@@ -1604,7 +1604,11 @@ def _add_request_options(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument("--priority", type=int, metavar="PRIORITY", help="the new priority, for set_priority")
     parser.add_argument("--step", metavar="STEP", help="the step to resume at, for override_step")
-    parser.add_argument("--destination", metavar="DEST", help="where the job goes, for eject")
+    parser.add_argument(
+        "--destination",
+        metavar="DEST",
+        help="where the job goes, for eject; for a mount-daemon remote, a directory in its outbox (default: the outbox)",
+    )
     for name, option in _BUDGET_OPTIONS.items():
         parser.add_argument(
             option,

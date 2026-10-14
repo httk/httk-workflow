@@ -36,7 +36,7 @@ _DAEMON_FILE = "daemon.json"
 _EXCHANGE_FORMAT = "httk-workspace-exchange"
 _EXCHANGE_FILE = "exchange.json"
 _MAX_DOCUMENT_BYTES = 64 * 1024
-_SUBDIRECTORIES = ("requests", "responses", "inbox", "outbox", "managers")
+_SUBDIRECTORIES = ("requests", "responses", "inbox", "outbox", "launchers")
 #: The content file of a request cache entry, the record directory ``daemon-requests/<enrollment>/<request id>/``.
 #: The content file of a cache entry: the file :func:`httk.workflow._fs.publish_record` writes.
 _CACHE_RECORD = "record"
@@ -354,8 +354,8 @@ def read_passive_status(endpoint: "Endpoint") -> dict[str, object]:
     return parts
 
 
-def read_manager_log(endpoint: "Endpoint", handle: str) -> bytes:
-    """Read the published log of one manager from ``EXCHANGE/managers/<handle>.log``.
+def read_launcher_log(endpoint: "Endpoint", handle: str) -> bytes:
+    """Read the published log of one manager from ``EXCHANGE/launchers/<handle>.log``.
 
     The content is untrusted: it is returned as bytes and must never be acted upon.
 
@@ -369,12 +369,13 @@ def read_manager_log(endpoint: "Endpoint", handle: str) -> bytes:
     if type(handle) is not str or _ID_PATTERN.fullmatch(handle) is None:
         raise ValueError("handle must be 32 lowercase hexadecimal digits")
     endpoint.check_exchange()
-    with MailboxDirectory(endpoint.exchange / "managers") as directory:
+    with MailboxDirectory(endpoint.exchange / "launchers") as directory:
         try:
             return read_regular(_fs.anchored(directory._require_open(), f"{handle}.log"), _MAX_LOG_BYTES)
         except FileNotFoundError:
             raise ValueError(
-                "no log has been published for this manager yet; it appears when the manager's Slurm job ends"
+                "no launcher log is published for this manager: it appears when its Slurm job ends and is removed "
+                "by the workspace's retention (retention.trash_days)"
             ) from None
 
 

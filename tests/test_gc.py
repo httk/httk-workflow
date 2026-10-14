@@ -84,6 +84,12 @@ def _leftovers(ws: Workspace) -> dict[str, Path]:
     log.write_text("old manager\n", encoding="utf-8")
     placement = ws.jobs / "ready" / "empty" / "mirror"
     placement.mkdir(parents=True)
+    launcher = ws.root / "logs" / "launchers" / f"{uuid.uuid4().hex}.out"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("old launcher output\n", encoding="utf-8")
+    published = ws.root / "exchange" / "launchers" / f"{uuid.uuid4().hex}.log"
+    published.parent.mkdir(parents=True)
+    published.write_text("published tail\n", encoding="utf-8")
     entries = {
         "malformed": malformed,
         "orphan": orphan,
@@ -92,6 +98,8 @@ def _leftovers(ws: Workspace) -> dict[str, Path]:
         "tombstone": tombstone,
         "log": log,
         "placement": placement,
+        "launcher": launcher,
+        "published": published,
     }
     for path in entries.values():
         _age(path)
@@ -112,6 +120,7 @@ def test_a_dry_run_reports_everything_and_touches_nothing(tmp_path: Path) -> Non
         "placement_directories": 0,  # pruning is a single rmdir pass, so a dry run reports none
         "requests": 2,
         "manager_logs": 1,
+        "launcher_logs": 2,
         "owner_tombstones": 1,
         "tmp_entries": 2,
     }
@@ -134,6 +143,7 @@ def test_each_category_collects_only_the_aged_entries(tmp_path: Path) -> None:
         "placement_directories": 4,  # ready/empty/mirror and ready/empty, and ready/p/1 and ready/p the job left
         "requests": 2,
         "manager_logs": 1,
+        "launcher_logs": 2,
         "owner_tombstones": 1,
         "tmp_entries": 2,
     }
@@ -182,10 +192,50 @@ def test_keep_disables_a_retention_category(tmp_path: Path) -> None:
     assert skipped == {
         "attempt_control": "retention.attempt_control_days keeps everything",
         "manager_logs": "retention.trash_days keeps everything",
+        "launcher_logs": "retention.trash_days keeps everything",
         "owner_tombstones": "retention.owner_tombstone_days keeps everything",
     }
     assert entries["log"].exists() and entries["tombstone"].exists() and _attempts(ws, ref) == ["old"]
+    assert entries["launcher"].exists() and entries["published"].exists()
     assert report.skipped == tuple(f"{name}: {reason}" for name, reason in skipped.items())
+
+
+def _aged_file(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x\n", encoding="utf-8")
+    return _age(path)
+
+
+def test_launcher_logs_keep_a_live_launch_and_never_follow_an_exchange_symlink(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path / "ws")
+    logs = ws.root / "logs" / "launchers"
+    launch_id = uuid.uuid4().hex
+    live = [_aged_file(logs / f"{launch_id}.sbatch"), _aged_file(logs / f"{launch_id}.out")]
+    stale = _aged_file(logs / f"{uuid.uuid4().hex}.sbatch")
+    young = logs / f"{uuid.uuid4().hex}.out"
+    young.write_text("", encoding="utf-8")
+    foreign = _aged_file(logs / "notes.txt")
+    outside = _aged_file(tmp_path / "outside.log")
+    link = ws.root / "exchange" / "launchers" / f"{uuid.uuid4().hex}.log"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside)
+    _age(link)
+    with _kernel.register_owner(ws, kind="cli", label="live", allocation=None, advertised={}, launch_id=launch_id):
+        assert collect_garbage(ws, dry_run=True, categories=("launcher_logs",)).candidates == 1
+        assert stale.exists()
+        report = collect_garbage(ws, categories=("launcher_logs",))
+    assert report.category("launcher_logs").removed == 1 and not stale.exists()
+    assert all(path.exists() for path in live) and young.exists() and foreign.exists()
+    assert link.is_symlink() and outside.exists()
+
+
+def test_launcher_logs_skip_a_symlinked_exchange_launchers_directory(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path / "ws")
+    target = _aged_file(tmp_path / "elsewhere" / f"{uuid.uuid4().hex}.log")
+    (ws.root / "exchange").mkdir()
+    (ws.root / "exchange" / "launchers").symlink_to(target.parent)
+    report = collect_garbage(ws, categories=("launcher_logs",))
+    assert report.category("launcher_logs").candidates == 0 and target.exists()
 
 
 def test_a_collection_can_select_only_named_categories(tmp_path: Path) -> None:

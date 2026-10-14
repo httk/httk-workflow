@@ -217,7 +217,8 @@ def test_batch_script_carries_launcher_pins_after_cli_ones(
     assert launch_runtime.main([str(request)]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["ok"] is True
-    script = Path(result["script"]).read_text(encoding="utf-8")
+    [script_path] = result["scripts"]
+    script = Path(script_path).read_text(encoding="utf-8")
     assert "#SBATCH --partition=debug" in script
     [exec_line] = [line for line in script.splitlines() if line.startswith("exec ")]
     assert "--setting 'confine.readonly_paths=/usr:/opt/my tools'" in exec_line

@@ -219,8 +219,9 @@ httk remote daemon log sigma --handle MANAGER_HANDLE
 
 A manager adopts the inbox bundle and returns the finished job tree to `outbox`. From the local workspace where you want the result, adopt it using the actual path visible in the exchange:
 ```bash
-httk job adopt --move "$EXCHANGE_MOUNT/outbox/CLIENT_JOB_UUID/JOB_KEY"
+httk job adopt --move "$EXCHANGE_MOUNT/outbox/CLIENT_JOB_KEY"
 ```
+`CLIENT_JOB_KEY` is your own job key, `<tag>--<client job UUID>`, the same name the bundle had in `inbox/`.
 The `--move` removes the exchange copy after successful adoption. If a start request times out, retry the same request ID with the same fields. Use a new ID for a genuinely new start.
 
 To change an allocation's time limit, for example:

@@ -32,6 +32,8 @@ RESERVED_WORKFLOW_ENVIRONMENT_PREFIX = "HTTK_WORKFLOW_"
 # digest pins.
 ATTEMPTS_DIRECTORY = "attempts"
 LOGS_DIRECTORY = "logs"
+#: Where a launcher writes everything it produces for one manager, as ``<launch id>.<ext>``.
+LAUNCHERS_DIRECTORY = f"{LOGS_DIRECTORY}/launchers"
 JOBS_DIRECTORY = "jobs"
 POSTPROCESS_DIRECTORY = "postprocess"
 EXCHANGE_DIRECTORY = "exchange"

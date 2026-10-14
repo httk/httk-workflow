@@ -19,7 +19,7 @@ from .._daemon_client import (
     prepare_request,
     read_daemon,
     read_exchange,
-    read_manager_log,
+    read_launcher_log,
     read_passive_status,
     take_back,
 )
@@ -108,7 +108,7 @@ def handle_remote_daemon_log(arguments: argparse.Namespace, context: CLIContext)
 
     _, endpoint = _mount_endpoint(arguments, context)
     sys.stdout.flush()
-    sys.stdout.buffer.write(read_manager_log(endpoint, arguments.handle))
+    sys.stdout.buffer.write(read_launcher_log(endpoint, arguments.handle))
     sys.stdout.buffer.flush()
     return 0
 
@@ -278,8 +278,12 @@ def build_daemon_remote_parser(
     log = _leaf(
         daemon_subparsers,
         "log",
-        summary="print a manager's published log",
-        description="Print EXCHANGE/managers/<handle>.log, which appears when the manager's Slurm job ends",
+        summary="print a manager's published launcher log",
+        description=(
+            "Print EXCHANGE/launchers/<handle>.log, the tail of the manager's Slurm (launcher) output, "
+            "which appears when the manager's Slurm job ends and is removed by the workspace's retention "
+            "(retention.trash_days)"
+        ),
         handler=handle_remote_daemon_log,
     )
     log.add_argument("remote", metavar="REMOTE", help="the configured mount-daemon remote")

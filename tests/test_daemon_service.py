@@ -28,7 +28,7 @@ from httk.workflow._daemon_keys import initialize_response_seed, response_public
 from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_policy import ApprovedLauncher, Policy
 from httk.workflow._daemon_protocol import Request, Response, decode_response, encode_request
-from httk.workflow._daemon_service import Broker, ExchangePublisher, _Observation
+from httk.workflow._daemon_service import Broker, ExchangePublisher
 from httk.workflow._daemon_slurm import Observation, SchedulerError, SlurmGateway, Submission, UncertainSubmission
 from httk.workflow._daemon_state import Ledger, LedgerError
 from httk.workflow._death import ProcessIdentity
@@ -738,7 +738,7 @@ def test_requests_and_confirmed_submissions_are_logged(tmp_path: Path, caplog: p
             _publish(broker, start)
             broker.process_once(threading.Event())
         handle = _read(broker, start).handle
-        log = policy.jobs / "httk-42.out"
+        log = policy.workspace / "logs/launchers" / f"{handle}.out"
         assert f"daemon_submitted handle={handle} job_id=42 cluster=cluster-1 log={log}" in caplog.text
         assert (
             f"daemon_request request_id={health.request_id} operation=health outcome=ready reason=None handle=None"
@@ -1017,7 +1017,6 @@ def _observing(
     *,
     initialize: bool = True,
     sacct: bool = False,
-    jobs: Path | None = None,
 ) -> tuple[ExitStack, Broker, ScriptedGateway, list[float]]:
     """Open a broker that follows its managers, on a settable clock."""
 
@@ -1025,7 +1024,7 @@ def _observing(
     if sacct:
         policy = replace(policy, sacct=tmp_path / "broker/sacct")
     stack, broker, ledger = _open(tmp_path, policy, initialize=initialize)
-    policy.jobs.mkdir(parents=True, exist_ok=True)
+    _launcher_log(policy, "").parent.mkdir(parents=True, exist_ok=True)
     gateway = ScriptedGateway(policy)
     observing = Broker(
         policy,
@@ -1036,7 +1035,6 @@ def _observing(
         exchange=_publisher(policy),
         response_seed=broker.response_seed,
         observe=True,
-        jobs=jobs,
     )
     clock = [time.time()]
     monkeypatch.setattr(service_module, "time", SimpleNamespace(time=lambda: clock[0]))
@@ -1047,32 +1045,25 @@ def _managers(policy: Policy) -> Any:
     return json.loads((policy.exchange / "managers.json").read_bytes())
 
 
-def test_manager_log_reads_sandbox_jobs_but_names_host_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    sandbox_jobs = tmp_path / "sandbox-daemon/jobs"
-    sandbox_jobs.mkdir(parents=True)
-    (sandbox_jobs / "httk-42.out").write_bytes(b"sandbox output")
-    stack, broker, _, _ = _observing(tmp_path, monkeypatch, jobs=sandbox_jobs)
-    try:
-        observation: _Observation = {
-            "job_id": "42",
-            "cluster": "cluster-1",
-            "scheduler_state": "FAILED",
-            "exit_code": "1:0",
-            "started_at": None,
-            "ended_at": None,
-            "final": True,
-            "log_published": False,
-            "checked_at": 1.0,
-            "unknown_since": None,
-        }
-        broker._publish_log("a" * 32, observation)
-        published = broker.policy.exchange / "managers" / f"{'a' * 32}.log"
-        assert published.read_bytes() == b"sandbox output"
+def _launcher_log(policy: Policy, handle: str) -> Path:
+    return policy.workspace / "logs/launchers" / f"{handle}.out"
 
-        observation["job_id"] = "43"
-        broker._publish_log("b" * 32, observation)
-        missing = broker.policy.exchange / "managers" / f"{'b' * 32}.log"
-        assert missing.read_bytes() == f"no Slurm output was found at {broker.policy.jobs / 'httk-43.out'}\n".encode()
+
+def test_launcher_log_is_read_from_the_workspace_and_named_in_a_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack, broker, _, _ = _observing(tmp_path, monkeypatch)
+    _launcher_log(broker.policy, "a" * 32).write_bytes(b"slurm output")
+    try:
+        assert broker._publish_log("a" * 32)
+        published = broker.policy.exchange / "launchers" / f"{'a' * 32}.log"
+        assert published.read_bytes() == b"slurm output"
+
+        assert broker._publish_log("b" * 32)
+        missing = broker.policy.exchange / "launchers" / f"{'b' * 32}.log"
+        assert (
+            missing.read_bytes() == f"no Slurm output was found at {_launcher_log(broker.policy, 'b' * 32)}\n".encode()
+        )
     finally:
         stack.close()
 
@@ -1085,13 +1076,13 @@ def test_managers_are_followed_to_their_final_state_and_their_log_published_once
     stop = threading.Event()
     start = _request(tmp_path, 1, "start_manager", profile="cpu")
     tail = b"x" * 10 + b"y" * (1024 * 1024)
-    (policy.jobs / "httk-42.out").write_bytes(tail)
     try:
         _publish(broker, start)
         with caplog.at_level(logging.INFO):
             broker.process_once(stop)
             handle = _read(broker, start).handle
             assert handle is not None
+            _launcher_log(policy, handle).write_bytes(tail)
             (row,) = _managers(policy)["managers"]
             assert row == {
                 "handle": handle,
@@ -1123,10 +1114,10 @@ def test_managers_are_followed_to_their_final_state_and_their_log_published_once
         (row,) = _managers(policy)["managers"]
         assert row["scheduler_state"] == "FAILED" and row["exit_code"] == "1:0"
         assert (row["started_at"], row["ended_at"]) == ("2026-10-05T10:00:00", "2026-10-05T10:01:00")
-        assert row["log"] == f"managers/{handle}.log"
+        assert row["log"] == f"launchers/{handle}.log"
         assert (policy.exchange / row["log"]).read_bytes() == tail[10:]
         assert caplog.text.count("daemon_manager_log ") == 1
-        assert f"path=managers/{handle}.log" in caplog.text
+        assert f"path=launchers/{handle}.log" in caplog.text
         states = [record.getMessage() for record in caplog.records if "daemon_manager_state" in record.getMessage()]
         assert [message.split("state=")[1] for message in states] == [
             "PENDING exit_code=None",
@@ -1146,7 +1137,7 @@ def test_managers_are_followed_to_their_final_state_and_their_log_published_once
         with caplog.at_level(logging.INFO):
             broker.process_once(stop)
         assert gateway.statuses == [] and "daemon_manager_log " not in caplog.text
-        assert _managers(policy)["managers"][0]["log"] == f"managers/{handle}.log"
+        assert _managers(policy)["managers"][0]["log"] == f"launchers/{handle}.log"
     finally:
         stack.close()
 
@@ -1171,9 +1162,9 @@ def test_a_manager_unknown_everywhere_for_thirty_minutes_is_gone_with_a_note(
         broker.process_once(stop)
         row = _managers(policy)["managers"][0]
         assert (row["scheduler_state"], row["exit_code"]) == ("GONE", None)
-        source = policy.jobs / "httk-42.out"
-        note = f"no Slurm output was found at {source}\n".encode()
-        assert (policy.exchange / "managers" / f"{handle}.log").read_bytes() == note
+        assert handle is not None
+        note = f"no Slurm output was found at {_launcher_log(policy, handle)}\n".encode()
+        assert (policy.exchange / "launchers" / f"{handle}.log").read_bytes() == note
         assert len(gateway.accountings) == 3
         clock[0] += 3600
         broker.process_once(stop)
@@ -1258,7 +1249,7 @@ def test_failing_accounting_still_reaches_gone_and_warns_once(
                 clock[0] += 60
                 broker.process_once(threading.Event())
         row = _managers(broker.policy)["managers"][0]
-        assert (row["scheduler_state"], row["log"]) == ("GONE", f"managers/{handle}.log")
+        assert (row["scheduler_state"], row["log"]) == ("GONE", f"launchers/{handle}.log")
         assert caplog.text.count("daemon_manager_accounting_failed") == 1
         assert "slurmdbd: Connection refused" in caplog.text
         assert "daemon_manager_check_failed" not in caplog.text
@@ -1327,18 +1318,20 @@ def test_a_final_squeue_state_reads_accounting_at_once(tmp_path: Path, monkeypat
 def test_a_non_regular_job_output_is_published_as_a_note(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
-    stack, broker, gateway, _ = _observing(tmp_path, monkeypatch)
-    source = broker.policy.jobs / "httk-42.out"
-    if kind == "symlink":
-        secret = tmp_path / "secret"
-        secret.write_text("private", encoding="utf-8")
-        source.symlink_to(secret)
-    else:
-        os.mkfifo(source)
-    gateway.state = "FAILED"
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch)
     try:
         handle = _start(tmp_path, broker)
-        published = broker.policy.exchange / "managers" / f"{handle}.log"
+        source = _launcher_log(broker.policy, handle)
+        if kind == "symlink":
+            secret = tmp_path / "secret"
+            secret.write_text("private", encoding="utf-8")
+            source.symlink_to(secret)
+        else:
+            os.mkfifo(source)
+        gateway.state = "FAILED"
+        clock[0] += 60
+        broker.process_once(threading.Event())
+        published = broker.policy.exchange / "launchers" / f"{handle}.log"
         assert published.read_bytes() == f"the Slurm output at {source} is not a regular file\n".encode()
     finally:
         stack.close()
@@ -1346,20 +1339,22 @@ def test_a_non_regular_job_output_is_published_as_a_note(
 
 def test_a_failed_log_publication_is_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     stack, broker, gateway, clock = _observing(tmp_path, monkeypatch)
-    (broker.policy.jobs / "httk-42.out").write_bytes(b"output")
     outbox = broker.policy.exchange
-    (outbox / "managers").write_text("not a directory", encoding="utf-8")
-    gateway.state = "FAILED"
+    (outbox / "launchers").write_text("not a directory", encoding="utf-8")
     try:
         handle = _start(tmp_path, broker)
-        assert _managers(broker.policy)["managers"][0]["log"] is None
-        assert broker._observation(handle)["log_published"] is False  # type: ignore[index]
-        (outbox / "managers").unlink()
+        _launcher_log(broker.policy, handle).write_bytes(b"output")
+        gateway.state = "FAILED"
         clock[0] += 60
         broker.process_once(threading.Event())
-        assert (outbox / "managers" / f"{handle}.log").read_bytes() == b"output"
-        assert _managers(broker.policy)["managers"][0]["log"] == f"managers/{handle}.log"
-        assert gateway.statuses == [("42", "cluster-1", handle)]
+        assert _managers(broker.policy)["managers"][0]["log"] is None
+        assert broker._observation(handle)["log_published"] is False  # type: ignore[index]
+        (outbox / "launchers").unlink()
+        clock[0] += 60
+        broker.process_once(threading.Event())
+        assert (outbox / "launchers" / f"{handle}.log").read_bytes() == b"output"
+        assert _managers(broker.policy)["managers"][0]["log"] == f"launchers/{handle}.log"
+        assert len(gateway.statuses) == 2
     finally:
         stack.close()
 
@@ -1369,7 +1364,7 @@ PUBLISHED = {"handle": "a" * 32, "profile": "cpu", "request_id": "1" * 32, "stat
 
 def _exchange(tmp_path: Path) -> tuple[ExchangePublisher, Path]:
     exchange = tmp_path / "workspace" / "exchange"
-    (exchange / "managers").mkdir(parents=True)
+    (exchange / "launchers").mkdir(parents=True)
     return ExchangePublisher(exchange, ENROLLMENT_ID), exchange
 
 
@@ -1388,7 +1383,7 @@ def test_managers_document_is_pinned_and_rewritten_only_when_rows_change(tmp_pat
     assert path.stat().st_ino == inode
     publisher.poll([{**PUBLISHED, "state": "uncertain"}])
     assert path.stat().st_ino != inode and json.loads(path.read_bytes())["managers"][0]["state"] == "uncertain"
-    assert sorted(os.listdir(exchange)) == ["managers", "managers.json"]
+    assert sorted(os.listdir(exchange)) == ["launchers", "managers.json"]
 
 
 def test_a_client_symlink_at_a_published_name_is_replaced_never_followed(tmp_path: Path) -> None:
@@ -1397,11 +1392,11 @@ def test_a_client_symlink_at_a_published_name_is_replaced_never_followed(tmp_pat
     victim.write_text("untouched", encoding="utf-8")
     (exchange / "managers.json").symlink_to(victim)
     handle = "b" * 32
-    (exchange / "managers" / f"{handle}.log").symlink_to(victim)
+    (exchange / "launchers" / f"{handle}.log").symlink_to(victim)
     publisher.poll([PUBLISHED])
     assert publisher.publish_log(handle, b"log")
-    assert not (exchange / "managers.json").is_symlink() and not (exchange / "managers" / f"{handle}.log").is_symlink()
-    assert (exchange / "managers" / f"{handle}.log").read_bytes() == b"log"
+    assert not (exchange / "managers.json").is_symlink() and not (exchange / "launchers" / f"{handle}.log").is_symlink()
+    assert (exchange / "launchers" / f"{handle}.log").read_bytes() == b"log"
     assert victim.read_text(encoding="utf-8") == "untouched"
 
 
@@ -1411,8 +1406,8 @@ def test_a_hostile_exchange_is_logged_once_and_never_raises(tmp_path: Path, capl
     (exchange / "managers.json").mkdir()  # a directory refuses the rename
     outside = tmp_path / "outside"
     outside.mkdir()
-    (exchange / "managers").rmdir()
-    (exchange / "managers").symlink_to(outside, target_is_directory=True)
+    (exchange / "launchers").rmdir()
+    (exchange / "launchers").symlink_to(outside, target_is_directory=True)
     with caplog.at_level(logging.WARNING):
         publisher.poll([PUBLISHED])
         publisher.poll([{**PUBLISHED, "state": "uncertain"}])
@@ -1423,11 +1418,11 @@ def test_a_hostile_exchange_is_logged_once_and_never_raises(tmp_path: Path, capl
     assert caplog.text.count(f"daemon_exchange_publish_failed name={handle}.log") == 1
 
 
-def test_a_removed_managers_directory_is_recreated_by_descriptor(tmp_path: Path) -> None:
+def test_a_removed_launchers_directory_is_recreated_by_descriptor(tmp_path: Path) -> None:
     publisher, exchange = _exchange(tmp_path)
-    (exchange / "managers").rmdir()
+    (exchange / "launchers").rmdir()
     assert publisher.publish_log("d" * 32, b"log")
-    assert (exchange / "managers" / f"{'d' * 32}.log").read_bytes() == b"log"
+    assert (exchange / "launchers" / f"{'d' * 32}.log").read_bytes() == b"log"
 
 
 def test_a_missing_exchange_is_logged_without_raising(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

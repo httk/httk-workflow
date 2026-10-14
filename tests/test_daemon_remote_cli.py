@@ -27,7 +27,7 @@ ACTIVE_CONFIGURATION_DIGEST = "a" * 64
 def _write_exchange(exchange: Path, public_key: str, **changes: object) -> Path:
     """Create (or rewrite the endpoint of) one exchange directory fixture."""
 
-    for name in ("requests", "responses", "inbox", "outbox", "managers"):
+    for name in ("requests", "responses", "inbox", "outbox", "launchers"):
         (exchange / name).mkdir(parents=True, exist_ok=True)
     (exchange / "exchange.json").write_text(
         json.dumps({"format": "httk-workspace-exchange", "format_version": 1, "workspace_id": WORKSPACE_ID}),
@@ -174,7 +174,7 @@ def test_daemon_configure_pins_identities_from_exchange(project: Path, tmp_path:
         "daemon.json",
         "exchange.json",
         "inbox",
-        "managers",
+        "launchers",
         "outbox",
         "requests",
         "responses",
@@ -683,14 +683,14 @@ def test_log_prints_the_published_bytes_and_refuses_errors(
     project: Path, capsysbinary: pytest.CaptureFixture[bytes]
 ) -> None:
     exchange = Path(str(_remote_settings(project)["exchange"]))
-    (exchange / "managers" / f"{'2' * 32}.log").write_bytes(b"out\n\xff")
+    (exchange / "launchers" / f"{'2' * 32}.log").write_bytes(b"out\n\xff")
     bundle = project / PROJECT_DIRECTORY / "remotes" / "cluster"
     assert bundle.is_dir()
     code = command(["remote", "daemon", "log", "cluster", "--handle", "2" * 32], CLIContext("httk", project))
     assert code == 0 and capsysbinary.readouterr().out == b"out\n\xff"
     code = command(["remote", "daemon", "log", "cluster", "--handle", "3" * 32], CLIContext("httk", project))
     captured = capsysbinary.readouterr()
-    assert code == 2 and captured.out == b"" and b"no log has been published" in captured.err
+    assert code == 2 and captured.out == b"" and b"no launcher log is published" in captured.err
     code = command(["remote", "daemon", "log", "cluster", "--handle", "zz"], CLIContext("httk", project))
     assert code == 2
 
@@ -713,7 +713,7 @@ def test_status_without_handle_passes_managers_v3_through(project: Path) -> None
                 "exit_code": "0:0",
                 "started_at": None,
                 "ended_at": None,
-                "log": f"managers/{'2' * 32}.log",
+                "log": f"launchers/{'2' * 32}.log",
             }
         ],
     }

@@ -291,7 +291,7 @@ $ httk remote daemon status confined
 $ httk remote daemon status confined --handle MANAGER_HANDLE
 $ httk job request pause --workspace confined:runs --reason 'operator pause' JOB_UUID
 $ httk remote daemon cancel confined --handle MANAGER_HANDLE
-$ httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
+$ httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_KEY
 ```
 
 `job eject` copies the bundle into the mount under a hidden partial name and

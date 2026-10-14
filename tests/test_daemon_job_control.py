@@ -18,6 +18,7 @@ from httk.core.identity import identity_public_key
 
 import v3_helpers as v3
 from httk.workflow import _death, _kernel, _moving, _requests, _store, removal, seals
+from httk.workflow._bundles import rekeyed_id
 from httk.workflow._daemon_auth import sign_request, verify_request
 from httk.workflow._daemon_jobs import JobExecutor, _Target
 from httk.workflow._daemon_keys import initialize_response_seed, response_seed_path
@@ -1033,6 +1034,27 @@ def test_authenticated_executor_applies_every_internal_action_on_real_jobs(
         assert current is not None and not seals.is_job_sealed(current.path)
         doc = v3.state_of(current)
         assert doc.seal is not None and doc.seal["released"] is True
+
+
+@pytest.mark.parametrize("adopted_here", [True, False])
+def test_an_eject_without_destination_lands_in_the_outbox_root(tmp_path: Path, adopted_here: bool) -> None:
+    workspace, _ref, state = _setup(tmp_path, adopted=False)
+    installed = _store.lookup(workspace, "demo")
+    assert installed is not None
+    client_id = str(uuid4())
+    mapping = v3.job_mapping(installed, {"start": "succeed"}, tag="client")
+    if adopted_here:
+        # The id this workspace's adoption of the client's job would give it: an exchange root of this workspace.
+        mapping["id"] = rekeyed_id(workspace.workspace_id, client_id)
+    ref = _mark_exchange(workspace, v3.submit_mapping(workspace, mapping), client_id)
+    ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID)
+    entry = ledger.admit(_request(tmp_path, workspace.workspace_id, ref.job_id, action="eject"))
+    with _kernel.register_owner(workspace, kind="daemon", label="eject", allocation=None, advertised={}) as owner:
+        response = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
+    ledger.close()
+    assert (response.outcome, response.detail) == ("applied", "job ejected to outbox/")
+    name = f"client--{client_id}" if adopted_here else ref.job_key
+    assert sorted(os.listdir(workspace.root / "exchange" / "outbox")) == [name]
 
 
 @pytest.mark.parametrize("guard", ["sealed_workspace", "unknown_runner_step"])

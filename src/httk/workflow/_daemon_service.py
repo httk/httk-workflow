@@ -30,6 +30,7 @@ from ._daemon_scope import read_execution_scope
 from ._daemon_slurm import KILL_GRACE_SECONDS, SchedulerError, SlurmGateway, Submission, excerpt
 from ._daemon_state import CapacityError, ConflictError, Entry, Ledger, LedgerError, refusal_response
 from ._exchange import ExchangeUnavailableError, publish_file
+from .models import LAUNCHERS_DIRECTORY
 from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -128,14 +129,14 @@ def _parse_observation(data: bytes | None) -> _Observation | None:
         not isinstance(entry, dict)
         or set(entry) != set(_OBSERVATION_TYPES)
         or not all(type(entry[key]) in types for key, types in _OBSERVATION_TYPES.items())
-        or _JOB_ID.fullmatch(entry["job_id"]) is None  # it names the Slurm output file read for the log
+        or _JOB_ID.fullmatch(entry["job_id"]) is None
     ):
         return None
     return cast(_Observation, entry)
 
 
 class ExchangePublisher:
-    """Publish ``managers.json`` and the manager logs into the workspace exchange.
+    """Publish ``managers.json`` and the managers' launcher logs into the workspace exchange.
 
     Every call reopens the exchange from its path without following a symlink and installs through the exchange
     module's descriptor-anchored primitive (an exclusive temporary and a rename), so a name the client planted is
@@ -199,7 +200,7 @@ class ExchangePublisher:
             self._managers = managers
 
     def publish_log(self, handle: str, data: bytes) -> bool:
-        """Publish one manager's Slurm output tail as ``managers/<handle>.log``.
+        """Publish one manager's Slurm (launcher) output tail as ``launchers/<handle>.log``.
 
         :param handle: The manager's broker-issued handle: 32 lowercase hexadecimal digits.
         :param data: The bytes to publish.
@@ -209,7 +210,7 @@ class ExchangePublisher:
 
         if _HANDLE.fullmatch(handle) is None:
             raise ValueError("handle must be 32 lowercase hexadecimal digits")
-        return self._publish(f"{handle}.log", data, directory="managers")
+        return self._publish(f"{handle}.log", data, directory="launchers")
 
 
 class _ActivationChanged(Exception):
@@ -228,7 +229,7 @@ class Broker:
     :param ledger: The enrollment's durable daemon ledger.
     :param requests: Descriptor-anchored request mailbox.
     :param responses: Descriptor-anchored response mailbox.
-    :param exchange: Publisher of ``managers.json`` and manager logs into the workspace exchange; ``None``
+    :param exchange: Publisher of ``managers.json`` and launcher logs into the workspace exchange; ``None``
         skips publication.
     :param response_seed: Validated protected response-signing seed.
     :param observe: Follow submitted manager jobs with the scheduler, keeping each observation in the ledger.
@@ -237,7 +238,6 @@ class Broker:
     :param mailboxes: Reopen the request and response mailboxes; called at the start of every poll, so a
         client that replaced either directory is followed (or, for a symlink, refused) at the next poll.
         The broker then owns and closes the mailboxes it holds. ``None`` keeps *requests* and *responses*.
-    :param jobs: The visible directory holding Slurm output, defaulting to the policy's host path.
     :param job_executor: Authenticated workspace-job command executor; ``None`` refuses job commands.
     """
 
@@ -254,7 +254,6 @@ class Broker:
         observe: bool = False,
         activation: Callable[[], None] | None = None,
         mailboxes: Callable[[], tuple[MailboxDirectory, MailboxDirectory]] | None = None,
-        jobs: Path | None = None,
         job_executor: JobExecutor | None = None,
     ) -> None:
         if not isinstance(response_seed, Path):
@@ -270,7 +269,6 @@ class Broker:
         self.observe = observe
         self.activation = activation
         self.mailboxes = mailboxes
-        self.jobs = policy.jobs if jobs is None else jobs
         self.job_executor = job_executor
         self._mailbox_problem: str | None = None
         #: Rejected publications that could be neither removed nor set aside, in the directory identified.
@@ -502,7 +500,7 @@ class Broker:
             handle,
             submission.job_id,
             submission.cluster,
-            self.policy.jobs / f"httk-{submission.job_id}.out",
+            self.policy.workspace / LAUNCHERS_DIRECTORY / f"{handle}.out",
         )
         return self._finish(entry, self._response(request, "submitted", handle=handle))
 
@@ -807,7 +805,7 @@ class Broker:
                     "exit_code": observation["exit_code"],
                     "started_at": observation["started_at"],
                     "ended_at": observation["ended_at"],
-                    "log": f"managers/{row['handle']}.log" if observation["log_published"] else None,
+                    "log": f"launchers/{row['handle']}.log" if observation["log_published"] else None,
                 }
             )
         return result
@@ -844,7 +842,7 @@ class Broker:
                     continue
             if observation is None:
                 continue
-            if observation["final"] and not observation["log_published"] and self._publish_log(handle, observation):
+            if observation["final"] and not observation["log_published"] and self._publish_log(handle):
                 observation = cast(_Observation, {**observation, "log_published": True})
             if observation != previous:
                 self._save_observation(handle, observation)
@@ -923,31 +921,29 @@ class Broker:
             )
         return observation
 
-    def _publish_log(self, handle: str, observation: _Observation) -> bool:
-        """Publish the tail of a finished manager's private Slurm output into the exchange.
+    def _publish_log(self, handle: str) -> bool:
+        """Publish the tail of a finished manager's Slurm output, its launcher log, into the exchange.
 
         :param handle: The manager handle.
-        :param observation: The manager's final observation, naming its job.
         :return: Whether the log was published.
         """
 
         assert self.exchange is not None
-        host_source = self.policy.jobs / f"httk-{observation['job_id']}.out"
-        source = self.jobs / host_source.name
+        source = self.policy.workspace / LAUNCHERS_DIRECTORY / f"{handle}.out"
         try:
             data = _read_tail(source, _MAX_LOG_BYTES)
         except FileNotFoundError:
-            data = os.fsencode(f"no Slurm output was found at {host_source}\n")
+            data = os.fsencode(f"no Slurm output was found at {source}\n")
         except ValueError:
-            data = os.fsencode(f"the Slurm output at {host_source} is not a regular file\n")
+            data = os.fsencode(f"the Slurm output at {source} is not a regular file\n")
         except OSError as exc:
             if exc.errno != errno.ELOOP:
                 _LOGGER.warning("daemon_manager_log_unread handle=%s reason=%s", handle, exc.strerror)
                 return False
-            data = os.fsencode(f"the Slurm output at {host_source} is not a regular file\n")
+            data = os.fsencode(f"the Slurm output at {source} is not a regular file\n")
         if not self.exchange.publish_log(handle, data):
             return False
-        _LOGGER.info("daemon_manager_log handle=%s path=managers/%s.log", handle, handle)
+        _LOGGER.info("daemon_manager_log handle=%s path=launchers/%s.log", handle, handle)
         return True
 
     def run(self, stop: threading.Event, *, once: bool = False) -> None:
@@ -1082,7 +1078,6 @@ def _run(arguments: argparse.Namespace) -> None:
                 observe=True,
                 activation=_activation_check(_DAEMON_DIRECTORY, policy_source, policy),
                 mailboxes=mailboxes,
-                jobs=_DAEMON_DIRECTORY / "jobs",
                 job_executor=jobs,
             )
             stack.callback(broker.close)

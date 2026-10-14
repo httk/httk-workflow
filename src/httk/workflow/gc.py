@@ -13,6 +13,9 @@ One collection runs the categories of :data:`GC_CATEGORIES`, in order:
   cannot be found go to ``quarantine/``;
 - ``manager_logs``: ``logs/managers/<owner-id>.log`` of owners that are gone,
   older than ``retention.trash_days``;
+- ``launcher_logs``: ``logs/launchers/<launch id>.*`` whose launch id no
+  owner record carries, and ``exchange/launchers/<launch id>.log`` (published
+  only after its manager ended), older than ``retention.trash_days``;
 - ``owner_tombstones``: ``dead.json`` of recovered owners older than
   ``retention.owner_tombstone_days``;
 - ``tmp_entries``: write temporaries older than a day in ``requests/`` and
@@ -28,6 +31,7 @@ collection killed halfway leaves the workspace as consistent as before.
 
 import logging
 import os
+import re
 import stat
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -36,12 +40,12 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
-from . import _death, _fs, _kernel, _requests, _store
+from . import _death, _exchange, _fs, _kernel, _requests, _store
 from ._kernel import Release
 from ._state import UNOWNED_STATES, StateDoc, read_state_unowned
 from ._util import json_bytes
 from .errors import FormatError, WorkflowError
-from .models import LOGS_DIRECTORY
+from .models import EXCHANGE_DIRECTORY, LAUNCHERS_DIRECTORY, LOGS_DIRECTORY
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .workspace import Workspace
@@ -73,12 +77,15 @@ GC_CATEGORIES = (
     "placement_directories",
     "requests",
     "manager_logs",
+    "launcher_logs",
     "owner_tombstones",
     "tmp_entries",
 )
 _DAY = 86400.0
 _PRUNE_BUDGET = 100_000
 _TRASH_NAME_LENGTH = len("trash.") + 16
+_LAUNCHER_LOG = re.compile(r"([0-9a-f]{32})\.[A-Za-z0-9.]+")
+_PUBLISHED_LAUNCHER_LOG = re.compile(r"[0-9a-f]{32}\.log")
 
 
 @dataclass(frozen=True)
@@ -491,6 +498,53 @@ class _Collection:
             if self._aged(logs / name, cutoff):
                 self._remove(tally, logs / name)
 
+    def launcher_logs(self, tally: _Tally) -> None:
+        cutoff = self._cutoff(self.retention.trash_days)
+        assert cutoff is not None
+        live = {
+            record.record["launch_id"]
+            for record in _kernel.list_owners(self.workspace)
+            if record.record is not None and isinstance(record.record.get("launch_id"), str)
+        }
+        logs = self.workspace.root / LAUNCHERS_DIRECTORY
+        for name in _kernel.list_names(logs):
+            match = _LAUNCHER_LOG.fullmatch(name)
+            if match is not None and match.group(1) not in live and self._aged(logs / name, cutoff):
+                self._remove(tally, logs / name)
+        # The exchange is client-writable: every access is anchored on descriptors, follows no symlink and
+        # removes regular files only.
+        try:
+            exchange = _exchange._open(self.workspace.root, EXCHANGE_DIRECTORY)
+        except _exchange.ExchangeUnavailableError:
+            return
+        try:
+            launchers = _exchange._open(exchange, "launchers")
+        except _exchange.ExchangeUnavailableError:
+            os.close(exchange)
+            return
+        try:
+            for name in _exchange._listing(launchers):
+                if _PUBLISHED_LAUNCHER_LOG.fullmatch(name) is None:
+                    continue
+                target = _fs.anchored(launchers, name)
+                info = _fs.lstat(target)
+                if info is None or not stat.S_ISREG(info.st_mode) or info.st_mtime >= cutoff:
+                    continue
+                tally.note(
+                    self.workspace.root / EXCHANGE_DIRECTORY / "launchers" / name, info.st_size if self.sizes else 0
+                )
+                if self.dry_run:
+                    continue
+                try:
+                    _fs.remove_file(target, durable=self.workspace.durable)
+                except OSError as exc:
+                    _LOGGER.warning("could not remove exchange launcher log %s: %s", name, exc)
+                    continue
+                tally.removed += 1
+        finally:
+            os.close(launchers)
+            os.close(exchange)
+
     def owner_tombstones(self, tally: _Tally) -> None:
         cutoff = self._cutoff(self.retention.owner_tombstone_days)
         assert cutoff is not None
@@ -532,6 +586,7 @@ class _Collection:
         gates = {
             "attempt_control": ("attempt_control_days", self.retention.attempt_control_days),
             "manager_logs": ("trash_days", self.retention.trash_days),
+            "launcher_logs": ("trash_days", self.retention.trash_days),
             "owner_tombstones": ("owner_tombstone_days", self.retention.owner_tombstone_days),
         }
         results: list[GcCategory] = []

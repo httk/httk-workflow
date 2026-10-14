@@ -304,7 +304,7 @@ def test_start_requires_configuration_digest_when_encoded() -> None:
         ({"step": "next"}, "step"),
         ({"action": "override_step"}, "step"),
         ({"destination": "../outside"}, "destination"),
-        ({"action": "eject"}, "destination"),
+        ({"destination": "archive"}, "destination is allowed only for eject"),
         ({"destination": "/absolute"}, "destination"),
         ({"destination": "bad\\path"}, "destination"),
     ],
@@ -347,7 +347,8 @@ def test_job_request_accepts_every_request_action(action: str) -> None:
     assert decode_request(encode_request(request)) == request
 
 
-def test_job_request_destination_is_relative_component_path() -> None:
+@pytest.mark.parametrize("destination", ["archive/old/job", None])
+def test_job_request_eject_destination_is_a_relative_component_path_or_the_outbox(destination: str | None) -> None:
     request = Request(
         REQUEST_ID,
         WORKSPACE_ID,
@@ -357,7 +358,7 @@ def test_job_request_destination_is_relative_component_path() -> None:
         selector="abcdef01-2345",
         action="eject",
         reason="move it",
-        destination="archive/old/job",
+        destination=destination,
     )
     assert decode_request(encode_request(request)) == request
 

@@ -29,7 +29,7 @@ Timestamps are UTC ISO 8601, except epoch seconds in signed exchange requests.
 | Manager (`TaskManager`, owner kind `manager`) | trusted | everything below the workspace, but inside a job only while it owns it |
 | CLI owner (owner kind `cli`) | trusted | as a manager; `job new`, `job submit`, `job delete`, `job seal`, `job unseal`, `job eject`, `job adopt`, `job debug`, `workflow install`, `workflow build`, `workflow uninstall`, `workspace gc` and `workspace fsck --repair` register one for their duration |
 | Operator | trusted | request files, tombstones by attestation, the workflow store |
-| Workspace daemon | trusted | its private state outside the workspace, and its own documents in `exchange/`; owner kind `daemon` is reserved for it |
+| Workspace daemon | trusted | its private state in `.httk-workspace/daemon/`, and its own documents in `exchange/`; owner kind `daemon` is reserved for it |
 | Attempt and its launch ranks | **untrusted**, confined when `manager.confine=bwrap` | its own job directory, minus the trusted entries |
 | Exchange client | **untrusted** | `exchange/` only |
 
@@ -93,7 +93,8 @@ WORKSPACE/
 │   ├── waiting/, paused/, failed/, succeeded/, cancelled/   likewise
 │   └── owned/<owner-id>/<job-key>~p<NNN>~<t>~<from>/        flat
 ├── workflows/<slug>--<h16>/                installed workflows
-├── logs/managers/<owner-id>.log            one log per manager; logs/batch/ for launchers
+├── logs/managers/<owner-id>.log            one log per manager
+├── logs/launchers/<launch id>.*            launcher output: .sbatch script, .out merged output
 ├── postprocess/                            default postprocess output root
 └── exchange/                               the exchange extension, when enabled
 ```
@@ -345,7 +346,7 @@ job, its scratch, a staged transaction entry of its quiescent job.
 - *Crash:* the entry is at either name, both of which the caller owns.
 
 **`deliver(src, dst, token_name, token)`** moves a caller-owned directory to a
-name another party may occupy (`<DEST>/<root key>`, an exchange outbox name).
+name another party may occupy (`<DEST>/<name>`, see eject below).
 
 - *Precondition:* `src` holds the regular file `token_name` with exactly
   `token`; `dst`'s parent is never pruned. A `dst` whose parent an untrusted
@@ -450,14 +451,15 @@ once.
 {
   "format": "httk-workflow-owner", "format_version": 1, "owner_id": "<32 hex>", "kind": "manager",
   "label": "manager on node17", "hostname": "node17", "boot_id": "<boot id>", "pid": 4711,
-  "process_start_ticks": 123456, "started_at": "<utc>",
+  "process_start_ticks": 123456, "started_at": "<utc>", "launch_id": "<32 hex>",
   "allocation": {"probe": "slurm", "kind": "slurm", "identity": {"job_id": "991"}, "end_time": 1760000000.0},
   "pools": ["default"], "capabilities": [], "prefixes": [], "resources": {"procs": 8},
   "end_time": 1760000000.0, "drain_start": 1759999880.0
 }
 ```
 
-`kind` is `manager`, `cli` or `daemon`; `boot_id` and `process_start_ticks`
+`kind` is `manager`, `cli` or `daemon`; `launch_id` is the id the owner's launcher
+gave it (`HTTK_LAUNCH_ID`), naming `logs/launchers/<launch id>.*`, or `null`; `boot_id` and `process_start_ticks`
 may be `null`. `allocation` is `null` or the allocation the death proof may ask
 about (`probe` is the `--allocation` specification, such as `slurm` or
 `exec:PATH`). The advertised members from `pools` on are optional and
@@ -1270,7 +1272,8 @@ one sequence, run by an owner that has claimed the root in any unowned state:
    `state.json` in the scratch and the nonce from its index entry, or `null`)
    beside `bundle/`.
 5. **Deliver** with `deliver(…, token = the bundle.json bytes)` to
-   `DEST/<root key>` (a hold: `transfers/outgoing/<transfer-id>`); a target
+   `DEST/<name>` (the root's job key, or the client's job key
+   `<tag>--<client job UUID>` for an exchange job this workspace adopted; a hold: `transfers/outgoing/<transfer-id>`); a target
    below `WORKSPACE/exchange` is anchored at its parent, opened with
    `open_dir_under` from the workspace root. Across filesystems the bundle is
    first copied to `DEST/.<name>.partial.<transfer-id>` and that copy is
@@ -1414,11 +1417,11 @@ WORKSPACE/exchange/
 ├── exchange.json                      {format: "httk-workspace-exchange", format_version: 1, workspace_id}
 ├── status.json                        managers: exchange jobs, states, progress
 ├── inbox/<name>/                      client → workspace: fresh job bundles
-├── outbox/<exchange-name>/            workspace → client: a returned tree
+├── outbox/<tag>--<client job UUID>/   workspace → client: a returned tree
 ├── outbox/rejected/<unique>/          {<name>/, reason.json}
 ├── requests/<id>.json                 client: signed daemon and job actions
 ├── responses/<id>.json                daemon-signed command results
-└── daemon.json, managers.json, managers/<handle>.log    the workspace daemon's documents
+└── daemon.json, managers.json, launchers/<handle>.log    the workspace daemon's documents
 ```
 
 `httk workspace exchange enable` creates the directories by descriptor, writes
@@ -1456,16 +1459,19 @@ directory, and validation, rekeying and publication work on that copy only.
 
 When an indexed exchange root and every member of its tree are terminal (and
 its `state.json` says `origin: exchange`), a manager posts an `eject` request
-of the tree to `outbox/<exchange-name>/`, with operator `exchange-return` and
+of the tree to `outbox/` itself, with operator `exchange-return` and
 request id `uuid5(5d0c8f2e-8f5e-4a43-9a51-7f2b0c3e9b61, "<job-id>/<sha256 of
 state.json>")`, so every manager seeing one state posts the same request. The
-owner applies it with `deliver`, anchored at `outbox/<exchange-name>/` opened
-without following a symlink, so a client-planted entry or symlink there only
-makes the eject roll back, and the changed state yields a fresh request id for
-the retry. A manager posts no return while `outbox/<exchange-name>/<root-key>`
-exists (the client has not fetched the previous copy) or while `outbox` or
-`outbox/<exchange-name>` is not a real directory, looking from the exchange's
-descriptor; repeated returns of one job back off: 10 s, doubling, capped at one
+owner applies it with `deliver`, anchored at `outbox/` opened without following
+a symlink, so a client-planted entry or symlink at the target name only makes
+the eject roll back, and the changed state yields a fresh request id for the
+retry. The returned tree sits at `outbox/<tag>--<client job UUID>/`, with no
+per-job parent directory: the name is the client's own job key, the same name
+the bundle had in `inbox/`, which is also the name an eject of an adopted
+exchange job delivers to. `httk job adopt --move` of that path removes the
+whole entry. A manager posts no return while `outbox/<tag>--<client job UUID>`
+exists (the client has not fetched the previous copy) or while `outbox` is not
+a real directory, looking from the exchange's descriptor; repeated returns of one job back off: 10 s, doubling, capped at one
 hour.
 
 ### Job control
@@ -1564,6 +1570,7 @@ primitives, so a killed collection leaves the workspace consistent.
 | `placement_directories` | `rmdir` of empty placement directories of the unowned states, children first, one attempt each. |
 | `requests` | Request files older than a day that are malformed or whose job is not found (settled, owned included) go to quarantine. |
 | `manager_logs` | `logs/managers/<owner-id>.log` of owners without `owner.json`, older than `trash_days`. |
+| `launcher_logs` | `logs/launchers/<launch id>.*` older than `trash_days` when no owner record carries that launch id, and `exchange/launchers/<handle>.log` older than `trash_days`. |
 | `owner_tombstones` | A tombstone older than `owner_tombstone_days` whose owner holds nothing else. |
 | `tmp_entries` | Write temporaries older than a day in `requests/` and `owners/*/`, `tmp/trash.<t>` entries older than a day, and `workflows/*.old.<t>` trees older than a day once their installation exists (an only copy is moved back instead). |
 

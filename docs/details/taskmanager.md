@@ -74,7 +74,7 @@ httk workspace policy unset --key retention.trash_days WORKSPACE
 | --- | --- | --- |
 | `visibility_deadline_seconds` | `5.0` | How long another node's change may take to become visible; see [the visibility deadline](#the-visibility-deadline). |
 | `retention.attempt_control_days` | absent (keep) | Age after which `gc` removes old attempt directories. |
-| `retention.trash_days` | `1.0` | Age after which `gc` removes the logs of departed managers. |
+| `retention.trash_days` | `1.0` | Age after which `gc` removes the logs of departed managers and their launcher output. |
 | `retention.owner_tombstone_days` | `30.0` | Age after which `gc` removes the tombstone of a recovered owner. |
 
 Values are JSON, validated on write; `null` or `"keep"` keeps a retention
@@ -258,8 +258,10 @@ launcher, and combines only with `--count 1`. `--detach` starts the managers
 and returns immediately. A remote workspace always uses this detached
 invocation once the remote adapter has reached its owning machine.
 
-The packaged Slurm launcher writes one mode-0700 batch script below
-`logs/batch/`, submits it once per manager, and returns the Slurm job ids. If
+The packaged Slurm launcher writes one mode-0700 batch script per manager,
+`logs/launchers/<launch id>.sbatch`, submits each once, and returns the Slurm
+job ids and launch ids; Slurm writes the manager's output to
+`logs/launchers/<launch id>.out`. If
 submission fails after one or more jobs were accepted, the command refuses with
 text containing `submitted: N` and `job_ids: [...]`; cancel those jobs before
 retrying.
@@ -322,8 +324,21 @@ the manager's own file `logs/managers/<owner-id>.log`. `--log-level` raises or
 lowers both, `--json-logs` writes one JSON object per line, and `--log-file
 PATH` names a fixed file for one in-process manager. A manager rotates its log
 at start and past 16 MiB, keeping one backup; `gc` (category `manager_logs`)
-removes the logs of departed managers after `trash_days`. `logs/batch/` is
-never collected.
+removes the logs of departed managers after `trash_days`.
+
+A launcher gives each manager a fresh launch id (32 hexadecimal digits),
+exported as `HTTK_LAUNCH_ID` and recorded in the manager's `owner.json`
+(`null` for a manager started by hand). Everything the launcher produces for
+that manager is `logs/launchers/<launch id>.*`: the Slurm script
+`<launch id>.sbatch`, and standard output and error merged in
+`<launch id>.out` (from Slurm, or from the process launcher). The `.out` file
+receives the detached manager's console output on standard error (warnings by
+default, everything with `--log-level debug`); it is not rotated and is kept
+while the manager runs. Use `logs/managers/<owner-id>.log` (rotated) for
+detailed logs. `gc` (category
+`launcher_logs`) removes those files after `trash_days` once no owner record
+carries the launch id, together with the published tails
+`exchange/launchers/<launch id>.log` older than `trash_days`.
 
 Each job also keeps its own timeline, `logs/runlog.jsonl`, appended only by its
 owner, and the attempt output `logs/stdio.out`; `job log` prints them.
@@ -889,6 +904,7 @@ httk manager run --workspace WORKSPACE --gc-interval 3600
 | `placement_directories` | empty placement directories of the unowned states |
 | `requests` | request files older than a day that are malformed or whose job is not found go to quarantine |
 | `manager_logs` | `logs/managers/<owner-id>.log` of departed owners older than `trash_days` |
+| `launcher_logs` | `logs/launchers/<launch id>.*` whose launch id no owner record carries, and `exchange/launchers/<launch id>.log`, older than `trash_days` |
 | `owner_tombstones` | tombstones of recovered owners older than `owner_tombstone_days` |
 | `tmp_entries` | write temporaries and removal leftovers older than a day, and leftovers of a crashed workflow reinstall |
 

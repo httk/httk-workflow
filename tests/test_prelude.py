@@ -21,6 +21,8 @@ from httk.workflow._job import JobDefinition
 from httk.workflow.launch_runtime import _batch_script
 from httk.workflow.runtime_builders import JobSpec
 
+_LAUNCH_ID = "0123456789abcdef0123456789abcdef"
+
 
 def test_workflow_prelude_round_trip_and_validation(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
@@ -86,6 +88,7 @@ def test_batch_script_runs_prelude_before_exec_under_set_e() -> None:
         settings={"environment.prelude": "module load VASP/6.2.1"},
         workspace="/ws",
         directory="/ws/.batch",
+        launch_id=_LAUNCH_ID,
     )
     assert script.startswith("#!/bin/bash -l\n")
     assert "set -e\n" in script and "set -eu" not in script
@@ -103,13 +106,14 @@ def test_batch_script_uses_configured_manager_command_after_prelude() -> None:
         settings={"environment.prelude": "module load python", "manager.command": "/opt/httk with space"},
         workspace="/ws",
         directory="/ws/.batch",
+        launch_id=_LAUNCH_ID,
     )
     assert "exec '/opt/httk with space' workflow manager run" in script
 
 
 def test_batch_script_without_prelude_omits_it() -> None:
     argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"]
-    script = _batch_script(argv, settings={}, workspace="/ws", directory="/ws/.batch")
+    script = _batch_script(argv, settings={}, workspace="/ws", directory="/ws/.batch", launch_id=_LAUNCH_ID)
     assert "module load" not in script
     assert "set -e\n" in script and "set -eu" not in script
     assert f"exec {sys.executable} -m httk.core.cli workflow manager run" in script
@@ -120,9 +124,29 @@ def test_batch_script_quotes_slurm_values_and_paths_with_spaces() -> None:
         [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"],
         settings={"slurm.partition": "main cluster"},
         workspace="/ws with space",
-        directory="/ws with space/logs/batch",
+        directory="/ws with space/logs/launchers",
+        launch_id=_LAUNCH_ID,
     )
     assert "#SBATCH --partition='main cluster'" in script
     assert "#SBATCH --chdir='/ws with space'" in script
-    assert "#SBATCH --output='/ws with space/logs/batch/manager-%j.out'" in script
-    assert "#SBATCH --error='/ws with space/logs/batch/manager-%j.err'" in script
+    assert f"#SBATCH --output='/ws with space/logs/launchers/{_LAUNCH_ID}.out'" in script
+    assert "--error" not in script
+
+
+def test_batch_script_exports_the_launch_id_before_the_prelude() -> None:
+    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"]
+    script = _batch_script(
+        argv,
+        settings={"environment.prelude": "module load python"},
+        workspace="/ws",
+        directory=None,
+        launch_id=_LAUNCH_ID,
+    )
+    lines = script.splitlines()
+    export = lines.index(f"export HTTK_LAUNCH_ID={_LAUNCH_ID}")
+    exec_line = next(index for index, line in enumerate(lines) if line.startswith("exec "))
+    assert export < lines.index("module load python") and export < exec_line
+    assert "--output" not in script and "--job-name" not in script
+    for invalid in ("", "0123456789ABCDEF0123456789ABCDEF", _LAUNCH_ID + "0", "$(id)"):
+        with pytest.raises(ValueError, match="launch id"):
+            _batch_script(argv, settings={}, workspace="/ws", directory=None, launch_id=invalid)

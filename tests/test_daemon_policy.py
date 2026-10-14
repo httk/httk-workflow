@@ -70,7 +70,6 @@ def test_policy_loads_exact_fields_and_defaults(tmp_path: Path) -> None:
     assert policy.broker == policy.daemon / "broker"
     assert policy.snapshots == policy.daemon / "snapshots"
     assert policy.response_seed == policy.daemon / "response.seed"
-    assert policy.jobs == policy.daemon / "jobs"
     assert policy.max_records == 4096
     assert policy.max_submissions == 128
     assert policy.poll_seconds == 1.0

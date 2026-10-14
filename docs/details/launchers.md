@@ -133,15 +133,20 @@ After submission, the Slurm template leaves its generated files below the
 workspace:
 
 ```text
-logs/batch/manager-*.sbatch
-logs/batch/manager-%j.out
-logs/batch/manager-%j.err
+logs/launchers/<launch id>.sbatch
+logs/launchers/<launch id>.out
 logs/managers/<manager-id>.log
 ```
 
-The batch script and scheduler output are launcher output in `logs/batch/`,
-which garbage collection never touches. Each manager writes its own log
-`logs/managers/<manager-id>.log`; no file is shared between managers.
+Every launcher gives each manager a fresh launch id, exports it as
+`HTTK_LAUNCH_ID`, and writes everything it produces for that manager as
+`logs/launchers/<launch id>.<ext>`: here the batch script and the scheduler
+output, standard error merged into `<launch id>.out`. The process launcher
+writes the manager's standard output and error to `<launch id>.out` the same
+way. The manager records its launch id in its `owner.json`, and
+`httk workspace gc` (category `launcher_logs`) removes launcher output after
+`retention.trash_days` once no owner records that id. Each manager writes its
+own log `logs/managers/<manager-id>.log`; no file is shared between managers.
 
 ## Several launchers
 

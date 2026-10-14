@@ -2,7 +2,7 @@
 
 The enrollment is real (approved ``slurm`` launcher, ``daemon.json``), and enrolling enables the workspace's
 exchange extension. The client writes a fresh bundle into ``WORKSPACE/exchange/inbox`` and fetches the returned
-tree from ``WORKSPACE/exchange/outbox/<its job UUID>/``; the broker never moves bundles. The manager is the one the
+tree from ``WORKSPACE/exchange/outbox/<tag>--<its job UUID>/``; the broker never moves bundles. The manager is the one the
 broker's submission would start: a confined manager on the real workspace path, whose attempt sandbox is replaced
 by a pass-through.
 """
@@ -111,7 +111,8 @@ def test_a_job_round_trips_through_the_exchange(
         manager.run_until_idle(timeout=120.0, poll_interval=0.05)
     assert [call["settings"].mode for call in sandboxes] == ["bwrap"]
     assert sandboxes[0]["workspace_root"] == server.root
-    [bundle] = (exchange / "outbox" / str(client_job["id"])).iterdir()
+    bundle = exchange / "outbox" / f"trip--{client_job['id']}"
+    assert sorted(os.listdir(exchange / "outbox")) == sorted([bundle.name, "rejected"])
     manifest = BundleManifest.from_json((bundle / "bundle.json").read_bytes())
     assert [member.state for member in manifest.members] == ["succeeded"]
     assert os.listdir(exchange / "inbox") == [] and os.listdir(exchange / "outbox" / "rejected") == []

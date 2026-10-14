@@ -502,6 +502,7 @@ def register_owner(
     allocation: Mapping[str, object] | None,
     advertised: Mapping[str, object],
     execution_scope: _death.ProcessIdentity | None = None,
+    launch_id: str | None = None,
 ) -> "Owner":
     """Create ``owners/<owner-id>/`` and its ``owner.json``, before the owner claims anything.
 
@@ -512,6 +513,8 @@ def register_owner(
     :param advertised: Any of ``pools``, ``capabilities``, ``prefixes``, ``resources``, ``end_time`` and
         ``drain_start`` (epoch seconds, or ``None``).
     :param execution_scope: The identity of this owner's full execution scope, or ``None`` to identify this process.
+    :param launch_id: The launch id the owner's launcher gave it (``HTTK_LAUNCH_ID``), which names its launcher
+        output ``logs/launchers/<launch id>.*``, or ``None`` when no launcher started it.
     :return: The new owner.
     :raises ValueError: For an unknown kind or advertised member.
     """
@@ -534,6 +537,7 @@ def register_owner(
         "process_start_ticks": identity.start_ticks,
         "started_at": _now(),
         "allocation": None if allocation is None else dict(allocation),
+        "launch_id": launch_id,
         **advertised,
     }
     path = _owner_dir(workspace, owner_id)

@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import IO, cast
 
 import pytest
 from httk.core.cli import CLIContext
@@ -124,7 +125,8 @@ def test_launcher_add_persists_settings_and_slurm_prefers_them(tmp_path: Path, r
         settings=workspace_settings,
         timeout=None,
     )
-    script = Path(str(result["script"])).read_text(encoding="utf-8")
+    [script_path] = cast(list[str], result["scripts"])
+    script = Path(script_path).read_text(encoding="utf-8")
     assert "#SBATCH --partition=gpu" in script
     assert "#SBATCH --cpus-per-task=8" in script
     assert "--workers 8" in script
@@ -238,7 +240,18 @@ def test_slurm_launcher_start_spools_scripts(tmp_path: Path, remote: Remote) -> 
         timeout=None,
     )
     assert result["job_ids"] == ["4201", "4202"]
-    script = Path(str(result["script"])).read_text(encoding="utf-8")
+    launch_ids = cast(list[str], result["launch_ids"])
+    scripts = cast(list[str], result["scripts"])
+    assert len(set(launch_ids)) == 2 and all(re.fullmatch(r"[0-9a-f]{32}", launch_id) for launch_id in launch_ids)
+    # One script per submission, each named after and exporting its own launch id.
+    directory = workspace.root / "logs" / "launchers"
+    assert scripts == [str(directory / f"{launch_id}.sbatch") for launch_id in launch_ids]
+    for launch_id, path in zip(launch_ids, scripts, strict=True):
+        text = Path(path).read_text(encoding="utf-8")
+        assert f"export HTTK_LAUNCH_ID={launch_id}\n" in text
+        assert f"#SBATCH --output={directory / launch_id}.out\n" in text
+        assert Path(path).stat().st_mode & 0o777 == 0o700
+    script = Path(scripts[0]).read_text(encoding="utf-8")
     for directive in (
         "--account=p2026-1",
         "--partition=main",
@@ -305,11 +318,17 @@ def test_launch_processes_detaches_and_filters_slurm(monkeypatch: pytest.MonkeyP
         settings={"environment.prelude": "module load python"},
         capacity={"procs": 5, "mem": 3, "license": 8},
     )
+    launch_ids = cast(list[str], result.pop("launch_ids"))
     assert result == {"ok": True, "kind": "process", "count": 2, "pids": [701, 702]}
+    assert len(set(launch_ids)) == 2 and all(re.fullmatch(r"[0-9a-f]{32}", launch_id) for launch_id in launch_ids)
     assert all(call["start_new_session"] is True for call in calls)
     assert all(call["stdin"] is subprocess.DEVNULL for call in calls)
-    assert all(call["stdout"] is subprocess.DEVNULL for call in calls)
-    assert all(call["stderr"] is subprocess.DEVNULL for call in calls)
+    for launch_id, call in zip(launch_ids, calls, strict=True):
+        # Standard output and error both go to the manager's launcher log, which the parent closed again.
+        output = cast(IO[bytes], call["stdout"])
+        assert call["stderr"] is output and output.closed and output.mode == "ab"
+        assert Path(output.name) == tmp_path.resolve() / "logs" / "launchers" / f"{launch_id}.out"
+        assert cast(dict[str, str], call["env"])["HTTK_LAUNCH_ID"] == launch_id
     launched_argvs: list[list[str]] = []
     for call in calls:
         environment = call["env"]
@@ -339,7 +358,9 @@ def test_manager_command_must_be_a_nonempty_string(tmp_path: Path) -> None:
             capacity={"procs": 1},
         )
     with pytest.raises(ValueError, match="manager.command must be a nonempty string"):
-        launch_runtime._batch_script(argv, settings={"manager.command": 7}, workspace="/ws", directory="/ws/.batch")
+        launch_runtime._batch_script(
+            argv, settings={"manager.command": 7}, workspace="/ws", directory="/ws/.batch", launch_id="0" * 32
+        )
 
 
 def test_slurm_launcher_reports_partial_submission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:

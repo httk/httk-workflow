@@ -171,9 +171,11 @@ def test_initialize_freezes_slurm_launchers_and_publishes_the_daemon_document(
     )
     assert policy.max_submissions == 128
     assert policy.python.is_relative_to(Path(sys.prefix).resolve())
-    for directory in (policy.daemon, policy.snapshots, policy.jobs, policy.broker):
+    for directory in (policy.daemon, policy.snapshots, policy.broker):
         assert directory.stat().st_mode & 0o777 == 0o700
-    assert policy.jobs == policy.daemon / "jobs"
+    # Slurm writes each manager's output there and does not create a missing directory.
+    assert (layout.workspace.root / "logs/launchers").is_dir()
+    assert not (policy.daemon / "jobs").exists()
     assert (policy.daemon / "broker/ledger").is_dir()
     assert (policy.daemon / "active.json").is_file()
     assert (policy.daemon / "configuration.json").is_file()
@@ -181,7 +183,7 @@ def test_initialize_freezes_slurm_launchers_and_publishes_the_daemon_document(
     assert response_seed_path(policy.daemon).stat().st_mode & 0o777 == 0o600
     assert list(data_home.iterdir()) == []
     assert (layout.workspace.root / ".httk-workspace").stat().st_mode & 0o777 == control_mode
-    for name in ("requests", "responses", "inbox", "outbox", "outbox/rejected", "managers"):
+    for name in ("requests", "responses", "inbox", "outbox", "outbox/rejected", "launchers"):
         assert (layout.exchange / name).is_dir()
     # Setup enables the extension: every manager on the workspace must then be confined. No marker, no staging.
     assert "exchange" in Workspace(layout.workspace.root).extensions
@@ -243,8 +245,11 @@ def test_bundle_edits_take_effect_at_the_next_activation_without_another_command
     configurations = json.loads((layout.exchange / "daemon.json").read_text(encoding="utf-8"))["configurations"]
     assert configurations["small"] == second.configuration_digest("small") != first.configuration_digest("small")
     assert configurations["large"] == first.configuration_digest("large")
-    # Nothing changed since: the next activation publishes nothing.
+    # Nothing changed since: the next activation publishes nothing, but recreates a removed launcher log directory.
+    (layout.workspace.root / "logs/launchers").rmdir()
     assert _daemon_setup.activate(layout.workspace.root) == (snapshot, None)
+    assert (layout.workspace.root / "logs/launchers").is_dir()
+    assert not (second.daemon / "jobs").exists()
     assert sorted(path.name for path in snapshot.parent.glob("*.json")) == sorted([first_snapshot.name, snapshot.name])
 
 
@@ -452,7 +457,7 @@ def test_initialize_enables_the_exchange_without_a_dedicated_parent_or_staging(t
     )
     assert reports == [f"enabled the exchange extension of {layout.workspace.root}: {layout.exchange}"]
     assert "exchange" in Workspace(layout.workspace.root).extensions
-    for name in ("requests", "responses", "inbox", "outbox", "outbox/rejected", "managers"):
+    for name in ("requests", "responses", "inbox", "outbox", "outbox/rejected", "launchers"):
         assert (layout.exchange / name).is_dir()
     # None of the removed artifacts: staging, enrollment marker, withdrawn directory, endpoint, sibling exchange.
     assert not (layout.workspace.root / ".httk-workspace" / "exchange").exists()

@@ -27,7 +27,7 @@ from .._logging import LOG_LEVELS, add_log_file, configure_logging
 from .._scheduler import detect_scheduler
 from ..adapters import REMOTE_MANAGER_COMMAND
 from ..errors import FormatError
-from ..launchers import PROCESS_LAUNCHER, launch_processes, resolve_launcher, split_capacity, start_managers
+from ..launchers import _LAUNCH_ID, PROCESS_LAUNCHER, launch_processes, resolve_launcher, split_capacity, start_managers
 from ..manager import NotIdleError, TaskManager
 from ..models import LOGS_DIRECTORY, validate_capacity
 from ..registry import WorkspaceBinding
@@ -718,6 +718,8 @@ def _run_in_process_manager(
     maximum_workers = (
         configured_workers if configured_workers is not None else _positive_setting(settings, "manager.workers", 1)
     )
+    # Set by the launcher; worker children inherit this environment, so each records the same launch id.
+    launch_id = os.environ.get("HTTK_LAUNCH_ID", "")
     with TaskManager(
         workspace,
         pools=getattr(arguments, "pool", []) or ["default"],
@@ -733,6 +735,7 @@ def _run_in_process_manager(
         deadline_margin=deadline_margin,
         allocation=allocation,
         setting_overrides=pinned,
+        launch_id=launch_id if _LAUNCH_ID.fullmatch(launch_id) else None,
     ) as manager:
         ends = "" if end_time is None else f", ends={format_duration(max(0, int(end_time - time.time())))}"
         if allocation is not None:

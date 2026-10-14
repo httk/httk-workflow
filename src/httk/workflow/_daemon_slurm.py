@@ -12,6 +12,7 @@ from pathlib import Path
 from ._daemon_bootstrap import _operator_environment
 from ._daemon_policy import ApprovedLauncher, Policy
 from .launch_runtime import SubmissionIdentity, slurm_submission
+from .models import LAUNCHERS_DIRECTORY
 
 _VERSION = re.compile(r"slurm (\d+)\.(\d+)\.(\d+)(?:[.-][A-Za-z0-9.-]+)?\s*\Z")
 _JOB = re.compile(r"[1-9][0-9]{0,19}\Z")
@@ -198,7 +199,7 @@ def submission(policy: Policy, launcher: ApprovedLauncher, handle: str) -> tuple
 
     :param policy: Validated runtime policy.
     :param launcher: The approved launcher, whose frozen settings alone shape the script.
-    :param handle: The broker's opaque manager handle, which names the job.
+    :param handle: The broker's opaque manager handle, which names the job and its launcher log.
     :return: The ``sbatch`` argument vector and the script bytes for its standard input.
     :raises ValueError: If a frozen setting cannot be expressed in the script.
     """
@@ -211,8 +212,9 @@ def submission(policy: Policy, launcher: ApprovedLauncher, handle: str) -> tuple
             job_name=f"httk-{handle}",
             sbatch=policy.sbatch,
             cluster=policy.cluster,
-            output=str(policy.jobs / "httk-%j.out"),
+            output=str(policy.workspace / LAUNCHERS_DIRECTORY / f"{handle}.out"),
         ),
+        launch_id=handle,
     )
     return argv, script.encode("utf-8")
 

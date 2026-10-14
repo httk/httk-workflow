@@ -104,7 +104,11 @@ The dispatcher prints one result object:
   "kind": "slurm",
   "count": 2,
   "job_ids": ["501", "502"],
-  "script": "/scratch/me/runs/workspace/logs/batch/manager-....sbatch"
+  "launch_ids": ["3f2a...", "9c41..."],
+  "scripts": [
+    "/scratch/me/runs/workspace/logs/launchers/3f2a....sbatch",
+    "/scratch/me/runs/workspace/logs/launchers/9c41....sbatch"
+  ]
 }
 ```
 
@@ -165,19 +169,30 @@ prefixes) there.
 
 A launcher may use other settings, but should keep its interpretation explicit.
 
-The maintained Slurm dispatcher writes one mode-0700 script below
-`logs/batch/`, adds `--chdir`, output, and error paths, and calls
-`sbatch` once per requested manager. The script's final command is an
-argument-quoted `exec` line. If `environment.prelude` is set, the prelude runs
-first under `set -e`, and the manager command is resolved on the resulting
+Every launcher gives each manager it starts a fresh **launch id**, 32
+lowercase hexadecimal digits (`uuid.uuid4().hex`). It exports
+`HTTK_LAUNCH_ID=<launch id>` in the manager's environment, writes everything
+it produces for that manager as `WORKSPACE/logs/launchers/<launch id>.<ext>`
+(standard output and error merged into `<launch id>.out`), and reports the ids
+as `launch_ids` in its result. The manager records its launch id in its
+`owner.json`; `httk workspace gc` (category `launcher_logs`) removes those
+files after `retention.trash_days` once no owner records the id.
+
+The maintained Slurm dispatcher writes one mode-0700 script per requested
+manager, `logs/launchers/<launch id>.sbatch`, with `--chdir` and
+`--output=<launch id>.out` (Slurm merges standard error into it), and submits
+each with `sbatch`. The script exports `HTTK_LAUNCH_ID` after `set -e`, and its
+final command is an argument-quoted `exec` line. If `environment.prelude` is
+set, the prelude runs first under `set -e`, and the manager command is
+resolved on the resulting
 `PATH` as `manager.command` (default `httk`). Without a prelude, the supplied
 Python interpreter argv is preserved. Unless the argv already has one, the
 dispatcher appends `--allocation` with the `manager.allocation` setting
 (default `slurm`), so each manager probes its job's nodes; see
 [allocation probes](#allocation-probes). It then appends the bundle's pinned
-`--setting` values. A successful result contains the parsed
-Slurm job IDs and the script path. If submission fails after some jobs were
-accepted, the refusal includes `submitted` and `job_ids` so the operator can
+`--setting` values. A successful result contains the parsed Slurm job IDs
+with the parallel `launch_ids` and `scripts`. If submission fails after some
+jobs were accepted, the refusal includes `submitted` and `job_ids` so the operator can
 cancel those jobs.
 
 ## A PBS launcher
@@ -223,39 +238,39 @@ def main():
         return
     workspace = Path(request["workspace"])
     settings = {**request.get("settings", {}), **request.get("launcher_settings", {})}
-    directory = workspace / "logs" / "batch"
+    directory = workspace / "logs" / "launchers"
     directory.mkdir(parents=True, exist_ok=True)
-    script = directory / ("manager-" + uuid.uuid4().hex + ".pbs")
-    directives = [("#PBS -N httk-manager",),
-                  (f"#PBS -d {workspace}",),
-                  (f"#PBS -o {directory}/manager-$PBS_JOBID.out",),
-                  (f"#PBS -e {directory}/manager-$PBS_JOBID.err",)]
     names = {"slurm.account": "#PBS -A", "slurm.partition": "#PBS -q",
              "slurm.time_limit": "#PBS -l walltime", "slurm.nodes": "#PBS -l nodes"}
-    lines = ["#!/bin/bash -l"]
-    lines.extend(item[0] for item in directives)
-    for key, prefix in names.items():
-        if key in settings:
-            lines.append(f"{prefix}={settings[key]}")
-    lines.append("set -e")
-    if settings.get("environment.prelude"):
-        lines.append(str(settings["environment.prelude"]))
     argv = list(request["argv"])
     if "--allocation" not in argv:
         bundle = request["launcher_dir"]
         argv += ["--allocation", settings.get("manager.allocation", f"exec:{bundle}/allocation")]
-    lines.append("exec " + shlex.join(argv))
-    script.write_text("\n".join(lines) + "\n")
-    os.chmod(script, 0o700)
-    jobs = []
+    jobs, launch_ids, scripts = [], [], []
     for _ in range(request.get("count", 1)):
+        launch_id = uuid.uuid4().hex
+        lines = ["#!/bin/bash -l", "#PBS -N httk-manager", f"#PBS -d {workspace}",
+                 f"#PBS -o {directory}/{launch_id}.out", "#PBS -j oe"]
+        for key, prefix in names.items():
+            if key in settings:
+                lines.append(f"{prefix}={settings[key]}")
+        lines += ["set -e", f"export HTTK_LAUNCH_ID={launch_id}"]
+        if settings.get("environment.prelude"):
+            lines.append(str(settings["environment.prelude"]))
+        lines.append("exec " + shlex.join(argv))
+        script = directory / f"{launch_id}.pbs"
+        script.write_text("\n".join(lines) + "\n")
+        os.chmod(script, 0o700)
         completed = subprocess.run(["qsub", str(script)], cwd=workspace,
                                    text=True, capture_output=True, check=False)
         if completed.returncode:
             refusal(operation, completed.stderr.strip() or "qsub failed")
             return
         jobs.append(completed.stdout.strip())
-    result(operation, kind="pbs", count=len(jobs), job_ids=jobs, script=str(script))
+        launch_ids.append(launch_id)
+        scripts.append(str(script))
+    result(operation, kind="pbs", count=len(jobs), job_ids=jobs,
+           launch_ids=launch_ids, scripts=scripts)
 
 if __name__ == "__main__":
     main()

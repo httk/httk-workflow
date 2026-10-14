@@ -30,7 +30,7 @@ from httk.workflow._state import Release, read_state_unowned
 from httk.workflow.errors import ConfinementUnavailableError, SealedError
 from httk.workflow.seals import seal_workspace
 from httk.workflow.workflow_cli import command
-from test_bundles import write_bundle
+from test_bundles import key_of, write_bundle
 from test_moving import claim_root
 from v3_helpers import cli_owner, install, job_mapping, submit_mapping
 from v3_helpers import workspace as v3_workspace
@@ -140,7 +140,7 @@ def test_enable_creates_the_layout_and_records_the_extension(tmp_path: Path) -> 
         "format_version": 1,
         "workspace_id": workspace.workspace_id,
     }
-    assert sorted(os.listdir(exchange)) == ["exchange.json", "inbox", "managers", "outbox", "requests", "responses"]
+    assert sorted(os.listdir(exchange)) == ["exchange.json", "inbox", "launchers", "outbox", "requests", "responses"]
     assert _extensions(workspace) == ["exchange"] and "exchange" in Workspace(workspace.root).extensions
     # Nothing is left behind: no rename probe.
     assert os.listdir(workspace.control / "tmp") == []
@@ -339,8 +339,10 @@ def test_a_finished_exchange_tree_returns_to_the_outbox_and_leaves_the_index(
     _finish(ws)
     assert _pass(ws) is True
     _apply(ws, root)
-    outbox = exchange_directory(ws) / "outbox" / str(jobs[0]["id"])
-    manifest = BundleManifest.from_json((outbox / root.job_key / "bundle.json").read_bytes())
+    # Flat in the outbox, under the client's own job key.
+    outbox = exchange_directory(ws) / "outbox"
+    assert sorted(os.listdir(outbox)) == sorted([key_of(jobs[0]), "rejected"])
+    manifest = BundleManifest.from_json((outbox / key_of(jobs[0]) / "bundle.json").read_bytes())
     assert len(manifest.members) == 3 and {member.state for member in manifest.members} == {"succeeded"}
     assert _all_jobs(ws) == []
     assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is None
@@ -355,8 +357,8 @@ def test_an_occupied_outbox_name_is_not_requested_until_fetched(tmp_path: Path) 
     _pass(ws)
     root = _indexed(ws, jobs[0]["id"])
     _finish(ws)
-    occupant = exchange_directory(ws) / "outbox" / str(jobs[0]["id"]) / root.job_key
-    occupant.mkdir(parents=True)
+    occupant = exchange_directory(ws) / "outbox" / key_of(jobs[0])
+    occupant.mkdir()
     (occupant / "earlier").write_text("not fetched yet")
     with cli_owner(ws) as owner:
         service = ExchangeService(ws, owner)
@@ -386,13 +388,13 @@ def test_a_symlinked_outbox_never_redirects_a_return(tmp_path: Path, planted: st
         shutil.rmtree(outbox)
         os.symlink(elsewhere, outbox)
     else:
-        os.symlink(elsewhere, outbox / str(jobs[0]["id"]))
+        os.symlink(elsewhere, outbox / key_of(jobs[0]))
     _apply(ws, root)
     # The eject opened the outbox without following the link, so it rolled back: nothing left the workspace.
     assert os.listdir(elsewhere) == [] and len(_all_jobs(ws)) == 3
     assert _kernel.exchange_index(ws, str(jobs[0]["id"])) is not None
     # No new return is requested while the outbox is a symlink, and the pre-check looks at nothing through it.
-    (elsewhere / root.job_key).mkdir()
+    (elsewhere / key_of(jobs[0])).mkdir()
     with cli_owner(ws) as owner:
         service = ExchangeService(ws, owner)
         service._backoff.clear()
@@ -406,11 +408,11 @@ def test_a_return_that_rolled_back_waits_out_a_doubling_backoff(tmp_path: Path) 
     _pass(ws)
     root = _indexed(ws, jobs[0]["id"])
     _finish(ws)
-    occupant = exchange_directory(ws) / "outbox" / str(jobs[0]["id"]) / root.job_key
+    occupant = exchange_directory(ws) / "outbox" / key_of(jobs[0])
     requests = ws.control / "requests"
 
     def rolled_back() -> None:
-        occupant.mkdir(parents=True)  # the outbox fills between the request and its application
+        occupant.mkdir()  # the outbox fills between the request and its application
         (occupant / "earlier").write_text("not fetched yet")
         _apply(ws, root)
         (occupant / "earlier").unlink()
@@ -575,7 +577,7 @@ def test_an_until_idle_manager_adopts_runs_and_returns_a_client_job(
     with TaskManager(ws, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
         manager.run_until_idle(timeout=120.0, poll_interval=0.02)
     assert [call["settings"].mode for call in sandboxes] == ["bwrap"]
-    [bundle] = (exchange_directory(ws) / "outbox" / str(client_job["id"])).iterdir()
+    bundle = exchange_directory(ws) / "outbox" / key_of(client_job)
     manifest = BundleManifest.from_json((bundle / "bundle.json").read_bytes())
     assert [member.state for member in manifest.members] == ["succeeded"]
     doc, _ = read_state_unowned(manifest.member_dir(bundle, manifest.members[0]) / "state.json")

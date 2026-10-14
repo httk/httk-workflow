@@ -42,7 +42,7 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Endpo
     monkeypatch.setenv("HTTK_DATA_HOME", str(tmp_path / "data"))
     add_identity("operator", "Operator", "operator@example.test")
     exchange = tmp_path / "exchange"
-    for name in ("requests", "responses", "inbox", "outbox", "managers"):
+    for name in ("requests", "responses", "inbox", "outbox", "launchers"):
         (exchange / name).mkdir(parents=True)
     (exchange / "exchange.json").write_text(
         json.dumps({"format": "httk-workspace-exchange", "format_version": 1, "workspace_id": WORKSPACE_ID}),
@@ -241,6 +241,26 @@ def test_changed_reason_retry_is_invalid_cli_input_before_any_publish(
     assert result == 2
     assert "cached daemon request intent conflicts" in capsys.readouterr().err
     assert calls == []
+
+
+@pytest.mark.parametrize("destination", [None, "archive"])
+def test_a_mount_daemon_eject_may_omit_the_destination(
+    remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], destination: str | None
+) -> None:
+    bundle, _endpoint, identity, response_seed = remote
+    seen = _mock_adapter(monkeypatch, response_seed, [("applied", None)])
+    binding = WorkspaceBinding("cluster:runs", "cluster", None)
+    monkeypatch.setattr(job_cli, "_resolve_binding", lambda *_args, **_kwargs: (binding, None))
+    monkeypatch.setattr(job_cli, "resolve_remote", lambda *_args, **_kwargs: SimpleNamespace(bundle=bundle))
+    monkeypatch.setattr(job_cli, "_resolve_request_identity", lambda _selector: identity)
+    argv = ["job", "request", "eject", "--workspace", "cluster:runs", "--reason", "return it", JOB_ID]
+    if destination is not None:
+        argv.append(f"--destination={destination}")
+
+    assert command(argv, CLIContext("httk", bundle.parent)) == 0
+    capsys.readouterr()
+    # Omitted, the daemon ejects into the outbox root.
+    assert [(request.action, request.destination) for request in seen] == [("eject", destination)]
 
 
 def test_pause_wait_polls_with_fresh_signed_command_status(remote, monkeypatch: pytest.MonkeyPatch) -> None:

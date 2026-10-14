@@ -67,6 +67,7 @@ from httk.workflow._bundles import (
     read_manifest,
     read_rekeyed,
     rekey_untrusted,
+    rekeyed_id,
     validate_bundle,
 )
 from httk.workflow._job import JobDefinition
@@ -78,7 +79,9 @@ from httk.workflow.models import (
     EXCHANGE_DIRECTORY,
     WORKSPACE_DIRECTORY,
     canonical_uuid,
+    make_job_key,
     normalize_placement,
+    parse_job_key,
     placement_text,
 )
 
@@ -608,10 +611,14 @@ def _eject(
     read = read_manifest(bundle / "bundle.json")
     assert read is not None
     token, manifest = read
-    target = destination / (manifest.transfer_id if hold else root.job_key)
-    report = EjectReport(target, tuple(member.job_key for member in manifest.members), manifest.transfer_id)
     # Read in the scratch, before the bundle reaches a destination others may write.
     exchange = _exchange_root(workspace, bundle, manifest)
+    name = root.job_key
+    if exchange is not None and rekeyed_id(workspace.workspace_id, exchange[0]) == root.job_id:
+        # A job this workspace adopted from its exchange goes back under the client's name.
+        name = make_job_key(exchange[0], parse_job_key(root.job_key)[0])
+    target = destination / (manifest.transfer_id if hold else name)
+    report = EjectReport(target, tuple(member.job_key for member in manifest.members), manifest.transfer_id)
     error: Exception | None = None
     try:
         # Recorded first: a crash after the delivery leaves a scratch whose reconciler can still decide it.
@@ -643,7 +650,10 @@ def eject(
     tree: bool,
     owner_key: str | None = None,
 ) -> EjectReport:
-    """Move a claimed job, and with *tree* its descendants, out of the workspace into ``<destination>/<root key>``.
+    """Move a claimed job, and with *tree* its descendants, out of the workspace into ``<destination>/<name>``.
+
+    The name is the client's job key (``<tag>--<exchange name>``) for an exchange job this workspace adopted,
+    otherwise the root's job key.
 
     Tree members are the root's non-detached descendants (:func:`tree_members`); each must be terminal or paused,
     and they are claimed in sorted job-UUID order. Without *tree*, a root that has such descendants present is

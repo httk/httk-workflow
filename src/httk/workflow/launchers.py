@@ -3,9 +3,11 @@
 import importlib.resources
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +19,7 @@ from ._daemon_policy import SLURM_EXPORT_SETTING, validate_slurm_export
 from ._util import write_json_atomic
 from .configuration import launchers_home
 from .errors import ResolutionMiss
+from .models import LAUNCHERS_DIRECTORY
 from .projects import PROJECT_DIRECTORY, discover_project
 from .workspace import _validate_setting_key, _validate_settings
 
@@ -54,6 +57,8 @@ LAUNCHER_OPERATIONS = ("check", "start")
 PROCESS_LAUNCHER = "process"
 REQUEST_FORMAT = "httk-manager-launcher-request"
 RESULT_FORMAT = "httk-manager-launcher-result"
+#: A launch id: 32 lowercase hexadecimal digits (``uuid.uuid4().hex``), fresh per started manager.
+_LAUNCH_ID = re.compile(r"[0-9a-f]{32}")
 
 
 @dataclass(frozen=True)
@@ -584,7 +589,8 @@ def launch_processes(
     :param settings: Workspace settings, including an optional environment prelude.
     :param capacity: Capacity to split, or :func:`host_capacity` when omitted;
         not passed to one manager that probes the host itself (``--allocation host``).
-    :return: Process launcher result document.
+    :return: Process launcher result document; ``launch_ids`` is parallel to ``pids``, and each manager's
+        standard output and error go to ``logs/launchers/<launch id>.out``.
     """
 
     if count < 1:
@@ -607,7 +613,10 @@ def launch_processes(
     if allocation[-1:] == ["host"]:
         # The host probe supplies the one manager's capacity and its node inventory.
         resources = [{}]
+    logs = root / LAUNCHERS_DIRECTORY
+    logs.mkdir(parents=True, exist_ok=True)
     pids: list[int] = []
+    launch_ids: list[str] = []
     for child_resources in resources:
         child_argv = [*argv, *allocation]
         supplied = _explicit_resources(child_argv)
@@ -625,14 +634,17 @@ def launch_processes(
             ]
         else:
             launch_argv = child_argv
-        child = subprocess.Popen(
-            launch_argv,
-            cwd=str(root),
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        launch_id = uuid.uuid4().hex
+        with open(logs / f"{launch_id}.out", "ab") as output:
+            child = subprocess.Popen(
+                launch_argv,
+                cwd=str(root),
+                env={**environment, "HTTK_LAUNCH_ID": launch_id},
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=output,
+                start_new_session=True,
+            )
         pids.append(child.pid)
-    return {"ok": True, "kind": PROCESS_LAUNCHER, "count": count, "pids": pids}
+        launch_ids.append(launch_id)
+    return {"ok": True, "kind": PROCESS_LAUNCHER, "count": count, "pids": pids, "launch_ids": launch_ids}

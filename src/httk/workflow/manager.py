@@ -434,6 +434,8 @@ class TaskManager:
     :param setting_overrides: Pinned ``manager.confine``, ``manager.confine.block_mpi_spawn``,
         ``manager.launch_template``, ``manager.launch_mpi``, ``manager.bind_cpus`` and ``confine.*`` settings
         that win over the workspace settings for this manager's lifetime.
+    :param launch_id: The launch id its launcher gave this manager (``HTTK_LAUNCH_ID``), recorded in
+        ``owner.json``, or ``None`` when no launcher started it.
     :raises ValueError: If a manager limit, a pinned setting or the effective confinement settings are invalid.
     :raises httk.workflow.errors.ConfinementUnavailableError: If the effective ``manager.confine`` is ``bwrap``
         and Bubblewrap cannot build the attempt sandbox here, or the workspace has the exchange extension and
@@ -463,6 +465,7 @@ class TaskManager:
         deadline_margin: float = 120.0,
         allocation: Allocation | None = None,
         setting_overrides: Mapping[str, str] | None = None,
+        launch_id: str | None = None,
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
@@ -559,6 +562,8 @@ class TaskManager:
         self._closed = False
         self._last_heartbeat = time.monotonic()
         self._reset_drain()
+        #: The launch id this manager was started with, or ``None``.
+        self.launch_id = launch_id
         self.owner = _kernel.register_owner(
             workspace,
             kind="manager",
@@ -573,6 +578,7 @@ class TaskManager:
                 "end_time": self.end_time,
                 "drain_start": self.drain_start,
             },
+            launch_id=launch_id,
         )
         #: This manager's owner id.
         self.manager_id = self.owner.owner_id

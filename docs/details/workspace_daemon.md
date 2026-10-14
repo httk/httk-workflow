@@ -116,9 +116,9 @@ WORKSPACE/
     daemon.json          the daemon's public menu, written by the daemon
     status.json          exchange jobs, states and progress, written by the managers
     managers.json        manager rows, written by the daemon
-    managers/<handle>.log   published manager logs, written by the daemon
+    launchers/<handle>.log  published launcher logs, written by the daemon
     inbox/               the client drops job bundles here
-    outbox/              returned trees in outbox/<client job UUID>/;
+    outbox/              returned trees, one outbox/<tag>--<client job UUID>/ each;
                          outbox/rejected/<unique>/{<name>, reason.json}
     requests/ responses/ signed daemon actions and job actions
   .httk-workspace/daemon/  mode 0700; not visible to confined jobs
@@ -128,7 +128,6 @@ WORKSPACE/
     active.json         active runtime-snapshot pointer;
                          written by init/activate
     snapshots/<digest>.json  immutable runtime policy snapshots
-    jobs/httk-<jobid>.out  Slurm batch output; reachable from batch nodes
     broker/ledger/       the ledger; broker/ is writable for the broker
 ```
 
@@ -370,8 +369,13 @@ for one JSON document). Relative paths are taken from the current directory.
   SIGTERM; a site service supervisor can restart the foreground daemon.
 - The layout is fixed by the workspace path; nothing is written under the
   *httk* data directory (`~/.local/share/httk/...`). Slurm
-  writes manager output to `.httk-workspace/daemon/jobs/`, reachable from batch
-  nodes through the workspace's shared filesystem.
+  writes manager output to `WORKSPACE/logs/launchers/<handle>.out`, reachable
+  from batch nodes through the workspace's shared filesystem. Do not remove
+  `logs/launchers/` while the daemon runs: Slurm cannot start a manager whose
+  output directory is missing, and the daemon recreates the directory only when
+  it starts (`httk workspace daemon run` or `check`). An existing
+  workspace may still hold `exchange/managers/`, `logs/batch/` and
+  `.httk-workspace/daemon/jobs/` from before; remove them by hand.
 
 Trusted code (the *httk* installation, launcher bundles, Python interpreter
 and Slurm clients) must stay outside the workspace, be owned by you or root,
@@ -509,11 +513,13 @@ manager took it: cancel the job instead.
 Adoption gives the jobs fresh UUIDs and keeps the client's job UUID as the
 job's exchange name. Once the root and every job of its tree are finished
 (`succeeded`, `failed` or `cancelled`), a manager returns the whole tree to
-`outbox/<client job UUID>/<job key>`; while an earlier copy there is not
-fetched, the return waits. Fetch it, removing it from the outbox:
+`outbox/CLIENT_JOB_KEY`, where `CLIENT_JOB_KEY` is the client's own job key,
+`<tag>--<client job UUID>`, the name the bundle had in `inbox/`; while an
+earlier copy there is not fetched, the return waits. Fetch it, removing the
+whole entry from the outbox:
 
 ```console
-httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_UUID/JOB_KEY
+httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_KEY
 ```
 
 The daemon executes a `job_request` only for an indexed exchange root adopted
@@ -529,7 +535,9 @@ whole tree, and children are absent from `status.json`. A
 same key as the original command. Selectors are internal job UUIDs or unique
 UUID prefixes from `status.json`; paths, globs and tags are refused. `--force`
 is refused. Eject destinations are relative to the mounted exchange outbox,
-resolved by the server, and ejects include the whole tree. State, parent/join,
+resolved by the server, and ejects include the whole tree. `--destination` may
+be omitted: the job then goes to the outbox root as `outbox/CLIENT_JOB_KEY`
+(the name rule above); with `--destination D` it goes to `outbox/D/<name>`. State, parent/join,
 runner-step and seal guards still apply. `set_budget` is accepted for such a
 root: the typed command carries the action `set_budget` and the field `budget`
 (the `--max-*` options of the CLI). Managers need no client keys; existing
@@ -567,9 +575,12 @@ manager is final in `COMPLETED`, `FAILED`, `CANCELLED`, `TIMEOUT`,
 for accounting to add the exit code, and is then kept without one. A manager
 that neither client knows for 30 minutes, which is always the case without
 `sacct` or while accounting fails, becomes `GONE`. Once a manager is final, the
-last 1 MiB of its Slurm output is copied to `managers/<handle>.log` in the
+last 1 MiB of its Slurm output is copied to `launchers/<handle>.log` in the
 exchange, and its row's `log` names that file. This also covers a manager that
-failed on its node before it ever adopted a job.
+failed on its node before it ever adopted a job. `httk workspace gc` (category
+`launcher_logs`) removes that exchange copy once it is older than
+`retention.trash_days`; the row keeps naming it, and `httk remote daemon log`
+then reports that no log is published.
 
 ## File command protocol
 
@@ -725,12 +736,14 @@ published manager log, every failed Slurm client call with its exit code and
 error output, and startup and check results.
 
 While a submitted job runs, Slurm writes its output, with stderr merged in, to
-`.httk-workspace/daemon/jobs/httk-<jobid>.out` in the workspace shared
-filesystem; the
-`daemon_submitted` log line names this path. When the manager is final, the
-last 1 MiB is published to `managers/<handle>.log` in the exchange (see
-[Job flow](#job-flow)). The original stays in the `jobs` directory for the
-operator to inspect and clean up. The manager's own log is
+`logs/launchers/<handle>.out` in the workspace shared filesystem (the
+broker handle is the launch id); the `daemon_submitted` log line names this
+path. When the manager is final, the last 1 MiB is published to
+`launchers/<handle>.log` in the exchange (see [Job flow](#job-flow)). The
+original stays in `logs/launchers/`; `httk workspace gc` removes it once no
+owner record carries that launch id and it is older than `trash_days`; the
+exchange copy is removed once older than `trash_days` too (category
+`launcher_logs`). The manager's own log is
 `logs/managers/<manager-id>.log` in the workspace, as for every manager.
 
 ### Quotas

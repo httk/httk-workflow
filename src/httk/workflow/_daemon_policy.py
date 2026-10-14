@@ -249,12 +249,6 @@ class Policy:
         return self.workspace / EXCHANGE_DIRECTORY
 
     @property
-    def jobs(self) -> Path:
-        """Directory of Slurm batch job output."""
-
-        return self.daemon / "jobs"
-
-    @property
     def daemon(self) -> Path:
         """The daemon's private workspace directory."""
 

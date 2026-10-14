@@ -70,7 +70,7 @@ def test_real_broker_confinement(tmp_path: Path, termination: str) -> None:
     (workspace / "workflows").mkdir()
     for name in ("owners", "requests", "tmp", "quarantine", "exchange-jobs"):
         (workspace / ".httk-workspace" / name).mkdir(parents=True)
-    for root in (daemon / "snapshots", daemon / "jobs", daemon_broker, broker):
+    for root in (daemon / "snapshots", daemon_broker, broker):
         root.mkdir()
     (daemon / "response.seed").write_bytes(b"test-seed")
 

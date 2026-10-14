@@ -9,14 +9,14 @@ has one directory a client may write, ``WORKSPACE/exchange``:
     ├── exchange.json                 written at enable: format, format_version, workspace_id
     ├── status.json                   managers: the exchange jobs, their states and bounded progress
     ├── inbox/<name>/                 client -> workspace: fresh job bundles
-    ├── outbox/<exchange-name>/       workspace -> client: the returned tree of one exchange job
+    ├── outbox/<tag>--<client UUID>/  workspace -> client: the returned tree of one exchange job
     ├── outbox/rejected/<unique>/     one refused bundle: <name>/ and reason.json
     ├── requests/<id>.json            client: signed daemon actions and job actions
     ├── responses/<id>.json           daemon-signed command results
-    └── daemon.json, managers.json, managers/   the workspace daemon's documents
+    └── daemon.json, managers.json, launchers/   the workspace daemon's documents
 
 :func:`enable_exchange` creates it, and the workspace daemon installs
-``daemon.json``, ``managers.json`` and the manager logs there
+``daemon.json``, ``managers.json`` and the managers' launcher logs there
 (:func:`install_document`, :func:`publish_file`).
 
 Job-control authentication and dispatch belong to the confined daemon: managers leave the
@@ -29,9 +29,10 @@ exchange runs :class:`ExchangeService` in each tick:
   ``.httk-workspace/exchange-jobs/``. A refused bundle goes to ``outbox/rejected/<unique>/`` with its
   ``reason.json``.
 - **Returns.** A finished exchange tree (the indexed root and every member terminal) gets an ``eject`` request
-  of the whole tree to ``outbox/<exchange-name>/``; its owner applies it. While the client has not fetched an
-  earlier return there, nothing is requested; a request whose eject rolled back anyway is retried after a
-  per-job backoff that doubles from :data:`STEP_INTERVAL` up to an hour.
+  of the whole tree to ``outbox/``, which delivers it under the client's job key as
+  ``outbox/<tag>--<client UUID>/``; its owner applies it. While the client has not fetched an earlier return
+  there, nothing is requested; a request whose eject rolled back anyway is retried after a per-job backoff that
+  doubles from :data:`STEP_INTERVAL` up to an hour.
 - **Status.** At most every :data:`STEP_INTERVAL` (and not when another manager wrote it just before),
   ``status.json`` lists every indexed exchange job with its state and a sanitized excerpt of the
   ``progress.json`` a job may keep in its payload, read live without following a symlink or blocking.
@@ -71,7 +72,7 @@ from ._state import encode_state, read_state_unowned
 from ._util import json_bytes, utc_now
 from .errors import FormatError, WorkflowError
 from .introspection._reading import read_job_file
-from .models import EXCHANGE_DIRECTORY, EXCHANGE_EXTENSION
+from .models import EXCHANGE_DIRECTORY, EXCHANGE_EXTENSION, make_job_key, parse_job_key
 from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -98,7 +99,7 @@ __all__ = [
 EXCHANGE_DOCUMENT = "exchange.json"
 EXCHANGE_FORMAT = "httk-workspace-exchange"
 #: The directories of an enabled exchange, parents before children.
-EXCHANGE_SUBDIRECTORIES = ("inbox", "outbox", "outbox/rejected", "requests", "responses", "managers")
+EXCHANGE_SUBDIRECTORIES = ("inbox", "outbox", "outbox/rejected", "requests", "responses", "launchers")
 
 #: The status document managers install at the exchange root.
 STATUS_DOCUMENT = "status.json"
@@ -121,7 +122,7 @@ _RESERVED_NAMES = frozenset(
         "exchange.json",
         "status.json",
         "managers.json",
-        "managers",
+        "launchers",
         "rejected",
         "requests",
         "responses",
@@ -301,7 +302,7 @@ def publish_file(exchange_fd: int, name: str, data: bytes, *, directory: str | N
 
     The subdirectory is opened (and recreated, by descriptor, when a client removed it) without following a
     symlink, and the file goes in through :func:`_install`. Used by the daemon for ``managers.json`` and
-    ``managers/<handle>.log``; nothing in the exchange is ever read back.
+    ``launchers/<handle>.log``; nothing in the exchange is ever read back.
 
     :param exchange_fd: The exchange directory's descriptor.
     :param name: The file's name in the target directory.
@@ -578,7 +579,7 @@ class ExchangeService:
         return changed
 
     def _return(self, job: _ExchangeJob, now: float, exchange: int) -> bool:
-        """Post the ``eject`` request of one finished exchange tree to ``outbox/<exchange-name>/``.
+        """Post the ``eject`` request of one finished exchange tree to ``outbox/<tag>--<exchange-name>/``.
 
         *exchange* is the exchange directory's descriptor: the outbox is client-writable, so it is looked into
         anchored, never following a symlink.
@@ -599,16 +600,17 @@ class ExchangeService:
             return False
         if any(member.state not in TERMINAL_STATES for member in members):
             return False
-        outbox = exchange_directory(self.workspace) / "outbox" / job.exchange_name
+        outbox = exchange_directory(self.workspace) / "outbox"
         try:
-            descriptor = _fs.open_dir_under(exchange, f"outbox/{job.exchange_name}")
+            descriptor = _fs.open_dir_under(exchange, "outbox")
         except FileNotFoundError:
-            pass  # nothing returned there yet
+            pass  # nothing returned yet
         except _fs.UnsafePath:
             return False  # a client replaced the outbox with a symlink or a file: the delivery would be refused
         else:
             try:
-                occupied = _fs.exists(_fs.anchored(descriptor, ref.job_key))
+                name = make_job_key(job.exchange_name, parse_job_key(ref.job_key)[0])
+                occupied = _fs.exists(_fs.anchored(descriptor, name))
             finally:
                 os.close(descriptor)
             if occupied:

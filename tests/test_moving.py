@@ -17,7 +17,7 @@ from httk.workflow._job import JobDefinition
 from httk.workflow._state import Release, StateDoc, read_state_unowned
 from httk.workflow.errors import FormatError, WorkflowError
 from httk.workflow.models import make_job_key
-from test_bundles import family, manifest_of, write_bundle
+from test_bundles import family, key_of, manifest_of, write_bundle
 from v3_helpers import cli_owner, job_mapping, submit_mapping
 from v3_helpers import workspace as v3_workspace
 
@@ -1216,15 +1216,45 @@ def test_a_held_exchange_job_leaves_the_exchange_index(tmp_path: Path) -> None:
     assert len(hold.members) == 3 and _kernel.exchange_index(ws, str(jobs[0]["id"])) is None
 
 
-def _outbox(ws: Workspace, client_id: object) -> Path:
-    return ws.root / "exchange" / "outbox" / str(client_id)
+def _outbox(ws: Workspace) -> Path:
+    return ws.root / "exchange" / "outbox"
+
+
+def test_an_exchange_root_ejects_under_the_client_key_and_comes_back_under_its_own(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs, root = _exchange_tree(ws, tmp_path)
+    with cli_owner(ws) as owner:
+        report = _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=_outbox(ws), tree=True)
+    # Flat in the outbox, under the client's job key (tag and client UUID), not this workspace's root key.
+    assert report.destination == _outbox(ws) / key_of(jobs[0]) and os.listdir(_outbox(ws)) == [key_of(jobs[0])]
+    # The client adopts its return: the root keeps its exchange name but carries this workspace's id, which is
+    # not the client's rekeying of that name, so it is no exchange root there and ejects under its own key.
+    client = v3_workspace(tmp_path / "client")
+    with cli_owner(client) as owner:
+        adopted = _moving.adopt(client, owner, report.destination, untrusted=False)
+        assert adopted is not None and not os.listdir(_outbox(ws))
+        returned = find(client, root.job_id)
+        assert returned is not None
+        doc, _damaged = read_state_unowned(returned.path / "state.json")
+        assert doc is not None and (doc.origin, doc.exchange_name) == ("exchange", str(jobs[0]["id"]))
+        owned = claim_root(client, owner, root.job_id)
+        back = _moving.eject(client, owner, owned, destination=tmp_path / "back", tree=True)
+    assert back.destination == tmp_path / "back" / root.job_key
+
+
+def test_a_plain_job_ejects_under_its_root_key(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    mapping, _state, _priority = single(ws)
+    with cli_owner(ws) as owner:
+        report = _moving.eject(ws, owner, claim_root(ws, owner, mapping["id"]), destination=_outbox(ws), tree=False)
+    assert report.destination == _outbox(ws) / make_job_key(str(mapping["id"]), "solo")
 
 
 @pytest.mark.parametrize("where", ["outbox", "plain"])
 def test_a_crash_right_after_the_delivery_rolls_forward_and_leaves_the_index(tmp_path: Path, where: str) -> None:
     ws = v3_workspace(tmp_path / "ws")
     jobs, root = _exchange_tree(ws, tmp_path)
-    destination = _outbox(ws, jobs[0]["id"]) if where == "outbox" else tmp_path / "out"
+    destination = _outbox(ws) if where == "outbox" else tmp_path / "out"
     owner = cli_owner(ws)
 
     def crash_after_delivery(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
@@ -1251,7 +1281,7 @@ def test_a_crash_right_after_the_delivery_rolls_forward_and_leaves_the_index(tmp
 def test_a_return_fetched_before_recovery_still_leaves_the_index(tmp_path: Path) -> None:
     ws = v3_workspace(tmp_path / "ws")
     jobs, root = _exchange_tree(ws, tmp_path)
-    destination = _outbox(ws, jobs[0]["id"])
+    destination = _outbox(ws)
     owner = cli_owner(ws)
 
     def crash_after_delivery(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
@@ -1368,7 +1398,7 @@ def test_recovery_after_a_resubmission_keeps_the_new_adoptions_index_entry(tmp_p
     ws = v3_workspace(tmp_path / "ws")
     jobs, root = _exchange_tree(ws, tmp_path)
     name = str(jobs[0]["id"])
-    destination = _outbox(ws, name)
+    destination = _outbox(ws)
     owner = cli_owner(ws)
     _fs.set_fault_injector(_crash_after_delivery)
     try:
@@ -1402,7 +1432,7 @@ def test_settle_does_not_mistake_a_taken_scratch_for_a_delivery(
     ws = v3_workspace(tmp_path / "ws")
     jobs, root = _exchange_tree(ws, tmp_path)
     name = str(jobs[0]["id"])
-    destination = _outbox(ws, name)
+    destination = _outbox(ws)
     real_carried = _moving._carried
     taken: list[Path] = []
 
@@ -1417,7 +1447,7 @@ def test_settle_does_not_mistake_a_taken_scratch_for_a_delivery(
 
     monkeypatch.setattr(_moving, "_carried", carried_then_taken)
     destination.mkdir(parents=True)
-    os.symlink(tmp_path / "elsewhere", destination / root.job_key)  # occupied: the reconciler decides at once
+    os.symlink(tmp_path / "elsewhere", destination / key_of(jobs[0]))  # occupied: the reconciler decides at once
     with cli_owner(ws) as owner, pytest.raises(_kernel.OwnerLost, match="taken"):
         _moving.eject(ws, owner, claim_root(ws, owner, root.job_id), destination=destination, tree=True)
     assert sorted(os.listdir(taken[0])) == ["bundle", "eject.json"]

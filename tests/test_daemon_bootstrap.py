@@ -56,7 +56,6 @@ def _layout(
         roots["site/workspace"] / ".httk-workspace/exchange-jobs",
         roots["daemon"],
         roots["daemon"] / "snapshots",
-        roots["daemon"] / "jobs",
         roots["daemon_broker"],
         roots["runtime"],
         roots["broker"],

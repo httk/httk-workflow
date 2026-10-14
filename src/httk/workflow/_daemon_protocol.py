@@ -77,7 +77,7 @@ class Request:
     :param priority: Set priority for ``set_priority``.
     :param step: Select the runner step for ``override_step``.
     :param budget: Set retry-policy limits for ``set_budget`` (``None`` values lift a limit); stored read-only.
-    :param destination: Select an outbox-relative destination for ``eject``.
+    :param destination: Select an outbox-relative destination for ``eject``; omitted, the outbox root.
     :param command_id: Identify the original daemon command for ``job_request_status``.
     :raises ValueError: If a field is invalid or conflicts with the operation.
     """
@@ -193,8 +193,8 @@ class Request:
                     parts = self.destination.split("/")
                     if any(part in {"", ".", ".."} or len(part.encode("utf-8")) > 255 or ":" in part for part in parts):
                         raise ValueError("invalid destination")
-                if (self.action == "eject") != (self.destination is not None):
-                    raise ValueError("destination is required only for eject")
+                if self.action != "eject" and self.destination is not None:
+                    raise ValueError("destination is allowed only for eject")
             else:
                 if self.configuration_digest is not None or any(
                     item is not None

@@ -520,7 +520,9 @@ def test_workspace_launcher_profile_dispatches_run_to_slurm(tmp_path: Path, remo
     assert command(["run", "--workspace", "station"], context) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["job_ids"] == ["4201", "4202"]
-    script = next(workspace.root.glob("logs/batch/*.sbatch")).read_text(encoding="utf-8")
+    scripts = sorted(path.name for path in workspace.root.glob("logs/launchers/*.sbatch"))
+    assert scripts == sorted(f"{launch_id}.sbatch" for launch_id in result["launch_ids"])
+    script = next(workspace.root.glob("logs/launchers/*.sbatch")).read_text(encoding="utf-8")
     for directive in (
         "--account=p2026-1",
         "--partition=main",
@@ -548,7 +550,7 @@ def test_invocation_launcher_overrides_workspace_launcher(tmp_path: Path, remote
 
     assert command(["run", "--workspace", "station", "--launcher", "gpu"], context) == 0
     capsys.readouterr()
-    script = next(workspace.root.glob("logs/batch/*.sbatch")).read_text(encoding="utf-8")
+    script = next(workspace.root.glob("logs/launchers/*.sbatch")).read_text(encoding="utf-8")
     assert "#SBATCH --partition=gpu" in script
     assert "--launcher" not in script
 

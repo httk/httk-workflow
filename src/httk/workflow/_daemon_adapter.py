@@ -306,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             _refusal(
                 operation,
                 "mount-daemon supports typed daemon controls only; move jobs with "
-                "'httk job eject JOB EXCHANGE/inbox' and 'httk job adopt EXCHANGE/outbox/<job_key>'",
+                "'httk job eject JOB EXCHANGE/inbox' and 'httk job adopt --move EXCHANGE/outbox/<tag>--<client job UUID>'",
             )
         else:
             _refusal(operation, "unsupported mount-daemon adapter operation")

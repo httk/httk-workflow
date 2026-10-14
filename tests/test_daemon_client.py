@@ -65,7 +65,7 @@ def _write_endpoint(exchange: Path, document: dict[str, object]) -> None:
 
 def _endpoint(tmp_path: Path) -> Endpoint:
     exchange = tmp_path / "exchange"
-    for name in ("requests", "responses", "inbox", "outbox", "managers"):
+    for name in ("requests", "responses", "inbox", "outbox", "launchers"):
         (exchange / name).mkdir(parents=True)
     (exchange / "exchange.json").write_text(
         json.dumps({"format": "httk-workspace-exchange", "format_version": 1, "workspace_id": WORKSPACE_ID}),
@@ -306,7 +306,7 @@ def test_endpoint_check_accepts_exchange_and_reads_only_endpoint(tmp_path: Path)
     Endpoint.from_settings(_settings(endpoint)).check()
 
 
-@pytest.mark.parametrize("name", ["requests", "responses", "inbox", "outbox", "managers"])
+@pytest.mark.parametrize("name", ["requests", "responses", "inbox", "outbox", "launchers"])
 def test_endpoint_check_refuses_missing_or_symlinked_subdirectory(tmp_path: Path, name: str) -> None:
     endpoint = _endpoint(tmp_path)
     (endpoint.exchange / name).rmdir()
@@ -697,7 +697,7 @@ _MANAGER: dict[str, object] = {
     "exit_code": "0:0",
     "started_at": "s",
     "ended_at": "e",
-    "log": f"managers/{HANDLE}.log",
+    "log": f"launchers/{HANDLE}.log",
 }
 
 
@@ -787,7 +787,7 @@ def test_passive_status_fails_closed_when_the_exchange_or_enrollment_changed(tmp
 
 
 def _log_directory(endpoint: Endpoint) -> Path:
-    directory = endpoint.exchange / "managers"
+    directory = endpoint.exchange / "launchers"
     return directory
 
 
@@ -841,12 +841,12 @@ def test_take_back_copies_through_the_inbox_descriptor(tmp_path: Path, monkeypat
 
 def test_check_refuses_a_v2_shaped_exchange_with_the_teaching_message(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
-    (endpoint.exchange / "managers").rmdir()
+    (endpoint.exchange / "launchers").rmdir()
     with pytest.raises(ValueError, match="httk remote daemon configure"):
         endpoint.check()
-    (endpoint.exchange / "managers").mkdir()
+    (endpoint.exchange / "launchers").mkdir()
     (endpoint.exchange / "exchange.json").unlink()
-    (endpoint.exchange / "managers").rmdir()
+    (endpoint.exchange / "launchers").rmdir()
     with pytest.raises(ValueError, match="httk remote daemon configure"):
         endpoint.check()
 
@@ -964,40 +964,40 @@ def test_take_back_names_the_held_entry_when_restore_fails_and_warns_on_stuck_re
     assert ".takeback-" in caplog.text
 
 
-def test_manager_log_is_returned_as_published(tmp_path: Path) -> None:
+def test_launcher_log_is_returned_as_published(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     data = b"line\n\xff\x00bytes"
     (_log_directory(endpoint) / f"{HANDLE}.log").write_bytes(data)
-    assert client_module.read_manager_log(endpoint, HANDLE) == data
+    assert client_module.read_launcher_log(endpoint, HANDLE) == data
 
 
-def test_manager_log_missing_and_bad_handle(tmp_path: Path) -> None:
+def test_launcher_log_missing_and_bad_handle(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     _log_directory(endpoint)
-    with pytest.raises(ValueError, match="no log has been published for this manager yet"):
-        client_module.read_manager_log(endpoint, HANDLE)
+    with pytest.raises(ValueError, match="no launcher log is published for this manager"):
+        client_module.read_launcher_log(endpoint, HANDLE)
     for bad in ("../x", HANDLE.upper(), HANDLE[:-1], ""):
         with pytest.raises(ValueError, match="handle"):
-            client_module.read_manager_log(endpoint, bad)
+            client_module.read_launcher_log(endpoint, bad)
 
 
-def test_manager_log_refuses_unsafe_files(tmp_path: Path) -> None:
+def test_launcher_log_refuses_unsafe_files(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     path = _log_directory(endpoint) / f"{HANDLE}.log"
     (tmp_path / "elsewhere.log").write_bytes(b"x")
     path.symlink_to(tmp_path / "elsewhere.log")
     with pytest.raises(OSError):
-        client_module.read_manager_log(endpoint, HANDLE)
+        client_module.read_launcher_log(endpoint, HANDLE)
     path.unlink()
     os.mkfifo(path)
     with pytest.raises(ValueError, match="regular"):  # returns without blocking
-        client_module.read_manager_log(endpoint, HANDLE)
+        client_module.read_launcher_log(endpoint, HANDLE)
     path.unlink()
     path.write_bytes(b"x" * (1024 * 1024 + 1))
     with pytest.raises(ValueError, match="exceeds"):
-        client_module.read_manager_log(endpoint, HANDLE)
+        client_module.read_launcher_log(endpoint, HANDLE)
     path.write_bytes(b"x" * (1024 * 1024))
-    assert len(client_module.read_manager_log(endpoint, HANDLE)) == 1024 * 1024
+    assert len(client_module.read_launcher_log(endpoint, HANDLE)) == 1024 * 1024
 
 
 def test_writing_a_cache_entry_sweeps_stagings_a_crash_left(tmp_path: Path) -> None:

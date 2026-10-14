@@ -97,7 +97,7 @@ def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
         "--input=/dev/null",
         "--clusters=cluster",
         f"--job-name=httk-{_HANDLE}",
-        f"--output={policy.jobs / 'httk-%j.out'}",
+        f"--output={policy.workspace}/logs/launchers/{_HANDLE}.out",
     ]
     assert environment["NSC_RESOURCE_NAME"] == "tetralith"
     assert environment["LANG"] == environment["LC_ALL"] == "C"
@@ -115,8 +115,9 @@ def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
         "#SBATCH --mem=512M",
         f"#SBATCH --chdir={policy.workspace}",
     ]
-    # Nothing in the script names the job or writes its output into the workspace.
+    # Only the command line names the job and its output.
     assert "--job-name" not in script and "--output" not in script and "--error" not in script
+    assert f"export HTTK_LAUNCH_ID={_HANDLE}" in lines
     exec_line = lines[-1]
     assert shlex.split(exec_line) == [
         "exec",
@@ -146,7 +147,7 @@ def _submission_identity(policy: Policy) -> SubmissionIdentity:
         job_name=f"httk-{_HANDLE}",
         sbatch=policy.sbatch,
         cluster=policy.cluster,
-        output=str(policy.jobs / "httk-%j.out"),
+        output=str(policy.workspace / "logs/launchers" / f"{_HANDLE}.out"),
     )
 
 
@@ -156,6 +157,7 @@ def test_submission_emits_one_export_none_by_default(policy: Policy) -> None:
         argv=manager_argv(policy),
         workspace=str(policy.workspace),
         identity=_submission_identity(policy),
+        launch_id=_HANDLE,
     )
     assert [item for item in argv if item.startswith("--export=")] == ["--export=NONE"]
 
@@ -167,6 +169,7 @@ def test_submission_honours_slurm_export_nil(policy: Policy) -> None:
         argv=manager_argv(policy),
         workspace=str(policy.workspace),
         identity=_submission_identity(policy),
+        launch_id=_HANDLE,
     )
     assert [item for item in argv if item.startswith("--export=")] == ["--export=NIL"]
 
@@ -180,6 +183,7 @@ def test_slurm_submission_defensively_refuses_an_unvalidated_export(policy: Poli
             argv=manager_argv(policy),
             workspace=str(policy.workspace),
             identity=_submission_identity(policy),
+            launch_id=_HANDLE,
         )
 
 

@@ -39,7 +39,7 @@ def _identity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 def _endpoint(tmp_path: Path) -> Endpoint:
     exchange = tmp_path / "exchange"
-    for name in ("requests", "responses", "inbox", "outbox", "managers"):
+    for name in ("requests", "responses", "inbox", "outbox", "launchers"):
         (exchange / name).mkdir(parents=True)
     (exchange / "exchange.json").write_text(
         json.dumps({"format": "httk-workspace-exchange", "format_version": 1, "workspace_id": WORKSPACE_ID}),

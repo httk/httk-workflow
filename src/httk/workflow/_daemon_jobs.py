@@ -35,6 +35,12 @@ def _ascii_detail(value: object) -> str:
     return (text or "no further detail")[:1000]
 
 
+def _outbox(destination: str | None) -> str:
+    """The client-visible eject destination: the outbox root, or the named directory in it."""
+
+    return f"outbox/{destination or ''}"
+
+
 def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
@@ -170,7 +176,7 @@ class JobExecutor:
             if root:
                 value = value.replace(root.rstrip("/"), "workspace")
         if command.operation == "job_request" and command.action == "eject":
-            destination = f"outbox/{command.destination}"
+            destination = _outbox(command.destination)
             if destination not in value:
                 value = f"{destination}: {value}"
         return _ascii_detail(value)
@@ -255,8 +261,8 @@ class JobExecutor:
             document["step"] = request.step
         if request.budget is not None:
             document["budget"] = dict(request.budget)
-        if request.destination is not None:
-            document["destination"] = str(self.workspace.root / "exchange" / "outbox" / request.destination)
+        if request.action == "eject":
+            document["destination"] = str(self.workspace.root / "exchange" / "outbox" / (request.destination or ""))
             document["tree"] = True
         _requests.validate_envelope(document)
         encoded = _canonical(document)
@@ -445,7 +451,7 @@ class JobExecutor:
                 (outcome,) = removal.serve_requests(self.workspace, [(current, path)], owner=self.owner)
                 detail = outcome.explanation
                 if request.action == "eject" and outcome.status == "applied":
-                    detail = f"job ejected to outbox/{request.destination}"
+                    detail = f"job ejected to {_outbox(request.destination)}"
                 response = self._response(
                     request,
                     outcome.status,

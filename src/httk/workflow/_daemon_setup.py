@@ -41,7 +41,7 @@ from ._daemon_state import Ledger
 from ._exchange import ExchangeUnavailableError, enable_exchange, install_document
 from .configuration import launchers_home
 from .launchers import LAUNCHER_METADATA, _validate_launcher_metadata
-from .models import DAEMON_DIRECTORY, EXCHANGE_DIRECTORY, WORKSPACE_DIRECTORY
+from .models import DAEMON_DIRECTORY, EXCHANGE_DIRECTORY, LAUNCHERS_DIRECTORY, WORKSPACE_DIRECTORY
 from .workspace import Workspace
 
 _DAEMON_DOCUMENT = "daemon.json"
@@ -747,8 +747,9 @@ def initialize(
     cluster = _cluster(cluster, configuration.slurm_conf, None if scontrol is None else Path(scontrol))
     policy = _compile(workspace, secrets.token_hex(16), cluster, configuration)
     _runtime_policy_bytes(policy)
-    for directory in (policy.daemon, policy.snapshots, policy.jobs, policy.broker):
+    for directory in (policy.daemon, policy.snapshots, policy.broker):
         _mkdir_exclusive(directory)
+    _fs.make_dirs(policy.workspace / LAUNCHERS_DIRECTORY, durable=True)
     _save_configuration(policy.daemon, configuration)
     initialize_response_seed(policy.daemon)
     with Ledger(
@@ -833,11 +834,12 @@ def configure(
 def activate(workspace: Path) -> tuple[Path, tuple[str, ...] | None]:
     """Compile the saved configuration from the current launcher bundles and activate it when it changed.
 
-    The job-output directory is recreated when missing and ``exchange/daemon.json`` is reinstalled every
-    time, since the client may have replaced it. A changed compilation is published as a new active
-    snapshot even while daemon instances run: the ledger holds no lock, and every running instance re-reads
-    the active snapshot before each admission and decision and stops once it changed (never between
-    deciding a submission and submitting it), so the change takes effect when the daemon is started again.
+    The launcher log directory ``logs/launchers/``, where Slurm writes each manager's output, is created when
+    missing and ``exchange/daemon.json`` is reinstalled every time, since the client may have replaced it. A
+    changed compilation is published as a new active snapshot even while daemon instances run: the ledger holds
+    no lock, and every running instance re-reads the active snapshot before each admission and decision and
+    stops once it changed (never between deciding a submission and submitting it), so the change takes effect
+    when the daemon is started again.
 
     :param workspace: Workspace data root.
     :return: The active runtime snapshot, and the names of the launchers whose approval changed, or
@@ -850,7 +852,7 @@ def activate(workspace: Path) -> tuple[Path, tuple[str, ...] | None]:
     old_snapshot, old, old_digest = _active(workspace)
     new = _recompile(old, _load_configuration(old))
     _validate_private_directory(old.snapshots)
-    _mkdir_exclusive(new.jobs, exist_ok=True)
+    _fs.make_dirs(new.workspace / LAUNCHERS_DIRECTORY, durable=True)
     # Opening the ledger refuses an earlier version's SQLite ledger and an identity mismatch; it takes no lock.
     with Ledger(
         old.broker,
