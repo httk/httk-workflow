@@ -348,6 +348,11 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
         source for option in ("--ro-bind-fd", "--bind-fd", "--ro-bind-data") for source, _ in _pairs(argv, option)
     }
     assert set(observed["fds"]) - {"0", "1", "2"} == operands | {info_writer, scope_reader}
+    # Bubblewrap closes each bound descriptor after its mount, so no descriptor may be bound twice.
+    sources = [
+        source for option in ("--ro-bind-fd", "--bind-fd", "--ro-bind-data") for source, _ in _pairs(argv, option)
+    ]
+    assert len(sources) == len(set(sources))
     assert inside[-1] == "--once"
 
 

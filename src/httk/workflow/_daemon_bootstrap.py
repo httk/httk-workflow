@@ -360,7 +360,9 @@ def _prepare_sandbox(
             target = workspace / relative
             argv.extend([option, str(descriptor), str(target)])
             if destination is not None:
-                argv.extend(["--dir", str(destination), option, str(descriptor), str(destination)])
+                # Bubblewrap closes a --bind-fd descriptor once it is mounted, so the second bind needs its own.
+                descriptors.append(os.dup(descriptor))
+                argv.extend(["--dir", str(destination), option, str(descriptors[-1]), str(destination)])
             return descriptor
 
         try:
