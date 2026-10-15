@@ -106,6 +106,7 @@ details/launcher_authoring
 details/remotes
 details/adapter_authoring
 details/workspace_daemon
+details/howto_example
 details/sealing
 details/monitor
 details/runtime_helpers
