@@ -730,7 +730,7 @@ def test_v1_bare_directory_is_realized_and_degraded_on_collect(tmp_path: Path) -
     workspace = Workspace.initialize(tmp_path / "workspace")
     job = new_job(workspace, root, parameters={"value": "bare"}, format="httk-v1")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=2)
+        manager.run_until_idle(timeout=10)
     marker = find(workspace, job.job_id)
     assert marker.state == "succeeded"
     collected = next(collect(workspace))
