@@ -14,6 +14,7 @@ how a code-support distribution plugs into *httk-workflow*.
 | `git+https://github.com/httk/workflows-vasp#vasp-relax-bash` | `vasp.relax-bash` | the same relaxation, authored in Bash |
 | `git+https://github.com/httk/workflows-vasp#vasp-static` | `vasp.static` | one single-point calculation of a fixed structure |
 | `git+https://github.com/httk/workflows-vasp#vasp-relax-static` | `vasp.relax-static` | relax, then evaluate the relaxed structure statically |
+| `git+https://github.com/httk/workflows-vasp#vasp-band-structure` | `vasp.band-structure` | the electronic band structure of a fixed structure along its HPKOT k-path |
 
 Each takes one required input, `structure`, staged as `files/POSCAR`. Their job
 parameters, failure codes, postprocess scripts (`relaxation-report`,
