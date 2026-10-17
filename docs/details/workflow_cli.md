@@ -240,7 +240,7 @@ whole lineage). See {doc}`/details/workflow_uris`.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workflow list` | without `--workspace`, the workflows a name selects on this machine (registered, plugin, fetched git workflows); with it, the workflows installed in that workspace | `--workspace`, `--json` |
+| `workflow list` | without `--workspace`, the workflows a name selects on this machine (registered, plugin, pip-installed workflow repositories, fetched git workflows); with it, the workflows installed in that workspace | `--workspace`, `--json` |
 | `workflow describe TARGET...` | describe a registered id or alias, git URI, runner file or package directory; with `--workspace`, an installation there | `--workspace`, `--format`, `--json` |
 
 As a report, `describe` runs a directory package's runner entry with

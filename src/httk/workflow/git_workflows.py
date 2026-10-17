@@ -10,6 +10,8 @@ hash; it is the workflow id a job records and identifies the workflow
 :func:`fetch_workflow` installs the workflow through the shared
 ``httk.core.git_sources`` cache (kind ``"workflows"``), and
 :func:`fetched_workflows` reads the installed entries without running git.
+Workflow repositories pip-installed into this Python environment are offered
+too, without installed entries and without the network.
 """
 
 import logging
@@ -18,6 +20,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from httk.core.git_sources import (
+    GitUri,
     InstalledGitMember,
     install_git_member,
     installed_git_members,
@@ -26,6 +29,7 @@ from httk.core.git_sources import (
 )
 from httk.core.userdirs import data_home
 
+from ._pip_repositories import _pip_provider, _pip_seed, _pip_tag_commit, _reset_pip_repository_cache
 from .scaffold import WorkflowProvider
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,14 +61,25 @@ def fetch_workflow(reference: str) -> WorkflowProvider:
 
     A pinned URI whose commit is already cached runs no git at all. Every call
     refreshes the installed entry's reference time, which decides which commit
-    the workflow's short name means.
+    the workflow's short name means. For the repository of a pip-installed
+    workflow repository, a ``wf-v*`` tag ref is its recorded commit, a version
+    it offers is returned without writing an installed entry, and any other
+    commit is taken from its local source when that holds it.
 
     :param reference: Supply a ``git+…`` workflow URI.
     :return: The provider, whose ``workflow_id`` is the canonical URI.
     :raises ValueError: If the URI is invalid, git fails, or the package is missing or invalid.
     """
 
-    installed = install_git_member(_KIND, reference, _MANIFEST, _claims)
+    uri = parse_git_uri(reference)
+    if uri.ref is not None and not uri.pinned and (commit := _pip_tag_commit(uri.repository, uri.ref)) is not None:
+        uri = GitUri(uri.repository, commit, uri.subdir)
+    if uri.pinned:
+        pip = _pip_provider(str(uri))
+        if pip is not None:
+            return pip
+        _pip_seed(uri)
+    installed = install_git_member(_KIND, str(uri), _MANIFEST, _claims)
     _reset_fetched_workflow_cache()
     provider = _load(installed.uri, installed.path)
     from .scaffold import _claimed_names
@@ -146,14 +161,14 @@ def fetched_workflows() -> Mapping[str, WorkflowProvider]:
 
 
 def _installed_provider(text: str) -> WorkflowProvider | None:
-    """Return the installed provider for exactly this pinned URI; never fetch, never raise."""
+    """Return the fetched or pip-offered provider for exactly this pinned URI; never fetch, never raise."""
 
     try:
         uri = parse_git_uri(text)
     except ValueError:
         return None
     entry = _fetched_data()[0].get(str(uri)) if uri.pinned else None
-    return None if entry is None else entry[0]
+    return _pip_provider(text) if entry is None else entry[0]
 
 
 def _fetched_names() -> tuple[Mapping[str, WorkflowProvider], Mapping[str, tuple[str, ...]]]:
@@ -176,7 +191,8 @@ def _fetched_provider(name: str) -> WorkflowProvider | None:
 
 
 def _reset_fetched_workflow_cache() -> None:
-    """Clear cached installed-workflow discovery (after installs and in tests)."""
+    """Clear cached installed- and pip-workflow discovery (after installs and in tests)."""
 
     global _FETCHED_CACHE
     _FETCHED_CACHE = None
+    _reset_pip_repository_cache()

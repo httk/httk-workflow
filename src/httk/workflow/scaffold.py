@@ -354,7 +354,7 @@ def register_workflow(provider: WorkflowProvider) -> None:
 
 
 def registered_workflows() -> tuple[str, ...]:
-    """Return registered ids, followed by sorted installed-plugin workflow ids.
+    """Return registered ids, then sorted plugin ids, pip-installed and fetched short names.
 
     :return: The registered workflow ids.
     """
@@ -367,11 +367,12 @@ def registered_workflows() -> tuple[str, ...]:
     result.extend(
         workflow_id for workflow_id in sorted(installed_plugin_workflows()) if workflow_id not in registered_names
     )
+    result.extend(sorted(name for name, provider in _visible_pip().items() if name == provider.name))
     result.extend(sorted(name for name, provider in _visible_fetched().items() if name == provider.name))
     return tuple(result)
 
 
-def _claimed_names() -> set[str]:
+def _base_claimed_names() -> set[str]:
     """Return every in-process and installed-plugin id and alias, conflicted or not."""
 
     from .packages import _plugin_workflow_conflicts, installed_plugin_workflows
@@ -380,6 +381,24 @@ def _claimed_names() -> set[str]:
     for provider in (*_WORKFLOW_PROVIDERS.values(), *installed_plugin_workflows().values()):
         names.update(name for name in (provider.workflow_id, provider.alias) if name)
     return names
+
+
+def _claimed_names() -> set[str]:
+    """Return the names that shadow fetched short names: base names plus pip names, conflicted or not."""
+
+    from ._pip_repositories import _pip_names
+
+    winners, conflicts = _pip_names()
+    return _base_claimed_names() | set(winners) | set(conflicts)
+
+
+def _visible_pip() -> dict[str, WorkflowProvider]:
+    """Return pip-installed workflows by short name or alias, minus names in-process or plugin workflows claim."""
+
+    from ._pip_repositories import _pip_names
+
+    claimed = _base_claimed_names()
+    return {name: provider for name, provider in _pip_names()[0].items() if name not in claimed}
 
 
 def _visible_fetched() -> dict[str, WorkflowProvider]:
@@ -397,7 +416,7 @@ _RUNNER_SUFFIXES = frozenset({".py", ".sh", ".bash", ".cwl", ".json", ".yaml", "
 
 
 def registered_workflow_labels() -> tuple[str, ...]:
-    """Return display labels for registered and installed-plugin workflows.
+    """Return display labels for registered, installed-plugin, pip-installed and fetched workflows.
 
     :return: The registered workflow labels, in registration order.
     """
@@ -424,6 +443,13 @@ def registered_workflow_labels() -> tuple[str, ...]:
         alias = provider.alias if provider.alias not in conflicts else None
         label = f"{workflow_id} ({alias})" if alias else workflow_id
         labels.append(f"{label} [plugin {owners[workflow_id]}]")
+    from ._pip_repositories import _pip_owner
+
+    pip = _visible_pip()
+    for name, provider in sorted(pip.items()):
+        if name == provider.name:
+            label = f"{name} ({provider.alias})" if pip.get(provider.alias or "") is provider else name
+            labels.append(f"{label} [pip {_pip_owner(provider.workflow_id)}]")
     fetched = _visible_fetched()
     for name, provider in sorted(fetched.items()):
         if name == provider.name:
@@ -433,7 +459,7 @@ def registered_workflow_labels() -> tuple[str, ...]:
 
 
 def _registered_names() -> list[str]:
-    """Return every registered or installed-plugin id and alias."""
+    """Return every registered, installed-plugin, pip-installed or fetched id and alias."""
 
     names: list[str] = []
     for workflow_id, provider in _WORKFLOW_PROVIDERS.items():
@@ -450,12 +476,13 @@ def _registered_names() -> list[str]:
             names.append(workflow_id)
         if provider.alias and provider.alias not in conflicts:
             names.append(provider.alias)
+    names.extend(sorted(_visible_pip()))
     names.extend(sorted(_visible_fetched()))
     return names
 
 
 def workflow_provider(name: str) -> WorkflowProvider | None:
-    """Return the provider selected by canonical id, alias, or fetched short name.
+    """Return the provider selected by canonical id, alias, or pip-installed or fetched short name.
 
     A git URI selects only an already installed workflow pinned to a full
     commit hash: this lookup never fetches or raises for a URI, so a job payload
@@ -463,7 +490,7 @@ def workflow_provider(name: str) -> WorkflowProvider | None:
 
     :param name: Select a workflow by id, alias, short name, or pinned git URI.
     :return: The selected provider, or ``None`` when no provider matches.
-    :raises ValueError: If the name is claimed by several plugins or fetched lineages.
+    :raises ValueError: If the name is claimed by several plugins, pip-installed workflows or fetched lineages.
     """
 
     if name.startswith("git+"):
@@ -490,6 +517,16 @@ def workflow_provider(name: str) -> WorkflowProvider | None:
     for candidate in providers.values():
         if candidate.alias == name:
             return candidate
+    from ._pip_repositories import _pip_names
+
+    winners, conflicts = _pip_names()
+    if name in conflicts:
+        raise ValueError(
+            f"workflow name {name!r} is claimed by several pip-installed workflows ({', '.join(conflicts[name])}); "
+            "reference one by its URI"
+        )
+    if name in winners:
+        return winners[name]
     from .git_workflows import _fetched_provider
 
     return _fetched_provider(name)

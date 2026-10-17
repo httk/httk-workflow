@@ -22,6 +22,7 @@ from httk.core.git_sources import parse_git_uri
 
 from .. import _fs, _kernel, _store
 from .._durations import TIME_RESOURCES, format_duration
+from .._pip_repositories import _pip_names, _pip_owner, _pip_provider, _pip_tag_uris
 from ..adapters import probe_remote_workspace, resolve_remote, run_adapter
 from ..git_workflows import _uninstall_workflows, fetch_workflow
 from ..introspection import iter_jobs, read_job
@@ -90,7 +91,7 @@ def _manifest_step_drift(workflow: ResolvedWorkflow) -> str | None:
 
 def _source_kind(target: str, workflow: ResolvedWorkflow) -> str:
     if (workflow.registration_id or "").startswith("git+"):
-        return "installed"
+        return "pip" if _pip_provider(workflow.workflow_id) is not None else "installed"
     provider = workflow_provider(target)
     if provider is not None:
         return "registered-directory" if provider.directory is not None else "installed-package"
@@ -159,9 +160,11 @@ def _workflow_description(target: str, format: str | None = None) -> dict[str, o
     workflow = resolve_workflow(target, format=format)
     source = workflow.directory if workflow.directory is not None else workflow.source
     source_document: dict[str, object] = {"kind": _source_kind(target, workflow), "path": str(source)}
-    if source_document["kind"] == "installed":
+    if source_document["kind"] in {"installed", "pip"}:
         uri = parse_git_uri(workflow.workflow_id)
         source_document.update(uri=workflow.workflow_id, commit=uri.ref, name=workflow.name)
+    if source_document["kind"] == "pip":
+        source_document["distribution"] = _pip_owner(workflow.workflow_id)
     return _description(workflow, source_document)
 
 
@@ -274,6 +277,8 @@ def _render_text(description: Mapping[str, object]) -> str:
     assert isinstance(source, Mapping)
     if source["kind"] == "installed":
         lines.append(f"source: installed {source['uri']} ({source['path']})")
+    elif source["kind"] == "pip":
+        lines.append(f"source: pip {source['distribution']} {source['uri']} ({source['path']})")
     elif source["kind"] == "workspace":
         lines.append(f"source: workspace installation {source['id']} of {source['source']} ({source['path']})")
     else:
@@ -447,8 +452,9 @@ def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
 
     Without ``--workspace`` the listing is the union ``--workflow`` resolves
     names against: the workflows ``register_workflow`` added in this process,
-    the workflows installed plugins bundle, then fetched git workflows by short
-    name. With ``--workspace`` it is that workspace's store.
+    the workflows installed plugins bundle, the workflows of pip-installed
+    workflow repositories, then fetched git workflows by short name. With
+    ``--workspace`` it is that workspace's store.
 
     :param arguments: The parsed ``list`` arguments.
     :param context: The invocation context.
@@ -473,6 +479,7 @@ def _list_this_machine(arguments: argparse.Namespace) -> int:
 
     plugin_providers = installed_plugin_workflows()
     owners = installed_plugin_workflow_owners()
+    pip_winners = _pip_names()[0]
     rows: list[dict[str, object]] = []
     for workflow_id in registered_workflows():
         provider = workflow_provider(workflow_id)
@@ -488,6 +495,13 @@ def _list_this_machine(arguments: argparse.Namespace) -> int:
         }
         if provider is not None and is_installed:
             row_source["uri"] = provider.workflow_id
+        if provider is not None and provider is pip_winners.get(workflow_id):
+            row_source = {
+                "kind": "pip",
+                "distribution": _pip_owner(provider.workflow_id),
+                "uri": provider.workflow_id,
+                "tags": _pip_tag_uris(provider.workflow_id),
+            }
         rows.append(
             {
                 "workflow": workflow_id,
@@ -508,6 +522,8 @@ def _list_this_machine(arguments: argparse.Namespace) -> int:
         source_text = (
             f"plugin {source['plugin']}"
             if source["kind"] == "plugin"
+            else f"pip {source['distribution']} {source['uri']}"
+            if source["kind"] == "pip"
             else f"installed {source['uri']}"
             if source["kind"] == "installed"
             else "registered"
@@ -663,6 +679,10 @@ def _not_installable(selector: str) -> str | None:
         return f"{selector!r} is a plugin workflow; remove its plugin with httk plugin uninstall"
     if claims(_WORKFLOW_PROVIDERS):
         return f"{selector!r} is registered in-process and cannot be uninstalled"
+    pip = _pip_provider(selector) if selector.startswith("git+") else _pip_names()[0].get(selector)
+    if pip is not None:
+        distribution = _pip_owner(pip.workflow_id)
+        return f"{selector!r} is installed by the Python distribution {distribution!r}; remove it with pip uninstall {distribution}"
     return None
 
 
@@ -744,7 +764,8 @@ def build_list_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         summary="list this machine's workflows, or a workspace's installed workflows",
         description=(
             "Without --workspace, list the workflows a name selects on this machine: those registered in this "
-            "process, those installed plugins bundle, then fetched git workflows by short name. With --workspace, "
+            "process, those installed plugins bundle, those of pip-installed workflow repositories, then fetched "
+            "git workflows by short name. With --workspace, "
             "list the workflows installed in that workspace (REMOTE:WS through the remote's adapter)"
         ),
         handler=handle_workflow_list,
