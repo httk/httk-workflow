@@ -50,4 +50,5 @@ ports to declared roles. The httk v1 format has no default and needs a
 
 The full guide, {doc}`details/workflow_compat`, covers the package form of each
 format, the supported CWL subset and what is refused, jobflow response
-semantics and failure codes, and the Python registry API.
+semantics and failure codes, how workspace settings such as `vasp.command`
+reach atomate2, and the Python registry API.

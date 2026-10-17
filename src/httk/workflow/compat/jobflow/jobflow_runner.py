@@ -5,24 +5,158 @@ import importlib
 import importlib.util
 import json
 import os
+import shlex
 import shutil
+import signal
 import traceback
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
-from contextlib import chdir
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import chdir, contextmanager, suppress
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-from httk.workflow import Attempt, ChildSpec, Runner
+from httk.workflow import Attempt, ChildSpec, Runner, Workspace, _kernel
+from httk.workflow.codes import launch_command
 from httk.workflow.compat.jobflow import OUTPUTS_FILE
+from httk.workflow.models import canonical_uuid
 
 WORKFLOW = "jobflow.workflow"
 STATE_FILE = "state.json"
 STORE_FILE = "store.json"
 SPOOL_DIRECTORY = "spool"
 CHILD_OUTPUTS_FILE = "child-outputs.json"
+#: Stands for a child job's ``run/exec`` directory in shipped documents: ``<token><job_id>[/suffix]``.
+EXEC_TOKEN = "httk-jobflow-exec://"
 
 run = Runner(WORKFLOW)
+
+#: The httk settings naming VASP commands, and the atomate2 variables they set.
+_VASP_COMMANDS = (
+    ("vasp.command", "ATOMATE2_VASP_CMD"),
+    ("vasp.gamma_command", "ATOMATE2_VASP_GAMMA_CMD"),
+    ("vasp.ncl_command", "ATOMATE2_VASP_NCL_CMD"),
+)
+#: Workspace setting prefixes passed through to the variables a library reads.
+_LIBRARY_PREFIXES = {"atomate2.": "ATOMATE2_", "pymatgen.": "PMG_"}
+#: Job parameters a parent forwards to every child, so the job layer of these settings reaches ``enter``.
+_FORWARDED_PARAMETERS = frozenset(name for name, _variable in _VASP_COMMANDS) | {"pymatgen.psp_dir"}
+# ponytail: fixed, below the manager's default 10 s cancel grace so the SIGKILL escalation of
+# custodian's groups runs before the manager kills this runner; derive it if that grace is tuned.
+_STOP_GRACE_SECONDS = 5.0
+
+
+def _atomate2_environment(a: Attempt, *, vasp: bool = True) -> dict[str, str]:
+    """Return the atomate2 and pymatgen variables this attempt's settings imply.
+
+    Workspace settings and job parameters ``atomate2.<key>`` and ``pymatgen.<key>``
+    become ``ATOMATE2_<KEY>`` and ``PMG_<KEY>``; ``pymatgen.psp_dir`` instead becomes
+    ``PMG_VASP_PSP_DIR``. With *vasp*, when ``vasp.command`` resolves, it and
+    ``vasp.gamma_command``/``vasp.ncl_command`` (defaulting to it) become
+    ``ATOMATE2_VASP_CMD``/``ATOMATE2_VASP_GAMMA_CMD``/``ATOMATE2_VASP_NCL_CMD``
+    with the attempt's launch prefix (``HTTK_WORKFLOW_LAUNCH``) prepended. These
+    variables override the libraries' own configuration files, which a confined
+    attempt cannot see.
+
+    :param a: The attempt whose settings are mapped.
+    :param vasp: Whether to map the VASP commands.
+    :return: The variables to set.
+    :raises ValueError: If a VASP command names a parallel launcher while a launch prefix applies.
+    """
+
+    result: dict[str, str] = {}
+    for key, value in {**a.context.settings, **a.parameters}.items():
+        if key == "pymatgen.psp_dir" or isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            continue
+        for prefix, variable in _LIBRARY_PREFIXES.items():
+            if key.startswith(prefix):
+                result[variable + key.removeprefix(prefix).upper().replace(".", "_")] = str(value)
+    psp_dir = a.setting("pymatgen.psp_dir", None)
+    if isinstance(psp_dir, str) and psp_dir:
+        result["PMG_VASP_PSP_DIR"] = psp_dir
+    command = a.setting("vasp.command", None)
+    if not vasp or not isinstance(command, str) or not command.strip():
+        return result
+    for name, variable in _VASP_COMMANDS:
+        value = a.setting(name, None)
+        if not isinstance(value, str) or not value.strip():
+            # An unset gamma/ncl command reuses vasp.command, so custodian's
+            # auto_gamma never runs a bare vasp_gam outside the launch prefix.
+            result[variable] = result["ATOMATE2_VASP_CMD"]
+            continue
+        try:
+            result[variable] = shlex.join(launch_command(shlex.split(value)))
+        except ValueError as exc:
+            raise ValueError(f"the {name} setting: {exc}") from exc
+    return result
+
+
+def _apply_atomate2_environment(a: Attempt, spooled: Mapping[str, object]) -> bool:
+    """Export the settings-derived atomate2 variables for one spooled job, or fail the attempt.
+
+    A launch conflict fails only an atomate2 job (its function's module is under
+    ``atomate2.``); any other job runs without the VASP variables, with a run-log warning.
+
+    :param a: The attempt to configure.
+    :param spooled: The spooled job mapping, not yet decoded.
+    :return: Whether the step may continue.
+    """
+
+    try:
+        environment = _atomate2_environment(a)
+    except ValueError as exc:
+        function = spooled.get("function")
+        module = function.get("@module") if isinstance(function, Mapping) else None
+        if isinstance(module, str) and module.startswith("atomate2."):
+            a.fail("jobflow.launch_conflict", str(exc))
+            return False
+        environment = _atomate2_environment(a, vasp=False)
+        a.log.append("warning", f"VASP commands are not exported to this non-atomate2 job: {exc}")
+    os.environ.update(environment)
+    return True
+
+
+@contextmanager
+def _forwarded_stop_signals() -> Iterator[None]:
+    """Forward ``SIGTERM``/``SIGINT`` to every process group of a descendant other than this one's.
+
+    custodian starts VASP in a new session, out of reach of the manager's signal to
+    this attempt's group. On a signal, each such group gets it, every one of those
+    groups gets ``SIGKILL`` after a grace period (members can outlive their leader),
+    and the signal is re-raised with its default action. Without ``psutil`` nothing
+    is installed.
+    """
+    try:
+        import psutil
+    except ImportError:
+        yield
+        return
+
+    def forward(signum: int, _frame: object) -> None:
+        own = os.getpgrp()
+        members: list[psutil.Process] = []
+        groups: set[int] = set()
+        for child in psutil.Process().children(recursive=True):
+            with suppress(OSError):
+                group = os.getpgid(child.pid)
+                if group != own:
+                    members.append(child)
+                    groups.add(group)
+        for group in groups:
+            with suppress(OSError):
+                os.killpg(group, signum)
+        psutil.wait_procs(members, timeout=_STOP_GRACE_SECONDS)
+        for group in groups:
+            with suppress(OSError):
+                os.killpg(group, signal.SIGKILL)
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    previous = {number: signal.signal(number, forward) for number in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
 
 
 def _require_dependencies(maker_module: str | None, *, need_pymatgen: bool = False) -> None:
@@ -47,6 +181,79 @@ def _write_json(path: Path, value: object) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _map_strings(value: object, rewrite: Callable[[str], str]) -> Any:
+    """Return *value* with every string nested in dicts and lists passed through *rewrite*."""
+    if isinstance(value, str):
+        return rewrite(value)
+    if isinstance(value, dict):
+        return {key: _map_strings(item, rewrite) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_map_strings(item, rewrite) for item in value]
+    return value
+
+
+def _tokenize_exec(value: str, directories: Mapping[str, str]) -> str:
+    """Replace a reference into a known exec directory, optionally ``host:``-prefixed, by its job's token.
+
+    :param value: The string to rewrite.
+    :param directories: The job id of each exec directory.
+    :return: The token form, or *value* unchanged.
+    """
+    host, separator, rest = value.partition(":")
+    for candidate in (value, rest) if separator and "/" not in host else (value,):
+        for directory, job_id in directories.items():
+            if candidate == directory or candidate.startswith(directory + "/"):
+                return f"{EXEC_TOKEN}{job_id}{candidate[len(directory) :]}"
+    return value
+
+
+def _exec_token_ids(value: object) -> set[str]:
+    """Return the job ids of the exec-directory tokens nested in *value*."""
+    ids: set[str] = set()
+
+    def note(text: str) -> str:
+        if text.startswith(EXEC_TOKEN):
+            ids.add(text.removeprefix(EXEC_TOKEN).partition("/")[0])
+        return text
+
+    _map_strings(value, note)
+    return ids
+
+
+def _locate_exec_directories(a: Attempt, placement: PurePosixPath, job_ids: set[str]) -> dict[str, str]:
+    """Return the current ``run/exec`` directory of each job found, from one settled listing pass.
+
+    :param a: The attempt whose workspace is searched.
+    :param placement: The placement the jobs share (their parent's).
+    :param job_ids: The job ids to find; malformed ones are never found.
+    :return: The exec directory of each job found, by job id.
+    """
+    wanted = set()
+    for job_id in job_ids:
+        with suppress(ValueError):
+            wanted.add(canonical_uuid(job_id, "job_id"))
+    if not wanted:
+        return {}
+    refs = _kernel.locate_many(
+        Workspace(a.workspace, durable=a.context.durable), sorted(wanted), placements=[placement], settle=True
+    )
+    return {job_id: str(ref.path / "run" / "exec") for job_id, ref in refs.items()}
+
+
+def _resolve_exec(value: str, directories: Mapping[str, str]) -> str:
+    """Replace an exec-directory token by its job's current exec directory, when known.
+
+    :param value: The string to rewrite.
+    :param directories: The exec directory of each job id.
+    :return: The plain absolute path, or *value* unchanged.
+    """
+    if not value.startswith(EXEC_TOKEN):
+        return value
+    job_id, slash, suffix = value.removeprefix(EXEC_TOKEN).partition("/")
+    directory = directories.get(job_id)
+    return value if directory is None else directory + slash + suffix
 
 
 def _payload_path(a: Attempt, value: object) -> Path:
@@ -228,6 +435,8 @@ def _failure_message(child: Any) -> str:
 @run.step
 def start(a: Attempt) -> None:
     """Build the root flow and initialize its persistent scheduler state."""
+    # No VASP runs here, so only the library passthrough applies and nothing can conflict.
+    os.environ.update(_atomate2_environment(a, vasp=False))
     maker_module = None
     maker_spec = a.parameter("jobflow_maker", None)
     if isinstance(maker_spec, str):
@@ -355,6 +564,11 @@ def advance(a: Attempt) -> None:
     ]
     live_labels = list(prior_live_labels)
     spool_root = root / SPOOL_DIRECTORY
+    forwarded = {
+        name: value
+        for name, value in a.parameters.items()
+        if name in _FORWARDED_PARAMETERS or name.startswith(tuple(_LIBRARY_PREFIXES))
+    }
     for job in state.ready():
         key = f"{job.uuid}:{job.index}"
         state.mark_running(key)
@@ -367,6 +581,7 @@ def advance(a: Attempt) -> None:
             ChildSpec(
                 step="enter",
                 parameters={
+                    **forwarded,
                     # Relative to this workdir: the parent's directory moves while it waits, and the
                     # child reads them through its parent accessor.
                     "jobflow_child_job": spool_path.relative_to(a.workdir).as_posix(),
@@ -393,7 +608,9 @@ def advance(a: Attempt) -> None:
                 output = resolve_final_output(state, store)
                 outputs: dict[str, object] = {"output": output}
                 if state.stored_data:
-                    outputs["stored_data"] = state.stored_data
+                    from monty.json import jsanitize
+
+                    outputs["stored_data"] = jsanitize(state.stored_data, strict=True, enum_values=True)
                 output_path = a.workdir / OUTPUTS_FILE
                 _write_json(output_path, outputs)
                 a.put(output_path, f"{a.parameter('jobflow_data_prefix', 'jobflow')}/{OUTPUTS_FILE}")
@@ -417,8 +634,6 @@ def enter(a: Attempt) -> None:
         a.fail("jobflow.missing_dependency", str(exc))
         return
     try:
-        from httk.workflow.compat.jobflow._driver import load_spooled_job, merge_documents
-
         parent = a.parent
         if parent is None:
             a.fail("jobflow.job_unloadable", "the parent job holding the spooled job is not in this workspace")
@@ -426,17 +641,59 @@ def enter(a: Attempt) -> None:
         job_path = parent.workdir / str(a.parameter("jobflow_child_job"))
         snapshot_path = parent.workdir / str(a.parameter("jobflow_child_snapshot"))
         try:
-            job = load_spooled_job(json.loads(job_path.read_text(encoding="utf-8")))
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            spooled = json.loads(job_path.read_text(encoding="utf-8"))
+            if not isinstance(spooled, dict):
+                raise ValueError("the spooled job is not an object")
+        except (OSError, ValueError) as exc:
             a.fail("jobflow.job_unloadable", str(exc))
             return
-        store = _open_store()
         try:
             snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
             if not isinstance(snapshot, list):
                 raise ValueError("jobflow store snapshot is not an array")
+        except (OSError, ValueError) as exc:
+            a.fail("jobflow.snapshot_invalid", f"cannot load the jobflow store snapshot: {exc}")
+            return
+        # Before any job module (atomate2, pymatgen) is imported, which read these at import.
+        if not _apply_atomate2_environment(a, spooled):
+            return
+        from httk.workflow.compat.jobflow._driver import load_spooled_job, merge_documents
+
+        # Sibling jobs share the parent's placement; their exec tokens become current paths
+        # for this run only, in memory (the parent's files are never rewritten).
+        found = _locate_exec_directories(a, parent.placement, _exec_token_ids([spooled, snapshot]))
+        unresolved = sorted(_exec_token_ids(spooled) - found.keys())
+        if unresolved:
+            a.fail(
+                "jobflow.reference_unresolved",
+                f"this job's inputs name the directory of jobflow job {', '.join(unresolved)}, "
+                "which is not in this workspace",
+            )
+            return
+        try:
+            job = load_spooled_job(_map_strings(spooled, lambda value: _resolve_exec(value, found)))
+        except (RuntimeError, TypeError, ValueError) as exc:
+            a.fail("jobflow.job_unloadable", str(exc))
+            return
+        # ponytail: a whole referenced output document counts, not just the referenced field.
+        inputs = set(job.input_uuids)
+        referenced = [item for item in snapshot if isinstance(item, Mapping) and item.get("uuid") in inputs]
+        unresolved = sorted(_exec_token_ids(referenced) - found.keys())
+        if unresolved:
+            a.fail(
+                "jobflow.reference_unresolved",
+                f"this job's input references name the directory of jobflow job {', '.join(unresolved)}, "
+                "which is not in this workspace",
+            )
+            return
+        missing = sorted(_exec_token_ids(snapshot) - found.keys())
+        if missing:
+            a.log.append("warning", f"the jobflow store names directories of absent jobs {', '.join(missing)}")
+        store = _open_store()
+        try:
+            snapshot = _map_strings(snapshot, lambda value: _resolve_exec(value, found))
             merge_documents(store, [item for item in snapshot if isinstance(item, Mapping)])
-        except (OSError, UnicodeError, ValueError) as exc:
+        except ValueError as exc:
             a.fail("jobflow.snapshot_invalid", f"cannot load the jobflow store snapshot: {exc}")
             return
         baseline = {(str(item.get("uuid")), int(item.get("index", 0))) for item in store.query()}
@@ -447,7 +704,7 @@ def enter(a: Attempt) -> None:
         exec_dir = a.workdir / "exec"
         shutil.rmtree(exec_dir, ignore_errors=True)
         exec_dir.mkdir(parents=True, exist_ok=True)
-        with chdir(exec_dir):
+        with chdir(exec_dir), _forwarded_stop_signals():
             response = job.run(store=store)
         response.output = None
         from jobflow.core.flow import get_flow
@@ -459,11 +716,18 @@ def enter(a: Attempt) -> None:
         from monty.json import jsanitize
 
         shipped = {
-            "response": jsanitize(vars(response), strict=True, enum_values=True, allow_bson=True),
-            "docs": jsanitize(
-                _new_documents(store, baseline, baseline_blobs), strict=True, enum_values=True, allow_bson=True
-            ),
+            "response": jsanitize(vars(response), strict=True, enum_values=True),
+            "docs": jsanitize(_new_documents(store, baseline, baseline_blobs), strict=True, enum_values=True),
         }
+        # This payload moves once it finishes, so references into exec/ (atomate2's
+        # dir_name) ship as tokens that a consuming sibling resolves to the current path.
+        # Sibling directories resolved above ship back as their tokens too.
+        directories = {
+            path: job_id
+            for job_id, directory in [*found.items(), (a.context.job_id, str(exec_dir))]
+            for path in (directory, os.path.realpath(directory))
+        }
+        shipped = _map_strings(shipped, lambda value: _tokenize_exec(value, directories))
         _write_json(a.workdir / CHILD_OUTPUTS_FILE, shipped)
         a.succeed()
     except Exception as exc:

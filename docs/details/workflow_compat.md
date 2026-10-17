@@ -184,7 +184,22 @@ the parent's persistent workdir; re-activation and crash recovery resume from
 them. No MongoDB service is used. The `replace`, `detour`, `addition`,
 `stop_children` and `stop_jobflow` responses keep their jobflow semantics.
 Children of a replacing or detouring job wait for the whole replacement or
-detour sub-flow.
+detour sub-flow. Documents are stored as plain JSON, so a `datetime` in an
+output becomes its text form.
+
+Each jobflow job runs in its child's `run/exec` directory, and jobs that chain
+by directory (atomate2's `dir_name`, received by the next job as `prev_dir`)
+would record a path that is stale once that child's job directory moves to its
+terminal state or is transferred. A child therefore ships every reference into
+its `exec` directory, plain or `host:`-prefixed, as
+`httk-jobflow-exec://<job_id>[/subpath]`, and so ships back any sibling path
+it resolved. A consuming child resolves these tokens to the producing job's
+current `run/exec` path, without a host prefix, for its own run only. A token
+in the job's own inputs, or in the output document of a job it references,
+whose job is not in the workspace fails the step with
+`jobflow.reference_unresolved`; elsewhere in the store it stays in place with a
+run-log warning. The parent's `jobflow-outputs.json` keeps the tokens: a stable
+reference to the job that produced each directory.
 
 #### Outputs and failures
 
@@ -197,13 +212,71 @@ there are no output ports beyond `output` and `stored_data`.
 
 Failure codes are `jobflow.missing_dependency`, `jobflow.document_invalid`,
 `jobflow.maker_config_failed`, `jobflow.input_invalid`, `jobflow.make_failed`,
-`jobflow.job_failed` and `jobflow.flow_failed`.
+`jobflow.job_failed`, `jobflow.flow_failed`, `jobflow.launch_conflict` and
+`jobflow.reference_unresolved`.
 
 #### atomate2
 
-atomate2 VASP execution settings belong to atomate2 (`~/.atomate2.yaml`,
-`ATOMATE2_VASP_CMD`), not to *httk* workflow settings. atomate2 workflows run
-here as jobflow Makers; this is not a FireWorks runner.
+atomate2 workflows run here as jobflow Makers; this is not a FireWorks runner.
+Ready-made atomate2 VASP workflow packages are in
+[workflows-vasp-atomate2](https://github.com/httk/workflows-vasp-atomate2).
+Before any job module is imported, the `enter` step maps *httk* settings into
+the environment variables atomate2 and pymatgen read (`start`, where no VASP
+runs, maps all but the VASP commands). These variables override
+`~/.atomate2.yaml` and pymatgen's `~/.config/.pmgrc.yaml`, which a confined
+attempt cannot see (its `HOME` is private):
+
+| Setting | Variable |
+| --- | --- |
+| `vasp.command` | `ATOMATE2_VASP_CMD` |
+| `vasp.gamma_command` (default: `vasp.command`) | `ATOMATE2_VASP_GAMMA_CMD` |
+| `vasp.ncl_command` (default: `vasp.command`) | `ATOMATE2_VASP_NCL_CMD` |
+| `pymatgen.psp_dir` | `PMG_VASP_PSP_DIR` |
+| any other `atomate2.<key>` | `ATOMATE2_<KEY>` |
+| any other `pymatgen.<key>` | `PMG_<KEY>` |
+
+The three VASP commands resolve like `a.setting` (job parameter, then
+`HTTK_VASP_COMMAND` and so on, then the workspace setting). Job parameters with
+these names, or starting with `atomate2.` or `pymatgen.`, are forwarded from
+the parent to every child job, so a job-level value reaches each step that runs
+VASP. As for the VASP code package, `vasp.command` names only the program, such
+as `vasp_std`, and the attempt's launch prefix (`HTTK_WORKFLOW_LAUNCH`) is
+prepended. A command that starts with `srun`, `mpirun` or another launcher
+while a prefix applies fails a job whose function lives in an `atomate2.`
+module with `jobflow.launch_conflict`. Any other jobflow job runs without the
+VASP variables, with a run-log warning; a custom Maker defined elsewhere that
+still calls atomate2's `run_vasp` therefore gets that warning and atomate2's
+own configuration.
+The gamma and noncollinear commands default to the `vasp.command` mapping, so
+custodian's automatic Gamma-only switch never runs a bare `vasp_gam` outside
+the launch prefix. `vasp.ncl_command` sets `ATOMATE2_VASP_NCL_CMD`, but
+atomate2 0.1.5's `run_vasp` does not read it: spin-orbit runs use
+`vasp.command`. Do not set `atomate2.vasp_cmd` through the generic passthrough:
+it bypasses the launch prefix; use `vasp.command`.
+
+`pymatgen.psp_dir` is a POTCAR library in pymatgen's layout
+(`POT_GGA_PAW_PBE/POTCAR.<El>` and so on), distinct from *httk-workflow-vasp*'s
+`vasp.pseudo_library`. A confined attempt sees it only when it lies inside
+`confine.readonly_paths`. Other `atomate2.*` and `pymatgen.*` settings pass
+through with the key upper-cased and dots replaced by underscores, as text;
+boolean and structured values are not passed. For example:
+
+```console
+httk workspace settings set --key vasp.command --value vasp_std default
+httk workspace settings set --key pymatgen.psp_dir --value /opt/potcars default
+httk workspace settings set --key atomate2.vasp_custodian_max_errors --value 3 default
+```
+
+Without `vasp.command` no VASP variable is set and atomate2's own configuration
+(`~/.atomate2.yaml`, `ATOMATE2_VASP_CMD`) applies, which a confined attempt
+does not see.
+
+custodian starts VASP in a process group of its own, which the manager's stop
+signal to the attempt does not reach. When `psutil` is installed (custodian
+requires it), a `SIGTERM` or `SIGINT` to a running job is forwarded to every
+such descendant group; every such group is killed after a
+grace period, including members that outlive their leader, before the job
+itself stops.
 
 ### httk-v1 package
 

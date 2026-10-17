@@ -24,7 +24,7 @@ def spool_job(job: Job) -> dict[str, Any]:
     :param job: The job to encode.
     :return: An MSON-safe job mapping.
     """
-    return jsanitize(job, strict=True, enum_values=True, allow_bson=True)
+    return jsanitize(job, strict=True, enum_values=True)
 
 
 def load_spooled_job(mapping: Mapping[str, Any]) -> Job:
@@ -82,7 +82,7 @@ class DriverState:
         :return: State with all root jobs pending.
         """
         root = get_flow(flow)
-        state = cls(root_output=jsanitize(root.output, strict=True, enum_values=True, allow_bson=True))
+        state = cls(root_output=jsanitize(root.output, strict=True, enum_values=True))
         state._add_flow(root)
         return state
 
@@ -139,7 +139,7 @@ class DriverState:
             "stopped": sorted(self.stopped),
             "skipped": sorted(self.skipped),
             "errors": self.errors,
-            "stored_data": jsanitize(self.stored_data, strict=True, enum_values=True, allow_bson=True),
+            "stored_data": jsanitize(self.stored_data, strict=True, enum_values=True),
             "root_output": self.root_output,
             "stop_jobflow": self.stop_jobflow,
         }
@@ -430,4 +430,4 @@ def resolve_final_output(state: DriverState, store: Any) -> Any:
         uuid, index = state.identities[completed[-1]]
         document = store.query_one({"uuid": uuid, "index": index})
         value = None if document is None else document.get("output")
-    return jsanitize(value, strict=True, enum_values=True, allow_bson=True)
+    return jsanitize(value, strict=True, enum_values=True)
