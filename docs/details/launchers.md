@@ -80,7 +80,8 @@ $ httk workflow run --count 4 --workspace default
 | `manager.confine`, `confine.*` | Attempt confinement; see [Confinement](#confinement). |
 | `slurm.account` | Slurm account directive. |
 | `slurm.partition` | Slurm partition directive. |
-| `slurm.time_limit` | Slurm time limit directive. |
+| `slurm.time_limit` | Slurm time limit directive; a string is a Slurm `--time` duration and an integer counts minutes. |
+| `slurm.time_limit_max` | The longest `--time-limit` a start may request, in the same form; defaults to `slurm.time_limit`, so a start can only shorten it. Not a batch directive. |
 | `slurm.nodes` | Number of Slurm nodes. |
 | `slurm.cpus_per_task` | CPUs per Slurm task. |
 | `slurm.ntasks` | Number of Slurm tasks. |
@@ -91,7 +92,8 @@ $ httk workflow run --count 4 --workspace default
 | `slurm.export` | sbatch `--export` mode for a workspace-daemon manager submission: `NONE` (default) or `NIL`. |
 | `environment.prelude` | Shell setup run before the manager, such as a module load or environment activation. |
 
-The `slurm.*` values become batch directives, except `slurm.export`, which sets
+The `slurm.*` values become batch directives, except `slurm.time_limit_max`,
+which bounds `--time-limit` (see below), and `slurm.export`, which sets
 the `sbatch --export` command-line mode (`NONE` or `NIL`, default `NONE`) of a
 workspace-daemon manager submission; see the site's `sbatch` manual for what
 each mode means. `environment.prelude` runs before
@@ -121,6 +123,23 @@ $ httk workflow run --count 1 --inline --workspace default
 
 `--inline` shows manager output directly and ignores the workspace launcher.
 `--detach` starts `process` managers detached and returns immediately.
+
+With a Slurm launcher whose effective settings (workspace settings overridden
+by the launcher's) set a bound, `slurm.time_limit` or `slurm.time_limit_max`,
+`--time-limit DURATION` replaces `slurm.time_limit` as
+the jobs' `--time` for this start, and the managers follow that allocation's
+end. The launcher refuses a duration above `slurm.time_limit_max` (by default
+`slurm.time_limit`); `launcher add` and `launcher configure` refuse a
+`slurm.time_limit` above `slurm.time_limit_max`. With any other launcher, or a
+Slurm launcher whose `slurm.time_limit` is unset, `0` or `UNLIMITED` without a
+`slurm.time_limit_max`, `--time-limit` stays the managers' own deadline:
+
+```console
+$ httk launcher configure --set slurm.time_limit_max=1-00:00:00 cluster
+$ httk workflow run --workspace default --launcher cluster --time-limit 12:00:00
+```
+
+The printed result's `time_limit` is the effective `--time`.
 
 Launch behaves the same on a login node, through a workspace addressed by a
 configured `machine_names` name, and when a remote invokes the manager on its

@@ -29,6 +29,7 @@ from ._daemon_protocol import Request, Response, decode_request, encode_response
 from ._daemon_scope import read_execution_scope
 from ._daemon_slurm import KILL_GRACE_SECONDS, SchedulerError, SlurmGateway, Submission, excerpt
 from ._daemon_state import CapacityError, ConflictError, Entry, Ledger, LedgerError, refusal_response
+from ._durations import effective_time_limit
 from ._exchange import ExchangeUnavailableError, publish_file
 from .models import LAUNCHERS_DIRECTORY
 from .workspace import Workspace
@@ -66,7 +67,7 @@ _FINAL_STATES = frozenset(
 _MAX_WARNED = 4096
 _MAX_REPORTED = 4096
 _MANAGERS_FORMAT = "httk-workspace-daemon-managers"
-_MANAGERS_VERSION = 3
+_MANAGERS_VERSION = 4
 
 
 class _Observation(TypedDict):
@@ -436,11 +437,16 @@ class Broker:
         except ValueError:
             return "request_expired"
         try:
-            self.policy.launcher(request.profile)
+            launcher = self.policy.launcher(request.profile)
         except ValueError:
             return "invalid_configuration"
         if request.configuration_digest != self.policy.configuration_digest(request.profile):
             return "stale_configuration"
+        if request.time_limit is not None:
+            try:
+                effective_time_limit(dict(launcher.settings), request.time_limit)
+            except ValueError:
+                return "time_limit_exceeded"
         return None
 
     def _start(self, entry: Entry) -> Response | None:
@@ -474,9 +480,11 @@ class Broker:
         request = entry.request
         handle = entry.handle
         assert handle is not None and request.profile is not None
+        time_limit: str | None = None
         try:
             launcher = self.policy.launcher(request.profile)
-            submission = self.gateway.submit(launcher, handle)
+            time_limit = effective_time_limit(dict(launcher.settings), request.time_limit)
+            submission = self.gateway.submit(launcher, handle, time_limit=request.time_limit)
             if (
                 type(submission) is not Submission
                 or _JOB_ID.fullmatch(submission.job_id) is None
@@ -491,18 +499,20 @@ class Broker:
                 handle=handle,
                 reason="submission_unconfirmed",
                 detail=self._scheduler_failed(request, handle, exc),
+                time_limit=time_limit,
             )
             return self._finish(entry, response)
 
         self.ledger.record_scheduler(request.request_id, submission.job_id, submission.cluster)
         _LOGGER.info(
-            "daemon_submitted handle=%s job_id=%s cluster=%s log=%s",
+            "daemon_submitted handle=%s job_id=%s cluster=%s time_limit=%s log=%s",
             handle,
             submission.job_id,
             submission.cluster,
+            time_limit or "-",
             self.policy.workspace / LAUNCHERS_DIRECTORY / f"{handle}.out",
         )
-        return self._finish(entry, self._response(request, "submitted", handle=handle))
+        return self._finish(entry, self._response(request, "submitted", handle=handle, time_limit=time_limit))
 
     def _manager(self, entry: Entry) -> Response:
         request = entry.request

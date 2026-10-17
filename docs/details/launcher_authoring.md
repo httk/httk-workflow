@@ -133,12 +133,18 @@ the kind. It submits nothing.
 
 `start` receives an absolute `workspace`, the full manager `argv`, a positive
 manager `count`, the workspace `settings` mapping, and the bundle's
-`launcher_settings` mapping. The maintained Slurm kind merges them, with bundle
+`launcher_settings` mapping. For a `slurm`-kind launcher whose effective
+settings (workspace settings overridden by the bundle's) set a usable
+`slurm.time_limit` or `slurm.time_limit_max`, a `--time-limit` given to the
+manager command arrives instead as an optional `time_limit` string, a Slurm
+`--time` duration for the managers' jobs, and is omitted from `argv`; every
+other launcher receives `--time-limit` in `argv` as before. The maintained Slurm kind merges them, with bundle
 settings taking precedence over workspace settings for the keys the kind
 consumes; custom launchers define their own merge. Workspace settings are not
 copied into the bundle. The settings fall into four groups:
 
 - scheduler settings: `slurm.account`, `slurm.partition`, `slurm.time_limit`,
+  `slurm.time_limit_max` (the bound on a requested `time_limit`, not a directive),
   `slurm.nodes`, `slurm.cpus_per_task`, `slurm.ntasks`,
   `slurm.ntasks_per_node`, `slurm.mem`, `slurm.gres`, and `slurm.reservation`,
   which become batch directives; and `slurm.export` (`NONE`, the default, or
@@ -190,8 +196,12 @@ Python interpreter argv is preserved. Unless the argv already has one, the
 dispatcher appends `--allocation` with the `manager.allocation` setting
 (default `slurm`), so each manager probes its job's nodes; see
 [allocation probes](#allocation-probes). It then appends the bundle's pinned
-`--setting` values. A successful result contains the parsed Slurm job IDs
-with the parallel `launch_ids` and `scripts`. If submission fails after some
+`--setting` values. A requested `time_limit` must not exceed `slurm.time_limit_max`, which
+defaults to `slurm.time_limit`; it replaces `slurm.time_limit` as the
+`--time` directive. A successful result contains the parsed Slurm job IDs
+with the parallel `launch_ids` and `scripts`, and `time_limit`: the effective
+`--time` normalized to `[D-]HH:MM:SS` when it parses to a positive duration,
+verbatim otherwise, or null when none is set. If submission fails after some
 jobs were accepted, the refusal includes `submitted` and `job_ids` so the operator can
 cancel those jobs.
 

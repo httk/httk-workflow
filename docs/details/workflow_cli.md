@@ -652,6 +652,11 @@ the launch site), `--workers` (attempts per manager) and the manager command
 used after `environment.prelude`. `--inline` forces one in-process manager, and
 `--detach` returns after starting the managers. See {doc}`launchers`.
 
+Through a Slurm launcher whose effective settings (workspace settings
+overridden by the launcher's) set `slurm.time_limit` or `slurm.time_limit_max`,
+`--time-limit` sets the jobs' Slurm `--time` instead of being passed to the
+managers, bounded by `slurm.time_limit_max` (default `slurm.time_limit`);
+otherwise it stays the managers' own deadline; see {doc}`launchers`.
 `--time-limit`, `--deadline-margin`, `--worker-resource` and `--allocation`
 are explained in {doc}`taskmanager` under resources, time requirements and
 allocations; the startup banner, idle summary and logs under running managers.
@@ -777,7 +782,7 @@ remote meaning "this machine", so `remote add local` is refused.
 | `remote remove NAME...` | remove remote bundles; refused while a registered workspace holds a transfer bound for the remote | `--force` skips only the confirmation |
 | `remote daemon configure REMOTE` | pin the identities in the mounted `exchange.json` and `daemon.json` | required `--exchange` |
 | `remote daemon health REMOTE` | check the confined daemon | `--request-id`, `--wait-seconds` |
-| `remote daemon start REMOTE` | start one approved manager configuration | required `--configuration`; `--request-id`, `--wait-seconds` |
+| `remote daemon start REMOTE` | start one approved manager configuration | required `--configuration`; `--time-limit` (the job's Slurm `--time`, above 120 s and up to the configuration's `slurm.time_limit_max`), `--request-id`, `--wait-seconds` |
 | `remote daemon status REMOTE` | print passive status, inspect a manager with `--handle`, or inspect an original job command with `--request-id` | mutually exclusive `--handle` / `--request-id`; `--wait-seconds` |
 | `remote daemon cancel REMOTE` | request manager cancellation | required `--handle`; `--request-id`, `--wait-seconds` |
 | `remote daemon log REMOTE` | print a manager's published log | required `--handle` |

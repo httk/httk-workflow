@@ -201,7 +201,7 @@ def _memory_mb(value: object, *, force: bool = False) -> int:
     return result
 
 
-def _time_minutes(value: object, *, force: bool = False) -> int:
+def _time_minutes(value: object, *, force: bool = False, key: str = "slurm.time_limit") -> int:
     if type(value) is int:
         result = value
     elif type(value) is str and _CANONICAL_INTEGER.fullmatch(value) is not None:
@@ -212,11 +212,11 @@ def _time_minutes(value: object, *, force: bool = False) -> int:
         if "-" in value:
             pieces = value.split("-")
             if len(pieces) != 2 or _CANONICAL_INTEGER.fullmatch(pieces[0]) is None:
-                raise ValueError("invalid slurm.time_limit")
+                raise ValueError(f"invalid {key}")
             days, clock = int(pieces[0]), pieces[1]
         fields = clock.split(":")
-        if len(fields) not in (1, 2, 3) or any(not field.isdigit() or not field for field in fields):
-            raise ValueError("invalid slurm.time_limit")
+        if len(fields) not in (1, 2, 3) or any(not field.isascii() or not field.isdigit() for field in fields):
+            raise ValueError(f"invalid {key}")
         numbers = [int(field) for field in fields]
         if days:
             if len(numbers) == 1:
@@ -226,29 +226,29 @@ def _time_minutes(value: object, *, force: bool = False) -> int:
             else:
                 hours, minutes, seconds = numbers
             if hours > 23 or minutes > 59 or seconds > 59:
-                raise ValueError("invalid slurm.time_limit")
+                raise ValueError(f"invalid {key}")
             total_seconds = ((days * 24 + hours) * 60 + minutes) * 60 + seconds
         elif len(numbers) == 2:
             minutes, seconds = numbers
             if seconds > 59:
-                raise ValueError("invalid slurm.time_limit")
+                raise ValueError(f"invalid {key}")
             total_seconds = minutes * 60 + seconds
         elif len(numbers) == 3:
             hours, minutes, seconds = numbers
             if minutes > 59 or seconds > 59:
-                raise ValueError("invalid slurm.time_limit")
+                raise ValueError(f"invalid {key}")
             total_seconds = (hours * 60 + minutes) * 60 + seconds
         else:
-            raise ValueError("invalid slurm.time_limit")
+            raise ValueError(f"invalid {key}")
         result = (total_seconds + 59) // 60
     else:
-        raise ValueError("invalid slurm.time_limit")
+        raise ValueError(f"invalid {key}")
     if not 1 <= result <= (_HARD_LIMIT if force else _TIME_LIMIT):
         if result >= 1:
             if force:
-                raise ValueError(f"slurm.time_limit exceeds the {_HARD_LIMIT} minute ceiling")
-            raise ValueError(f"slurm.time_limit exceeds the {_TIME_LIMIT} minute sanity limit{_FORCE_HINT}")
-        raise ValueError("slurm.time_limit must normalize to at least 1 minute")
+                raise ValueError(f"{key} exceeds the {_HARD_LIMIT} minute ceiling")
+            raise ValueError(f"{key} exceeds the {_TIME_LIMIT} minute sanity limit{_FORCE_HINT}")
+        raise ValueError(f"{key} must normalize to at least 1 minute")
     return result
 
 
@@ -261,9 +261,10 @@ def _check_resources(settings: Mapping[str, object], *, force: bool) -> None:
     memory = settings.get("slurm.mem")
     if memory is not None:
         _memory_mb(memory, force=force)
-    time_limit = settings.get("slurm.time_limit")
-    if time_limit is not None:
-        _time_minutes(time_limit, force=force)
+    for key in ("slurm.time_limit", "slurm.time_limit_max"):
+        time_limit = settings.get(key)
+        if time_limit is not None:
+            _time_minutes(time_limit, force=force, key=key)
 
 
 def _approved_launcher(name: str, workspace: Path, *, force: bool) -> ApprovedLauncher:

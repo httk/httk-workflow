@@ -333,6 +333,31 @@ def test_start_after_reload_cannot_replay_cached_request_under_new_digest(
     assert "intent conflicts" in stderr
 
 
+def test_start_time_limit_is_normalized_signed_and_part_of_the_intent(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    observed: dict[str, object] = {}
+
+    def run_adapter(_bundle, _operation, payload, *, timeout):
+        observed.update(payload=payload)
+        raise TimeoutError("stop after request construction")
+
+    monkeypatch.setattr(cli, "run_adapter", run_adapter)
+    args = ["start", "cluster", "--configuration", "serial", "--request-id", "e" * 32]
+    assert _invoke(project, [*args, "--time-limit", "90"])[0] == 2
+    assert _observed_daemon_request(observed)["time_limit"] == "01:30:00"
+    observed.clear()
+    # A retry under the same request ID with another limit is another intent, never the cached request.
+    assert _invoke(project, [*args, "--time-limit", "2:00:00"])[0] == 2 and not observed
+    parser = build_parser("httk workflow", CLIContext("httk", project))
+    for value in ("0", "2", "soon"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["remote", "daemon", *args, "--time-limit", value])
+    assert parser.parse_args(["remote", "daemon", *args, "--time-limit", "2:01"]).time_limit == "00:02:01"
+
+
 def test_credentials_are_merged_for_endpoint_validation(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from httk.workflow.adapters import store_credentials
     from httk.workflow.workflow_cli import _daemon_remote as cli
@@ -695,11 +720,11 @@ def test_log_prints_the_published_bytes_and_refuses_errors(
     assert code == 2
 
 
-def test_status_without_handle_passes_managers_v3_through(project: Path) -> None:
+def test_status_without_handle_passes_managers_v4_through(project: Path) -> None:
     _status, outbox = _passive(project)
     managers = {
         "format": "httk-workspace-daemon-managers",
-        "format_version": 3,
+        "format_version": 4,
         "enrollment_id": ENROLLMENT_ID,
         "generated_at": "2026-01-01T00:00:00.000000Z",
         "managers": [
@@ -709,6 +734,7 @@ def test_status_without_handle_passes_managers_v3_through(project: Path) -> None
                 "request_id": "3" * 32,
                 "state": "ENDED",
                 "job_id": None,
+                "time_limit": "01:30:00",
                 "scheduler_state": "COMPLETED",
                 "exit_code": "0:0",
                 "started_at": None,

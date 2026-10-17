@@ -663,3 +663,46 @@ def test_response_without_detail_keeps_its_version_five_encoding() -> None:
     response = decode_response(stored)
     assert response.detail is None
     assert encode_response(response) == stored
+
+
+def test_a_start_time_limit_is_canonical_and_start_only() -> None:
+    start = {"configuration": "cpu", "configuration_digest": CONFIGURATION_DIGEST}
+    request = decode_request(_document("start_manager", **start, time_limit="01:30:00"))
+    assert request.time_limit == "01:30:00"
+    assert decode_request(encode_request(request)) == request
+    assert decode_request(_document("start_manager", **start)).time_limit is None
+    for value in ("90", "1:30:00", "00:00:00", 90, None):
+        with pytest.raises(ValueError):
+            decode_request(_document("start_manager", **start, time_limit=value))
+    for value in ("90", "1:30:00", "00:00:00", 90):
+        with pytest.raises(ValueError):
+            Request(REQUEST_ID, WORKSPACE_ID, "start_manager", "cpu", enrollment_id=ENROLLMENT_ID, time_limit=value)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        decode_request(_document("manager_status", handle=HANDLE, time_limit="01:00:00"))
+    with pytest.raises(ValueError):
+        Request(REQUEST_ID, WORKSPACE_ID, "health", enrollment_id=ENROLLMENT_ID, time_limit="01:00:00")
+
+
+def test_a_response_time_limit_is_only_on_submitted_or_uncertain_starts() -> None:
+    identity = (REQUEST_ID, WORKSPACE_ID, ENROLLMENT_ID, REQUEST_DIGEST)
+    for outcome, reason in (("submitted", None), ("uncertain", "submission_unconfirmed")):
+        response = Response(*identity, outcome, HANDLE, reason=reason, time_limit="1-00:00:00")
+        assert decode_response(encode_response(response)) == response
+    for outcome, handle, reason in (("refused", None, "time_limit_exceeded"), ("status", HANDLE, None)):
+        with pytest.raises(ValueError):
+            Response(
+                *identity, outcome, handle, "RUNNING" if outcome == "status" else None, reason, time_limit="01:00:00"
+            )
+    with pytest.raises(ValueError):
+        Response(*identity, "submitted", HANDLE, time_limit="60")
+    with pytest.raises(ValueError):
+        Response(
+            *identity,
+            "uncertain",
+            reason="execution_uncertain",
+            detail="x",
+            job_id=JOB_ID,
+            internal_request_id=INTERNAL_REQUEST_ID,
+            command_id=REQUEST_ID,
+            time_limit="01:00:00",
+        )

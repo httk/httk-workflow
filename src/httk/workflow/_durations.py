@@ -53,6 +53,98 @@ def format_duration(seconds: int) -> str:
     return f"{days}-{clock}" if days else clock
 
 
+def duration_setting(settings: Mapping[str, object], key: str) -> int | None:
+    """Return the seconds of one Slurm duration setting, or ``None`` when it is unset.
+
+    A string is a Slurm ``--time`` duration and an integer counts minutes, as
+    the ``#SBATCH --time`` directive reads it; a blank string reads as unset.
+
+    :param settings: The launcher settings.
+    :param key: The setting name.
+    :return: The duration in seconds, or ``None``.
+    :raises ValueError: If the value is not a duration.
+    """
+
+    value = settings.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(f"launcher setting {key} must be a Slurm duration or integer minutes, not {value!r}")
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return parse_slurm_duration(text)
+    except ValueError as exc:
+        raise ValueError(f"launcher setting {key}: {exc}") from exc
+
+
+def time_limit_bound(settings: Mapping[str, object]) -> int | None:
+    """Return the longest time limit a start may request, in seconds.
+
+    The bound is ``slurm.time_limit_max`` when set, else ``slurm.time_limit``.
+
+    :param settings: The launcher settings.
+    :return: The bound in seconds, or ``None`` when neither setting is set.
+    :raises ValueError: If the setting the bound comes from is not a duration, or is
+        zero, which Slurm reads as no limit.
+    """
+
+    key = (
+        "slurm.time_limit_max" if duration_setting(settings, "slurm.time_limit_max") is not None else "slurm.time_limit"
+    )
+    bound = duration_setting(settings, key)
+    if bound == 0:
+        raise ValueError(f"launcher setting {key} is 0, which Slurm reads as no limit")
+    return bound
+
+
+def effective_time_limit(settings: Mapping[str, object], requested: str | None) -> str | None:
+    """Return the Slurm ``--time`` a start submits with, as canonical duration text.
+
+    Without a request this is the configured ``slurm.time_limit``, normalized
+    when it parses to a positive duration and verbatim otherwise (Slurm also
+    takes ``UNLIMITED``, and reads ``0`` as no limit). A
+    request is normalized and must lie between one second and
+    :func:`time_limit_bound`.
+
+    :param settings: The launcher settings.
+    :param requested: The requested time limit, or ``None`` for the configured one.
+    :return: The effective time limit, or ``None`` when the launcher sets none.
+    :raises ValueError: If a setting is malformed, or the request is malformed,
+        not positive, above the bound, or made without a bound.
+    """
+
+    if requested is None:
+        configured = settings.get("slurm.time_limit")
+        if configured is None:
+            return None
+        if isinstance(configured, bool) or not isinstance(configured, (str, int)):
+            raise ValueError(f"launcher setting slurm.time_limit must be a Slurm duration, not {configured!r}")
+        text = str(configured).strip()
+        try:
+            seconds = parse_slurm_duration(text)
+        except ValueError:
+            return text or None
+        return format_duration(seconds) if seconds else text
+    bound = time_limit_bound(settings)
+    if bound is None:
+        raise ValueError(
+            "launcher sets neither slurm.time_limit nor slurm.time_limit_max; a time limit cannot be requested"
+        )
+    seconds = parse_slurm_duration(requested.strip())
+    if seconds < 1:
+        raise ValueError(f"time limit {requested!r} must be at least one second")
+    if seconds > bound:
+        hint = (
+            ""
+            if duration_setting(settings, "slurm.time_limit_max") is not None
+            else "; set slurm.time_limit_max on the launcher to allow longer"
+        )
+        raise ValueError(f"time limit {format_duration(seconds)} exceeds the launcher's {format_duration(bound)}{hint}")
+    return format_duration(seconds)
+
+
 def cap_maxtime(
     resources: Mapping[str, int],
     step_resources: Mapping[str, Mapping[str, int]],

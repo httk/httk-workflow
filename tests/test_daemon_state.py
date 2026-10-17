@@ -634,7 +634,7 @@ def test_recovery_marks_an_old_unanswered_submission_uncertain_and_a_late_winner
     state: Path,
 ) -> None:
     winner, recoverer = _open(state), _open(state)
-    request = _start(1)
+    request = replace(_start(1), time_limit="02:00:00")
     handle = winner.admit(request).handle
     assert handle is not None
     entry, won = winner.decide(request.request_id)
@@ -644,10 +644,11 @@ def test_recovery_marks_an_old_unanswered_submission_uncertain_and_a_late_winner
     assert recoverer.recover(older_than=95.0, now_ns=decided + 95 * 10**9) == []
     (settled,) = recoverer.recover(older_than=95.0, now_ns=decided + 96 * 10**9)
     assert settled.response is not None
-    assert (settled.response.outcome, settled.response.reason, settled.state) == (
+    assert (settled.response.outcome, settled.response.reason, settled.state, settled.response.time_limit) == (
         "uncertain",
         "submission_unconfirmed",
         "uncertain",
+        "02:00:00",
     )
     # The late winner still records the job, and leaves the response alone.
     late = winner.record_scheduler(request.request_id, "42", "cluster-1")
@@ -656,7 +657,14 @@ def test_recovery_marks_an_old_unanswered_submission_uncertain_and_a_late_winner
     assert (late.job_id, late.cluster, late.state) == ("42", "cluster-1", "submitted")
     assert recoverer.lookup_manager(handle) == stored
     assert recoverer.managers() == [
-        {"handle": handle, "profile": "cpu", "request_id": request.request_id, "state": "submitted", "job_id": "42"}
+        {
+            "handle": handle,
+            "profile": "cpu",
+            "request_id": request.request_id,
+            "state": "submitted",
+            "job_id": "42",
+            "time_limit": "02:00:00",
+        }
     ]
 
 

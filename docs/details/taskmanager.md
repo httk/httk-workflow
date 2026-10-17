@@ -511,6 +511,8 @@ Its drain point is `--deadline-margin` seconds (120 by default) before that
 end. With a known end, a ready job whose `mintime` exceeds the time left until
 the drain point stays ready, and from the drain point on nothing is claimed;
 attempts are told the earlier of their `maxtime` deadline and the drain point.
+Through a Slurm launcher with a bound, `--time-limit` sets the job's `--time`
+instead; see {doc}`launchers`.
 `workspace owners` and `job why` show each manager's time left. At the drain
 point the manager [drains](#draining) and exits. An allocation end that has
 passed is never evidence of death on its own.

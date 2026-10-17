@@ -192,7 +192,9 @@ def manager_argv(policy: Policy) -> list[str]:
     ]
 
 
-def submission(policy: Policy, launcher: ApprovedLauncher, handle: str) -> tuple[list[str], bytes]:
+def submission(
+    policy: Policy, launcher: ApprovedLauncher, handle: str, time_limit: str | None = None
+) -> tuple[list[str], bytes]:
     """Build the ``sbatch`` command and script of one manager from the frozen launcher content.
 
     The packaged ``slurm`` launcher logic runs in this process; the bundle itself is never executed.
@@ -200,6 +202,7 @@ def submission(policy: Policy, launcher: ApprovedLauncher, handle: str) -> tuple
     :param policy: Validated runtime policy.
     :param launcher: The approved launcher, whose frozen settings alone shape the script.
     :param handle: The broker's opaque manager handle, which names the job and its launcher log.
+    :param time_limit: A checked Slurm ``--time`` replacing the launcher's ``slurm.time_limit``.
     :return: The ``sbatch`` argument vector and the script bytes for its standard input.
     :raises ValueError: If a frozen setting cannot be expressed in the script.
     """
@@ -215,6 +218,7 @@ def submission(policy: Policy, launcher: ApprovedLauncher, handle: str) -> tuple
             output=str(policy.workspace / LAUNCHERS_DIRECTORY / f"{handle}.out"),
         ),
         launch_id=handle,
+        time_limit=time_limit,
     )
     return argv, script.encode("utf-8")
 
@@ -249,17 +253,18 @@ class SlurmGateway:
                     f"exited {code} and printed {printed!r}"
                 )
 
-    def submit(self, launcher: ApprovedLauncher, handle: str) -> Submission:
+    def submit(self, launcher: ApprovedLauncher, handle: str, *, time_limit: str | None = None) -> Submission:
         """Submit one manager through the frozen launcher content, under the handle's job name.
 
         :param launcher: An approved launcher.
         :param handle: The broker's newly reserved opaque handle.
+        :param time_limit: A checked Slurm ``--time`` replacing the launcher's ``slurm.time_limit``.
         :return: The confirmed scheduler job identity.
         :raises UncertainSubmission: If acceptance cannot be confirmed.
         """
 
         try:
-            argv, script = submission(self.policy, launcher, handle)
+            argv, script = submission(self.policy, launcher, handle, time_limit)
         except ValueError as exc:
             raise SchedulerError(f"cannot build the submission: {exc}") from exc
         try:

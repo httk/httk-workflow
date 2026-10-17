@@ -265,7 +265,8 @@ counts (see {doc}`launchers`):
 ```console
 httk launcher add --template slurm --global small \
   --set manager.confine=bwrap --set slurm.cpus_per_task=2 --set slurm.mem=4G \
-  --set slurm.time_limit=01:00:00 --set manager.workers=2
+  --set slurm.time_limit=01:00:00 --set slurm.time_limit_max=12:00:00 \
+  --set manager.workers=2
 httk launcher configure --add-path confine.readonly_paths=/software small
 ```
 
@@ -398,16 +399,18 @@ remove them to clear an uncertain submission.
 ### Resources
 
 Optionally set CPU count, memory and time in a launcher as
-`slurm.cpus_per_task`, `slurm.mem` and `slurm.time_limit`, and the geometry as
+`slurm.cpus_per_task`, `slurm.mem` and `slurm.time_limit`, the longest time a
+start may request as `slurm.time_limit_max` (default `slurm.time_limit`), and
+the geometry as
 `slurm.nodes`, `slurm.ntasks` and `slurm.ntasks_per_node`, exactly as for any
 `slurm` launcher. A setting left unset adds no corresponding `sbatch` flag, so
 Slurm's partition and site defaults apply:
 
 - Memory accepts positive integer MiB or K/M/G/T suffixes; KiB rounds up to
   MiB.
-- Time accepts the standard
+- Time (`slurm.time_limit` and `slurm.time_limit_max`) accepts the standard
   [Slurm time forms](https://slurm.schedmd.com/sbatch.html); seconds round up
-  to minutes.
+  to minutes. `slurm.time_limit` must not exceed `slurm.time_limit_max`.
 - Zero or unlimited requests are rejected.
 - Values above 1024 CPUs per task, 1,048,576 MiB per node or 10,080 minutes
   are refused unless the daemon configuration sets `force=true`.
@@ -427,6 +430,17 @@ content. With the default `--export=NONE`, the manager's environment comes from
 the login shell and the prelude, not from the daemon; `NIL` was observed to
 break the login-shell Lmod environment on one site, so `NONE` is the default.
 The workspace's own `environment.prelude` does not apply to daemon submissions.
+
+A start may ask for another `--time` with
+`httk remote daemon start REMOTE --configuration NAME --time-limit DURATION`,
+which the client requires to exceed the manager's 120 s deadline margin. The
+daemon refuses it with `time_limit_exceeded` when it exceeds the frozen
+launcher's `slurm.time_limit_max` (by default its `slurm.time_limit`), or when
+the launcher sets neither. The submitted and uncertain responses carry the
+effective `time_limit` as `[D-]HH:MM:SS` (omitted when no limit applies), and
+`managers.json` and the `daemon_submitted` log line show it. A start that
+recovery answers `uncertain` after its daemon crashed carries only a requested
+`time_limit`; without a request it stays null.
 
 The manager is `httk workflow manager run --by-path --workspace WORKSPACE
 --idle` with the launcher's `--workers` (from `manager.workers`),
@@ -472,7 +486,7 @@ work first, then re-enroll as described in
 [Earlier enrollments](#earlier-enrollments). A snapshot from an earlier policy
 format is refused at start; there is no migration. Update the client before or
 together with the remote host: the current client reads `exchange.json`,
-`daemon.json` and version 3 of `managers.json`. A bundle carrying `owner_key`
+`daemon.json` and version 4 of `managers.json`. A bundle carrying `owner_key`
 is refused by an older *httk-workflow* because its manifest members differ;
 the remote host must run this version before a client sends bundles that carry
 `owner_key` (both are then updated together). Exchange jobs adopted before
@@ -561,8 +575,9 @@ to the `inbox` again.
 `status.json` at the exchange root lists the exchange jobs
 (`jobs[{exchange_name, job_id, job_key, state, progress}]`, `updated_at`,
 `truncated`), where `progress` is a bounded excerpt of the scalar members of a
-`progress.json` the job keeps in its payload; the managers write it. `managers.json` (format version 3) lists the
-daemon's manager starts with their ledger state, Slurm job ID, scheduler state,
+`progress.json` the job keeps in its payload; the managers write it. `managers.json` (format version 4) lists the
+daemon's manager starts with their ledger state, Slurm job ID, effective
+`time_limit`, scheduler state,
 exit code and start and end times. Unknown values are `null`. Both files are
 informational: `status.json` is rewritten at most every 10 seconds while a
 manager runs, and `managers.json` when its rows change. Read them with
@@ -663,7 +678,7 @@ operation fields are rejected. The operations are `health`, and:
 
 | Operation | Additional fields |
 | --- | --- |
-| `start_manager` | `configuration` and `configuration_digest`: the approved launcher name and its SHA256 digest |
+| `start_manager` | `configuration` and `configuration_digest`: the approved launcher name and its SHA256 digest; optional `time_limit`, a canonical `[D-]HH:MM:SS` Slurm `--time` of at least one second |
 | `manager_status` | `handle`: the returned manager handle |
 | `cancel_manager` | `handle`: the returned manager handle |
 | `job_request` | `selector`, `action`, `reason`, `configuration_digest`; `priority`, `step` or outbox-relative `destination` only for the corresponding action |

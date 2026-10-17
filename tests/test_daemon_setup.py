@@ -469,7 +469,12 @@ def test_initialize_enables_the_exchange_without_a_dedicated_parent_or_staging(t
 
 @pytest.mark.parametrize(
     ("key", "value"),
-    [("slurm.cpus_per_task", "2048"), ("slurm.mem", "2T"), ("slurm.time_limit", "8-0")],
+    [
+        ("slurm.cpus_per_task", "2048"),
+        ("slurm.mem", "2T"),
+        ("slurm.time_limit", "8-0"),
+        ("slurm.time_limit_max", "8-0"),
+    ],
 )
 def test_sanity_limits_apply_at_setup_unless_forced(key: str, value: str, tmp_path: Path) -> None:
     layout = _layout(tmp_path)
@@ -483,13 +488,25 @@ def test_sanity_limits_apply_at_setup_unless_forced(key: str, value: str, tmp_pa
     assert dict(load_policy(snapshot).launcher("small").settings)[key] == value
 
 
-@pytest.mark.parametrize("key", ["slurm.mem", "slurm.time_limit", "slurm.cpus_per_task"])
+@pytest.mark.parametrize("key", ["slurm.mem", "slurm.time_limit", "slurm.time_limit_max", "slurm.cpus_per_task"])
 def test_force_does_not_lift_the_hard_ceiling(key: str, tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     _rewrite_launcher("small", **{key: str(2**31)})
     with pytest.raises(ValueError, match=key.replace(".", r"\.")) as refusal:
         _initialize(layout, "small", changes=[("set", "force=true")])
     assert "force=true" not in str(refusal.value)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    # A non-ASCII digit would reach the submitted script, which no Slurm duration parser accepts.
+    [("slurm.time_limit_max", "soon"), ("slurm.time_limit_max", "0"), ("slurm.time_limit", "1:٣")],
+)
+def test_an_invalid_time_limit_is_refused_at_setup(key: str, value: str, tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    _rewrite_launcher("small", **{key: value})
+    with pytest.raises(ValueError, match=key.replace(".", r"\.") + r"\b"):
+        _initialize(layout, "small", changes=[("set", "force=true")])
 
 
 def test_force_is_persisted_and_honoured_at_activation(
@@ -651,7 +668,7 @@ class _Gateway(SlurmGateway):
     def check(self) -> None:
         pass
 
-    def submit(self, launcher: ApprovedLauncher, handle: str) -> Submission:
+    def submit(self, launcher: ApprovedLauncher, handle: str, *, time_limit: str | None = None) -> Submission:
         self.submissions.append(handle)
         return Submission(str(41 + len(self.submissions)), self.policy.cluster)
 

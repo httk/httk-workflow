@@ -22,12 +22,21 @@ from .._allocation import (
     split_allocation,
 )
 from .._confine import CONFINE_PREFIX, confine_settings, is_override_key, launch_mpi_setting
-from .._durations import format_duration, parse_slurm_duration
+from .._durations import format_duration, parse_slurm_duration, time_limit_bound
 from .._logging import LOG_LEVELS, add_log_file, configure_logging
 from .._scheduler import detect_scheduler
 from ..adapters import REMOTE_MANAGER_COMMAND
 from ..errors import FormatError
-from ..launchers import _LAUNCH_ID, PROCESS_LAUNCHER, launch_processes, resolve_launcher, split_capacity, start_managers
+from ..launchers import (
+    _LAUNCH_ID,
+    PROCESS_LAUNCHER,
+    LauncherTarget,
+    launch_processes,
+    resolve_launcher,
+    split_capacity,
+    start_managers,
+    validate_launcher_bundle,
+)
 from ..manager import NotIdleError, TaskManager
 from ..models import LOGS_DIRECTORY, validate_capacity
 from ..registry import WorkspaceBinding
@@ -778,6 +787,31 @@ def _run_in_process_manager(
     return 0
 
 
+def _slurm_time_limit(
+    target: LauncherTarget, settings: Mapping[str, object], arguments: argparse.Namespace
+) -> str | None:
+    """Return ``--time-limit`` as the job ``--time`` of a bounded ``slurm`` launcher, or ``None`` to keep it on the manager.
+
+    :param target: The resolved launcher.
+    :param settings: The workspace settings, which the launcher's own settings override.
+    :param arguments: The parsed manager options.
+    :return: The canonical duration, or ``None`` for another kind or a launcher without a usable bound.
+    :raises ValueError: If the launcher bundle is invalid.
+    """
+
+    seconds = _time_limit_seconds(arguments)
+    if seconds is None:
+        return None
+    metadata = validate_launcher_bundle(target.bundle)
+    if metadata.get("kind") != "slurm":
+        return None
+    try:
+        bound = time_limit_bound({**settings, **metadata.get("settings", {})})
+    except ValueError:
+        return None
+    return None if bound is None else format_duration(seconds)
+
+
 def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context: CLIContext) -> tuple[str, object]:
     """Dispatch managers for a local workspace through its configured launcher."""
 
@@ -829,6 +863,12 @@ def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context
             label = "--launcher" if requested_launcher is not None else "setting manager.launch"
             raise RuntimeError(f"workspace {root} {label}={profile!r}: {exc}") from exc
         try:
+            time_limit = _slurm_time_limit(target, settings, arguments)
+            if time_limit is not None:
+                # The job's Slurm --time replaces it, and the manager probes that allocation; forwarded, it
+                # would warn that it ends after the allocation. The tail's last --time-limit is its pair.
+                index = max(i for i, item in enumerate(argv) if item == "--time-limit")
+                del argv[index : index + 2]
             result = start_managers(
                 target,
                 workspace_root=root,
@@ -836,6 +876,7 @@ def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context
                 count=count,
                 settings=settings,
                 timeout=getattr(arguments, "adapter_timeout", None),
+                time_limit=time_limit,
             )
         except (OSError, RuntimeError, ValueError) as exc:
             label = "--launcher" if requested_launcher is not None else "setting manager.launch"

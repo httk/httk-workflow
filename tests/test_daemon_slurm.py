@@ -174,6 +174,18 @@ def test_submission_honours_slurm_export_nil(policy: Policy) -> None:
     assert [item for item in argv if item.startswith("--export=")] == ["--export=NIL"]
 
 
+def test_submission_time_limit_replaces_the_configured_one(policy: Policy) -> None:
+    _argv, script = slurm_submission(
+        settings=dict(policy.launcher("cpu").settings),
+        argv=manager_argv(policy),
+        workspace=str(policy.workspace),
+        identity=_submission_identity(policy),
+        launch_id=_HANDLE,
+        time_limit="01:00:00",
+    )
+    assert [line for line in script.splitlines() if line.startswith("#SBATCH --time=")] == ["#SBATCH --time=01:00:00"]
+
+
 @pytest.mark.parametrize("value", ["ALL", "NONE,FOO", "", "NONE --wrap x", "none", "nil", " NONE", "NONE\n", 1])
 def test_slurm_submission_defensively_refuses_an_unvalidated_export(policy: Policy, value: object) -> None:
     # The frozen path validates first, so reach the sbatch-argv guard directly with a raw settings map.

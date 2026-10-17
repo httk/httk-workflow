@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import cast
 
+from ._durations import format_duration, parse_slurm_duration
 from .errors import FormatError
 from .models import validate_budget_override, validate_step
 
@@ -79,6 +80,7 @@ class Request:
     :param budget: Set retry-policy limits for ``set_budget`` (``None`` values lift a limit); stored read-only.
     :param destination: Select an outbox-relative destination for ``eject``; omitted, the outbox root.
     :param command_id: Identify the original daemon command for ``job_request_status``.
+    :param time_limit: Request a canonical Slurm ``--time`` for ``start_manager`` instead of the configured one.
     :raises ValueError: If a field is invalid or conflicts with the operation.
     """
 
@@ -101,12 +103,16 @@ class Request:
     budget: Mapping[str, int | None] | None = field(default=None, kw_only=True)
     destination: str | None = field(default=None, kw_only=True)
     command_id: str | None = field(default=None, kw_only=True)
+    time_limit: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse invalid fields and operation-specific combinations."""
 
         if type(self.request_id) is not str or _ID_PATTERN.fullmatch(self.request_id) is None:
             raise ValueError("invalid request_id")
+        _check_time_limit(self.time_limit)
+        if self.time_limit is not None and self.operation != "start_manager":
+            raise ValueError("time_limit is allowed only for start_manager")
         if type(self.enrollment_id) is not str or _ID_PATTERN.fullmatch(self.enrollment_id) is None:
             raise ValueError("invalid enrollment_id")
         if type(self.workspace_id) is not str:
@@ -226,6 +232,18 @@ class Request:
                 raise ValueError("invalid handle")
 
 
+def _check_time_limit(value: object) -> None:
+    """Refuse a time limit that is not ``None`` or a canonical Slurm duration of at least one second."""
+
+    if value is None:
+        return
+    try:
+        if type(value) is not str or value != format_duration(parse_slurm_duration(value)) or value == "00:00:00":
+            raise ValueError
+    except ValueError:
+        raise ValueError("invalid time_limit") from None
+
+
 def _version_message(kind: str, version: object) -> str:
     """Return the refusal for a *kind* document of an unsupported protocol *version*."""
 
@@ -321,6 +339,8 @@ def _request_fields(request: Request) -> dict[str, object]:
             raise ValueError("start_manager requires configuration_digest on the wire")
         fields["configuration"] = request.profile
         fields["configuration_digest"] = request.configuration_digest
+        if request.time_limit is not None:
+            fields["time_limit"] = request.time_limit
     elif request.operation in {"manager_status", "cancel_manager"}:
         fields["handle"] = request.handle
     elif request.operation == "job_request":
@@ -373,6 +393,8 @@ def decode_request(data: bytes) -> Request:
     }
     if operation == "start_manager":
         keys.update({"configuration", "configuration_digest"})
+        if "time_limit" in value:
+            keys.add("time_limit")
     elif operation in {"manager_status", "cancel_manager"}:
         keys.add("handle")
     elif operation == "job_request":
@@ -399,6 +421,8 @@ def decode_request(data: bytes) -> Request:
     if "configuration_digest" in value and type(configuration_digest) is not str:
         raise ValueError("invalid request fields")
     if "handle" in value and type(handle) is not str:
+        raise ValueError("invalid request fields")
+    if "time_limit" in value and type(value["time_limit"]) is not str:
         raise ValueError("invalid request fields")
     if type(created_at) is not int or type(expires_at) is not int:
         raise ValueError("invalid request fields")
@@ -427,6 +451,7 @@ def decode_request(data: bytes) -> Request:
             budget=cast(Mapping[str, int | None] | None, value.get("budget")),
             destination=cast(str | None, value.get("destination")),
             command_id=cast(str | None, value.get("command_id")),
+            time_limit=cast(str | None, value.get("time_limit")),
         )
     except ValueError as exc:
         raise ValueError("invalid request fields") from exc
@@ -462,6 +487,7 @@ class Response:
     :param internal_request_id: Identify the filesystem request with its canonical UUID.
     :param current_state: Report the resolved job's bounded current state when available.
     :param command_id: Identify the original daemon command with 32 lowercase hexadecimal digits.
+    :param time_limit: Give a manager start's effective canonical Slurm ``--time``, if any.
     :raises ValueError: If a field is invalid or conflicts with the outcome.
     """
 
@@ -480,6 +506,7 @@ class Response:
     internal_request_id: str | None = field(default=None, kw_only=True)
     current_state: str | None = field(default=None, kw_only=True)
     command_id: str | None = field(default=None, kw_only=True)
+    time_limit: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse invalid identifiers and outcome-specific combinations."""
@@ -531,6 +558,7 @@ class Response:
             type(self.current_state) is not str or self.current_state not in _JOB_STATES
         ):
             raise ValueError("invalid current_state")
+        _check_time_limit(self.time_limit)
 
         has_handle = self.handle is not None
         has_state = self.scheduler_state is not None
@@ -556,6 +584,11 @@ class Response:
             if self.outcome == "refused" and not has_reason:
                 valid = False
         elif any(item is not None for item in (self.job_id, self.internal_request_id, self.current_state)):
+            valid = False
+        # Only a manager start's submitted or uncertain response carries one (a job's has a command_id).
+        if self.time_limit is not None and (
+            self.outcome not in {"submitted", "uncertain"} or self.command_id is not None
+        ):
             valid = False
         if not valid:
             raise ValueError("invalid outcome fields")
@@ -583,7 +616,7 @@ def _response_fields(response: Response) -> dict[str, object]:
         fields["reason"] = response.reason
     if response.detail is not None:
         fields["detail"] = response.detail
-    for name in ("job_id", "internal_request_id", "current_state", "command_id"):
+    for name in ("job_id", "internal_request_id", "current_state", "command_id", "time_limit"):
         value = getattr(response, name)
         if value is not None:
             fields[name] = value
@@ -624,6 +657,7 @@ def decode_response(data: bytes) -> Response:
         "internal_request_id",
         "current_state",
         "command_id",
+        "time_limit",
     }
     if not keys <= set(value) or not set(value) <= keys | optional:
         raise ValueError("invalid response fields")
@@ -646,6 +680,7 @@ def decode_response(data: bytes) -> Response:
             internal_request_id=value.get("internal_request_id"),  # type: ignore[arg-type]
             current_state=value.get("current_state"),  # type: ignore[arg-type]
             command_id=value.get("command_id"),  # type: ignore[arg-type]
+            time_limit=value.get("time_limit"),  # type: ignore[arg-type]
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid response fields") from exc

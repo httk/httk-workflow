@@ -2,6 +2,7 @@
 
 import importlib.resources
 import json
+import logging
 import os
 import re
 import shutil
@@ -16,6 +17,7 @@ from typing import Any
 from ._allocation import argv_allocation, half_physical_memory_mb, split_allocation
 from ._confine import confine_settings, launch_mpi_setting
 from ._daemon_policy import SLURM_EXPORT_SETTING, validate_slurm_export
+from ._durations import duration_setting
 from ._util import write_json_atomic
 from .configuration import launchers_home
 from .errors import ResolutionMiss
@@ -59,6 +61,7 @@ REQUEST_FORMAT = "httk-manager-launcher-request"
 RESULT_FORMAT = "httk-manager-launcher-result"
 #: A launch id: 32 lowercase hexadecimal digits (``uuid.uuid4().hex``), fresh per started manager.
 _LAUNCH_ID = re.compile(r"[0-9a-f]{32}")
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,15 @@ def _validate_launcher_metadata(
     if metadata.get("kind") == "slurm":
         # Pinned on every manager this bundle starts; refuse a bad value before any submission.
         confine_settings(settings)
+        maximum = duration_setting(settings, "slurm.time_limit_max")
+        if maximum is not None:
+            if maximum < 1:
+                raise ValueError("launcher setting slurm.time_limit_max must be at least one second")
+            limit = duration_setting(settings, "slurm.time_limit")
+            if limit == 0:
+                raise ValueError("launcher setting slurm.time_limit is 0 (no limit) but slurm.time_limit_max is set")
+            if limit is not None and limit > maximum:
+                raise ValueError("launcher setting slurm.time_limit exceeds slurm.time_limit_max")
     # The sbatch --export mode of a daemon manager submission; refuse a bad value at configure/add/enroll
     # (a null reads as unset and resolves to the default at submission time).
     export = settings.get(SLURM_EXPORT_SETTING)
@@ -469,6 +481,7 @@ def start_managers(
     count: int,
     settings: Mapping[str, object],
     timeout: float | None,
+    time_limit: str | None = None,
 ) -> dict[str, Any]:
     """Start manager processes through one resolved launcher.
 
@@ -478,6 +491,7 @@ def start_managers(
     :param count: Number of managers to start.
     :param settings: Workspace settings passed to the launcher.
     :param timeout: Optional caller-side operation timeout.
+    :param time_limit: Slurm ``--time`` for the managers' jobs instead of the launcher's ``slurm.time_limit``.
     :return: The launcher start result.
     """
 
@@ -490,18 +504,20 @@ def start_managers(
     launcher_settings = metadata.get("settings", {})
     if not isinstance(launcher_settings, Mapping):
         raise ValueError("launcher settings must be an object")
-    return run_launcher(
-        target.bundle,
-        "start",
-        {
-            "workspace": str(root),
-            "argv": list(argv),
-            "count": count,
-            "settings": dict(settings),
-            "launcher_settings": dict(launcher_settings),
-        },
-        timeout=timeout,
-    )
+    request: dict[str, object] = {
+        "workspace": str(root),
+        "argv": list(argv),
+        "count": count,
+        "settings": dict(settings),
+        "launcher_settings": dict(launcher_settings),
+    }
+    if time_limit is not None:
+        request["time_limit"] = time_limit
+    result = run_launcher(target.bundle, "start", request, timeout=timeout)
+    if time_limit is not None and result.get("time_limit") != time_limit:
+        # An older httk on the launcher's PATH ignores the member, and --time-limit is no longer in argv.
+        _LOGGER.warning("launcher %s did not confirm the requested time limit %s", target.name, time_limit)
+    return result
 
 
 def split_capacity(

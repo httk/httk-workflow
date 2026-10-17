@@ -720,7 +720,7 @@ class Ledger:
             yield entry
 
     def managers(self) -> list[dict[str, str | None]]:
-        """Return every manager start as ``handle``, ``profile``, ``request_id``, ``state`` and ``job_id``.
+        """Return every manager start as ``handle``, ``profile``, ``request_id``, ``state``, ``job_id`` and ``time_limit``.
 
         The rows come from a listing of ``handles/``, each cross-checked against its anchor's ``handle``.
 
@@ -739,6 +739,7 @@ class Ledger:
                     "request_id": entry.request.request_id,
                     "state": entry.state,
                     "job_id": entry.job_id,
+                    "time_limit": None if entry.response is None else entry.response.time_limit,
                 }
             )
         return sorted(rows, key=lambda row: str(row["request_id"]))
@@ -1289,6 +1290,7 @@ class Ledger:
                     "uncertain",
                     handle=entry.handle,
                     reason="submission_unconfirmed",
+                    time_limit=entry.request.time_limit,
                 )
             else:
                 continue

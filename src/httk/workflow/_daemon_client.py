@@ -271,12 +271,12 @@ _PASSIVE = {
         "generated_at",
         "managers",
         ("handle", "profile", "request_id", "state"),
-        ("job_id", "scheduler_state", "exit_code", "started_at", "ended_at", "log"),
+        ("job_id", "time_limit", "scheduler_state", "exit_code", "started_at", "ended_at", "log"),
         (),
         (),
     ),
 }
-_PASSIVE_VERSIONS = {"status": 2, "managers": 3}
+_PASSIVE_VERSIONS = {"status": 2, "managers": 4}
 _MAX_LOG_BYTES = 1024 * 1024
 
 
@@ -635,6 +635,7 @@ def _same_intent(saved: Request, intent: Request) -> bool:
         saved.destination,
         saved.command_id,
         saved.configuration_digest,
+        saved.time_limit,
     ) == (
         intent.request_id,
         intent.workspace_id,
@@ -651,6 +652,7 @@ def _same_intent(saved: Request, intent: Request) -> bool:
         intent.destination,
         intent.command_id,
         intent.configuration_digest,
+        intent.time_limit,
     )
 
 

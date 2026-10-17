@@ -231,6 +231,12 @@ To change an allocation's time limit, for example:
 httk launcher configure large --set slurm.time_limit=02:00:00
 ```
 
+A single start can instead ask for a shorter allocation, or a longer one up to the launcher's `slurm.time_limit_max`:
+
+```bash
+httk remote daemon start sigma --configuration large --time-limit 00:30:00
+```
+
 ## Reference
 
 The environment-specific settings above come from the working sigma configuration established on 11 October 2026. Workflow references remain pinned to the supplied revisions. The package installation commands use maintained development branches rather than a full dependency freeze.

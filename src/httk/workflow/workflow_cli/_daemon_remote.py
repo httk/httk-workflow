@@ -24,6 +24,7 @@ from .._daemon_client import (
     take_back,
 )
 from .._daemon_protocol import Request, encode_request, encode_response
+from .._durations import format_duration, parse_slurm_duration
 from .._util import write_json_atomic
 from ..adapters import metadata_path, read_metadata, remote_settings, resolve_remote, run_adapter
 from ._common import _group, _leaf
@@ -36,6 +37,8 @@ _OPERATION_NAMES = {
     "cancel": "cancel_manager",
 }
 _POSITIVE_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requested"})
+#: The daemon manager's default ``--deadline-margin``: a shorter job would start draining at once.
+_MIN_TIME_LIMIT_SECONDS = 120
 
 
 def handle_remote_daemon_configure(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -127,6 +130,20 @@ def handle_remote_daemon_take_back(arguments: argparse.Namespace, context: CLICo
     return 0
 
 
+def _time_limit(text: str) -> str:
+    """Return a ``--time-limit`` longer than the manager's deadline margin as canonical Slurm duration text."""
+
+    try:
+        seconds = parse_slurm_duration(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    if seconds <= _MIN_TIME_LIMIT_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} does not exceed the manager's {_MIN_TIME_LIMIT_SECONDS} s deadline margin"
+        )
+    return format_duration(seconds)
+
+
 def _response_returncode(outcome: str) -> int:
     """Map a confirmed daemon outcome to the CLI status convention."""
 
@@ -212,6 +229,7 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
         handle=getattr(arguments, "handle", None),
         enrollment_id=enrollment_id,
         configuration_digest=configuration_digest,
+        time_limit=getattr(arguments, "time_limit", None),
     )
     request = prepare_request(endpoint, intent)
     request_document = json.loads(encode_request(request))
@@ -328,6 +346,13 @@ def build_daemon_remote_parser(
                 required=True,
                 metavar="NAME",
                 help="approved manager configuration",
+            )
+            parser.add_argument(
+                "--time-limit",
+                type=_time_limit,
+                metavar="DURATION",
+                help="the manager job's Slurm --time instead of the configuration's slurm.time_limit, "
+                "up to its slurm.time_limit_max (default: slurm.time_limit)",
             )
             parser.add_argument(
                 "--request-id",

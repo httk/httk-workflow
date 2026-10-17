@@ -1,6 +1,8 @@
 """Launcher bundle, runtime, and CLI behaviour."""
 
+import argparse
 import json
+import logging
 import os
 import re
 import subprocess
@@ -24,7 +26,7 @@ from httk.workflow.launchers import (
     validate_launcher_bundle,
 )
 from httk.workflow.projects import initialize_project
-from httk.workflow.workflow_cli import command
+from httk.workflow.workflow_cli import _manager, command
 
 
 def test_split_capacity_uses_quotient_remainder_and_preserves_explicit() -> None:
@@ -269,6 +271,131 @@ def test_slurm_launcher_start_spools_scripts(tmp_path: Path, remote: Remote) -> 
     assert "module load python" in script
     assert f"exec httk workflow manager run --workspace {workspace.root} --allocation slurm" in script
     assert bundle.exists()
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"slurm.time_limit": "4:00:00", "slurm.time_limit_max": "3:59:59"},
+        {"slurm.time_limit_max": "soon"},
+        {"slurm.time_limit_max": "0"},
+        {"slurm.time_limit": "0", "slurm.time_limit_max": "1:00:00"},
+    ],
+)
+def test_time_limit_max_is_validated_at_configure_and_add(
+    tmp_path: Path, remote: Remote, settings: dict[str, object]
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="time-limit-max-validation")
+    with pytest.raises(ValueError, match="slurm.time_limit"):
+        add_launcher("bad", template="slurm", settings=settings, project=project)
+    add_launcher("cluster", template="slurm", project=project)
+    with pytest.raises(ValueError, match="slurm.time_limit"):
+        configure_launcher("cluster", settings, project=project)
+    configure_launcher("cluster", {"slurm.time_limit": "4:00:00", "slurm.time_limit_max": "4:00:00"}, project=project)
+
+
+def test_slurm_launcher_start_applies_a_bounded_time_limit(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="launcher-time-limit")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    add_launcher(
+        "cluster",
+        template="slurm",
+        settings={"slurm.time_limit": 240, "slurm.time_limit_max": "1-0"},
+        project=project,
+    )
+    target = resolve_launcher("cluster", project=project)
+    argv = ["httk", "workflow", "manager", "run", "--workspace", str(workspace.root)]
+
+    def start(time_limit: str | None) -> dict[str, object]:
+        return start_managers(
+            target,
+            workspace_root=workspace.root,
+            argv=argv,
+            count=1,
+            settings={},
+            timeout=None,
+            time_limit=time_limit,
+        )
+
+    with pytest.raises(RuntimeError):
+        start("1-00:00:01")
+    assert not list(remote.spool.glob("*.sbatch"))
+    result = start("1-0")
+    assert result["time_limit"] == "1-00:00:00"
+    script = Path(cast(list[str], result["scripts"])[0]).read_text(encoding="utf-8")
+    assert "#SBATCH --time=1-00:00:00\n" in script
+    assert "--time-limit" not in script
+    assert start(None)["time_limit"] == "04:00:00"
+
+
+@pytest.mark.parametrize(
+    ("kind", "settings", "sent"),
+    [
+        ("slurm", {"slurm.time_limit": "4:00:00"}, "01:30:00"),
+        ("slurm", {"slurm.time_limit_max": "1-0"}, "01:30:00"),
+        ("slurm", {}, None),
+        ("slurm", {"slurm.time_limit": "UNLIMITED"}, None),
+        ("slurm", {"slurm.time_limit": "0"}, None),
+        ("pbs", {"slurm.time_limit": "4:00:00"}, None),
+    ],
+)
+def test_cli_time_limit_becomes_the_job_time_only_for_a_bounded_slurm_launcher(
+    tmp_path: Path,
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    settings: dict[str, object],
+    sent: str | None,
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="launcher-time-limit-cli")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    bundle = add_launcher("cluster", template="slurm", settings=settings, project=project)
+    metadata = json.loads((bundle / "launcher.json").read_text(encoding="utf-8"))
+    metadata["kind"] = kind
+    (bundle / "launcher.json").write_text(json.dumps(metadata), encoding="utf-8")
+    calls: list[dict[str, object]] = []
+
+    def record(*_args: object, **kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(_manager, "start_managers", record)
+    monkeypatch.setattr(_manager, "launch_processes", record)
+    options = {**_manager.manager_option_defaults(), "time_limit": "90"}
+    context = CLIContext("httk", project)
+    _manager.launch_workspace_managers(
+        workspace.root, argparse.Namespace(**{**options, "launcher": "cluster"}), context
+    )
+    _manager.launch_workspace_managers(workspace.root, argparse.Namespace(**{**options, "detach": True}), context)
+    launcher, process = calls
+    assert launcher["time_limit"] == sent
+    assert ("--time-limit" in cast(list[str], launcher["argv"])) == (sent is None)
+    assert "time_limit" not in process
+    assert cast(list[str], process["argv"])[-2:] == ["--time-limit", "90"]
+
+
+def test_a_start_result_without_the_requested_time_limit_warns(
+    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="launcher-time-limit-unconfirmed")
+    add_launcher("cluster", template="slurm", settings={"slurm.time_limit": "4:00:00"}, project=project)
+    target = resolve_launcher("cluster", project=project)
+    # An older httk behind the launcher ignores the member and reports no time_limit.
+    monkeypatch.setattr(launchers, "run_launcher", lambda *_args, **_kwargs: {"ok": True})
+    with caplog.at_level(logging.WARNING, logger="httk.workflow.launchers"):
+        start_managers(
+            target, workspace_root=tmp_path, argv=["httk"], count=1, settings={}, timeout=None, time_limit="01:00:00"
+        )
+        assert [record.levelno for record in caplog.records if record.name == "httk.workflow.launchers"] == [
+            logging.WARNING
+        ]
+        caplog.clear()
+        start_managers(target, workspace_root=tmp_path, argv=["httk"], count=1, settings={}, timeout=None)
+        assert not caplog.records
 
 
 def test_unknown_launcher_kind_is_a_clean_cli_refusal(

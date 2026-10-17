@@ -16,6 +16,7 @@ from typing import Any
 from ._allocation import argv_allocation, parse_allocation_spec
 from ._confine import is_override_key
 from ._daemon_policy import DEFAULT_SLURM_EXPORT, SLURM_EXPORT_SETTING, validate_slurm_export
+from ._durations import effective_time_limit
 from .launchers import _LAUNCH_ID, _manager_command
 from .models import LAUNCHERS_DIRECTORY
 
@@ -231,6 +232,7 @@ def slurm_submission(
     workspace: str,
     identity: SubmissionIdentity,
     launch_id: str,
+    time_limit: str | None = None,
 ) -> tuple[list[str], str]:
     """Return the ``sbatch`` command and the batch script that submit one manager under a trusted identity.
 
@@ -243,10 +245,13 @@ def slurm_submission(
     :param workspace: The real workspace path, the job's working directory.
     :param identity: The trusted scheduler identity.
     :param launch_id: The manager's launch id, which the script exports as ``HTTK_LAUNCH_ID``.
+    :param time_limit: A Slurm ``--time`` replacing ``slurm.time_limit``, already checked by the caller.
     :return: The ``sbatch`` argument vector and the script text.
     :raises ValueError: If a setting cannot be expressed in the script, or *launch_id* is not a launch id.
     """
 
+    if time_limit is not None:
+        settings = {**settings, "slurm.time_limit": time_limit}
     script = _batch_script(
         _manager_argv(argv, settings, settings),
         settings=settings,
@@ -274,6 +279,12 @@ def slurm_submission(
 def _start_slurm(request: Mapping[str, object]) -> None:
     workspace = _workspace(request)
     settings = {**_settings(request), **_launcher_settings(request)}
+    requested = request.get("time_limit")
+    if requested is not None and not isinstance(requested, str):
+        raise ValueError("start time_limit must be a Slurm duration string")
+    time_limit = effective_time_limit(settings, requested)
+    if requested is not None:
+        settings["slurm.time_limit"] = time_limit
     count = _count(request)
     directory = Path(workspace) / LAUNCHERS_DIRECTORY
     directory.mkdir(parents=True, exist_ok=True)
@@ -308,7 +319,15 @@ def _start_slurm(request: Mapping[str, object]) -> None:
         job_ids.append(match.group(1))
         launch_ids.append(launch_id)
         scripts.append(str(script_path))
-    _result("start", kind="slurm", count=count, job_ids=job_ids, launch_ids=launch_ids, scripts=scripts)
+    _result(
+        "start",
+        kind="slurm",
+        count=count,
+        job_ids=job_ids,
+        launch_ids=launch_ids,
+        scripts=scripts,
+        time_limit=time_limit,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
