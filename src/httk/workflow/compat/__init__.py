@@ -205,6 +205,8 @@ class LanguageScaffold:
     :param parameters: Job parameters produced by preparation.
     :param required_capabilities: Require these manager capabilities.
     :param reserved_parameters: Names reserved for per-job realization output.
+    :param caller_parameters: Options of the realization a caller may supply without the
+        workflow declaring them, such as ``jobflow_overrides``.
     :param warnings: Preserve preparation warnings.
     :param instantiate: Supply the per-job hook called after input staging.
     :param finalize: Transform the per-job ``JobSpec`` immediately before its payload is prepared.
@@ -215,6 +217,7 @@ class LanguageScaffold:
     parameters: Mapping[str, object]
     required_capabilities: tuple[str, ...] = ()
     reserved_parameters: tuple[str, ...] = ()
+    caller_parameters: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     instantiate: Callable[["InstantiateContext"], object] | None = None
     finalize: Callable[["JobSpec"], "JobSpec"] | None = None

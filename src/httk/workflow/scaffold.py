@@ -709,6 +709,7 @@ class _Prepared:
     workflow: ResolvedWorkflow
     required_capabilities: tuple[str, ...] = ()
     reserved_parameters: tuple[str, ...] = ()
+    caller_parameters: tuple[str, ...] = ()
     documents: Mapping[str, str | bytes] = field(default_factory=dict)
     files: Mapping[str, Path] = field(default_factory=dict)
     parameters: Mapping[str, object] = field(default_factory=dict)
@@ -1645,6 +1646,7 @@ def _prepare(installed: Installed, *, step: str | None) -> _Prepared:
             workflow=resolved,
             required_capabilities=tuple(sorted(set(scaffolded.required_capabilities))),
             reserved_parameters=reserved_parameters,
+            caller_parameters=scaffolded.caller_parameters,
             documents=scaffolded.documents,
             files=scaffolded.files,
             parameters=parameters,
@@ -2003,7 +2005,9 @@ def _build_payload(
         _check_parameter_types(supplied_parameters, declared_parameters)
         declared_names = ", ".join(sorted(declared_parameters))
         logger = context_logger(_LOGGER, workflow.workflow_id)
-        for parameter_name in sorted(set(supplied_parameters) - set(declared_parameters)):
+        # A realization's caller options (``jobflow_overrides``) need no declaration.
+        undeclared = set(supplied_parameters) - set(declared_parameters) - set(prepared.caller_parameters)
+        for parameter_name in sorted(undeclared):
             logger.warning(
                 "job parameter %r is not declared by this workflow; declared: %s",
                 parameter_name,

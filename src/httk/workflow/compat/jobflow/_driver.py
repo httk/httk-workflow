@@ -396,17 +396,48 @@ def merge_documents(store: Any, docs: Iterable[Mapping[str, Any]]) -> None:
         blob_store.update(entries, key="blob_uuid")
 
 
-def snapshot_documents(store: Any) -> list[dict[str, Any]]:
+def _referenced_closure(store: Any, uuids: Iterable[str]) -> list[str]:
+    """Return *uuids* with every job uuid their stored outputs reference, transitively.
+
+    A replaced job's stored output is a reference to its replacement's output, which
+    jobflow resolves recursively, so those documents must travel too.
+    """
+    seen: set[str] = set()
+    queue = list(uuids)
+    for blob_store in store.additional_stores.values():
+        blob_store.connect()
+    while queue:
+        uuid = queue.pop()
+        if uuid in seen:
+            continue
+        seen.add(uuid)
+        # Loaded: a reference saved to an additional store (a `data` job) is a blob pointer until then.
+        for document in store.query({"uuid": uuid}, properties=["output"], load=True):
+            queue.extend(reference.uuid for reference in find_and_get_references(document.get("output")))
+    return sorted(seen)
+
+
+def snapshot_documents(store: Any, uuids: Iterable[str] | None = None) -> list[dict[str, Any]]:
     """Return JSON-safe main and additional-store documents for a worker snapshot.
 
     :param store: A connected ``JobStore`` or compatible object.
+    :param uuids: Keep only the documents of these jobs (every index) and of the jobs their
+        outputs reference, and the blobs of those jobs; ``None`` keeps everything.
     :return: Documents suitable for :func:`merge_documents`.
     """
-    documents = [{key: value for key, value in doc.items() if key != "_id"} for doc in store.query()]
+    criteria: dict[str, Any] = {}
+    blob_criteria: dict[str, Any] = {}
+    if uuids is not None:
+        closure = _referenced_closure(store, uuids)
+        criteria = {"uuid": {"$in": closure}}
+        blob_criteria = {"job_uuid": {"$in": closure}}
+    documents = [{key: value for key, value in doc.items() if key != "_id"} for doc in store.query(criteria)]
     additional: dict[str, list[dict[str, Any]]] = {}
     for name, blob_store in store.additional_stores.items():
         blob_store.connect()
-        entries = [{key: value for key, value in doc.items() if key != "_id"} for doc in blob_store.query()]
+        entries = [
+            {key: value for key, value in doc.items() if key != "_id"} for doc in blob_store.query(blob_criteria)
+        ]
         if entries:
             additional[name] = entries
     if additional:

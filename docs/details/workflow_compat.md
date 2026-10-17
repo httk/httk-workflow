@@ -167,10 +167,40 @@ default. The document form applies declared values with
 
 `[workflow.inputs.NAME]` values are passed to `make()` under their `port`
 labels, or their manifest names without one. Literal JSON values are
-Monty-decoded. A path input is staged under `files/inputs/`; `.json` files are
+Monty-decoded, so a pymatgen `Molecule` or other MSONable object is passed as
+its `as_dict()`. A path input is staged under `files/inputs/`; `.json` files are
 Monty-decoded and other paths are loaded with `pymatgen.Structure.from_file`.
-The Maker's `@module`, and the modules its serialized job functions need, must
-be importable wherever the jobs run.
+A live *httk* structure passed from Python (a `StructureBackend` such as
+`UnitcellStructure`, `UnitcellStructureView` or `SymopsStructure`; other views,
+such as an asymmetric-unit view, are refused as not JSON-serializable) is written as a staged `POSCAR` and so reaches `make()` as a
+pymatgen `Structure`; job creation needs *httk-atomistic*, not pymatgen. The
+`POSCAR` carries no magnetic moments, so a structure with site moments is
+refused: pass a pymatgen `Structure` with `magmom` site properties as Monty
+JSON (`structure.as_dict()`) instead. The Maker's `@module`, and the modules its serialized job functions
+need, must be importable wherever the jobs run.
+
+An input declared `directory = true` (accepted only for `format = "jobflow"`)
+takes a directory, for example a finished calculation for atomate2's
+`prev_dir`:
+
+```toml
+[workflow.inputs.prev_dir]
+directory = true
+description = "A finished VASP calculation to continue from."
+```
+
+Job creation copies the tree to `files/inputs/<port>/<basename>`, following
+symbolic links so the copy is self-contained, so it travels with the job and is
+visible under confinement. A dangling link or a special file in the tree, a
+file given for a directory input, or a directory for any other input, is
+refused; a relative path resolves against the package root. `make()` receives
+the placeholder `httk-jobflow-input://<port>/<basename>`. A child job whose
+arguments, or the output documents its references resolve to, contain the
+placeholder copies the staged tree from the parent's payload, through
+descriptors so the parent may be moved meanwhile, to its own
+`run/inputs/<port>/<basename>` and gets that absolute path; the placeholder
+stays as it is elsewhere in the store. A path into that copy in a job's output
+ships back as the placeholder.
 
 #### Scheduling
 
@@ -186,6 +216,95 @@ them. No MongoDB service is used. The `replace`, `detour`, `addition`,
 Children of a replacing or detouring job wait for the whole replacement or
 detour sub-flow. Documents are stored as plain JSON, so a `datetime` in an
 output becomes its text form.
+
+A child receives only the store documents its input references resolve
+through (every index of the referenced jobs, the jobs a replaced job's output
+refers to, and their blobs), not the whole flow's store. A job whose
+`JobConfig.expose_store` is true, and so may query the store itself, receives
+the full store.
+
+#### Resources per job
+
+Every child inherits the package's `[workflow.resources]`. A table under the
+runner options sets resources per jobflow job:
+
+```toml
+[workflow.resources]
+procs = 1
+maxtime = "2-00:00:00"
+
+[workflow.runner.resources."relax*"]
+procs = 32
+maxtime = "12:00:00"
+
+[workflow.runner.resources."*static*"]
+procs = 16
+
+[workflow.runner.resources."*"]
+procs = 4
+```
+
+Keys are `fnmatch` globs over the jobflow job name (case-sensitive), tried in
+manifest order; values are validated like `[workflow.resources]`, with
+`maxtime`/`mintime` as Slurm durations. When no glob matches, the job's
+`JobConfig.manager_config["httk"]["resources"]` table applies (settable per job
+with `Flow.update_config` or a `config` override); a malformed table there fails
+the parent with `jobflow.resources_invalid`. The table found overlays the
+inherited resources: named labels are replaced, the others kept (`mintime` is
+never inherited). Without either, the child keeps the inherited resources. A
+trailing `"*"` row makes every job's resources explicit. jobflow's
+`pass_manager_config` copies a generating job's `manager_config` to the
+dynamic jobs it creates, so name globs remain the way to set those apart.
+
+A child's `maxtime` is capped at the parent attempt's effective `maxtime`, so
+a package whose jobs need long walltimes declares a parent `[workflow.resources]`
+`maxtime` at least as long; the parent's own steps are light. A table whose
+`maxtime` exceeds the parent attempt's appends a run-log warning naming both.
+A table no manager can satisfy (more `procs` or `mem` than any manager offers)
+leaves that child, and so the flow, waiting rather than failed; `httk job why`
+and the census show what it waits for.
+
+#### Overrides
+
+The job parameter `jobflow_overrides` is a list of operations applied, in
+order, to the flow `make()` returned, before anything runs. It needs no
+`[workflow.parameters]` declaration, is checked when the job is created, and is
+recorded in `job.json`; a failing operation fails the job with
+`jobflow.override_failed`, naming its index. The kinds are:
+
+- `{"kind": "maker_kwargs", "update": {...}, "name_filter": ..., "class_filter":
+  "module:Class", "nested": true, "dict_mod": false}` calls
+  `update_maker_kwargs` on the flow: the update applies to every Maker whose
+  `name` contains `name_filter` (a substring) and that is an instance of
+  `class_filter`, including Makers nested in other Makers' fields.
+- `{"kind": "config", "config": {...}, "name_filter": ..., "attributes": [...],
+  "dynamic": true, "dict_mod": false}` calls `update_config`: jobs whose name
+  contains `name_filter` get the `JobConfig` fields named in `attributes` (by
+  default every key of `config`). This is the per-job route to
+  `manager_config["httk"]["resources"]`.
+- `{"kind": "function", "function": "module:callable", "kwargs": {...}}` calls
+  `callable(flow, **kwargs)` and continues with its return value when that is a
+  jobflow `Flow` or `Job` (atomate2's powerups return modified copies); a
+  `class_filter` string in `kwargs` is imported first.
+
+With `dict_mod`, the update is a MongoDB-style modification whose `->` paths
+reach into nested fields, for example:
+
+```json
+[{"kind": "maker_kwargs", "dict_mod": true,
+  "update": {"_set": {"input_set_generator->user_incar_settings->ENCUT": 600}}}]
+```
+
+The same change through an atomate2 powerup:
+
+```json
+[{"kind": "function", "function": "atomate2.vasp.powerups:update_user_incar_settings",
+  "kwargs": {"incar_updates": {"ENCUT": 600}}}]
+```
+
+Name filters differ: the resource globs match the whole job name with
+`fnmatch`, while `update_config` and `update_maker_kwargs` match a substring of
+the job or Maker name.
 
 Each jobflow job runs in its child's `run/exec` directory, and jobs that chain
 by directory (atomate2's `dir_name`, received by the next job as `prev_dir`)
@@ -212,8 +331,9 @@ there are no output ports beyond `output` and `stored_data`.
 
 Failure codes are `jobflow.missing_dependency`, `jobflow.document_invalid`,
 `jobflow.maker_config_failed`, `jobflow.input_invalid`, `jobflow.make_failed`,
-`jobflow.job_failed`, `jobflow.flow_failed`, `jobflow.launch_conflict` and
-`jobflow.reference_unresolved`.
+`jobflow.job_failed`, `jobflow.flow_failed`, `jobflow.launch_conflict`,
+`jobflow.reference_unresolved`, `jobflow.resources_invalid` and
+`jobflow.override_failed`.
 
 #### atomate2
 
@@ -249,10 +369,32 @@ still calls atomate2's `run_vasp` therefore gets that warning and atomate2's
 own configuration.
 The gamma and noncollinear commands default to the `vasp.command` mapping, so
 custodian's automatic Gamma-only switch never runs a bare `vasp_gam` outside
-the launch prefix. `vasp.ncl_command` sets `ATOMATE2_VASP_NCL_CMD`, but
-atomate2 0.1.5's `run_vasp` does not read it: spin-orbit runs use
-`vasp.command`. Do not set `atomate2.vasp_cmd` through the generic passthrough:
-it bypasses the launch prefix; use `vasp.command`.
+the launch prefix. Do not set `atomate2.vasp_cmd` through the generic
+passthrough: it bypasses the launch prefix; use `vasp.command`.
+
+When `vasp.ncl_command` or `vasp.gamma_command` is set and *httk-workflow-vasp*
+is installed where the jobs run, all three VASP variables name its dispatcher
+instead, with the launch prefix prepended once:
+
+```console
+<launch prefix> <python> -P -m httk.codes.vasp.launch --standard 'vasp_std' --ncl 'vasp_ncl' --gamma 'vasp_gam'
+```
+
+Each command is a program-only shell-quoted string (a launcher in any of them
+is a `jobflow.launch_conflict` as above); `-P` keeps the job's working
+directory off the dispatcher's module path. Whether the dispatcher is installed
+is checked without importing the VASP package. The program cannot be chosen in
+advance: a job's `LSORBIT`/`LNONCOLLINEAR` comes from its input-set generator,
+`ATOMATE2_VASP_INCAR_UPDATES`, an inherited `prev_dir` INCAR and pymatgen's
+handling of non-collinear magnetic moments, and the INCAR is only written
+inside the job. The dispatcher reads that INCAR and KPOINTS and runs the
+non-collinear program for `LSORBIT` or `LNONCOLLINEAR`, the Gamma-only one for
+a Gamma-only mesh (custodian's rule, never under `LEPSILON` or `LOPTICS`), and
+the standard one otherwise; a non-collinear INCAR without `vasp.ncl_command`
+fails the run rather than start the standard program. Whichever command custodian's automatic Gamma-only
+switch picks, it runs the same dispatcher, which decides Gamma itself. Without
+*httk-workflow-vasp* the variant commands map directly, after a run-log
+warning; atomate2 itself never reads `ATOMATE2_VASP_NCL_CMD`.
 
 `pymatgen.psp_dir` is a POTCAR library in pymatgen's layout
 (`POT_GGA_PAW_PBE/POTCAR.<El>` and so on), distinct from *httk-workflow-vasp*'s

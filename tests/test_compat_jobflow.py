@@ -4,6 +4,7 @@ import importlib
 import importlib.util
 import json
 import os
+import shlex
 import signal
 import sys
 import time
@@ -78,8 +79,16 @@ role = "result"
     return root
 
 
-def _drive(workspace: Workspace, *, maximum_workers: int = 4, timeout: float = 300.0) -> None:
-    with TaskManager(workspace, heartbeat_interval=0.01, maximum_workers=maximum_workers) as manager:
+def _drive(
+    workspace: Workspace,
+    *,
+    maximum_workers: int = 4,
+    timeout: float = 300.0,
+    resources: dict[str, int] | None = None,
+) -> None:
+    with TaskManager(
+        workspace, heartbeat_interval=0.01, maximum_workers=maximum_workers, resources=resources
+    ) as manager:
         manager.run_until_idle(timeout=timeout)
 
 
@@ -270,8 +279,9 @@ def test_jobflow_runner_dependency_messages(monkeypatch: pytest.MonkeyPatch) -> 
 
 def _settings_attempt(settings: dict[str, object], parameters: dict[str, object] | None = None) -> Attempt:
     """Return a stub carrying the real ``Attempt.setting`` resolution over plain layers."""
-    stub = SimpleNamespace(parameters=parameters or {}, context=SimpleNamespace(settings=settings))
+    stub = SimpleNamespace(parameters=parameters or {}, context=SimpleNamespace(settings=settings), warnings=[])
     stub.setting = lambda name, default=None: Attempt.setting(cast(Attempt, stub), name, default)
+    stub.log = SimpleNamespace(append=lambda kind, message: stub.warnings.append(message))
     return cast(Attempt, stub)
 
 
@@ -292,9 +302,55 @@ def test_atomate2_environment_prepends_the_launch_prefix(monkeypatch: pytest.Mon
         "ATOMATE2_VASP_GAMMA_CMD": "srun -n 4 vasp_std -x",
         "ATOMATE2_VASP_NCL_CMD": "srun -n 4 vasp_std -x",
     }
-    mapped = _atomate2_environment(_settings_attempt({"vasp.command": "vasp_std", "vasp.gamma_command": "vasp_gam"}))
+    # Without httk-workflow-vasp's dispatcher, variant commands map directly, after one warning.
+    monkeypatch.setattr(jobflow_runner.importlib.util, "find_spec", lambda name, package=None: None)
+    attempt = _settings_attempt({"vasp.command": "vasp_std", "vasp.gamma_command": "vasp_gam"})
+    mapped = _atomate2_environment(attempt)
     assert mapped["ATOMATE2_VASP_GAMMA_CMD"] == "srun -n 4 vasp_gam"
     assert mapped["ATOMATE2_VASP_NCL_CMD"] == "srun -n 4 vasp_std"
+    assert len(cast(Any, attempt).warnings) == 1 and "httk-workflow-vasp" in cast(Any, attempt).warnings[0]
+
+
+_DISPATCH = [sys.executable, "-P", "-m", "httk.codes.vasp.launch"]
+
+
+@pytest.mark.usefixtures("_no_launch")
+@pytest.mark.parametrize(
+    ("variants", "flags"),
+    [
+        ({"vasp.ncl_command": "vasp_ncl"}, ["--ncl", "vasp_ncl"]),
+        ({"vasp.gamma_command": "vasp_gam -q"}, ["--gamma", "vasp_gam -q"]),
+        (
+            {"vasp.ncl_command": "vasp_ncl", "vasp.gamma_command": "vasp_gam"},
+            ["--ncl", "vasp_ncl", "--gamma", "vasp_gam"],
+        ),
+    ],
+)
+def test_atomate2_environment_dispatches_vasp_variants(
+    monkeypatch: pytest.MonkeyPatch, variants: dict[str, object], flags: list[str]
+) -> None:
+    from httk.workflow.compat.jobflow.jobflow_runner import _atomate2_environment
+
+    monkeypatch.setattr(jobflow_runner, "_dispatcher_installed", lambda: True)
+    monkeypatch.setenv("HTTK_WORKFLOW_LAUNCH", "srun -n 4")
+    mapped = _atomate2_environment(_settings_attempt({"vasp.command": "vasp_std -x", **variants}))
+    # The prefix is prepended once, to the dispatcher; the inner commands stay program-only.
+    dispatcher = shlex.join(["srun", "-n", "4", *_DISPATCH, "--standard", "vasp_std -x", *flags])
+    assert mapped == {
+        name: dispatcher for name in ("ATOMATE2_VASP_CMD", "ATOMATE2_VASP_GAMMA_CMD", "ATOMATE2_VASP_NCL_CMD")
+    }
+
+
+@pytest.mark.usefixtures("_no_launch")
+def test_atomate2_environment_refuses_a_launcher_in_a_variant_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow.compat.jobflow.jobflow_runner import _atomate2_environment
+
+    monkeypatch.setattr(jobflow_runner, "_dispatcher_installed", lambda: True)
+    attempt = _settings_attempt({"vasp.command": "vasp_std", "vasp.ncl_command": "mpirun vasp_ncl"})
+    assert "mpirun vasp_ncl" in _atomate2_environment(attempt)["ATOMATE2_VASP_CMD"]
+    monkeypatch.setenv("HTTK_WORKFLOW_LAUNCH", "srun -n 4")
+    with pytest.raises(ValueError, match=r"vasp\.ncl_command setting.*bare program"):
+        _atomate2_environment(attempt)
 
 
 @pytest.mark.usefixtures("_no_launch")
@@ -561,6 +617,395 @@ class Maker:
 
     assert _collected_value(workspace, root_job.job_id) == 12
     assert len(_parent_record(workspace, root_job.job_id).children) >= 4
+
+
+def _snapshot_outputs(workspace: Workspace, job_id: str) -> list[list[object]]:
+    """Return the sorted job outputs held by each spooled snapshot of a finished parent."""
+    spool = find(workspace, job_id).path / "run" / "jobflow" / "spool"
+    snapshots = [json.loads(path.read_text(encoding="utf-8")) for path in spool.glob("*-store.json")]
+    return sorted(sorted((doc["output"] for doc in snapshot), key=repr) for snapshot in snapshots)
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_snapshots_carry_only_referenced_documents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    package = _jobflow_package(
+        tmp_path / "chain-package",
+        """from jobflow import Flow, job
+
+@job
+def first():
+    return "one"
+
+@job
+def second(value):
+    return value + "-two"
+
+@job
+def third(value):
+    return value + "-three"
+
+class Maker:
+    def make(self):
+        one = first()
+        two = second(one.output)
+        three = third(two.output)
+        return Flow([one, two, three], output=three.output)
+""",
+    )
+    _set_pythonpath(monkeypatch, package)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package)
+    _drive(workspace)
+    assert _collected_value(workspace, job.job_id) == "one-two-three"
+    # The third job's snapshot holds the second job's document only, not the first's.
+    assert _snapshot_outputs(workspace, job.job_id) == [[], ["one"], ["one-two"]]
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_replacement_referencing_an_outside_job_runs_on_filtered_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _jobflow_package(
+        tmp_path / "outside-package",
+        """from jobflow import Flow, OutputReference, Response, job
+
+@job
+def seed():
+    return 3
+
+@job
+def replacement(value):
+    return value * 10
+
+@job
+def middle(seed_uuid):
+    replaced = replacement(OutputReference(seed_uuid))
+    return Response(replace=Flow([replaced], output=replaced.output))
+
+@job
+def finish(value):
+    return value + 1
+
+class Maker:
+    def make(self):
+        one = seed()
+        two = middle(one.uuid)
+        three = finish(two.output)
+        return Flow([one, two, three], output=three.output)
+""",
+    )
+    _set_pythonpath(monkeypatch, package)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package)
+    _drive(workspace)
+    # finish references the replaced middle job, whose stored output refers to the replacement.
+    assert _collected_value(workspace, job.job_id) == 31
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_replaced_data_job_consumed_downstream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # jobflow copies a data=True job's config to the replacement's store_inputs job, whose
+    # OutputReference output then lives in the data store as a blob.
+    package = _jobflow_package(
+        tmp_path / "data-package",
+        """from jobflow import Flow, Response, job
+
+@job
+def inner(x):
+    return x + 1
+
+@job(data=True)
+def outer(x):
+    replaced = inner(x)
+    return Response(replace=Flow([replaced], output=replaced.output))
+
+@job
+def finish(value):
+    return value * 2
+
+class Maker:
+    def make(self):
+        first = outer(1)
+        last = finish(first.output)
+        return Flow([first, last], output=last.output)
+""",
+    )
+    _set_pythonpath(monkeypatch, package)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package)
+    _drive(workspace)
+    assert _collected_value(workspace, job.job_id) == 4
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_expose_store_job_gets_the_full_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    package = _jobflow_package(
+        tmp_path / "expose-package",
+        """from jobflow import CURRENT_JOB, Flow, JobConfig, job
+
+@job
+def first():
+    return 1
+
+@job
+def second(value):
+    return value + 1
+
+@job(config=JobConfig(expose_store=True))
+def count(value):
+    return len(list(CURRENT_JOB.store.query()))
+
+class Maker:
+    def make(self):
+        one = first()
+        two = second(one.output)
+        three = count(two.output)
+        return Flow([one, two, three], output=three.output)
+""",
+    )
+    _set_pythonpath(monkeypatch, package)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package)
+    _drive(workspace)
+    assert _collected_value(workspace, job.job_id) == 2
+
+
+_RESOURCE_FLOW = """from jobflow import Flow, JobConfig, job
+
+def _config(resources):
+    return JobConfig(manager_config={"httk": {"resources": resources}})
+
+@job
+def relax_a():
+    return 1
+
+@job(config=_config({"procs": 5}))
+def relax_b():
+    return 2
+
+@job(config=_config({"procs": 3}))
+def static():
+    return 3
+
+@job
+def other():
+    return 4
+
+class Maker:
+    def make(self):
+        jobs = [relax_a(), relax_b(), static(), other()]
+        return Flow(jobs, output=[item.output for item in jobs])
+"""
+
+_RESOURCE_TABLES = """[workflow.resources]
+procs = 1
+mem = 1000
+maxtime = "02:00:00"
+
+[workflow.runner.resources."relax*"]
+procs = 2
+maxtime = "01:00:00"
+"""
+
+
+def _child_resources_by_name(workspace: Workspace, parent_id: str) -> dict[str, dict[str, object]]:
+    """Return each spawned child's resources, keyed by the name of the jobflow job it ran."""
+    run = find(workspace, parent_id).path / "run"
+    result: dict[str, dict[str, object]] = {}
+    for record in job_records(workspace):
+        job = cast(dict[str, Any], record.job)
+        pointer = job.get("parameters", {}).get("jobflow_child_job")
+        if pointer is not None:
+            name = json.loads((run / pointer).read_text(encoding="utf-8"))["name"]
+            result[name] = dict(job["resources"])
+    return result
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_job_resources_overlay_by_glob_then_manager_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _jobflow_package(tmp_path / "resources-package", _RESOURCE_FLOW, parameters=_RESOURCE_TABLES)
+    _set_pythonpath(monkeypatch, package)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package)
+    _drive(workspace, resources={"procs": 8, "mem": 10000})
+    assert _collected_value(workspace, job.job_id) == [1, 2, 3, 4]
+    assert _child_resources_by_name(workspace, job.job_id) == {
+        # The glob table overlays the inherited resources (mem kept) and wins over manager_config.
+        "relax_a": {"procs": 2, "mem": 1000, "maxtime": 3600},
+        "relax_b": {"procs": 2, "mem": 1000, "maxtime": 3600},
+        "static": {"procs": 3, "mem": 1000, "maxtime": 7200},
+        "other": {"procs": 1, "mem": 1000, "maxtime": 7200},
+    }
+
+
+def test_jobflow_invalid_resource_table_is_refused_at_job_creation(tmp_path: Path) -> None:
+    package = _jobflow_package(
+        tmp_path / "bad-resources-package",
+        "",
+        parameters='[workflow.runner.resources."relax*"]\nmaxtime = 3600\n',
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(ValueError, match=r"workflow\.runner\.resources.*maxtime"):
+        new_job(workspace, package)
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_invalid_manager_config_resources_fail_the_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _jobflow_package(
+        tmp_path / "bad-config-package",
+        """from jobflow import JobConfig, job
+
+@job(config=JobConfig(manager_config={"httk": {"resources": {"procs": "lots"}}}))
+def greedy():
+    return 1
+
+class Maker:
+    def make(self):
+        return greedy()
+""",
+    )
+    _set_pythonpath(monkeypatch, package)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package)
+    _drive(workspace)
+    parent = _parent_record(workspace, job.job_id, states=("failed",))
+    assert parent.failure is not None and parent.failure.code == "jobflow.resources_invalid"
+    assert "greedy" in parent.failure.message
+
+
+_OVERRIDE_FLOW = """from dataclasses import dataclass, field
+from jobflow import Flow, Maker as JobflowMaker, job
+
+@dataclass
+class Settings(JobflowMaker):
+    name: str = "settings"
+    value: int = 1
+
+    def make(self):
+        raise NotImplementedError
+
+@dataclass
+class Step(JobflowMaker):
+    name: str = "relax step"
+    settings: Settings = field(default_factory=Settings)
+
+    @job
+    def make(self, offset):
+        return self.settings.value + offset
+
+@job
+def constant(value):
+    return value
+
+def replace_with_constant(flow, value):
+    return constant(value)
+
+def keep(flow):
+    return None
+
+class Maker:
+    def make(self):
+        step = Step().make(10)
+        return Flow([step], output=step.output)
+"""
+
+
+def _override_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overrides: list[Any]) -> tuple[Workspace, str]:
+    package = _jobflow_package(tmp_path / "override-package", _OVERRIDE_FLOW)
+    _set_pythonpath(monkeypatch, package)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package, parameters={"jobflow_overrides": overrides})
+    _drive(workspace, resources={"procs": 4})
+    return workspace, job.job_id
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_overrides_update_nested_makers_and_job_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, job_id = _override_job(
+        tmp_path,
+        monkeypatch,
+        [
+            {"kind": "maker_kwargs", "update": {"value": 5}, "class_filter": "toy:Settings"},
+            {
+                "kind": "config",
+                "config": {"manager_config": {"httk": {"resources": {"procs": 2}}}},
+                "name_filter": "relax",
+                "attributes": ["manager_config"],
+            },
+            {"kind": "function", "function": "toy:keep"},
+        ],
+    )
+    # The nested Settings Maker took the update; the config override set the job's resources.
+    assert _collected_value(workspace, job_id) == 15
+    assert _child_resources_by_name(workspace, job_id) == {"relax step": {"procs": 2}}
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_function_override_replaces_the_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    overrides = [{"kind": "function", "function": "toy:replace_with_constant", "kwargs": {"value": 42}}]
+    workspace, job_id = _override_job(tmp_path, monkeypatch, overrides)
+    assert _collected_value(workspace, job_id) == 42
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_failing_override_is_named_by_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    overrides = [{"kind": "function", "function": "toy:keep"}, {"kind": "function", "function": "toy:missing"}]
+    workspace, job_id = _override_job(tmp_path, monkeypatch, overrides)
+    parent = _parent_record(workspace, job_id, states=("failed",))
+    assert parent.failure is not None and parent.failure.code == "jobflow.override_failed"
+    assert parent.failure.message.startswith("jobflow_overrides[1] (function) failed: AttributeError")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"kind": "config"}, "must be a list"),
+        ([{"kind": "powerup"}], r"jobflow_overrides\[0\] must be an object whose kind"),
+        ([{"kind": "config"}], r"jobflow_overrides\[0\] lacks 'config'"),
+        ([{"kind": "function", "function": "toy:keep", "extra": 1}], "unknown member 'extra'"),
+        ([{"kind": "maker_kwargs", "update": {}, "class_filter": "Settings"}], "class_filter must be"),
+        ([{"kind": "config", "config": {}, "dynamic": "yes"}], "dynamic must be a boolean"),
+    ],
+)
+def test_jobflow_malformed_overrides_are_refused_at_job_creation(
+    tmp_path: Path, overrides: object, message: str
+) -> None:
+    package = _jobflow_package(tmp_path / "override-package", _OVERRIDE_FLOW)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(ValueError, match=message):
+        new_job(workspace, package, parameters={"jobflow_overrides": overrides})
+
+
+def test_jobflow_overrides_need_no_declaration(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    package = _jobflow_package(
+        tmp_path / "declared-package",
+        _OVERRIDE_FLOW,
+        parameters='[workflow.parameters.offset]\ntype = "integer"\n',
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with caplog.at_level("WARNING"):
+        new_job(workspace, package, parameters={"jobflow_overrides": [], "stray": 1})
+    warned = [record.getMessage() for record in caplog.records if "is not declared" in record.getMessage()]
+    assert len(warned) == 1 and "'stray'" in warned[0]
+
+
+def test_atomate2_powerup_override_updates_the_input_set_generator() -> None:
+    pytest.importorskip("atomate2")
+    from atomate2.vasp.jobs.core import StaticMaker
+    from pymatgen.core import Lattice, Structure
+
+    flow = cast(Any, StaticMaker()).make(Structure(Lattice.cubic(3.0), ["Si"], [[0, 0, 0]]))
+    override = {
+        "kind": "function",
+        "function": "atomate2.vasp.powerups:update_user_incar_settings",
+        "kwargs": {"incar_updates": {"ENCUT": 600}},
+    }
+    updated = jobflow_runner._apply_override(flow, override)
+    assert updated.function.__self__.input_set_generator.user_incar_settings["ENCUT"] == 600
 
 
 @NEEDS_JOBFLOW
@@ -875,9 +1320,9 @@ def test_exec_directory_tokens(tmp_path: Path) -> None:
     job_id = "00000000-0000-4000-8000-000000000001"
     sibling = "00000000-0000-4000-8000-000000000002"
     directories = {
-        str(alias / "run" / "exec"): job_id,
-        os.path.realpath(alias / "run" / "exec"): job_id,
-        str(tmp_path / "sibling" / "run" / "exec"): sibling,
+        str(alias / "run" / "exec"): jobflow_runner.EXEC_TOKEN + job_id,
+        os.path.realpath(alias / "run" / "exec"): jobflow_runner.EXEC_TOKEN + job_id,
+        str(tmp_path / "sibling" / "run" / "exec"): jobflow_runner.EXEC_TOKEN + sibling,
     }
     real = str(exec_dir.resolve())
     token = jobflow_runner.EXEC_TOKEN + job_id
@@ -929,7 +1374,7 @@ def test_enter_fails_on_an_unresolved_input_directory_and_warns_for_the_store(tm
             "jobflow_child_job": "job.json",
             "jobflow_child_snapshot": "store.json",
         }[name],
-        parent=SimpleNamespace(workdir=parent_workdir, placement=PurePosixPath(".")),
+        parent=SimpleNamespace(workdir=parent_workdir, payload=tmp_path, placement=PurePosixPath(".")),
         workdir=tmp_path / "child",
         fail=lambda code, message: events.append((code, message)),
         succeed=lambda: events.append(("succeeded", "")),
@@ -963,6 +1408,112 @@ def test_enter_fails_on_an_unresolved_input_directory_and_warns_for_the_store(tm
     (parent_workdir / "job.json").write_text(json.dumps(spool_job(store_inputs(5))))
     jobflow_runner.enter(cast(Attempt, stub))
     assert events == [("warning", f"the jobflow store names directories of absent jobs {other}"), ("succeeded", "")]
+
+
+_DIRECTORY_FLOW = """import os
+from jobflow import Flow, job
+
+@job
+def listing(prev_dir):
+    assert os.path.isdir(prev_dir) and "/run/inputs/prev_dir/" in prev_dir
+    files = sorted(os.path.relpath(os.path.join(root, name), prev_dir)
+                   for root, _dirs, names in os.walk(prev_dir) for name in names)
+    return {"files": files, "dir": prev_dir}
+
+@job
+def again(previous, prev_dir):
+    return previous["files"] == listing.original(prev_dir)["files"]
+
+class Maker:
+    def make(self, prev_dir):
+        first = listing(prev_dir)
+        second = again(first.output, prev_dir)
+        return Flow([first, second], output={"first": first.output, "same": second.output})
+"""
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_directory_input_reaches_each_job_as_a_local_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _jobflow_package(
+        tmp_path / "directory-input-package",
+        _DIRECTORY_FLOW,
+        inputs='[workflow.inputs.prev_dir]\ndirectory = true\n',
+    )
+    _set_pythonpath(monkeypatch, package)
+    calculation = tmp_path / "calc"
+    (calculation / "sub").mkdir(parents=True)
+    (calculation / "INCAR").write_text("ENCUT = 500\n", encoding="utf-8")
+    (calculation / "sub" / "OUTCAR").write_text("done\n", encoding="utf-8")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package, inputs={"prev_dir": str(calculation)})
+    _drive(workspace)
+    output = cast(dict[str, Any], _collected_value(workspace, job.job_id))
+    # Both jobs ran after the parent had moved between activations, each on its own copy;
+    # the first job's local path ships back as the stable input token.
+    assert output["first"] == {"files": ["INCAR", "sub/OUTCAR"], "dir": f"{jobflow_runner.INPUT_TOKEN}prev_dir/calc"}
+    assert output["same"] is True
+
+
+def test_jobflow_directory_inputs_are_checked_at_job_creation(tmp_path: Path) -> None:
+    package = _jobflow_package(
+        tmp_path / "directory-input-package",
+        _DIRECTORY_FLOW,
+        inputs='[workflow.inputs.prev_dir]\ndirectory = true\n',
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    a_file = tmp_path / "INCAR"
+    a_file.write_text("ENCUT = 500\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="declared a directory"):
+        new_job(workspace, package, inputs={"prev_dir": str(a_file)})
+    plain = _jobflow_package(tmp_path / "plain-package", _DIRECTORY_FLOW, inputs="[workflow.inputs.prev_dir]\n")
+    with pytest.raises(ValueError, match="declare the input with directory = true"):
+        new_job(workspace, plain, inputs={"prev_dir": str(tmp_path)})
+
+
+def test_directory_inputs_are_refused_outside_jobflow(tmp_path: Path) -> None:
+    package = tmp_path / "plain"
+    package.mkdir()
+    (package / "httk_workflow.toml").write_text(
+        '[workflow]\nname = "tests.plain"\n\n[workflow.runner]\nsteps = ["start"]\n\n[workflow.inputs.prev_dir]\ndirectory = true\n',
+        encoding="utf-8",
+    )
+    run = package / "run"
+    run.write_text("#!/bin/sh\n", encoding="utf-8")
+    run.chmod(0o755)
+    with pytest.raises(ValueError, match=r"directory is only supported by \[workflow.runner\] format"):
+        resolve_workflow(package)
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_httk_structure_input_reaches_make_as_pymatgen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("pymatgen")
+    atomistic = pytest.importorskip("httk.atomistic")
+    import httk.core
+
+    poscar = tmp_path / "POSCAR"
+    poscar.write_text("Si\n1.0\n5.43 0 0\n0 5.43 0\n0 0 5.43\nSi\n2\nDirect\n0 0 0\n0.25 0.25 0.25\n", encoding="utf-8")
+    structure = atomistic.UnitcellStructureView(httk.core.load(str(poscar), format="vasp-poscar", precision=1e-4))
+    package = _jobflow_package(
+        tmp_path / "httk-structure-package",
+        """from jobflow import job
+
+@job
+def formula(structure):
+    return [type(structure).__name__, structure.composition.formula]
+
+class Maker:
+    def make(self, structure):
+        return formula(structure)
+""",
+        inputs='[workflow.inputs.structure]\nentry_type = "structures"\n',
+    )
+    _set_pythonpath(monkeypatch, package)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package, inputs={"structure": structure})
+    _drive(workspace)
+    assert _collected_value(workspace, job.job_id) == ["Structure", "Si2"]
 
 
 @NEEDS_JOBFLOW
@@ -1205,3 +1756,174 @@ class Maker:
                 pytest.fail("a new-session descendant survived the runner's SIGTERM")
             manager.tick()
             time.sleep(0.05)
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_vasp_variant_dispatch_runs_the_ncl_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not jobflow_runner._dispatcher_installed():
+        pytest.skip("needs httk-workflow-vasp's httk.codes.vasp.launch")
+    for name in ("HTTK_WORKFLOW_LAUNCH", "HTTK_VASP_COMMAND", "HTTK_VASP_NCL_COMMAND", "HTTK_VASP_GAMMA_COMMAND"):
+        monkeypatch.delenv(name, raising=False)
+    programs = {}
+    for variant in ("standard", "ncl"):
+        script = tmp_path / f"vasp_{variant}.py"
+        script.write_text(f"open('{variant}.marker', 'w').close()\n", encoding="utf-8")
+        programs[variant] = shlex.join([sys.executable, str(script)])
+    package = _jobflow_package(
+        tmp_path / "dispatch-package",
+        """import os
+import shlex
+import subprocess
+from jobflow import job
+
+@job
+def run_vasp():
+    with open("INCAR", "w") as stream:
+        stream.write("LSORBIT = .TRUE.\\n")
+    subprocess.run(shlex.split(os.environ["ATOMATE2_VASP_CMD"]), check=True)
+    return sorted(name for name in os.listdir(".") if name.endswith(".marker"))
+
+class Maker:
+    def make(self):
+        return run_vasp()
+""",
+    )
+    _set_pythonpath(monkeypatch, package)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    workspace.configure_settings({"vasp.command": programs["standard"], "vasp.ncl_command": programs["ncl"]})
+    job = new_job(workspace, package)
+    _drive(workspace)
+    assert _collected_value(workspace, job.job_id) == ["ncl.marker"]
+
+
+def test_directory_input_copy_survives_the_parent_being_renamed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow import _fs
+
+    payload = tmp_path / "parent"
+    calculation = payload / "files" / "inputs" / "prev" / "calc"
+    (calculation / "sub").mkdir(parents=True)
+    for name in ("INCAR", "OUTCAR", "sub/CHGCAR"):
+        (calculation / name).write_text(name, encoding="utf-8")
+    anchor = _fs.open_dir(payload / "files" / "inputs")
+    real_copy = _fs._copy_file
+
+    def copy_while_moving(*args: Any, **kwargs: Any) -> None:
+        # The parent is re-claimed (renamed) in the middle of the copy.
+        if payload.exists():
+            payload.rename(tmp_path / "moved")
+        real_copy(*args, **kwargs)
+
+    monkeypatch.setattr(_fs, "_copy_file", copy_while_moving)
+    root = tmp_path / "child" / "inputs"
+    try:
+        jobflow_runner._stage_directory_inputs(anchor, {"prev/calc"}, root)
+        with pytest.raises(ValueError, match="'prev/other' is not in the parent job"):
+            jobflow_runner._stage_directory_inputs(anchor, {"prev/other"}, root)
+    finally:
+        os.close(anchor)
+    copied = root / "prev" / "calc"
+    assert not payload.exists()
+    assert sorted(path.relative_to(copied).as_posix() for path in copied.rglob("*") if path.is_file()) == [
+        "INCAR",
+        "OUTCAR",
+        "sub/CHGCAR",
+    ]
+
+
+def test_directory_tokens_never_name_the_inputs_root_or_climb(tmp_path: Path) -> None:
+    root = str(tmp_path / "inputs")
+    directories = {root: jobflow_runner.INPUT_TOKEN.removesuffix("/")}
+    assert jobflow_runner._tokenize_exec(root, directories) == root
+    assert jobflow_runner._tokenize_exec(f"{root}/prev/calc", directories) == f"{jobflow_runner.INPUT_TOKEN}prev/calc"
+    copied = {"prev/calc"}
+    token = f"{jobflow_runner.INPUT_TOKEN}prev/calc/INCAR"
+    assert jobflow_runner._resolve_exec(token, {}, root, copied) == f"{root}/prev/calc/INCAR"
+    # Not copied for this job: the placeholder stays.
+    assert jobflow_runner._resolve_exec(f"{jobflow_runner.INPUT_TOKEN}other/x", {}, root, copied).startswith("httk-")
+    for climbing in (f"{jobflow_runner.INPUT_TOKEN}prev/calc/../../x", f"{jobflow_runner.EXEC_TOKEN}id/../x"):
+        with pytest.raises(ValueError, match="climbs out"):
+            jobflow_runner._resolve_exec(climbing, {"id": "/exec"}, root, copied)
+
+
+def test_directory_inputs_follow_links_and_refuse_dangling_ones(tmp_path: Path) -> None:
+    package = _jobflow_package(
+        tmp_path / "directory-input-package",
+        _DIRECTORY_FLOW,
+        inputs="[workflow.inputs.prev_dir]\ndirectory = true\n",
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    outside = tmp_path / "POTCAR"
+    outside.write_text("potcar\n", encoding="utf-8")
+    calculation = tmp_path / "calc"
+    calculation.mkdir()
+    (calculation / "POTCAR").symlink_to(outside)
+    job = new_job(workspace, package, inputs={"prev_dir": str(calculation)})
+    staged = find(workspace, job.job_id).path / "files" / "inputs" / "prev_dir" / "calc" / "POTCAR"
+    assert staged.is_file() and not staged.is_symlink() and staged.read_text(encoding="utf-8") == "potcar\n"
+    (calculation / "WAVECAR").symlink_to(tmp_path / "missing")
+    with pytest.raises(ValueError, match="cannot stage directory"):
+        new_job(workspace, package, inputs={"prev_dir": str(calculation)})
+    with pytest.raises(ValueError, match="relative paths resolve against"):
+        new_job(workspace, package, inputs={"prev_dir": "no-such-calc"})
+
+
+def test_jobflow_httk_structure_with_site_moments_is_refused(tmp_path: Path) -> None:
+    atomistic = pytest.importorskip("httk.atomistic")
+    structure = atomistic.UnitcellStructure(
+        [[3, 0, 0], [0, 3, 0], [0, 0, 3]],
+        [[0, 0, 0]],
+        species_at_sites=["Fe"],
+        site_moments=atomistic.CollinearSiteMoments([2]),
+    )
+    package = _jobflow_package(tmp_path / "moments-package", "", inputs='[workflow.inputs.structure]\n')
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(ValueError, match="site moments.*magmom"):
+        new_job(workspace, package, inputs={"structure": structure})
+
+
+def test_child_resources_warn_when_a_table_exceeds_the_flow_maxtime() -> None:
+    warnings: list[str] = []
+    attempt = SimpleNamespace(
+        parameter=lambda name, default=None: [["relax*", {"maxtime": 7200, "procs": 4}]],
+        context=SimpleNamespace(resources={"maxtime": 3600}),
+        job=SimpleNamespace(resources={"procs": 1, "maxtime": 3600}),
+        log=SimpleNamespace(append=lambda kind, message: warnings.append(message)),
+    )
+    job = SimpleNamespace(name="relax 1", config=SimpleNamespace(manager_config={}))
+    resources = jobflow_runner._child_resources(cast(Attempt, attempt), job)
+    assert resources == {"procs": 4, "maxtime": "02:00:00"}
+    assert warnings == [
+        "jobflow job 'relax 1' asks for maxtime 02:00:00, but this flow's attempt has 01:00:00; the job gets 01:00:00"
+    ]
+
+
+def test_jobflow_caller_parameters_are_narrow(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    package = _jobflow_package(
+        tmp_path / "declared-package",
+        _OVERRIDE_FLOW,
+        parameters='[workflow.parameters.offset]\ntype = "integer"\n',
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with caplog.at_level("WARNING"):
+        new_job(workspace, package, parameters={"jobflow_override": []})
+    assert any("'jobflow_override' is not declared" in record.getMessage() for record in caplog.records)
+    with pytest.raises(ValueError, match="reserved language parameter 'jobflow_job_resources'"):
+        new_job(workspace, package, parameters={"jobflow_job_resources": [["*", {"procs": 64}]]})
+    with pytest.raises(ValueError, match=r"jobflow_overrides\[0\] must be an object whose kind"):
+        new_job(workspace, package, parameters={"jobflow_overrides": [{"kind": []}]})
+
+
+def test_dispatcher_detection_does_not_import_the_vasp_package() -> None:
+    probe = (
+        "import sys; from httk.workflow.compat.jobflow import jobflow_runner as r; "
+        "print(r._dispatcher_installed(), 'httk.codes.vasp' in sys.modules)"
+    )
+    import subprocess
+
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+    installed, imported = result.stdout.split()
+    if installed != "True":
+        pytest.skip("needs httk-workflow-vasp's httk.codes.vasp.launch")
+    assert imported == "False"

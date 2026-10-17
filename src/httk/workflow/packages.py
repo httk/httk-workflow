@@ -230,9 +230,15 @@ def _validate_input_table(
     *,
     language: bool = False,
     allow_port: bool = False,
+    allow_directory: bool = False,
 ) -> tuple[dict[str, object], str | None]:
     path = f"[workflow.inputs.{name}]"
-    _unknown(raw, {"destination", "description", "entry_type", "ref", "role", "port", "required"}, path, directory)
+    _unknown(
+        raw,
+        {"destination", "description", "entry_type", "ref", "role", "port", "required", "directory"},
+        path,
+        directory,
+    )
     destination = raw.get("destination")
     if language and destination is not None:
         raise _error(directory, f"{path}.destination is implied by the format")
@@ -254,6 +260,13 @@ def _validate_input_table(
         result["port"] = name
     if destination is not None:
         result["destination"] = destination
+    if "directory" in raw:
+        if not isinstance(raw["directory"], bool):
+            raise _error(directory, f"{path}.directory must be a boolean")
+        if not allow_directory:
+            raise _error(directory, f"{path}.directory is only supported by [workflow.runner] format = \"jobflow\"")
+        if raw["directory"]:
+            result["directory"] = True
     for key in ("description", "entry_type", "ref"):
         value = _optional_string(raw, key, path, directory)
         if value is not None:
@@ -831,6 +844,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             root,
             language=lang is not None,
             allow_port=lang is not None and (document_member is not None or lang.open_ports),
+            allow_directory=language_name == "jobflow",
         )
         if str(metadata["role"]) in roles:
             raise _error(root, f"[workflow.inputs.{input_name}].role is duplicated")
