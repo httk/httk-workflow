@@ -364,12 +364,15 @@ for one JSON document). Relative paths are taken from the current directory.
   snapshot directories by hand (`workspace-daemons/<hash>` and
   `<hash>.snapshots` below the *httk* data directory by default). A snapshot
   from an earlier policy format is refused at start; there is no migration.
-- `check` and `run` first activate the configuration (see
+- `check`, `run` and `reload` first activate the configuration (see
   [Configuration changes](#configuration-changes)).
 - `check` enters the real broker sandbox and checks the scheduler clients,
   without submitting work or validating compute-node execution.
 - `run --once` processes one bounded scan. `run` polls until SIGINT or
-  SIGTERM; a site service supervisor can restart the foreground daemon.
+  SIGTERM; a site service supervisor can restart the foreground daemon. `run`
+  starts the sandboxed daemon as a child process and forwards SIGTERM, SIGINT
+  and SIGHUP to it; it exits with the daemon's status (128 plus the signal
+  number after a signal) and restarts it only after a configuration change.
 - The layout is fixed by the workspace path; nothing is written under the
   *httk* data directory (`~/.local/share/httk/...`). Slurm
   writes manager output to `WORKSPACE/logs/launchers/<handle>.out`, reachable
@@ -453,27 +456,36 @@ until Slurm's time limit drains it; see {doc}`taskmanager`.
 ### Configuration changes
 
 Edit a launcher bundle with `httk launcher configure`, or the daemon
-configuration with `httk workspace daemon configure`, then restart the daemon:
+configuration with `httk workspace daemon configure`, then reload it:
 
 ```console
 httk workspace daemon configure /proj/campaign/workspace --add launchers=large \
   --remove authorized_keys=ed25519:REPLACE_WITH_REVOKED_KEY
-httk workspace daemon run /proj/campaign/workspace
+httk workspace daemon reload /proj/campaign/workspace
 ```
 
 `configure` approves the result exactly as a start would and saves it only
 when it is accepted; it publishes nothing and works while a daemon runs. Every
-`check` and `run` compiles the saved configuration with the current launcher
-bundles. When the result differs from the active runtime snapshot, it publishes
-a new snapshot, rewrites `daemon.json` and prints the launchers whose approval
-changed; otherwise it publishes nothing. Activation is not refused while a
-daemon runs: running instances notice the new configuration at their next
-admission or decision and exit, so a supervisor restarts them on it. Clients
-read configuration digests live from `daemon.json` and need no reconfiguration.
+`reload`, `check` and `run` compiles the saved configuration with the current
+launcher bundles. When the result differs from the active runtime snapshot, it
+publishes a new snapshot, rewrites `daemon.json` and prints the launchers whose
+approval changed; otherwise it publishes nothing (`reload` prints that the
+configuration is unchanged). A refused configuration activates nothing, and
+`reload` exits with status 2 and the reason, as `run` does. `reload` works
+whether or not a daemon runs. A running daemon, idle or not, notices the new
+snapshot at its next mailbox poll or request, once any scheduler check in
+progress has finished, logs `daemon_retired`, and stops; a daemon still
+starting stops the same way. `httk workspace daemon run` then prints `daemon
+restarting on the changed configuration` and starts it again on the snapshot
+active at that moment, without compiling the configuration again, while
+`run --once` just stops with status 0. Clients read configuration digests live
+from `daemon.json` and need no reconfiguration.
 
-Queued and running managers keep the settings they were submitted with. New
-starts must name a currently approved launcher and its exact digest; a
-retained old snapshot does not authorize them. Activation preserves the
+The daemon never cancels managers when it stops or restarts: queued and
+running managers keep running, and the restarted daemon follows them by their
+Slurm job IDs from the ledger. They keep the sbatch settings they were
+submitted with. New starts must name a currently approved launcher and its
+exact digest; a retained old snapshot does not authorize them. Activation preserves the
 enrollment, ledger, response key and old snapshots. Installed binaries and
 site configuration file contents remain operator-maintained external
 dependencies.
@@ -750,7 +762,23 @@ allowance. The filesystem rules of the mailbox are specified in
 The foreground daemon logs to stdout: one line per request (operation, request
 ID, outcome), each submitted Slurm job ID, every manager state change and
 published manager log, every failed Slurm client call with its exit code and
-error output, and startup and check results.
+error output, and startup and check results. A count line summarizes the
+managers at a glance; it appears at the first poll and again whenever a count
+changes:
+
+```text
+2026-10-17 12:00:00,000 INFO daemon_managers starting=0 queued=2 running=3 unknown=0 completed=12 failed=1 cancelled=0
+```
+
+`starting` counts starts decided but not yet submitted; `queued` submitted
+managers not yet observed or waiting for their allocation (`PENDING`,
+`CONFIGURING`, `REQUEUED`, `SPECIAL_EXIT` and the other requeue and hold
+states); `running` those in `RUNNING`, `COMPLETING`, `STAGE_OUT`, `SIGNALING`,
+`SUSPENDED`, `STOPPED` or `RESIZING`; `completed` and `cancelled` those
+states; `failed` the other final states (`FAILED`, `TIMEOUT`, `OUT_OF_MEMORY`,
+`NODE_FAIL`, `PREEMPTED`, `BOOT_FAIL`, `DEADLINE`) and `GONE`; and `unknown`
+uncertain submissions and managers in `UNKNOWN` or any other state. Refused
+starts are not counted. Scheduler states are checked about once a minute.
 
 While a submitted job runs, Slurm writes its output, with stderr merged in, to
 `logs/launchers/<handle>.out` in the workspace shared filesystem (the
@@ -949,10 +977,11 @@ services.
 ### PMI-2 launches (Intel MPI)
 
 Intel MPI under Slurm needs `srun --mpi=pmi2`. Set it on the daemon's approved
-launcher, then restart the daemon so `run` picks up the changed launcher:
+launcher, then reload the daemon so it picks up the changed launcher:
 
 ```bash
 httk launcher configure --set manager.launch_mpi=pmi2 small
+httk workspace daemon reload WORKSPACE
 ```
 
 The setting is pinned on the managers the daemon starts, and the built-in

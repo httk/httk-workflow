@@ -1740,7 +1740,8 @@ def test_an_activation_change_retires_an_instance_at_its_next_admission_without_
         _publish(broker, start)
         _publish(broker, health)
         broker.run(threading.Event())  # returns by itself once retired
-        assert broker.retired and len(fences) == 3  # admission and decision of the start, then the health
+        # The poll, the admission and decision of the start, then the health's admission.
+        assert broker.retired and len(fences) == 4
         assert _read(broker, start).outcome == "submitted" and len(gateway.submissions) == 1
         assert ledger.lookup_request(health.request_id) is None
         assert broker.requests.read(f"{health.request_id}.json") == encode_request(health)
@@ -1758,7 +1759,7 @@ def test_an_activation_change_between_admission_and_decision_leaves_the_start_to
 
     def activation() -> None:
         fences.append(None)
-        if len(fences) > 1:
+        if len(fences) > 2:  # after the poll's and the admission's fences
             raise OSError("active.json vanished")
 
     broker.activation = activation
@@ -1774,6 +1775,150 @@ def test_an_activation_change_between_admission_and_decision_leaves_the_start_to
         assert _read(successor, start).outcome == "submitted" and _submissions(successor) == 1
     finally:
         stack.close()
+
+
+def test_an_idle_instance_retires_at_its_next_poll(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, _ = _open(tmp_path, policy)
+    changed: list[None] = []
+
+    def activation() -> None:
+        if changed:
+            raise ValueError("daemon startup selected a stale or mismatched active policy snapshot")
+
+    broker.activation = activation
+    try:
+        broker.process_once(threading.Event())
+        assert not broker.retired
+        changed.append(None)  # 'daemon reload' activated a new configuration; no request is published
+        with caplog.at_level(logging.WARNING):
+            assert broker.process_once(threading.Event()) == 0
+        assert broker.retired and "daemon_retired" in caplog.text
+    finally:
+        stack.close()
+
+
+def _counts(caplog: pytest.LogCaptureFixture) -> list[dict[str, int]]:
+    lines = [record.getMessage() for record in caplog.records if record.getMessage().startswith("daemon_managers ")]
+    return [{key: int(value) for key, value in (item.split("=") for item in line.split()[1:])} for line in lines]
+
+
+def test_the_manager_count_line_is_logged_when_the_counts_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch)
+    stop = threading.Event()
+    zero = dict.fromkeys(("starting", "queued", "running", "unknown", "completed", "failed", "cancelled"), 0)
+    try:
+        with caplog.at_level(logging.INFO):
+            broker.process_once(stop)
+            broker.process_once(stop)
+            assert _counts(caplog) == [zero]  # once on the first poll, then only on a change
+            for number in (1, 2):
+                _publish(broker, _request(tmp_path, number, "start_manager", profile="cpu"))
+            broker.process_once(stop)  # observed PENDING at once
+            gateway.state = "RUNNING"
+            clock[0] += 60
+            broker.process_once(stop)
+            clock[0] += 1
+            broker.process_once(stop)
+        assert _counts(caplog) == [zero, {**zero, "queued": 2}, {**zero, "running": 2}]
+    finally:
+        stack.close()
+
+
+def test_manager_rows_are_counted_by_ledger_and_scheduler_state() -> None:
+    rows: list[dict[str, str | None]] = [
+        {"state": state, "scheduler_state": scheduler}
+        for state, scheduler in [
+            ("received", None),
+            ("submitting", None),
+            ("submitted", None),
+            ("submitted", "PENDING"),
+            ("submitted", "REQUEUE_HOLD"),
+            ("submitted", "RUNNING"),
+            ("submitted", "SUSPENDED"),
+            ("submitted", "COMPLETING"),
+            ("uncertain", None),
+            ("submitted", "UNKNOWN"),
+            ("submitted", "COMPLETED"),
+            ("submitted", "FAILED"),
+            ("submitted", "TIMEOUT"),
+            ("submitted", "GONE"),
+            ("submitted", "CANCELLED"),
+            ("submitted", "SPECIAL_EXIT"),
+            ("submitted", "NODE_FAIL"),
+            ("submitted", "REVOKED"),
+            ("refused", None),
+            ("done", None),
+        ]
+    ]
+    assert service_module._manager_counts(rows) == (2, 4, 3, 3, 1, 4, 1)
+
+
+def test_the_service_exits_with_the_reload_status_once_retired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    initialized = Workspace.initialize(tmp_path / "site/workspace", durable=False)
+    policy = replace(_policy(tmp_path), workspace_id=initialized.workspace_id)
+    for path in (policy.daemon, policy.requests, policy.responses, policy.broker):
+        path.mkdir(parents=True)
+    initialize_response_seed(policy.daemon)
+    with Ledger(policy.broker, policy.workspace_id, policy.enrollment_id, initialize=True):
+        pass
+    selected = tmp_path / "snapshots/selected.json"
+    active = policy.daemon / "active.json"
+    active.write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
+    active.chmod(0o600)
+    monkeypatch.setattr(service_module, "_SNAPSHOT_POLICY", selected)
+    monkeypatch.setattr(service_module, "_STATE_DIRECTORY", policy.broker)
+    monkeypatch.setattr(service_module, "_DAEMON_DIRECTORY", policy.daemon)
+    monkeypatch.setattr(service_module, "_EXCHANGE_DIRECTORY", policy.exchange)
+    monkeypatch.setattr(service_module, "SlurmGateway", lambda configured: RecordingGateway(configured))
+    monkeypatch.setattr(service_module, "load_policy", lambda _path: policy)
+    monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(service_module, "read_execution_scope", lambda *_args: _IDENTITY)
+    original = Broker.process_once
+
+    def reload_after_the_first_poll(broker: Broker, stop: threading.Event) -> int:
+        processed = original(broker, stop)
+        replacement = tmp_path / "snapshots/replacement.json"
+        active.write_text(json.dumps(activation_document(replacement, policy)), encoding="utf-8")
+        return processed
+
+    monkeypatch.setattr(Broker, "process_once", reload_after_the_first_poll)
+    with caplog.at_level(logging.INFO, logger="httk.workflow"):
+        status = service_module._run(_service_arguments(selected, selected, check=False, once=False))
+    assert status == service_module.RELOAD_EXIT_STATUS == 75
+    assert "daemon_stopped reason=activation_changed" in caplog.text
+    # A retired --once scan exits 0: nothing restarts it, and a cron wrapper must not see a failure.
+    active.write_text(json.dumps(activation_document(selected, policy)), encoding="utf-8")
+
+    def reload_before_the_scan(broker: Broker, stop: threading.Event) -> int:
+        replacement = tmp_path / "snapshots/replacement.json"
+        active.write_text(json.dumps(activation_document(replacement, policy)), encoding="utf-8")
+        return original(broker, stop)
+
+    monkeypatch.setattr(Broker, "process_once", reload_before_the_scan)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="httk.workflow"):
+        assert service_module._run(_service_arguments(selected, selected, check=False, once=True)) == 0
+    assert "daemon_stopped reason=activation_changed" in caplog.text
+    # A reload between 'daemon run' selecting the snapshot and the service's startup check restarts as well,
+    # but only a polling service, and only for another snapshot: a mismatched one stays a startup failure.
+    assert service_module._run(_service_arguments(selected, selected, check=False, once=False)) == 75
+    with pytest.raises(ValueError, match="stale or mismatched"):
+        service_module._run(_service_arguments(selected, selected, check=False, once=True))
+    active.write_text(json.dumps(activation_document(selected, replace(policy, poll_seconds=1.0))), encoding="utf-8")
+    with pytest.raises(ValueError, match="stale or mismatched"):
+        service_module._run(_service_arguments(selected, selected, check=False, once=False))
+    monkeypatch.setattr(service_module, "_run", lambda _arguments: service_module.RELOAD_EXIT_STATUS)
+    assert (
+        service_module.main(
+            ["--policy", "/x", "--policy-source", "/y", "--execution-scope-fd", "1", "--host-identity", "{}"]
+        )
+        == 75
+    )
 
 
 def test_the_decision_is_durable_before_sbatch_and_the_response_before_publication(

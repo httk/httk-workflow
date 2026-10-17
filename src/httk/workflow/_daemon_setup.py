@@ -814,7 +814,7 @@ def configure(
 ) -> dict[str, object]:
     """Change the saved daemon configuration after compiling the result as activation would.
 
-    Nothing is published: the daemon activates the configuration when it next starts.
+    Nothing is published: ``reload`` or the next daemon start activates the configuration.
 
     :param workspace: Workspace data root.
     :param changes: ``(operation, "KEY=VALUE")`` pairs with operation ``set``, ``add`` or ``remove``,
@@ -838,9 +838,9 @@ def activate(workspace: Path) -> tuple[Path, tuple[str, ...] | None]:
     The launcher log directory ``logs/launchers/``, where Slurm writes each manager's output, is created when
     missing and ``exchange/daemon.json`` is reinstalled every time, since the client may have replaced it. A
     changed compilation is published as a new active snapshot even while daemon instances run: the ledger holds
-    no lock, and every running instance re-reads the active snapshot before each admission and decision and
-    stops once it changed (never between deciding a submission and submitting it), so the change takes effect
-    when the daemon is started again.
+    no lock, and every running instance re-reads the active snapshot at each poll and before each admission and
+    decision and stops once it changed (never between deciding a submission and submitting it); ``daemon run``
+    then starts it again on the change.
 
     :param workspace: Workspace data root.
     :return: The active runtime snapshot, and the names of the launchers whose approval changed, or

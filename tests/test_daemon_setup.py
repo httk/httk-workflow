@@ -866,12 +866,59 @@ def test_configure_through_the_cli_prints_the_configuration_and_when_it_applies(
     assert _daemon_cli.command(arguments, program="httk") == 0
     lines = capsys.readouterr().out.splitlines()
     assert "launchers=small" in lines and f"authorized_keys={AUTHORIZED_KEY},{OTHER_KEY}" in lines
-    assert (
-        lines[-1]
-        == f"the configuration takes effect when the daemon next starts: httk workspace daemon run {workspace}"
-    )
+    assert f"httk workspace daemon reload {workspace}" in lines[-1]
+    assert f"httk workspace daemon run {workspace}" in lines[-1]
     assert _daemon_cli.command(["configure", workspace, "--set", "cluster=x"], program="httk") == 2
     assert "cluster is fixed by the enrollment" in capsys.readouterr().err
+
+
+def test_reload_activates_a_changed_bundle_without_a_running_daemon(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    layout = _layout(tmp_path)
+    first = _initialize(layout)
+    capsys.readouterr()
+    workspace = str(layout.workspace.root)
+    assert _daemon_cli.command(["reload", workspace], program="httk") == 0
+    assert "unchanged" in capsys.readouterr().out and _active(layout) == first
+    _rewrite_launcher("small", **{"slurm.cpus_per_task": "16"})
+    assert _daemon_cli.command(["reload", workspace], program="httk") == 0
+    assert "changed launchers: small" in capsys.readouterr().out
+    assert _active(layout) != first
+    assert dict(load_policy(_active(layout)).launcher("small").settings)["slurm.cpus_per_task"] == "16"
+    _rewrite_launcher("small", **{"manager.confine": None})
+    assert _daemon_cli.command(["reload", workspace], program="httk") == 2
+    assert "httk workspace daemon: " in capsys.readouterr().err
+
+
+def test_a_restart_selects_again_when_a_reload_moves_the_pointer_during_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path)
+    first = _initialize(layout)
+    _rewrite_launcher("small", **{"slurm.cpus_per_task": "16"})
+    second = _activate(layout)
+    assert second != first
+    real = _daemon_setup.read_active_snapshot
+    stale = (first, real(_state(layout))[1])  # what the pointer named before the reload, as far as paths go
+    reads: list[None] = []
+
+    def read(state: Path) -> tuple[Path, str]:
+        # The selection and _active() read the pointer before the reload; verification reads it after.
+        reads.append(None)
+        return stale if len(reads) <= 2 else real(state)
+
+    monkeypatch.setattr(_daemon_setup, "read_active_snapshot", read)
+    assert _daemon_cli._restart_snapshot(layout.workspace.root) == second
+    # A same-path mismatch is not a reload: it fails at once with the diagnostic.
+    reads.clear()
+    monkeypatch.setattr(_daemon_setup, "read_active_snapshot", lambda _state: stale)
+    with pytest.raises(ValueError, match="stale or mismatched"):
+        _daemon_cli._restart_snapshot(layout.workspace.root)
+    monkeypatch.setattr(_daemon_setup, "read_active_snapshot", real)
+    (_state(layout) / "active.json").unlink()
+    with pytest.raises(OSError):
+        _daemon_cli._restart_snapshot(layout.workspace.root)
 
 
 @pytest.mark.parametrize("source", ["declared", "environment", "default", "none"])

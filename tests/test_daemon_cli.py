@@ -4,8 +4,11 @@ import argparse
 import base64
 import json
 import os
+import select
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -61,7 +64,7 @@ def test_the_workflow_tree_exposes_the_same_daemon_subcommands(
     context = CLIContext(program="httk", cwd=tmp_path)
     assert workflow_cli.command(["workspace", "daemon"], context) == 0
     output = capsys.readouterr().out
-    assert all(mode in output for mode in ("init", "configure", "show", "check", "run"))
+    assert all(mode in output for mode in ("init", "configure", "show", "check", "run", "reload"))
     observed: list[argparse.Namespace] = []
 
     def launch(arguments: argparse.Namespace) -> int:
@@ -242,10 +245,10 @@ def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
             },
         ),
     ]
-    assert capsys.readouterr().out == (
-        f"{_RENDERED}sandbox check passed\n{_RENDERED}"
-        "the configuration takes effect when the daemon next starts: httk workspace daemon run /workspace\n"
-    )
+    output = capsys.readouterr().out
+    assert output.startswith(f"{_RENDERED}sandbox check passed\n{_RENDERED}")
+    hint = output.removeprefix(f"{_RENDERED}sandbox check passed\n{_RENDERED}")
+    assert "httk workspace daemon reload /workspace" in hint and "httk workspace daemon run /workspace" in hint
 
 
 def test_show_renders_or_prints_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -348,7 +351,7 @@ def test_failed_check_keeps_the_enrollment_and_exits_2(
     assert "httk workspace daemon configure" in captured.err and "httk workspace daemon check" in captured.err
 
 
-@pytest.mark.parametrize(("mode", "flag"), [(["check"], "--check"), (["run", "--once"], "--once"), (["run"], None)])
+@pytest.mark.parametrize(("mode", "flag"), [(["check"], "--check"), (["run", "--once"], "--once")])
 @pytest.mark.parametrize("changed", [None, (), ("small",)])
 def test_run_modes_exec_the_bootstrap_with_the_activated_snapshot(
     mode: list[str],
@@ -386,3 +389,91 @@ def test_run_modes_exec_the_bootstrap_with_the_activated_snapshot(
     else:
         names = ", ".join(changed) or "none"
         assert output == f"activated the changed daemon configuration; changed launchers: {names}\n"
+
+
+def _child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str) -> tuple[list[object], list[Path]]:
+    """Make ``run`` supervise a tiny Python child instead of the bootstrap.
+
+    :return: The activations, and the snapshot each start was given.
+    """
+
+    activations: list[object] = []
+    snapshots: list[Path] = []
+
+    def activate(workspace: Path) -> tuple[Path, None]:
+        activations.append(workspace)
+        return tmp_path / "active.json", None
+
+    def bootstrap_argv(_workspace: Path, policy: Path, _flag: str | None) -> list[str]:
+        snapshots.append(policy)
+        return [sys.executable, "-c", code]
+
+    monkeypatch.setattr(_daemon_setup, "activate", activate)
+    # Another process activated this snapshot meanwhile; the supervisor serves it without recompiling.
+    monkeypatch.setattr(_daemon_cli, "_restart_snapshot", lambda _workspace: tmp_path / "other.json")
+    monkeypatch.setattr(_daemon_cli, "_bootstrap_argv", bootstrap_argv)
+    monkeypatch.setattr(_daemon_cli, "_detach", lambda: None)  # the test process keeps its descriptors
+    return activations, snapshots
+
+
+def test_run_starts_the_daemon_again_on_the_active_snapshot_after_a_reload_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    counter = tmp_path / "starts"
+    code = (
+        f"import os,sys\np={str(counter)!r}\nn=len(open(p).read()) if os.path.exists(p) else 0\n"
+        "open(p,'a').write('x')\n"
+        "assert os.getcwd()=='/' and sys.stdin.read()=='' and os.environ['PATH']=='/usr/bin:/bin'\n"
+        "raise SystemExit(75 if n==0 else 0)"
+    )
+    monkeypatch.delenv("PATH")
+    activations, snapshots = _child(tmp_path, monkeypatch, code)
+    handlers = [signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)]
+    assert _daemon_cli.command(["run", str(tmp_path)], program="httk") == 0
+    assert activations == [tmp_path] and counter.read_text() == "xx"
+    assert snapshots == [tmp_path / "active.json", tmp_path / "other.json"]
+    assert "restarting" in capsys.readouterr().out
+    assert [signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)] == handlers
+
+
+@pytest.mark.parametrize(("code", "status"), [("raise SystemExit(3)", 3), ("import os;os.kill(os.getpid(),9)", 137)])
+def test_run_returns_any_other_child_status_without_restarting(
+    code: str, status: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    activations, snapshots = _child(tmp_path, monkeypatch, code)
+    assert _daemon_cli.command(["run", str(tmp_path)], program="httk") == status
+    assert len(activations) == len(snapshots) == 1
+
+
+def test_run_holds_no_inherited_descriptor_and_does_not_restart_after_a_forwarded_sigterm(tmp_path: Path) -> None:
+    started = tmp_path / "started"
+    child = (
+        "import signal,sys,time\nsignal.signal(signal.SIGTERM,lambda *_:sys.exit(75))\n"
+        f"open({str(started)!r},'a').write('x')\ntime.sleep(30)"
+    )
+    script = f"""
+import sys
+from pathlib import Path
+from httk.workflow import _daemon_cli, _daemon_setup
+_daemon_setup.activate = lambda workspace: (Path('/active.json'), None)
+_daemon_cli._bootstrap_argv = lambda *_a: [sys.executable, '-c', {child!r}]
+raise SystemExit(_daemon_cli.command(['run', {str(tmp_path)!r}], program='httk workspace daemon'))
+"""
+    reader, writer = os.pipe()
+    process = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True, pass_fds=(writer,))
+    os.close(writer)
+    try:
+        deadline = time.monotonic() + 20
+        while not started.exists() and time.monotonic() < deadline and process.poll() is None:
+            time.sleep(0.01)
+        assert started.exists()
+        # The supervisor closed the inherited pipe end: its reader sees EOF while the daemon still runs.
+        assert select.select([reader], [], [], 5)[0] and os.read(reader, 1) == b""
+        assert process.poll() is None
+        process.send_signal(signal.SIGTERM)
+        stdout, _ = process.communicate(timeout=20)
+    finally:
+        process.kill()
+        os.close(reader)
+    # The child stopped with the reload status on the forwarded SIGTERM, yet it was not started again.
+    assert process.returncode == 75 and started.read_text() == "x" and "restarting" not in stdout

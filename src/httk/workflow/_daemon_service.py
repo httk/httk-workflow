@@ -19,7 +19,7 @@ from types import FrameType
 from typing import TypedDict, cast
 
 from . import _kernel
-from ._daemon_activation import activation_document, verify_active_snapshot
+from ._daemon_activation import activation_document, read_active_snapshot, verify_active_snapshot
 from ._daemon_auth import CLOCK_SKEW_SECONDS, check_request_time, sign_response, verify_request
 from ._daemon_jobs import JobExecutor
 from ._daemon_keys import read_response_seed, response_seed_path
@@ -64,6 +64,17 @@ _FINAL_STATES = frozenset(
         "DEADLINE",
     }
 )
+#: Scheduler states of a manager that holds, or is about to hold, its allocation.
+_RUNNING_STATES = frozenset({"RUNNING", "COMPLETING", "STAGE_OUT", "SIGNALING", "SUSPENDED", "STOPPED", "RESIZING"})
+#: Scheduler states of a manager still waiting for its allocation.
+_QUEUED_STATES = frozenset(
+    {None, "PENDING", "CONFIGURING", "REQUEUED", "REQUEUE_HOLD", "REQUEUE_FED", "RESV_DEL_HOLD", "SPECIAL_EXIT"}
+)
+#: Final scheduler states of a manager that did not complete, and ``GONE``.
+_FAILED_STATES = (_FINAL_STATES - {"COMPLETED", "CANCELLED"}) | {"GONE"}
+_COUNTED = ("starting", "queued", "running", "unknown", "completed", "failed", "cancelled")
+#: The service exit status after the active configuration changed, so ``daemon run`` starts it again (EX_TEMPFAIL).
+RELOAD_EXIT_STATUS = 75
 _MAX_WARNED = 4096
 _MAX_REPORTED = 4096
 _MANAGERS_FORMAT = "httk-workspace-daemon-managers"
@@ -115,6 +126,37 @@ def _read_tail(path: Path, limit: int) -> bytes:
         return bytes(data)
     finally:
         os.close(descriptor)
+
+
+def _manager_counts(rows: list[dict[str, str | None]]) -> tuple[int, ...]:
+    """Count published manager rows as starting, queued, running, unknown, completed, failed and cancelled.
+
+    Starts that were refused or answered without a submission are not managers and are not counted.
+    """
+
+    counts: dict[str, int] = dict.fromkeys(_COUNTED, 0)
+    for row in rows:
+        ledger, state = row["state"], row["scheduler_state"]
+        if ledger in ("received", "submitting"):
+            key = "starting"
+        elif ledger == "uncertain":
+            key = "unknown"
+        elif ledger != "submitted":
+            continue
+        elif state in _QUEUED_STATES:
+            key = "queued"
+        elif state in _RUNNING_STATES:
+            key = "running"
+        elif state == "COMPLETED":
+            key = "completed"
+        elif state == "CANCELLED":
+            key = "cancelled"
+        elif state in _FAILED_STATES:
+            key = "failed"
+        else:  # UNKNOWN, and any state this daemon does not recognize
+            key = "unknown"
+        counts[key] += 1
+    return tuple(counts.values())
 
 
 def _parse_observation(data: bytes | None) -> _Observation | None:
@@ -221,9 +263,9 @@ class _ActivationChanged(Exception):
 class Broker:
     """Process bounded mailbox requests against the shared lock-free ledger.
 
-    Any number of brokers may serve one enrollment at once. Before every admission and every decision a
-    broker calls *activation*; when it reports a change, the broker finishes its current step and retires
-    (:attr:`retired`), never between a ``submit`` decision and the submission itself.
+    Any number of brokers may serve one enrollment at once. At the start of every poll, and before every
+    admission and every decision, a broker calls *activation*; when it reports a change, the broker finishes its
+    current step and retires (:attr:`retired`), never between a ``submit`` decision and the submission itself.
 
     :param policy: Validated protected daemon policy.
     :param gateway: Fixed Slurm gateway for scheduler operations.
@@ -279,6 +321,7 @@ class Broker:
         self.retired = False
         self._observed_at: float | None = None
         self._warned: set[tuple[str, str]] = set()
+        self._counts: tuple[int, ...] | None = None
 
     @staticmethod
     def _response(request: Request, outcome: str, **fields: str | None) -> Response:
@@ -741,6 +784,11 @@ class Broker:
 
         if self.retired:
             return 0
+        try:
+            self._fence()  # an idle instance retires within one poll as well
+        except _ActivationChanged as exc:
+            self._retire(exc)
+            return 0
         if self.job_executor is not None:
             self.job_executor.owner.check_alive()
         now = time.time()
@@ -775,12 +823,7 @@ class Broker:
             try:
                 self._process(publication, request)
             except _ActivationChanged as exc:
-                self.retired = True
-                _LOGGER.warning(
-                    "daemon_retired reason=%s: the active daemon configuration changed; this instance admits and "
-                    "decides nothing more and stops; start the daemon again to serve the new configuration",
-                    excerpt(str(exc)),
-                )
+                self._retire(exc)
                 break
         if self.exchange is not None:
             try:
@@ -789,12 +832,27 @@ class Broker:
                     self._observe(rows, now)
                 except Exception as exc:
                     _LOGGER.warning("daemon_manager_observation_failed reason=%s", excerpt(str(exc)))
-                self.exchange.poll(self._manager_rows(rows))
+                published = self._manager_rows(rows)
+                self.exchange.poll(published)
+                counts = _manager_counts(published)
+                if counts != self._counts:
+                    self._counts = counts
+                    _LOGGER.info(
+                        "daemon_managers %s", " ".join(f"{k}={n}" for k, n in zip(_COUNTED, counts, strict=True))
+                    )
             except Exception:
                 _LOGGER.exception("daemon_exchange_failed")
         if available:
             self._sweep_responses(now)
         return processed
+
+    def _retire(self, exc: _ActivationChanged) -> None:
+        self.retired = True
+        _LOGGER.warning(
+            "daemon_retired reason=%s: the active daemon configuration changed; this instance admits and decides "
+            "nothing more and stops; 'daemon run' restarts on the new configuration, a --once instance just stops",
+            excerpt(str(exc)),
+        )
 
     def _observation(self, handle: str) -> _Observation | None:
         return _parse_observation(self.ledger.observation(handle))
@@ -992,7 +1050,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run(arguments: argparse.Namespace) -> None:
+def _run(arguments: argparse.Namespace) -> int:
     if arguments.policy != _SNAPSHOT_POLICY:
         raise ValueError(f"service policy must be {_SNAPSHOT_POLICY}")
     policy_source: Path = arguments.policy_source
@@ -1029,7 +1087,14 @@ def _run(arguments: argparse.Namespace) -> None:
                     max_submissions=policy.max_submissions,
                 )
             )
-            verify_active_snapshot(_DAEMON_DIRECTORY, policy_source, policy)
+            try:
+                verify_active_snapshot(_DAEMON_DIRECTORY, policy_source, policy)
+            except ValueError:
+                # Another activation superseded this snapshot since 'daemon run' selected it: restart on that one.
+                if arguments.check or arguments.once or read_active_snapshot(_DAEMON_DIRECTORY)[0] == policy_source:
+                    raise
+                _LOGGER.info("daemon_stopped reason=activation_changed workspace=%s", policy.workspace_id)
+                return RELOAD_EXIT_STATUS
             if arguments.check:
                 # Every record is validated whenever it is read; 'daemon check' also validates them all.
                 ledger.verify()
@@ -1056,7 +1121,7 @@ def _run(arguments: argparse.Namespace) -> None:
             stack.callback(responses.close)
             stack.callback(requests.close)
             if arguments.check:
-                return
+                return 0
             workspace = Workspace(policy.workspace)
             if workspace.workspace_id != policy.workspace_id:
                 raise ValueError("daemon policy workspace identity does not match the workspace")
@@ -1100,27 +1165,32 @@ def _run(arguments: argparse.Namespace) -> None:
             broker.run(stop, once=arguments.once)
             if broker.retired:
                 _LOGGER.info("daemon_stopped reason=activation_changed workspace=%s", policy.workspace_id)
+            # Only the supervised 'run' starts again; a retired --once scan just stops.
+            return RELOAD_EXIT_STATUS if broker.retired and not arguments.once else 0
     finally:
         signal.signal(signal.SIGINT, previous_int)
         signal.signal(signal.SIGTERM, previous_term)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the fixed daemon service command, logging to stdout, and return a process status."""
+    """Run the fixed daemon service command, logging to stdout, and return a process status.
+
+    The status is ``RELOAD_EXIT_STATUS`` when a polling (not ``--once``) broker retired because the active
+    configuration changed.
+    """
 
     # The service entry point owns the process; library modules stay handler-free.
     logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         arguments = _parser().parse_args(argv)
-        _run(arguments)
+        return _run(arguments)
     except (OSError, ValueError, LedgerError, SchedulerError, _kernel.OwnerLost) as exc:
         _LOGGER.error("daemon_service_failed reason=%s", exc)
         return 1
-    return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["Broker", "ExchangePublisher", "main"]
+__all__ = ["RELOAD_EXIT_STATUS", "Broker", "ExchangePublisher", "main"]

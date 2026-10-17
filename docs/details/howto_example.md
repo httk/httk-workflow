@@ -167,8 +167,9 @@ To modify a deamon configuration, do e.g.,:
 ```bash
 httk workspace daemon configure main --add launchers=large
 httk workspace daemon configure main --add "authorized_keys=<ANOTHER KEY>"
+httk workspace daemon reload main
 ```
-Restart the daemon after configuration changes. As a saftey feature, a deamon has a default quota of running 128 "managers".
+`reload` activates the changed configuration (also after `httk launcher configure`); a running `httk workspace daemon run` restarts on it by itself, and queued and running managers keep running. As a saftey feature, a deamon has a default quota of running 128 "managers".
 
 ## 6 Mount the exchange on the client
 
