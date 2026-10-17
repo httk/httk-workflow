@@ -1,0 +1,83 @@
+httk.workflow.storing
+=====================
+
+.. py:module:: httk.workflow.storing
+
+.. autoapi-nested-parse::
+
+   Store collected jobs into a file-backed SQLite store.
+
+   :func:`store_collected` is the storage counterpart of
+   :func:`~httk.workflow.collecting.collect` and
+   :func:`~httk.workflow.calculations.collect_tree`: it saves each collected job's
+   entries, its run and its product links, rewriting the content ids the
+   collectors produced into the ids the store mints (or an id ledger allocates).
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.storing.store_collected
+
+
+Module Contents
+---------------
+
+.. py:function:: store_collected(items, path, *, id_base, id_series = '1', ledger_path = None, ledger_keys = (), bare_runs = True, upgrade = False)
+
+   Save one bounded collected sweep into a file-backed SQLite store.
+
+   Every job's run is stored, including the run of a job whose workflow has
+   nothing to collect (a *bare* run) unless *bare_runs* is off, so parent and
+   child jobs alike leave provenance naming their workflow declarations. A
+   parent's run gains one ``has_artifact`` edge to the run of each child it
+   spawned that is stored in this sweep or already in the store; children are
+   stored first so their run ids exist when the parent's run is written.
+
+   The entries a recognized calculation read (the ``inputs`` of
+   :class:`~httk.workflow.collecting.CollectedJob`) are stored like its
+   outputs, and the run's input edges name their stored ids.
+   Collector outputs arrive carrying content ids; every edge, product link and
+   ``product_of`` reference is rewritten to the id the store stored it under.
+
+   With an id ledger, each record and run is keyed by its job coordinate and
+   role (:func:`~httk.workflow.ledger_key`), so a store rebuilt from the
+   same jobs keeps its ids. A job collected again with changed content is a
+   revision: the record or run keeps its id and the store appends a new
+   revision to its lineage. Views that cannot carry an explicit id, such as
+   structures, are store-minted and deduplicated by content.
+
+   A generic ``DataRecord`` whose property definition a typed record of the
+   ``records`` family carries (``TotalEnergyRecord`` for the core total energy)
+   is stored as that typed record, so its value is served and filterable; any
+   other definition stays a generic record, stored but not served as a value.
+   A dataclass entry that is not a registered record of its family is a
+   storage error rather than a row in an unserved table.
+
+   Each report is the job's collected summary plus ``"stored"`` (the stored
+   entry ids and run id, or ``None`` when nothing was stored, with
+   ``"skipped"`` saying why), ``"storage_error"`` when the job could not be
+   stored, and ``"revised"``, which is true when this call replaced an
+   existing entry of the job (its run, or one of its records) with a new
+   revision.
+
+   :param items: The collected jobs to store.
+   :param path: The SQLite store file path.
+   :param id_base: The entry-id namespace base.
+   :param id_series: The entry-id campaign series.
+   :param ledger_path: An id-ledger database to allocate stable ids
+       through, or ``None`` to let the store mint ids directly.
+   :param ledger_keys: The signing keys each appended segment is signed with.
+   :param bare_runs: Store the runs of jobs whose workflows have nothing to collect.
+   :param upgrade: Apply an additive layout upgrade the store needs (new record
+       kinds or families, for example a typed record a newer *httk* ships)
+       instead of refusing. Keep a backup of the store first.
+   :return: One report mapping per collected job.
+   :raises ValueError: If *httk-store* is unavailable, or the store at *path*
+       was created for a different set of entry types, predates typed records, or
+       needs an additive upgrade and *upgrade* is false.
+
+

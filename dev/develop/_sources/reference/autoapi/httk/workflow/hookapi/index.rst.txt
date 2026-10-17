@@ -1,0 +1,161 @@
+httk.workflow.hookapi
+=====================
+
+.. py:module:: httk.workflow.hookapi
+
+.. autoapi-nested-parse::
+
+   Small standard-library helpers for executable workflow hooks.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.hookapi.COLLECT_STREAM_FORMAT
+   httk.workflow.hookapi.COLLECT_STREAM_VERSION
+   httk.workflow.hookapi.INSTANTIATE_FORMAT
+   httk.workflow.hookapi.INSTANTIATE_VERSION
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.hookapi.Claim
+   httk.workflow.hookapi.Unclaimed
+   httk.workflow.hookapi.InstantiateRequest
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.hookapi.instantiate_main
+   httk.workflow.hookapi.collect_main
+
+
+Module Contents
+---------------
+
+.. py:data:: COLLECT_STREAM_FORMAT
+   :value: 'httk-workflow-collect-stream'
+
+
+.. py:data:: COLLECT_STREAM_VERSION
+   :value: 2
+
+
+.. py:data:: INSTANTIATE_FORMAT
+   :value: 'httk-workflow-instantiate'
+
+
+.. py:data:: INSTANTIATE_VERSION
+   :value: 3
+
+
+.. py:class:: Claim
+
+   A recognize hook's claim on a calculation directory.
+
+   :param identity: The collector-chosen identity of the calculation: a non-empty
+       URL-safe string without ``:`` (for example a SHA-256 hex digest), stable
+       for the same calculation wherever its directory is.
+   :param consumes: Name the subdirectories that belong to this calculation, as
+       POSIX paths relative to the claimed directory (for example the
+       displacement runs of a phonon calculation). They are still collected by
+       their own collectors, and this calculation's run links to theirs as child
+       runs; one that is not collected degrades this calculation.
+   :raises ValueError: If *identity* is empty or not URL-safe, or a *consumes*
+       entry is empty, absolute, has an empty or ``..`` segment, or repeats.
+
+
+   .. py:attribute:: identity
+      :type:  str
+
+
+   .. py:attribute:: consumes
+      :type:  tuple[str, ...]
+      :value: ()
+
+
+
+.. py:class:: Unclaimed
+
+   A recognize hook's refusal of a directory that belongs to its code but cannot be collected.
+
+   :param reason: Why, shown to the user (for example ``"several pw.x outputs"``).
+
+
+   .. py:attribute:: reason
+      :type:  str
+
+
+.. py:class:: InstantiateRequest
+
+   The version-3 request passed to an executable instantiate hook.
+
+   :param workflow: The declared workflow id.
+   :param tag: The caller's tag, or ``None``.
+   :param parameters: The parameters the caller supplied for the job; declared
+       defaults are not merged in.
+   :param inputs: Hook-consumed input descriptors. A descriptor is either
+       ``{"kind": "value", "value": ...}`` or
+       ``{"kind": "file", "path": "payload-relative/posix/path"}``.
+   :param defaults: The manifest's declared parameter defaults, applied after
+       the hook for every parameter still absent.
+
+   The process current working directory is the staging payload. File
+   descriptors therefore name files relative to that directory.
+
+
+   .. py:attribute:: workflow
+      :type:  str
+
+
+   .. py:attribute:: tag
+      :type:  str | None
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, Any]
+
+
+   .. py:attribute:: inputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, Any]]
+
+
+   .. py:attribute:: defaults
+      :type:  collections.abc.Mapping[str, Any]
+
+
+.. py:function:: instantiate_main(fn)
+
+   Run *fn* as a version-3 executable instantiate hook.
+
+   The hook receives one JSON document on standard input:
+   ``{"format": "httk-workflow-instantiate", "format_version": 3,
+   "workflow": <workflow-id>, "tag": <string-or-null>, "parameters":
+   {...}, "defaults": {...}, "inputs": {<name>: <descriptor>}}``. The current working
+   directory is the staging payload; file descriptors contain payload-relative
+   POSIX paths. The returned mapping must contain ``parameters`` and may
+   contain ``tag``; it is emitted as one JSON document on standard output.
+   Exceptions, malformed requests, and invalid responses are reported on
+   standard error and exit with status 1.
+
+   :param fn: Convert the request into parameter mutations and an optional tag.
+   :return: Nothing; the response is written as one JSON document.
+
+
+.. py:function:: collect_main(fn)
+
+   Run *fn* as a streaming executable collector.
+
+   :param fn: Convert one serialized job record into role-to-value wrappers.
+   :return: Nothing; responses are written as JSONL to standard output.
+
+
