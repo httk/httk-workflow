@@ -17,7 +17,7 @@ URI, which needs `git` and network access the first time.
 Every command below works without VASP installed: `examples/mock_vasp.py` writes
 the output files a finished run leaves behind, so the whole path — prepare, run,
 publish, collect — is exercised for real, with meaningless numbers. Install
-`httk-atomistic` to read the VASP results and `httk-store[db]` for
+`httk-workflow-vasp` (the `vasp.*` packages require it wherever the jobs run), `httk-atomistic` to read the VASP results and `httk-store[db]` for
 `collect --into results.sqlite --id-base httk.quickstart`; without the store, that command reports
 a teaching error (the shell example skips storage and continues).
 
