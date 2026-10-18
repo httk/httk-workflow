@@ -15,10 +15,21 @@ how a code-support distribution plugs into *httk-workflow*.
 | `git+https://github.com/httk/workflows-vasp#vasp-static` | `vasp.static` | one single-point calculation of a fixed structure |
 | `git+https://github.com/httk/workflows-vasp#vasp-relax-static` | `vasp.relax-static` | relax, then evaluate the relaxed structure statically |
 | `git+https://github.com/httk/workflows-vasp#vasp-band-structure` | `vasp.band-structure` | the electronic band structure of a fixed structure along its HPKOT k-path |
+| `git+https://github.com/httk/workflows-vasp#vasp-relax-ions` | `vasp.relax-ions` | one accurate ionic relaxation in a fixed cell (`ISIF = 2`) or at fixed volume (`ISIF = 4`) |
+| `git+https://github.com/httk/workflows-vasp#vasp-dos` | `vasp.dos` | the density of states, Fermi energy and band gaps on a dense uniform mesh |
+| `git+https://github.com/httk/workflows-vasp#vasp-dielectric` | `vasp.dielectric` | dielectric tensors, Born effective charges and piezoelectric tensor of an insulator (DFPT) |
+| `git+https://github.com/httk/workflows-vasp#vasp-elastic` | `vasp.elastic` | the elastic tensor and moduli from strained `vasp.relax-ions` child jobs |
+| `git+https://github.com/httk/workflows-vasp#vasp-eos` | `vasp.eos` | the Birch–Murnaghan equation of state from fixed-volume `vasp.relax-ions` child jobs |
+| `git+https://github.com/httk/workflows-vasp#vasp-phonons` | `vasp.phonons` | harmonic phonons with phonopy from `vasp.static` child jobs, with an optional non-analytical correction |
+| `git+https://github.com/httk/workflows-vasp#vasp-full-characterization` | `vasp.full-characterization` | one material characterized by the packages above as child jobs, sharing one relaxation, one self-consistent density and one dielectric run |
 
 Each takes one required input, `structure`, staged as `files/POSCAR`. Their job
 parameters, failure codes, postprocess scripts (`relaxation-report`,
-`relaxation-plot`) and result layout are documented in that repository.
+`relaxation-plot`) and result layout are documented in that repository. The
+property workflows (`vasp.dos` through `vasp.full-characterization`) collect
+typed records with *httk-analyse*, and `vasp.phonons` needs phonopy where jobs
+run. To install every workflow of the repository into a workspace at once, give
+its root URI: `httk workflow install --workspace WS 'git+https://github.com/httk/workflows-vasp@<ref>'`.
 
 ## Install, run, uninstall
 
