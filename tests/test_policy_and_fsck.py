@@ -31,7 +31,7 @@ def test_policy_is_written_at_initialization_and_round_trips(tmp_path: Path) -> 
     stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
     assert stored["policy"] == {
         "visibility_deadline_seconds": 5.0,
-        "retention": {"trash_days": 1.0, "owner_tombstone_days": 30.0},
+        "retention": {"trash_days": 1.0, "owner_tombstone_days": 30.0, "daemon_history_days": 30.0},
     }
     assert workspace.policy == WorkspacePolicy()
     assert workspace.policy.retention.attempt_control_days is None
@@ -142,7 +142,7 @@ def test_policy_command_shows_sets_and_refuses(tmp_path: Path, capsys) -> None:
     assert command(["workspace", "policy", "show", "--json", ws], context) == 0
     shown = json.loads(capsys.readouterr().out)[0]
     assert shown["visibility_deadline_seconds"] == 5.0
-    assert shown["retention"] == {"trash_days": 1.0, "owner_tombstone_days": 30.0}
+    assert shown["retention"] == {"trash_days": 1.0, "owner_tombstone_days": 30.0, "daemon_history_days": 30.0}
     assert (
         command(["workspace", "policy", "set", "--key", "visibility_deadline_seconds", "--value", "60", ws], context)
         == 0
@@ -182,7 +182,11 @@ def test_retention_keep_is_persisted_and_disables_collection(tmp_path: Path) -> 
     assert updated.retention.owner_tombstone_days is None
     assert updated.retention.trash_days is None
     stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
-    assert stored["policy"]["retention"] == {"trash_days": None, "owner_tombstone_days": None}
+    assert stored["policy"]["retention"] == {
+        "trash_days": None,
+        "owner_tombstone_days": None,
+        "daemon_history_days": 30.0,
+    }
     attached = Workspace(workspace.root)
     assert attached.policy.retention.owner_tombstone_days is None
     assert attached.policy.retention.trash_days is None
@@ -207,10 +211,23 @@ def test_a_policy_with_retired_members_still_attaches(tmp_path: Path) -> None:
 
 
 def test_public_retention_none_round_trips_as_keep() -> None:
-    policy = RetentionPolicy(trash_days=None, owner_tombstone_days=None)
+    policy = RetentionPolicy(trash_days=None, owner_tombstone_days=None, daemon_history_days=None)
 
-    assert policy.as_mapping() == {"trash_days": None, "owner_tombstone_days": None}
+    assert policy.as_mapping() == {"trash_days": None, "owner_tombstone_days": None, "daemon_history_days": None}
     assert RetentionPolicy.from_mapping(policy.as_mapping()) == policy
+
+
+def test_daemon_history_defaults_to_thirty_days_and_keep_never_retires() -> None:
+    # The confined daemon applies this member itself; gc has no category for it.
+    assert RetentionPolicy().daemon_history_days == 30.0
+    assert RetentionPolicy.from_mapping({}).daemon_history_days == 30.0
+    assert RetentionPolicy.from_mapping({"daemon_history_days": "keep"}).daemon_history_days is None
+    assert RetentionPolicy.from_mapping({"daemon_history_days": None}).daemon_history_days is None
+    assert RetentionPolicy.from_mapping({"daemon_history_days": 7}).daemon_history_days == 7.0
+    with pytest.raises(FormatError):
+        RetentionPolicy.from_mapping({"daemon_history_days": -1})
+    with pytest.raises(FormatError):
+        RetentionPolicy.from_mapping({"daemon_history_days": "forever"})
 
 
 @pytest.mark.timing

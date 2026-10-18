@@ -49,7 +49,7 @@ WORKSPACE_DIRECTORY = ".httk-workspace"
 # once in format.json so that two implementations attaching the same workspace
 # cannot disagree about them.
 POLICY_KEYS = frozenset({"visibility_deadline_seconds", "retention"})
-RETENTION_KEYS = frozenset({"attempt_control_days", "trash_days", "owner_tombstone_days"})
+RETENTION_KEYS = frozenset({"attempt_control_days", "trash_days", "owner_tombstone_days", "daemon_history_days"})
 #: Members older workspaces still store; reading ignores them and the next policy write drops them.
 _RETIRED_POLICY_KEYS = frozenset({"journal_segment_bytes", "lease_seconds"})
 _RETIRED_RETENTION_KEYS = frozenset({"journal_days"})
@@ -724,11 +724,14 @@ class RetentionPolicy:
     :param attempt_control_days: The retention period for attempt controls.
     :param trash_days: The retention period for discarded workspace entries.
     :param owner_tombstone_days: How long the ``dead.json`` tombstone of a recovered owner is kept.
+    :param daemon_history_days: How long the confined workspace daemon keeps a settled request, and a manager
+        start after it ended, in its ledger and ``managers.json``; the daemon applies it itself, not ``gc``.
     """
 
     attempt_control_days: float | None = None
     trash_days: float | None = 1.0
     owner_tombstone_days: float | None = 30.0
+    daemon_history_days: float | None = 30.0
 
     @classmethod
     def from_mapping(cls, value: object, name: str = "policy.retention") -> "RetentionPolicy":
@@ -758,6 +761,7 @@ class RetentionPolicy:
             attempt_control_days=optional_days("attempt_control_days"),
             trash_days=optional_days("trash_days"),
             owner_tombstone_days=optional_days("owner_tombstone_days"),
+            daemon_history_days=optional_days("daemon_history_days"),
         )
 
     def as_mapping(self) -> dict[str, object]:
@@ -769,7 +773,7 @@ class RetentionPolicy:
         result: dict[str, object] = {}
         for key in sorted(RETENTION_KEYS):
             value = getattr(self, key)
-            if value is not None or key in {"trash_days", "owner_tombstone_days"}:
+            if value is not None or key in {"trash_days", "owner_tombstone_days", "daemon_history_days"}:
                 result[key] = value
         return result
 

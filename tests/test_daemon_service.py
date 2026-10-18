@@ -20,10 +20,10 @@ from typing import Any, cast
 import pytest
 from httk.core.identity import identity_public_key
 
+from httk.workflow import _daemon_auth, _daemon_state, _kernel
 from httk.workflow import _daemon_service as service_module
-from httk.workflow import _daemon_state, _kernel
 from httk.workflow._daemon_activation import activation_document
-from httk.workflow._daemon_auth import sign_request, verify_response
+from httk.workflow._daemon_auth import CLOCK_SKEW_SECONDS, sign_request, verify_response
 from httk.workflow._daemon_keys import initialize_response_seed, response_public_key, response_seed_path
 from httk.workflow._daemon_mailbox import MailboxDirectory
 from httk.workflow._daemon_policy import ApprovedLauncher, Policy
@@ -862,6 +862,7 @@ def test_service_logs_check_and_startup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     initialized = Workspace.initialize(tmp_path / "site/workspace", durable=False)
+    initialized.set_policy({"retention": {"daemon_history_days": 7}})
     policy = replace(_policy(tmp_path), workspace_id=initialized.workspace_id)
     for path in (policy.daemon, policy.requests, policy.responses, policy.broker):
         path.mkdir(parents=True)
@@ -880,9 +881,11 @@ def test_service_logs_check_and_startup(
     monkeypatch.setattr(service_module.signal, "signal", lambda *_args: None)
     monkeypatch.setattr(service_module, "read_execution_scope", lambda *_args: _IDENTITY)
     active_owners: list[dict[str, object]] = []
+    history: list[float | None] = []
 
-    def inspect_owner(_broker: Broker, _stop: threading.Event, *, once: bool = False) -> None:
+    def inspect_owner(broker: Broker, _stop: threading.Event, *, once: bool = False) -> None:
         assert once is True
+        history.append(broker.history_days)
         records = _kernel.list_owners(initialized)
         assert len(records) == 1 and records[0].record is not None
         active_owners.append(dict(records[0].record))
@@ -893,6 +896,8 @@ def test_service_logs_check_and_startup(
     assert f"daemon_check_passed workspace={policy.workspace_id} cluster=cluster-1" in caplog.text
     assert f"daemon_started workspace={policy.workspace_id} enrollment={ENROLLMENT_ID} launchers=cpu" in caplog.text
     assert active_owners[0]["kind"] == "daemon"
+    # The workspace's retention.daemon_history_days, read at start, bounds the ledger history.
+    assert history == [7.0]
     recorded = tuple(active_owners[0][key] for key in ("hostname", "boot_id", "pid", "process_start_ticks"))
     assert recorded == (_IDENTITY.hostname, _IDENTITY.boot_id, _IDENTITY.pid, _IDENTITY.start_ticks)
     assert _kernel.list_owners(initialized) == []
@@ -1068,6 +1073,7 @@ def _observing(
     *,
     initialize: bool = True,
     sacct: bool = False,
+    history_days: float | None = None,
 ) -> tuple[ExitStack, Broker, ScriptedGateway, list[float]]:
     """Open a broker that follows its managers, on a settable clock."""
 
@@ -1086,6 +1092,7 @@ def _observing(
         exchange=_publisher(policy),
         response_seed=broker.response_seed,
         observe=True,
+        history_days=history_days,
     )
     clock = [time.time()]
     monkeypatch.setattr(service_module, "time", SimpleNamespace(time=lambda: clock[0]))
@@ -2218,5 +2225,255 @@ def test_a_symlink_or_fifo_publication_is_still_discarded(tmp_path: Path) -> Non
     try:
         broker.process_once(threading.Event())
         assert os.listdir(policy.requests) == [] and target.read_bytes() == b"{}"
+    finally:
+        stack.close()
+
+
+# ---------------------------------------------------------------------------
+# History retirement
+# ---------------------------------------------------------------------------
+
+
+def _observed(*, final: bool, log_published: bool, job_id: str = "42") -> dict[str, object]:
+    return {**_TRAVERSING, "job_id": job_id, "cluster": "cluster-1", "final": final, "log_published": log_published}
+
+
+def test_history_is_retired_at_most_once_an_hour_and_drops_ended_managers_from_the_exchange(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch, history_days=30.0)
+    policy = broker.policy
+    stop = threading.Event()
+    calls: list[tuple[frozenset[str], int, list[str]]] = []
+    original = broker.ledger.retire
+
+    def recording(closed_handles: Any, *, cutoff_ns: int, max_age: int) -> list[str]:
+        assert max_age == policy.request_max_age
+        retired = original(closed_handles, cutoff_ns=cutoff_ns, max_age=max_age)
+        calls.append((frozenset(closed_handles), cutoff_ns, retired))
+        return retired
+
+    monkeypatch.setattr(broker.ledger, "retire", recording)
+    start = _request(tmp_path, 1, "start_manager", profile="cpu")
+    try:
+        _publish(broker, start)
+        broker.process_once(stop)
+        handle = _read(broker, start).handle
+        assert handle is not None
+        # The first poll retires (nothing yet: the manager is queued); the cutoff lies 30 days back.
+        assert calls == [(frozenset(), int((clock[0] - 30 * 86400.0) * 1_000_000_000), [])]
+        gateway.state = "COMPLETED"
+        clock[0] += 1800
+        broker.process_once(stop)
+        assert len(calls) == 1  # at most once an hour
+        assert _managers(policy)["managers"][0]["log"] == f"launchers/{handle}.log"
+        clock[0] += 1800
+        broker.process_once(stop)
+        # Ended with its log published: closed, but settled just now, so it stays listed.
+        assert calls[1] == (frozenset({handle}), int((clock[0] - 30 * 86400.0) * 1_000_000_000), [])
+        assert [row["handle"] for row in _managers(policy)["managers"]] == [handle]
+        clock[0] += 31 * 86400.0
+        with caplog.at_level(logging.INFO, logger="httk.workflow"):
+            broker.process_once(stop)
+        assert calls[2][2] == [start.request_id]
+        assert f"daemon_ledger_retired request_id={start.request_id}" in caplog.text
+        broker.process_once(stop)
+        assert _managers(policy)["managers"] == []
+        assert broker.ledger.lookup_manager(handle) is None
+    finally:
+        stack.close()
+
+
+def test_closed_starts_are_final_observations_whose_log_is_published_or_has_nowhere_to_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, ledger = _open(tmp_path, policy)
+    closed: list[frozenset[str]] = []
+
+    def recording(closed_handles: Any, *, cutoff_ns: int, max_age: int) -> list[str]:
+        closed.append(frozenset(closed_handles))
+        return []
+
+    monkeypatch.setattr(ledger, "retire", recording)
+    broker.history_days = 30.0
+    try:
+        handle = _start(tmp_path, broker)
+        cases: list[tuple[dict[str, object] | None, bool, frozenset[str]]] = [
+            (None, True, frozenset()),
+            (_observed(final=False, log_published=False), True, frozenset()),
+            (_observed(final=True, log_published=False), True, frozenset()),
+            (_observed(final=True, log_published=False), False, frozenset({handle})),
+            (_observed(final=True, log_published=True), True, frozenset({handle})),
+            (_observed(final=True, log_published=True, job_id="43"), True, frozenset()),
+        ]
+        publisher = broker.exchange
+        for observation, exchange, expected in cases:
+            if observation is not None:
+                ledger.record_observation(handle, json.dumps(observation).encode())
+            broker.exchange = publisher if exchange else None
+            broker._retired_at = None
+            closed.clear()
+            broker._retire_history(time.time())
+            assert closed == [expected], observation
+    finally:
+        stack.close()
+
+
+def test_without_a_history_bound_nothing_is_retired_and_a_failed_retirement_never_stops_the_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, ledger = _open(tmp_path, policy)
+    calls: list[None] = []
+
+    def failing(closed_handles: Any, *, cutoff_ns: int, max_age: int) -> list[str]:
+        calls.append(None)
+        raise OSError("injected retirement failure")
+
+    monkeypatch.setattr(ledger, "retire", failing)
+    first, second = _request(tmp_path, 1), _request(tmp_path, 2)
+    try:
+        assert broker.history_days is None
+        _publish(broker, first)
+        broker.process_once(threading.Event())
+        assert calls == [] and _read(broker, first).outcome == "ready"
+        broker.history_days = 30.0
+        with caplog.at_level(logging.ERROR):
+            broker.process_once(threading.Event())
+        assert calls == [None] and "daemon_ledger_retire_failed" in caplog.text
+        _publish(broker, second)
+        broker.process_once(threading.Event())
+        assert calls == [None] and _read(broker, second).outcome == "ready"
+    finally:
+        stack.close()
+
+
+@pytest.mark.parametrize("history_days", [-1.0, float("inf"), float("nan"), True, "30"])
+def test_the_history_bound_must_be_a_finite_non_negative_number(tmp_path: Path, history_days: object) -> None:
+    policy = _policy(tmp_path)
+    stack, broker, ledger = _open(tmp_path, policy)
+    try:
+        with pytest.raises(ValueError, match="history_days"):
+            Broker(
+                policy,
+                broker.gateway,
+                ledger,
+                broker.requests,
+                broker.responses,
+                response_seed=broker.response_seed,
+                history_days=cast(Any, history_days),
+            )
+        assert (
+            Broker(
+                policy,
+                broker.gateway,
+                ledger,
+                broker.requests,
+                broker.responses,
+                response_seed=broker.response_seed,
+                history_days=0,
+            ).history_days
+            == 0
+        )
+    finally:
+        stack.close()
+
+
+def test_a_zero_history_still_keeps_a_request_while_a_replay_of_it_could_be_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack, broker, _gateway, clock = _observing(tmp_path, monkeypatch, history_days=0.0)
+    policy = broker.policy
+    stop = threading.Event()
+    start = _request(tmp_path, 1, "start_manager", profile="cpu", configuration_digest="1" * 64)
+    minimum = policy.request_max_age + 2 * CLOCK_SKEW_SECONDS + 3600
+    try:
+        _publish(broker, start)
+        broker.process_once(stop)
+        assert _read(broker, start).reason == "stale_configuration"
+        started = clock[0]
+        # The horizon is at least the longest lifetime plus both skews plus an hour, counted from the later of
+        # the settlement and the end of this request's acceptance window (expires_at + skew).
+        ready = max(started, start.expires_at + CLOCK_SKEW_SECONDS) + minimum
+        assert ready - started >= minimum
+        # Retirement runs hourly; every run until the horizon has passed keeps the refused start.
+        while clock[0] + 3600 <= ready:
+            clock[0] += 3600
+            broker.process_once(stop)
+            assert [row["request_id"] for row in _managers(policy)["managers"]] == [start.request_id]
+            assert broker.ledger.lookup_request(start.request_id) is not None
+        clock[0] += 3600
+        broker.process_once(stop)
+        assert broker.ledger.lookup_request(start.request_id) is None
+        broker.process_once(stop)
+        assert _managers(policy)["managers"] == []
+    finally:
+        stack.close()
+
+
+def test_a_replay_of_a_retired_start_is_refused_as_expired_and_never_submitted_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch, history_days=0.0)
+    # The signed time window is checked against the same settable clock.
+    monkeypatch.setattr(_daemon_auth, "time", SimpleNamespace(time=lambda: clock[0]))
+    policy = broker.policy
+    stop = threading.Event()
+    start = _request(tmp_path, 1, "start_manager", profile="cpu", now=int(clock[0]))
+    try:
+        _publish(broker, start)
+        broker.process_once(stop)
+        handle = _read(broker, start).handle
+        assert handle is not None and len(gateway.submissions) == 1
+        gateway.state = "COMPLETED"
+        clock[0] += 60
+        broker.process_once(stop)
+        assert _managers(policy)["managers"][0]["log"] == f"launchers/{handle}.log"
+        horizon = policy.request_max_age + 2 * CLOCK_SKEW_SECONDS + 3600
+        clock[0] = start.expires_at + CLOCK_SKEW_SECONDS + horizon + 3600
+        broker.process_once(stop)
+        assert broker.ledger.lookup_request(start.request_id) is None
+
+        # The identical signed request again: admitted afresh, refused by its own expiry, never submitted.
+        _publish(broker, start)
+        broker.process_once(stop)
+        replayed = broker.ledger.lookup_request(start.request_id)
+        assert replayed is not None and replayed.response is not None and replayed.handle != handle
+        assert (replayed.response.outcome, replayed.response.reason) == ("refused", "request_expired")
+        assert len(gateway.submissions) == 1
+
+        cancel = _request(tmp_path, 2, "cancel_manager", handle=handle, now=int(clock[0]))
+        _publish(broker, cancel)
+        broker.process_once(stop)
+        cancelled = broker.ledger.lookup_request(cancel.request_id)
+        assert cancelled is not None and cancelled.response is not None
+        assert (cancelled.response.outcome, cancelled.response.reason) == ("refused", "unknown_manager")
+        assert gateway.cancellations == []
+    finally:
+        stack.close()
+
+
+def test_a_manager_retired_by_another_instance_during_observation_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stack, broker, gateway, clock = _observing(tmp_path, monkeypatch)
+    stop = threading.Event()
+    try:
+        first = _start(tmp_path, broker)
+        second_request = _request(tmp_path, 2, "start_manager", profile="cpu")
+        _publish(broker, second_request)
+        broker.process_once(stop)
+        original = broker.ledger.lookup_manager
+
+        def retired_first(handle: str) -> Any:
+            return None if handle == first else original(handle)
+
+        monkeypatch.setattr(broker.ledger, "lookup_manager", retired_first)
+        checked = len(gateway.statuses)
+        clock[0] += 60
+        broker.process_once(stop)
+        # The round went on: the other manager was still checked.
+        assert [call[2] for call in gateway.statuses[checked:]] == [_read(broker, second_request).handle]
     finally:
         stack.close()

@@ -312,7 +312,7 @@ comma-separated value. `init` discovers what is not given:
 | `sbatch`, `squeue`, `scancel` | the Slurm clients | on `PATH` |
 | `sacct` | optional, used only to report how managers ended | on `PATH` when present |
 | `slurm_conf` | optional fixed Slurm configuration file | `SLURM_CONF` when it names a file, else `/etc/slurm/slurm.conf` when present |
-| `max_submissions` | lifetime quota of manager starts (see [Quotas](#quotas)) | 128 |
+| `max_submissions` | quota of manager starts kept in the ledger history (see [Quotas](#quotas)) | 128 |
 | `force` | `true` approves CPU, memory and time above the sanity limits | `false` |
 | `cluster` (`init` only) | the fixed Slurm cluster name | `SLURM_CLUSTER_NAME`, the `ClusterName` of the Slurm configuration, or a bounded `scontrol show config` call |
 | `scontrol` (`init` only) | used only to discover the cluster name | on `PATH` |
@@ -398,7 +398,9 @@ filesystem with those semantics. Any number of daemon instances may run against 
 enrollment, for example a supervised standby; they share the ledger. An
 interrupted initialization keeps its partial artifacts and refuses automatic
 replacement. Keep the ledger and keys when diagnosing failures, and do not
-remove them to clear an uncertain submission.
+remove them to clear an uncertain submission. The daemon itself retires
+settled history from the ledger after the workspace's
+`retention.daemon_history_days` (see [Quotas](#quotas)).
 
 ### Resources
 
@@ -591,7 +593,10 @@ to the `inbox` again.
 `progress.json` the job keeps in its payload; the managers write it. `managers.json` (format version 4) lists the
 daemon's manager starts with their ledger state, Slurm job ID, effective
 `time_limit`, scheduler state,
-exit code and start and end times. Unknown values are `null`. Both files are
+exit code and start and end times. Unknown values are `null`. A row stays
+until `retention.daemon_history_days` (30 days by default) after its manager
+ended and its launcher log was published, or after a start was refused; a start
+answered `uncertain` without a Slurm job ID stays for good. Both files are
 informational: `status.json` is rewritten at most every 10 seconds while a
 manager runs, and `managers.json` when its rows change. Read them with
 `httk remote daemon status REMOTE`; add `--handle` for the scheduler
@@ -658,11 +663,18 @@ submitted can stay queued past that deadline.
 
 ### Ledger and replay
 
-The protected ledger keeps the exact signed requests. A duplicate never
-submits or republishes an internal job request again, even after a restart. A currently authorized key can still
-retrieve recorded results after expiry. A stale request that has not acted
-is durably refused, subject to ledger capacity. A request recovered before
-submission must still meet the time window before it can act.
+The protected ledger keeps the exact signed requests for the daemon history,
+`retention.daemon_history_days` (see [Quotas](#quotas)). Within it, a
+duplicate never submits or republishes an internal job request again, even
+after a restart, and a currently authorized key can still retrieve recorded
+results after expiry. Once a request is retired, its ID is unknown again: a
+status observation of a retired job command reports `unknown_command`,
+`manager_status` and `cancel_manager` on a retired handle answer `refused`
+with `unknown_manager`, and a repeated request is admitted afresh, where its
+own expiry refuses it. A stale
+request that has not acted is durably refused, subject to ledger capacity. A
+request recovered before submission must still meet the time window before it
+can act.
 
 ### Response signatures
 
@@ -760,10 +772,10 @@ allowance. The filesystem rules of the mailbox are specified in
 - Do not replace a request while the broker may still be consuming it, since
   responses are published before request removal. The maintained client waits
   for removal and checks again for a response before republishing.
-- A repeated request ID with unchanged content replays its recorded response.
-  Changed content under the same ID is refused.
+- A repeated request ID with unchanged content replays its recorded response
+  while the ledger keeps it. Changed content under the same ID is refused.
 - Use a new request ID for each signed status observation; `job_request_status`
-  bypasses permanent ledger admission and consumes no cumulative command quota.
+  bypasses ledger admission and consumes no command quota.
 
 ### Outcomes
 
@@ -809,16 +821,46 @@ original stays in `logs/launchers/`; `httk workspace gc` removes it once no
 owner record carries that launch id and it is older than `trash_days`; the
 exchange copy is removed once older than `trash_days` too (category
 `launcher_logs`). The manager's own log is
-`logs/managers/<manager-id>.log` in the workspace, as for every manager.
+`logs/managers/<manager-id>.log` in the workspace, as for every manager. The
+manager's row leaves `managers.json` `daemon_history_days` after the log was
+published; a manager whose log could not be published yet stays listed.
 
 ### Quotas
 
-The record limit (4096) limits all durable command records; fresh job-status observations consume none. `max_submissions`
-limits manager starts admitted over the enrollment's lifetime, including
-refused or uncertain starts. Both are cumulative quotas, not active-job counts.
+The record limit (4096) limits the durable command records the ledger keeps;
+fresh job-status observations consume none. `max_submissions` limits the
+manager starts it keeps, including refused or uncertain starts. Both bound the
+retained history, not active jobs or lifetime totals: at most once an hour,
+the daemon retires old history, which frees its quota.
+
+The history is the workspace retention setting
+`retention.daemon_history_days`, 30 days by default, which the daemon reads
+when it starts; restart it after a change:
+
+```console
+httk workspace policy set --key retention.daemon_history_days --value 14 WORKSPACE
+```
+
+A request is retired that long after
+its response was recorded, and a manager start that long after its manager
+reached a final scheduler state (or `GONE`) and its launcher log was
+published; a refused start needs no final state. `null` or `"keep"` never
+retires anything. Whatever the setting, the daemon never retires a request
+before its signed lifetime plus the clock-skew allowance has passed (and keeps
+at least the longest request lifetime plus twice the skew plus an hour), so a
+replay that could still be accepted always finds its record and never acts
+twice. Nothing that can still matter is retired: an unanswered
+request, a start whose manager may still be queued or running, and a start
+answered `uncertain` without a Slurm job ID, which stays for good because the
+daemon cannot tell whether its job exists; reconcile it with Slurm (it keeps
+holding its quota slot). A retired request leaves the ledger, its
+row leaves `managers.json`, and its replay ends (see
+[Ledger and replay](#ledger-and-replay)).
+
 Exhaustion returns a nonpersisted `busy` response, retryable with the same
-request ID and identical fields. Freeing capacity may need operator action;
-there is no automatic history pruning or quota reset. Intentional
+request ID and identical fields. When the history holds more starts than the
+quota, wait for retirement, lower `daemon_history_days`, or raise
+`max_submissions` with `httk workspace daemon configure`. Intentional
 re-enrollment requires preserving and reconciling outstanding work, a new
 enrollment ID and a new private ledger.
 

@@ -4,6 +4,7 @@ import argparse
 import errno
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -44,6 +45,8 @@ _JOB_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
 _CLUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 #: The least time between two scheduler checks of the submitted managers.
 _OBSERVE_SECONDS = 60.0
+#: The least time between two retirements of the settled ledger history.
+_RETIRE_SECONDS = 3600.0
 #: How long a manager may be unknown to both squeue and sacct before it is reported ``GONE``.
 _GONE_SECONDS = 30 * 60.0
 #: Added to the longest a scheduler call can take (``command_timeout`` plus the kill grace of
@@ -282,6 +285,11 @@ class Broker:
         client that replaced either directory is followed (or, for a symlink, refused) at the next poll.
         The broker then owns and closes the mailboxes it holds. ``None`` keeps *requests* and *responses*.
     :param job_executor: Authenticated workspace-job command executor; ``None`` refuses job commands.
+    :param history_days: How many days a settled request, and a manager start after its manager ended and its log
+        was published, stays in the ledger and ``managers.json``; at most once an hour, older history is retired
+        (:meth:`httk.workflow._daemon_state.Ledger.retire`), which frees its quota slots. ``None`` never retires.
+        A request is never retired while a replay of it could still be accepted (its lifetime plus clock skew).
+    :raises ValueError: If the response seed is invalid or *history_days* is not a finite non-negative number.
     """
 
     def __init__(
@@ -298,9 +306,17 @@ class Broker:
         activation: Callable[[], None] | None = None,
         mailboxes: Callable[[], tuple[MailboxDirectory, MailboxDirectory]] | None = None,
         job_executor: JobExecutor | None = None,
+        history_days: float | None = None,
     ) -> None:
         if not isinstance(response_seed, Path):
             raise ValueError("response_seed must be a Path")
+        if history_days is not None and (
+            isinstance(history_days, bool)
+            or not isinstance(history_days, (int, float))
+            or not math.isfinite(history_days)
+            or history_days < 0
+        ):
+            raise ValueError("history_days must be a finite non-negative number or None")
         read_response_seed(response_seed)
         self.policy = policy
         self.gateway = gateway
@@ -313,6 +329,7 @@ class Broker:
         self.activation = activation
         self.mailboxes = mailboxes
         self.job_executor = job_executor
+        self.history_days = history_days
         self._mailbox_problem: str | None = None
         #: Rejected publications that could be neither removed nor set aside, in the directory identified.
         self._stuck: set[str] = set()
@@ -320,6 +337,7 @@ class Broker:
         #: Set once the active snapshot changed: this broker admits and decides nothing more.
         self.retired = False
         self._observed_at: float | None = None
+        self._retired_at: float | None = None
         self._warned: set[tuple[str, str]] = set()
         self._counts: tuple[int, ...] | None = None
 
@@ -776,7 +794,7 @@ class Broker:
             _LOGGER.warning("daemon_response_sweep_failed reason=%s", excerpt(str(exc)))
 
     def process_once(self, stop: threading.Event) -> int:
-        """Recover, process one bounded sorted mailbox snapshot, then publish and sweep the exchange.
+        """Recover, process one bounded sorted mailbox snapshot, publish the exchange, retire old history, sweep.
 
         :param stop: Stop admission before the next request when set.
         :return: Number of request publications considered.
@@ -842,9 +860,48 @@ class Broker:
                     )
             except Exception:
                 _LOGGER.exception("daemon_exchange_failed")
+        if self.history_days is not None and not self.retired:
+            try:
+                self._retire_history(now)
+            except Exception:
+                _LOGGER.exception("daemon_ledger_retire_failed")
         if available:
             self._sweep_responses(now)
         return processed
+
+    def _retire_history(self, now: float) -> None:
+        """Retire the ledger history settled longer than ``history_days`` ago, at most once an hour.
+
+        The horizon is never shorter than the longest signed request lifetime plus the clock skew on both sides,
+        plus one retirement interval (for a settlement recorded just before this poll): a replay of a request that
+        can still be accepted must find its anchor. A start is closed when its stored observation is final and its
+        log was published (or nothing is published, without an exchange); the ledger retires refused starts and
+        settled requests by itself.
+
+        :param now: The current time in Unix seconds.
+        """
+
+        if self._retired_at is not None and 0.0 <= now - self._retired_at < _RETIRE_SECONDS:
+            return
+        self._retired_at = now
+        assert self.history_days is not None
+        horizon = max(
+            self.history_days * 86400.0,
+            self.policy.request_max_age + 2 * CLOCK_SKEW_SECONDS + _RETIRE_SECONDS,
+        )
+        if horizon >= now:
+            return  # nothing settled that long ago
+        closed: set[str] = set()
+        for row in self.ledger.managers():
+            handle = str(row["handle"])
+            if row["job_id"] is None:
+                continue
+            observation = self._observation(handle)
+            if observation is None or not observation["final"] or observation["job_id"] != row["job_id"]:
+                continue
+            if observation["log_published"] or self.exchange is None:
+                closed.add(handle)
+        self.ledger.retire(closed, cutoff_ns=int((now - horizon) * 1_000_000_000), max_age=self.policy.request_max_age)
 
     def _retire(self, exc: _ActivationChanged) -> None:
         self.retired = True
@@ -896,7 +953,9 @@ class Broker:
             observation = previous
             if row["job_id"] is not None and (observation is None or not observation["final"]):
                 entry = self.ledger.lookup_manager(handle)
-                if entry is None or entry.job_id is None or entry.cluster is None:
+                if entry is None:
+                    continue  # retired by another instance since the listing
+                if entry.job_id is None or entry.cluster is None:
                     raise LedgerError("submitted manager has no scheduler identity")
                 try:
                     observation = self._check(handle, entry.job_id, entry.cluster, observation, now)
@@ -1154,6 +1213,7 @@ def _run(arguments: argparse.Namespace) -> int:
                 activation=_activation_check(_DAEMON_DIRECTORY, policy_source, policy),
                 mailboxes=mailboxes,
                 job_executor=jobs,
+                history_days=workspace.policy.retention.daemon_history_days,
             )
             stack.callback(broker.close)
             _LOGGER.info(

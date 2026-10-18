@@ -202,8 +202,9 @@ class Policy:
     :param launchers: Approved global ``slurm`` launchers, frozen at approval.
     :param authorized_keys: Canonical Ed25519 keys authorized to issue requests.
     :param slurm_conf: Optional fixed Slurm configuration path.
-    :param max_records: Maximum mailbox records retained per enrollment.
-    :param max_submissions: Maximum accepted submissions per enrollment.
+    :param max_records: Maximum durable request records the enrollment's ledger retains at once; retiring
+        settled history (``retention.daemon_history_days``) frees them.
+    :param max_submissions: Maximum manager starts the enrollment's ledger retains at once, freed the same way.
     :param poll_seconds: Mailbox polling interval in seconds.
     :param command_timeout: Slurm command timeout in seconds.
     :param max_output_bytes: Maximum captured command output in bytes.

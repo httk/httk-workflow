@@ -110,7 +110,7 @@ everything else appears on demand.
   "format": "httk-workflow-filesystem", "format_version": 3, "layout": "jobs-v3",
   "core_profile": "core-v3", "extensions": [], "record_ref_encoding": "hwref-v2",
   "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1", "created_at": "2026-10-10T12:00:00+00:00",
-  "policy": {"visibility_deadline_seconds": 5.0, "retention": {"trash_days": 1.0, "owner_tombstone_days": 30.0}},
+  "policy": {"visibility_deadline_seconds": 5.0, "retention": {"trash_days": 1.0, "owner_tombstone_days": 30.0, "daemon_history_days": 30.0}},
   "settings": {}, "workflow_preludes": {}
 }
 ```
@@ -128,6 +128,7 @@ UUID. The refusals are listed in §Changes from the previous format.
 | `retention.attempt_control_days` | absent (keep) | Age after which `gc` removes old attempt directories. |
 | `retention.trash_days` | `1.0` | Age after which `gc` removes the logs of departed managers. |
 | `retention.owner_tombstone_days` | `30.0` | Age after which `gc` removes the tombstone of a recovered owner. |
+| `retention.daemon_history_days` | `30.0` | Age after which the confined workspace daemon retires settled requests and ended manager starts from its ledger and `managers.json` (not a `gc` category); never before a request's signed lifetime plus clock skew has passed. |
 
 A retention value of `null` or `"keep"` keeps everything in its category. The
 retired members `lease_seconds`, `journal_segment_bytes` and
@@ -1501,7 +1502,7 @@ commands alone. The daemon signs every result and keeps its protected ledger
 in `.httk-workspace/daemon/broker/ledger/`. `daemon.json` version 3 declares
 protocol version 5 and the active configuration digest, and lists the approved
 configurations with their digests and published resource settings. Fresh signed
-`job_request_status` observations bypass permanent admission and cumulative
+`job_request_status` observations bypass ledger admission and consume no
 quota. See {doc}`workspace_daemon` for confinement and enrollment upgrades.
 
 ### Status and progress

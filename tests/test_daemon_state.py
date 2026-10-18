@@ -2,8 +2,10 @@
 
 import errno
 import json
+import logging
 import os
 import shutil
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +15,7 @@ import pytest
 
 from httk.workflow import _daemon_state as state_module
 from httk.workflow import _fs
+from httk.workflow._daemon_auth import CLOCK_SKEW_SECONDS
 from httk.workflow._daemon_protocol import Request, Response, encode_response, request_digest
 from httk.workflow._daemon_state import (
     CapacityError,
@@ -404,9 +407,9 @@ def test_responses_must_belong_to_the_request_and_follow_its_decision(state: Pat
 # ---------------------------------------------------------------------------
 
 
-def test_record_and_submission_quotas_are_cumulative_slots(state: Path) -> None:
+def test_record_and_submission_quotas_bound_retained_slots_until_retirement_frees_them(state: Path) -> None:
     with _open(state, max_records=3, max_submissions=1) as ledger:
-        ledger.admit(_start(1))
+        first = ledger.admit(_start(1))
         with pytest.raises(CapacityError, match="submission"):
             ledger.admit(_start(2))
         # The record slot claimed for the refused start was released again.
@@ -420,6 +423,16 @@ def test_record_and_submission_quotas_are_cumulative_slots(state: Path) -> None:
         assert ledger.admit(_request(4)).request.request_id == f"{4:032x}"
         for name, content in _slots(state).items():
             assert content.endswith(f" {ledger.nonce}\n".encode()), name
+        # Slots are held while the records are retained: retiring settled history frees them.
+        assert first.handle is not None
+        ledger.decide(first.request.request_id, reason="invalid_configuration")
+        ledger.finish(first.request.request_id, refusal_response(first.request, first.handle, "invalid_configuration"))
+        ledger.finish(f"{3:032x}", _response(_request(3), "ready"))
+        assert ledger.retire((), cutoff_ns=time.time_ns() + 10**12, max_age=3600) == [f"{1:032x}", f"{3:032x}"]
+        assert sorted(_slots(state)) == ["record.2"]
+        ledger.admit(_start(2))
+        ledger.admit(_request(5))
+        assert sorted(_slots(state)) == ["record.0", "record.1", "record.2", "start.0"]
 
 
 def test_the_slot_scan_starts_at_the_listing_hint_wraps_and_is_busy_only_after_every_slot(
@@ -934,3 +947,333 @@ def test_an_anchor_another_instance_installed_is_made_durable_before_this_one_ex
     events.clear()
     second.admit(health)
     assert ("fsync", str(state / "ledger" / "req")) not in events
+
+
+# ---------------------------------------------------------------------------
+# History retirement
+# ---------------------------------------------------------------------------
+
+#: A cutoff later than anything a test stores: every settled record is "however old".
+_FAR = 1 << 62
+
+
+def _refused_start(ledger: Ledger, number: int) -> tuple[Request, str]:
+    request = _start(number)
+    handle = ledger.admit(request).handle
+    assert handle is not None
+    ledger.decide(request.request_id, reason="invalid_configuration")
+    ledger.finish(request.request_id, refusal_response(request, handle, "invalid_configuration"))
+    return request, handle
+
+
+def _submitted_start(ledger: Ledger, number: int, *, answered: bool = True) -> tuple[Request, str]:
+    request = _start(number)
+    handle = ledger.admit(request).handle
+    assert handle is not None
+    ledger.decide(request.request_id)
+    ledger.record_scheduler(request.request_id, "42", "cluster-1")
+    if answered:
+        ledger.finish(request.request_id, _response(request, "submitted", handle=handle))
+    return request, handle
+
+
+def _settled_ns(state: Path, request_id: str) -> int:
+    return (state / "ledger" / "req" / request_id / "response").stat().st_mtime_ns
+
+
+def _age(path: Path, mtime_ns: int) -> None:
+    os.utime(path, ns=(mtime_ns, mtime_ns), follow_symlinks=False)
+
+
+def test_a_refused_start_is_retired_after_the_cutoff_and_its_quota_slot_is_claimed_again(
+    state: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = state / "ledger"
+    with _open(state, max_records=2, max_submissions=1) as ledger:
+        request, handle = _refused_start(ledger, 1)
+        with pytest.raises(CapacityError, match="submission"):
+            ledger.admit(_start(2))
+        settled = _settled_ns(state, request.request_id)
+        # A refusal is final by definition: no closed handle is needed, only the age.
+        assert ledger.retire((), cutoff_ns=settled - 1, max_age=3600) == []
+        assert [row["handle"] for row in ledger.managers()] == [handle]
+        with caplog.at_level(logging.INFO, logger="httk.workflow"):
+            assert ledger.retire((), cutoff_ns=settled, max_age=3600) == [request.request_id]
+        assert (
+            f"daemon_ledger_retired request_id={request.request_id} operation=start_manager handle={handle}"
+            in caplog.text
+        )
+        assert not (root / "req" / request.request_id).exists() and not (root / "handles" / handle).exists()
+        assert _slots(state) == {} and not list((root / "prep").iterdir())
+        assert ledger.managers() == [] and ledger.lookup_request(request.request_id) is None
+        assert ledger.lookup_manager(handle) is None
+        assert ledger.verify() == 0
+        # Retiring again is a no-op, and the freed start slot admits the next start.
+        assert ledger.retire((), cutoff_ns=_FAR, max_age=3600) == []
+        assert ledger.admit(_start(2)).handle is not None
+        assert sorted(_slots(state)) == ["record.0", "start.0"]
+
+
+def test_a_submitted_start_is_retired_only_once_closed_and_settled_before_the_cutoff(state: Path) -> None:
+    root = state / "ledger"
+    with _open(state) as ledger:
+        request, handle = _submitted_start(ledger, 1)
+        # Not closed, however old: its manager may still be queued or running.
+        assert ledger.retire((), cutoff_ns=_FAR, max_age=3600) == []
+        assert ledger.retire(("f" * 32,), cutoff_ns=_FAR, max_age=3600) == []
+        ledger.record_observation(handle, b'{"final":true}')
+        observation = root / "observations" / f"{handle}.json"
+        settled = _settled_ns(state, request.request_id)
+        _age(observation, settled + 10**12)
+        # Closed, but its last observation is newer than the cutoff: kept.
+        assert ledger.retire((handle,), cutoff_ns=settled + 10**12 - 1, max_age=3600) == []
+        assert [row["state"] for row in ledger.managers()] == ["submitted"]
+        assert ledger.retire((handle,), cutoff_ns=settled + 10**12, max_age=3600) == [request.request_id]
+        assert ledger.managers() == [] and _slots(state) == {}
+        assert not observation.exists() and not (root / "handles" / handle).exists()
+        assert ledger.verify() == 0
+
+
+def test_unanswered_requests_and_starts_are_never_retired(state: Path) -> None:
+    with _open(state) as ledger:
+        received = ledger.admit(_start(1))
+        assert received.handle is not None
+        _, submitting = _submitted_start(ledger, 2, answered=False)
+        ledger.admit(_request(3))
+        health = _request(4)
+        ledger.admit(health)
+        ledger.finish(health.request_id, _response(health, "ready"))
+        assert ledger.retire((received.handle, submitting), cutoff_ns=_FAR, max_age=3600) == [health.request_id]
+        assert [row["state"] for row in ledger.managers()] == ["received", "submitted"]
+        assert ledger.lookup_request(f"{3:032x}") is not None
+        assert sorted(_slots(state)) == ["record.0", "record.1", "record.2", "start.0", "start.1"]
+        assert ledger.verify() == 3
+
+
+def test_an_uncertain_start_without_a_scheduler_identity_is_kept_forever(state: Path) -> None:
+    with _open(state) as ledger:
+        request = _start(1)
+        handle = ledger.admit(request).handle
+        assert handle is not None
+        ledger.decide(request.request_id)
+        uncertain = _response(request, "uncertain", handle=handle, reason="submission_unconfirmed")
+        ledger.finish(request.request_id, uncertain)
+        ledger.record_observation(handle, b'{"final":true}')
+        assert ledger.retire((handle,), cutoff_ns=_FAR, max_age=3600) == []
+        assert [row["state"] for row in ledger.managers()] == ["uncertain"]
+        # A late submit winner's scheduler identity makes it a submitted start like any other.
+        ledger.record_scheduler(request.request_id, "42", "cluster-1")
+        assert ledger.retire((handle,), cutoff_ns=_FAR, max_age=3600) == [request.request_id]
+
+
+def test_a_job_request_is_retired_with_its_target_decision_and_result(state: Path) -> None:
+    root = state / "ledger"
+    request = Request(
+        f"{1:032x}",
+        WORKSPACE_ID,
+        "job_request",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest="0" * 64,
+        selector=WORKSPACE_ID,
+        action="pause",
+        reason="operator request",
+    )
+    with _open(state) as ledger:
+        entry = ledger.admit(request)
+        ledger.store_target(entry, b'{"job_id":"x"}')
+        ledger.decide_execution(entry, ledger.nonce, ledger.nonce)
+        ledger.store_execution_result(entry, b'{"result":"applied"}')
+        assert ledger.retire((), cutoff_ns=_FAR, max_age=3600) == []  # unanswered
+        ledger.finish(
+            request.request_id, _response(request, "refused", reason="unknown_job", command_id=request.request_id)
+        )
+        assert ledger.verify() == 1
+        assert ledger.retire((), cutoff_ns=_FAR, max_age=3600) == [request.request_id]
+        for path in (
+            root / "executions" / f"{request.request_id}.result",
+            root / "executions" / f"{request.request_id}.decision",
+            root / "targets" / request.request_id,
+            root / "req" / request.request_id,
+        ):
+            assert not path.exists(), path
+        assert _slots(state) == {} and ledger.verify() == 0
+
+
+@pytest.mark.parametrize("removed", [1, 2, 3])
+def test_every_prefix_of_a_job_request_retirement_still_verifies(
+    state: Path, monkeypatch: pytest.MonkeyPatch, removed: int
+) -> None:
+    request = Request(
+        f"{1:032x}",
+        WORKSPACE_ID,
+        "job_request",
+        enrollment_id=ENROLLMENT_ID,
+        configuration_digest="0" * 64,
+        selector=WORKSPACE_ID,
+        action="pause",
+        reason="operator request",
+    )
+    with _open(state) as ledger:
+        entry = ledger.admit(request)
+        ledger.store_target(entry, b'{"job_id":"x"}')
+        ledger.decide_execution(entry, ledger.nonce, ledger.nonce)
+        ledger.store_execution_result(entry, b'{"result":"applied"}')
+        ledger.finish(
+            request.request_id, _response(request, "refused", reason="unknown_job", command_id=request.request_id)
+        )
+        calls: list[Path] = []
+        original = state_module._remove
+
+        def crash_after(path: Path, trash: Path) -> None:
+            if len(calls) == removed:
+                raise _Crash
+            calls.append(path)
+            original(path, trash)
+
+        monkeypatch.setattr(state_module, "_remove", crash_after)
+        with pytest.raises(_Crash):
+            ledger.retire((), cutoff_ns=_FAR, max_age=3600)
+        monkeypatch.undo()
+        assert ledger.verify() == 1
+        assert ledger.retire((), cutoff_ns=_FAR, max_age=3600) == [request.request_id]
+        assert ledger.verify() == 0
+
+
+def test_a_retirement_interrupted_after_the_anchor_is_finished_by_the_leftover_sweep(
+    state: Path, hook: list[Callable[[str], None]]
+) -> None:
+    root = state / "ledger"
+
+    def crash(step: str) -> None:
+        if step == "ledger.retired":
+            raise _Crash
+
+    with _open(state) as ledger:
+        request, handle = _submitted_start(ledger, 1)
+        ledger.record_observation(handle, b'{"final":true}')
+        hook.append(crash)
+        with pytest.raises(_Crash):
+            ledger.retire((handle,), cutoff_ns=_FAR, max_age=3600)
+        hook.clear()
+    assert not (root / "req" / request.request_id).exists()
+    orphans = [root / "handles" / handle, root / "observations" / f"{handle}.json", root / "slots" / "record.0"]
+    orphans.append(root / "slots" / "start.0")
+    assert all(path.exists() for path in orphans)
+    with _open(state) as ledger:
+        # The orphans are invisible: no row, a valid ledger, and nothing left to retire.
+        assert ledger.managers() == [] and ledger.lookup_manager(handle) is None
+        assert ledger.verify() == 0
+        assert ledger.retire((handle,), cutoff_ns=_FAR, max_age=3600) == []
+        # The same identifier admitted again by another instance gets a new handle and new slots.
+        again = ledger.admit(request)
+        assert again.handle is not None and again.handle != handle
+        assert [row["handle"] for row in ledger.managers()] == [again.handle]
+        # A young orphan (an admission between claiming and installing) is never touched.
+        young = root / "slots" / "record.9"
+        _plant(young, f"{9:032x} {'a' * 32}\n".encode())
+        now = time.time_ns()
+        ledger._sweep_leftovers(now)
+        assert all(path.exists() for path in orphans)
+        for path in orphans:
+            _age(path, now - 3601 * 10**9)
+        later = _open(state)
+        later._sweep_leftovers(now)
+        assert not any(path.exists() for path in orphans)
+        assert young.exists() and (root / "handles" / again.handle).exists()
+        assert sorted(_slots(state)) == ["record.1", "record.9", "start.1"]
+        assert [row["handle"] for row in later.managers()] == [again.handle]
+        assert later.verify() == 1
+        _age(young, now - 3601 * 10**9)
+        _open(state)._sweep_leftovers(now)
+        assert sorted(_slots(state)) == ["record.1", "start.1"]
+
+
+def test_an_anchor_retired_between_the_reads_of_an_entry_reads_as_absent(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with _open(state) as ledger:
+        request = _request(1)
+        ledger.admit(request)
+        anchor = state / "ledger" / "req" / request.request_id
+        original = Ledger._envelope
+
+        def vanishing(path: Path) -> tuple[Request, str, str | None] | None:
+            shutil.rmtree(path)
+            return original(path)
+
+        monkeypatch.setattr(Ledger, "_envelope", staticmethod(vanishing))
+        assert ledger.lookup_request(request.request_id) is None
+        monkeypatch.undo()
+        # Only a still-present anchor without its envelope is corrupt.
+        ledger.admit(request)
+        (anchor / "envelope").unlink()
+        with pytest.raises(LedgerError, match="incomplete"):
+            ledger.lookup_request(request.request_id)
+
+
+def test_an_instance_that_cached_a_retired_start_sees_its_identifier_admitted_again(state: Path) -> None:
+    with _open(state) as first, _open(state) as second:
+        request, handle = _refused_start(first, 1)
+        assert [row["handle"] for row in second.managers()] == [handle]  # cached as settled
+        assert first.retire((), cutoff_ns=_FAR, max_age=3600) == [request.request_id]
+        assert second.managers() == []
+        again = first.admit(request)
+        assert again.handle is not None and again.handle != handle
+        rows = second.managers()
+        assert [(row["handle"], row["state"]) for row in rows] == [(again.handle, "received")]
+        assert [entry.handle for entry in second._starts(unanswered=True)] == [again.handle]
+
+
+def test_a_request_is_never_retired_while_a_replay_of_it_could_still_be_accepted(state: Path) -> None:
+    created = int(time.time())
+    request = replace(_start(1), created_at=created, expires_at=created + 3600)
+    accepted_until_ns = (request.expires_at + CLOCK_SKEW_SECONDS) * 10**9
+    with _open(state) as ledger:
+        handle = ledger.admit(request).handle
+        assert handle is not None
+        ledger.decide(request.request_id, reason="invalid_configuration")
+        ledger.finish(request.request_id, refusal_response(request, handle, "invalid_configuration"))
+        # Settled long before the cutoff, but a replay inside expires_at + skew must still find the anchor.
+        assert _settled_ns(state, request.request_id) < accepted_until_ns
+        assert ledger.retire((), cutoff_ns=accepted_until_ns, max_age=3600) == []
+        assert ledger.lookup_request(request.request_id) is not None
+        assert ledger.retire((), cutoff_ns=accepted_until_ns + 1, max_age=3600) == [request.request_id]
+
+
+def test_a_request_whose_lifetime_no_daemon_accepts_is_retired_on_settlement_age_alone(state: Path) -> None:
+    now = int(time.time())
+    ten_years = 10 * 365 * 86400
+    overlong = replace(_request(1), created_at=now, expires_at=now + ten_years)
+    future = replace(_request(2), created_at=now + 3600, expires_at=now + 7200)
+    with _open(state) as ledger:
+        for request in (overlong, future):
+            ledger.admit(request)
+            ledger.finish(request.request_id, _response(request, "ready"))
+        settled = max(_settled_ns(state, request.request_id) for request in (overlong, future))
+        # Were ten-year lifetimes accepted, the overlong request would be kept as long as it claims to live.
+        assert ledger.retire((), cutoff_ns=settled, max_age=ten_years) == []
+        # check_request_time refuses any lifetime above max_age, so no replay of it can ever act; a request
+        # created in the future with a valid lifetime still waits for its own acceptance window to end.
+        assert ledger.retire((), cutoff_ns=settled, max_age=3600) == [overlong.request_id]
+        assert sorted(_slots(state)) == ["record.1"]
+        assert ledger.retire((), cutoff_ns=(future.expires_at + CLOCK_SKEW_SECONDS) * 10**9 + 1, max_age=3600) == [
+            future.request_id
+        ]
+        with pytest.raises(ValueError, match="max_age"):
+            ledger.retire((), cutoff_ns=settled, max_age=0)
+
+
+def test_a_corrupt_anchor_is_skipped_and_the_others_are_still_retired(
+    state: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with _open(state) as ledger:
+        for number in (1, 2):
+            request = _request(number)
+            ledger.admit(request)
+            ledger.finish(request.request_id, _response(request, "ready"))
+        (state / "ledger" / "req" / f"{1:032x}" / "envelope").write_bytes(b"{}")
+        with caplog.at_level(logging.WARNING, logger="httk.workflow"):
+            assert ledger.retire((), cutoff_ns=_FAR, max_age=3600) == [f"{2:032x}"]
+        assert f"daemon_ledger_retire_skipped request_id={1:032x}" in caplog.text
+        with pytest.raises(LedgerError):
+            ledger.verify()

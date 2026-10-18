@@ -76,6 +76,7 @@ httk workspace policy unset --key retention.trash_days WORKSPACE
 | `retention.attempt_control_days` | absent (keep) | Age after which `gc` removes old attempt directories. |
 | `retention.trash_days` | `1.0` | Age after which `gc` removes the logs of departed managers and their launcher output. |
 | `retention.owner_tombstone_days` | `30.0` | Age after which `gc` removes the tombstone of a recovered owner. |
+| `retention.daemon_history_days` | `30.0` | Age after which the [workspace daemon](workspace_daemon.md#quotas) retires settled requests and ended manager starts, freeing their quota; the daemon applies it, not `gc`, and never before a request's signed lifetime plus clock skew has passed. |
 
 Values are JSON, validated on write; `null` or `"keep"` keeps a retention
 category forever, and an unknown key is refused. A policy write is a

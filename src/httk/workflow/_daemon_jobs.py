@@ -581,6 +581,11 @@ class JobExecutor:
             )
         return self._serve(entry, target, None)
 
+    def _unknown_command(self, request: Request) -> Response:
+        """Answer a status observation of a command this ledger does not (or no longer) hold."""
+
+        return self._response(request, "refused", "unknown_command", "the original job command is unknown")
+
     def status(self, request: Request) -> Response:
         """Observe only commands signed by the same key, without admitting or executing this status request."""
 
@@ -591,9 +596,11 @@ class JobExecutor:
             or entry.request.operator_key != request.operator_key
             or entry.request.operation != "job_request"
         ):
-            return self._response(request, "refused", "unknown_command", "the original job command is unknown")
+            return self._unknown_command(request)
         stored_target = self.ledger.read_target(entry)
         if stored_target is None:
+            if self.ledger.lookup_request(request.command_id) is None:
+                return self._unknown_command(request)  # retired by another instance since the lookup
             if entry.response is not None:
                 original = entry.response
                 return self._response(
@@ -613,6 +620,8 @@ class JobExecutor:
         target = _Target.decode(stored_target)
         if (result := self._stored_result(request, entry, target=target, fresh_state=True)) is not None:
             return result
+        if self.ledger.lookup_request(request.command_id) is None:
+            return self._unknown_command(request)  # retired by another instance since the lookup
         if entry.response is not None and entry.response.outcome in {"applied", "refused"}:
             original = entry.response
             current = self._current(target)

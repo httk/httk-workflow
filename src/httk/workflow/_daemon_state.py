@@ -21,6 +21,8 @@ Path                                    Content
 ``handles/<handle>/``                   the request id of a manager start
 ``slots/record.<k>/``, ``slots/start.<k>/``  ``<request id> <nonce>`` claiming one unit of a quota
 ``observations/<handle>.json``          the last scheduler observation (last writer wins)
+``targets/<id>/``                       a job request's frozen target
+``executions/<id>.decision/``, ``.result/``  a job request's execution decision and result
 ======================================  ==========================================================
 
 Every instance has a random nonce. Whatever is not idempotent carries it (the
@@ -31,6 +33,14 @@ have produced identically.
 Durability order: each file is fsynced, then its directory; the anchor is
 durable before any decision, ``decision=submit`` before the scheduler is
 contacted, and ``response`` before the daemon publishes it.
+
+History is bounded by retirement (:meth:`Ledger.retire`), not by lifetime totals: a settled request, and a manager
+start once its manager ended and its log was published, is removed after the configured history, which frees its
+quota slots. Retirement removes a job request's result, execution decision and target, then the anchor in one
+atomic move, then a start's handle and observation and the request's slots, so every intermediate state is valid;
+the hourly leftover sweep finishes a retirement a crash interrupted. Nothing that can still matter is retired: an
+unanswered request, a start whose manager may still be queued or running, or a start answered ``uncertain`` without
+a scheduler identity, which is kept forever because nothing can tell whether its job exists.
 """
 
 import errno
@@ -43,13 +53,14 @@ import secrets
 import stat
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import Self
 
 from . import _fs
+from ._daemon_auth import CLOCK_SKEW_SECONDS
 from ._daemon_protocol import Request, Response, decode_request, decode_response, encode_request, encode_response
 from ._daemon_protocol import request_digest as canonical_request_digest
 from ._util import fsync_directory
@@ -69,6 +80,9 @@ _CLUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 _REASON = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _TIME_NS = re.compile(r"0|[1-9][0-9]{0,18}\Z")
 _PREPARED = re.compile(r"([0-9a-f]{32})\.[0-9a-f]{16}\Z")
+_OBSERVATION_NAME = re.compile(r"([0-9a-f]{32})\.json\Z")
+#: A slot's content: the claimed request identifier and the claiming instance's nonce.
+_SLOT_CLAIM = re.compile(rb"([0-9a-f]{32}) ([0-9a-f]{32})\n\Z")
 #: The prefix a prepared anchor is fenced to before the leftover sweep removes it.
 _STALE = ".stale."
 _SLOT = re.compile(r"(record|start)\.(0|[1-9][0-9]{0,5})\Z")
@@ -339,8 +353,8 @@ class Ledger:
     :param workspace_id: Workspace identity pinned by protected policy.
     :param enrollment_id: Enrollment identity pinned by protected policy.
     :param initialize: Create the ledger; it must not exist yet.
-    :param max_records: Maximum durable requests for this enrollment (cumulative).
-    :param max_submissions: Maximum admitted manager starts for this enrollment (cumulative).
+    :param max_records: Maximum durable requests this enrollment retains at once; :meth:`retire` frees slots.
+    :param max_submissions: Maximum manager starts this enrollment retains at once; :meth:`retire` frees slots.
     :raises ValueError: If the path, identities or configured bounds are invalid.
     :raises FileExistsError: If *initialize* is set and a ledger already exists.
     :raises LedgerError: If the ledger is missing, malformed, belongs to another enrollment, or the state
@@ -581,6 +595,9 @@ class Ledger:
 
         The files are read in the reverse of their write order (response, scheduler, decision, then the
         anchor's envelope), so a file read later always existed when an earlier-read one was written.
+        ponytail: a retirement plus a replay's re-admission of the same id between these reads can mix the
+        old response with the new envelope (a ``LedgerError`` for a start); the same accepted ceiling as
+        :meth:`_retire_entry`.
         """
 
         anchor = self._anchor(request_id)
@@ -594,6 +611,8 @@ class Ledger:
         decision_bytes = _read_record(anchor / "decision", _MAX_LINE)
         envelope = self._envelope(anchor)
         if envelope is None:
+            if _fs.lstat(_fs.loc(anchor)) is None:
+                return None  # retired between the reads: the anchor moves away whole
             raise LedgerError(f"daemon ledger anchor {anchor} is incomplete")
         request, owner, handle = envelope
         if request.request_id != request_id:
@@ -692,7 +711,8 @@ class Ledger:
 
         A settled start (a response that nothing can change any more: ``refused``, ``submitted``, or
         ``uncertain`` with the scheduler identity recorded) is read and validated once and then served
-        from memory, since every ledger file is written once and never replaced.
+        from memory, since every ledger file is written once and never replaced; only retirement removes
+        them, and :meth:`retire` forgets what it (or another instance) retired.
 
         :param unanswered: Skip every start whose ``response`` exists, found by a name lookup.
         :yields: Each start's validated entry, in handle order.
@@ -705,8 +725,8 @@ class Ledger:
             if request_id is None:
                 continue
             settled = self._settled.get(request_id)
-            if settled is not None:
-                if settled.handle == handle and not unanswered:
+            if settled is not None and settled.handle == handle:
+                if not unanswered:
                     yield settled
                 continue
             if unanswered and _fs.exists(_fs.loc(self._anchor(request_id) / "response")):
@@ -715,6 +735,9 @@ class Ledger:
             if entry is None or entry.handle != handle:
                 _LOGGER.debug("daemon ledger handle %s is an orphan; ignored", handle)
                 continue
+            if settled is not None:
+                # The identifier was retired (by another instance) and admitted again under a new handle.
+                del self._settled[request_id]
             if entry.response is not None and (entry.job_id is not None or entry.response.outcome != "uncertain"):
                 self._settled[request_id] = entry
             yield entry
@@ -747,43 +770,60 @@ class Ledger:
     def verify(self) -> int:
         """Validate every anchor and the shape of every ledger directory.
 
+        An instance may retire history meanwhile: a record that vanished between the listing and its check was
+        retired and is skipped, since retirement removes a job request's records before its anchor.
+
         :return: The number of admitted requests.
         :raises LedgerError: If anything stored is corrupt, unexpected, or beyond the absolute bound.
         """
 
         self._check_open()
-        count = 0
+        count = listed = 0
         for request_id in self._listing(self._root / "req"):
-            count += 1
-            if count > _MAX_RECORDS or _HEX32.fullmatch(request_id) is None:
+            listed += 1
+            if listed > _MAX_RECORDS or _HEX32.fullmatch(request_id) is None:
                 raise LedgerError(f"unexpected entry {request_id!r} in the daemon ledger's requests")
-            unknown = set(self._listing(self._anchor(request_id))) - _ANCHOR_FILES
+            try:
+                unknown = set(self._listing(self._anchor(request_id))) - _ANCHOR_FILES
+            except FileNotFoundError:
+                continue  # retired since the listing
             if unknown:
                 raise LedgerError(f"unexpected files {sorted(unknown)} in daemon ledger anchor {request_id}")
-            self._entry(request_id)
+            if self._entry(request_id) is not None:
+                count += 1
         for _start in self._starts():
             pass
-        for request_id in self._listing(self._root / "targets"):
+        targets = self._root / "targets"
+        executions = self._root / "executions"
+        for request_id in self._listing(targets):
             if _HEX32.fullmatch(request_id) is None:
                 raise LedgerError(f"unexpected entry {request_id!r} in daemon job targets")
             entry = self._entry(request_id)
+            if entry is None and not _fs.exists(_fs.loc(targets / request_id)):
+                continue  # retired since the listing
             if entry is None or entry.request.operation != "job_request":
                 raise LedgerError(f"orphan daemon job target {request_id}")
-            if _read_record(self._root / "targets" / request_id, _MAX_JOB_RECORD) is None:
+            if _read_record(targets / request_id, _MAX_JOB_RECORD) is None and _fs.exists(
+                _fs.loc(targets / request_id)
+            ):
                 raise LedgerError(f"invalid daemon job target {request_id}")
-        for name in self._listing(self._root / "executions"):
+        for name in self._listing(executions):
             match = re.fullmatch(r"([0-9a-f]{32})\.(decision|result)", name)
             if match is None:
                 raise LedgerError(f"unexpected entry {name!r} in daemon job executions")
             request_id, kind = match.groups()
             entry = self._entry(request_id)
+            if entry is None and not _fs.exists(_fs.loc(executions / name)):
+                continue  # retired since the listing
             if entry is None or entry.request.operation != "job_request":
                 raise LedgerError(f"orphan daemon job execution {request_id}")
-            if kind == "decision" and self.read_target(entry) is None:
-                raise LedgerError(f"daemon job execution has no target {request_id}")
-            if kind == "result" and self.execution_decision(entry) is None:
+            # What each record requires is removed after it, so it is checked by the record still being there.
+            required = targets / request_id if kind == "decision" else executions / f"{request_id}.decision"
+            if _read_record(required, _MAX_JOB_RECORD) is None and _fs.exists(_fs.loc(executions / name)):
+                if kind == "decision":
+                    raise LedgerError(f"daemon job execution has no target {request_id}")
                 raise LedgerError(f"daemon job result has no decision {request_id}")
-            if _read_record(self._root / "executions" / name, _MAX_JOB_RECORD) is None:
+            if _read_record(executions / name, _MAX_JOB_RECORD) is None and _fs.exists(_fs.loc(executions / name)):
                 raise LedgerError(f"invalid daemon job execution record {name}")
         for name in self._listing(self._root / "slots"):
             if _SLOT.fullmatch(name) is None:
@@ -901,7 +941,7 @@ class Ledger:
         :return: The new or existing durable entry.
         :raises ValueError: If the request is of the wrong type, workspace or enrollment.
         :raises ConflictError: If the request identifier names different content.
-        :raises CapacityError: If an applicable cumulative quota is exhausted.
+        :raises CapacityError: If an applicable quota of retained records is exhausted.
         :raises LedgerError: If the stored state is corrupt or admission never settles.
         """
 
@@ -1055,11 +1095,19 @@ class Ledger:
             raise LedgerError(f"the response of request {request_id} was not recorded")
         return stored
 
-    def _job_record(self, directory: str, entry: Entry, name: str) -> bytes | None:
+    def _job_record(self, directory: str, entry: Entry, name: str, *, admitted_only: bool = False) -> bytes | None:
+        """Read one job record of an admitted job request; ``None`` when absent or the request was retired.
+
+        A retired request (one whose anchor another instance removed since *entry* was read) has no records any
+        more, so reading reports ``None``; with *admitted_only* (a write is about to follow) that raises instead.
+        """
+
         self._check_open()
         if not isinstance(entry, Entry) or entry.request.operation != "job_request":
             raise ValueError("a job_request ledger entry is required")
         admitted = self.lookup_request(entry.request.request_id)
+        if admitted is None and not admitted_only:
+            return None
         if admitted is None or admitted.request != entry.request:
             raise ValueError("job request is not admitted in this ledger")
         if name not in {"target", "decision", "result"}:
@@ -1072,7 +1120,7 @@ class Ledger:
         """Read the immutable resolved target recorded for one admitted job request.
 
         :param entry: The admitted job request.
-        :return: The winning target bytes, or ``None`` before publication.
+        :return: The winning target bytes, or ``None`` before publication or once the request was retired.
         :raises ValueError: If *entry* is not a job request.
         :raises LedgerError: If the record is unsafe or too large.
         """
@@ -1091,7 +1139,7 @@ class Ledger:
 
         if type(data) is not bytes or not data or len(data) > _MAX_JOB_RECORD:
             raise ValueError("invalid job target document")
-        self._job_record("targets", entry, "target")
+        self._job_record("targets", entry, "target", admitted_only=True)
         directory = self._root / "targets" / entry.request.request_id
         if not _publish(directory.parent, directory.name, data):
             winner = _read_record(directory, _MAX_JOB_RECORD)
@@ -1155,7 +1203,7 @@ class Ledger:
         """Read the immutable winning execution decision for one job request.
 
         :param entry: The admitted job request.
-        :return: Canonical decision bytes, or ``None`` before publication.
+        :return: Canonical decision bytes, or ``None`` before publication or once the request was retired.
         :raises ValueError: If *entry* is not a job request.
         :raises LedgerError: If the record is unsafe or too large.
         """
@@ -1166,7 +1214,7 @@ class Ledger:
         """Read the once-written result of a job execution.
 
         :param entry: The admitted job request.
-        :return: Result bytes, or ``None`` before publication.
+        :return: Result bytes, or ``None`` before publication or once the request was retired.
         :raises ValueError: If *entry* is not a job request.
         :raises LedgerError: If the record is unsafe or too large.
         """
@@ -1201,10 +1249,11 @@ class Ledger:
     # ------------------------------------------------------------------
 
     def _sweep_leftovers(self, now_ns: int) -> None:
-        """Remove crash leftovers older than an hour: prepared anchors, trash, and record stagings.
+        """Remove crash leftovers older than an hour: prepared anchors, trash, record stagings and orphans.
 
         Record stagings are swept in ``slots/``, ``handles/`` and each ``req/<id>/`` (only names with the staging
-        mark there: an installed anchor keeps its ``.nonce``), and a staging of the ledger itself beside it.
+        mark there: an installed anchor keeps its ``.nonce``), and a staging of the ledger itself beside it. The
+        orphans a retirement leaves when it crashes after removing the anchor go too (:meth:`_sweep_orphans`).
         """
 
         if self._swept_at is not None and 0 <= now_ns - self._swept_at < _LEFTOVER_NS:
@@ -1253,6 +1302,97 @@ class Ledger:
             information = _fs.lstat(_fs.loc(path))
             if information is not None and now_ns - information.st_mtime_ns > _LEFTOVER_NS:
                 _remove(path, prep)
+        self._sweep_orphans(now_ns)
+
+    def _names(self, directory: Path) -> list[str]:
+        """List a ledger directory without dot and trash names, truncated (never refused) at the listing bound."""
+
+        with os.scandir(directory) as entries:
+            listed = [entry.name for _count, entry in zip(range(_MAX_LISTING), entries, strict=False)]
+        return [name for name in listed if not name.startswith((".", _TRASH))]
+
+    def _identity(self, request_id: str) -> tuple[str, str | None] | None:
+        """Return an anchor's owner nonce and handle, or ``None`` when no anchor exists.
+
+        :param request_id: The request identifier.
+        :return: The owner and handle the envelope names, or ``None``.
+        :raises LedgerError: If the anchor exists but its envelope is missing or invalid.
+        """
+
+        anchor = self._anchor(request_id)
+        if _fs.lstat(_fs.loc(anchor)) is None:
+            return None
+        stored = self._envelope(anchor)
+        if stored is None:
+            if _fs.lstat(_fs.loc(anchor)) is None:
+                return None
+            raise LedgerError(f"daemon ledger anchor {anchor} is incomplete")
+        return stored[1], stored[2]
+
+    def _sweep_orphans(self, now_ns: int) -> None:
+        """Remove what an interrupted retirement or admission left beside no anchor, once older than an hour.
+
+        A handle whose request has no anchor (or whose anchor minted another handle), an observation whose handle
+        is gone, and a slot whose request has no anchor (or whose anchor another instance installed: the claim of
+        a crashed losing admission) are removed. The hour protects an admission in progress, which claims its
+        slots before it installs the anchor and links the handle after. Anything undecidable is kept.
+
+        :param now_ns: The current time in integer UTC nanoseconds.
+        """
+
+        prep = self._root / "prep"
+        identities: dict[str, tuple[str, str | None] | None] = {}
+
+        def identity(request_id: str) -> tuple[str, str | None] | None:
+            if request_id not in identities:
+                identities[request_id] = self._identity(request_id)
+            return identities[request_id]
+
+        def old(path: Path) -> bool:
+            information = _fs.lstat(_fs.loc(path))
+            return information is not None and now_ns - information.st_mtime_ns > _LEFTOVER_NS
+
+        handles = self._root / "handles"
+        for handle in self._names(handles):
+            try:
+                if _HEX32.fullmatch(handle) is None or not old(handles / handle):
+                    continue
+                request_id = self._handle_target(handle)
+                if request_id is None:
+                    continue
+                stored = identity(request_id)
+                if stored is not None and stored[1] == handle:
+                    continue
+            except (LedgerError, OSError):
+                continue  # undecidable: verify reports a corrupt record
+            _LOGGER.info("daemon_ledger_leftover_removed path=handles/%s", handle)
+            _remove(handles / handle, prep)
+        observations = self._root / "observations"
+        for name in self._names(observations):
+            match = _OBSERVATION_NAME.fullmatch(name)
+            if match is None or _fs.exists(_fs.loc(handles / match.group(1))) or not old(observations / name):
+                continue
+            _LOGGER.info("daemon_ledger_leftover_removed path=observations/%s", name)
+            self._remove_observation(match.group(1))
+        slots = self._root / "slots"
+        for name in self._names(slots):
+            try:
+                if _SLOT.fullmatch(name) is None or not old(slots / name):
+                    continue
+                data = _read_record(slots / name, _MAX_LINE)
+                claim = None if data is None else _SLOT_CLAIM.fullmatch(data)
+                if data is None or claim is None:
+                    continue
+                stored = identity(claim.group(1).decode("ascii"))
+                if stored is not None and stored[0] == claim.group(2).decode("ascii"):
+                    continue
+                # Read again right before the removal: only this exact claim is removed.
+                if _read_record(slots / name, _MAX_LINE) != data:
+                    continue
+            except (LedgerError, OSError):
+                continue
+            _LOGGER.info("daemon_ledger_leftover_removed path=slots/%s", name)
+            _remove(slots / name, prep)
 
     def recover(self, *, older_than: float, now_ns: int | None = None) -> list[Entry]:
         """Settle every start whose decider crashed before linking its response.
@@ -1303,6 +1443,160 @@ class Ledger:
                 response.outcome,
             )
         return settled
+
+    # ------------------------------------------------------------------
+    # History
+    # ------------------------------------------------------------------
+
+    def _settled_at(self, request_id: str, handle: str | None) -> int | None:
+        """Return when a request settled: the newest of its response record and its start's observation.
+
+        :param request_id: The answered request's identifier.
+        :param handle: A start's handle, or ``None``.
+        :return: The time in integer UTC nanoseconds, or ``None`` when the response vanished meanwhile.
+        """
+
+        response = _fs.lstat(_fs.loc(self._anchor(request_id) / "response"))
+        if response is None:
+            return None
+        newest = response.st_mtime_ns
+        if handle is not None:
+            observed = _fs.lstat(_fs.loc(self._root / "observations" / f"{handle}.json"))
+            if observed is not None:
+                newest = max(newest, observed.st_mtime_ns)
+        return newest
+
+    def _remove_observation(self, handle: str) -> None:
+        """Remove one manager's observation file, never following a symlink; absent is fine."""
+
+        path = self._root / "observations" / f"{handle}.json"
+        information = _fs.lstat(_fs.loc(path))
+        if information is None:
+            return
+        if stat.S_ISDIR(information.st_mode):
+            _remove(path, self._root / "prep")  # not something _write made, but no reason to keep it
+        else:
+            _fs.remove_file(_fs.loc(path), durable=True)
+
+    def _slot_claims(self) -> dict[str, bytes]:
+        """Return the content of every quota slot, by name."""
+
+        slots = self._root / "slots"
+        claims: dict[str, bytes] = {}
+        for name in self._listing(slots):
+            if _SLOT.fullmatch(name) is None:
+                continue
+            data = _read_record(slots / name, _MAX_LINE)
+            if data is not None:
+                claims[name] = data
+        return claims
+
+    def _retire_entry(self, entry: Entry, claims: dict[str, bytes]) -> None:
+        """Remove one settled request in the crash-safe order; every step is repeatable.
+
+        ponytail: accepted ceiling. If two instances retire the same entry while a replay of its identifier is
+        being admitted, the second move can discard the replay's fresh anchor in the microseconds between them;
+        the replay would be refused as expired anyway, its admitting instance's ``admit`` raises and that daemon
+        exits, and its handle and slots are swept as orphans after an hour.
+
+        :param entry: The settled request.
+        :param claims: The slot contents read before any anchor of this retirement was removed.
+        """
+
+        request_id = entry.request.request_id
+        prep = self._root / "prep"
+        if entry.request.operation == "job_request":
+            # Each record requires the one removed after it, so verify() holds after a crash at any step.
+            _remove(self._root / "executions" / f"{request_id}.result", prep)
+            _remove(self._root / "executions" / f"{request_id}.decision", prep)
+            _remove(self._root / "targets" / request_id, prep)
+        # One atomic move into the trash: readers see the anchor whole or not at all.
+        _remove(self._anchor(request_id), prep)
+        self._settled.pop(request_id, None)
+        _hook("ledger.retired")
+        handle = entry.handle
+        if handle is not None:
+            if self._handle_target(handle) == request_id:
+                _remove(self._root / "handles" / handle, prep)
+            self._remove_observation(handle)
+        prefix = f"{request_id} ".encode("ascii")
+        slots = self._root / "slots"
+        for name, data in claims.items():
+            # Only the claims read before the anchor went: a later admission of the same identifier claims anew.
+            if data.startswith(prefix) and _read_record(slots / name, _MAX_LINE) == data:
+                _remove(slots / name, prep)
+
+    def retire(self, closed_handles: Collection[str], *, cutoff_ns: int, max_age: int) -> list[str]:
+        """Remove the settled history at or before *cutoff_ns*, freeing its quota slots.
+
+        A request is settled once its response is recorded; an unanswered request is never retired. A manager
+        start is retired only when it was refused, or when its handle is in *closed_handles* (its manager ended
+        and nothing more is published about it) and its scheduler identity is recorded. A start answered
+        ``uncertain`` without a scheduler identity is never retired: nothing can tell whether its job exists. The
+        settlement time is the modification time of the ``response`` record or, when newer, of the start's
+        observation. Whatever the cutoff, a request the daemon could ever accept (a signed lifetime from 1 through
+        *max_age* seconds) is retired only after its signed expiry plus the clock-skew allowance, so its anchor
+        outlives every time a replay of it could still be accepted and executed again. A request whose lifetime
+        no daemon accepts is retired on its settlement age alone, so it cannot hold its quota slot for as long as
+        it claims to live.
+
+        A job request's result, execution decision and target are removed first, then the anchor in one atomic
+        move, then a start's handle and observation and the request's slots. A crash after the anchor leaves
+        orphans that :meth:`managers` skips (except that an instance which cached the settled start may still list
+        it until its own next retirement forgets it) and the hourly leftover sweep removes. A retired request
+        identifier is new again: a later request with it is admitted afresh. A corrupt anchor is logged and
+        skipped (:meth:`verify` reports it); the others are still retired.
+
+        :param closed_handles: Handles of the starts whose manager is known to have ended for good.
+        :param cutoff_ns: The latest settlement time retired, in integer UTC nanoseconds.
+        :param max_age: The longest signed request lifetime the daemon accepts, in seconds.
+        :return: The retired request identifiers, in order.
+        :raises ValueError: If *cutoff_ns* is not an integer or *max_age* not a positive integer.
+        :raises LedgerError: If a directory is corrupt or exceeds the listing bound.
+        """
+
+        self._check_open()
+        if type(cutoff_ns) is not int:
+            raise ValueError("cutoff_ns must be an integer")
+        if type(max_age) is not int or max_age <= 0:
+            raise ValueError("max_age must be a positive integer")
+        closed = frozenset(closed_handles)
+        claims = self._slot_claims()
+        retired: list[str] = []
+        for request_id in sorted(self._listing(self._root / "req")):
+            if _HEX32.fullmatch(request_id) is None:
+                raise LedgerError(f"unexpected entry {request_id!r} in the daemon ledger's requests")
+            try:
+                entry = self._entry(request_id)
+            except LedgerError as exc:
+                _LOGGER.warning("daemon_ledger_retire_skipped request_id=%s reason=%s", request_id, exc)
+                continue
+            if entry is None or entry.response is None:
+                continue  # retired by another instance meanwhile, or still recovery's to answer
+            created_at, expires_at = entry.request.created_at, entry.request.expires_at
+            acceptable = created_at > 0 and 0 < expires_at - created_at <= max_age
+            if acceptable and (expires_at + CLOCK_SKEW_SECONDS) * 1_000_000_000 >= cutoff_ns:
+                continue  # a replay could still be accepted: only the anchor keeps it from acting twice
+            handle = entry.handle
+            if handle is not None:
+                refused = entry.decision is not None and entry.decision.kind == "refuse"
+                if not refused and (handle not in closed or entry.job_id is None):
+                    continue
+            settled_at = self._settled_at(request_id, handle)
+            if settled_at is None or settled_at > cutoff_ns:
+                continue
+            self._retire_entry(entry, claims)
+            retired.append(request_id)
+            _LOGGER.info(
+                "daemon_ledger_retired request_id=%s operation=%s handle=%s",
+                request_id,
+                entry.request.operation,
+                handle,
+            )
+        # Forget the settled starts another instance retired.
+        for request_id in [key for key in self._settled if not _fs.exists(_fs.loc(self._anchor(key)))]:
+            del self._settled[request_id]
+        return retired
 
     # ------------------------------------------------------------------
     # Observations

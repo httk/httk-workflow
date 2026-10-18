@@ -1459,3 +1459,82 @@ def test_job_result_detail_sanitizes_control_characters() -> None:
     )
     assert response.detail is not None and len(response.detail) <= 1000
     assert all(" " <= character <= "~" for character in response.detail)
+
+
+@pytest.mark.parametrize("read", ["read_target", "execution_result"])
+def test_a_command_retired_during_its_status_observation_is_unknown_and_the_daemon_keeps_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: str
+) -> None:
+    workspace, ref, _state = _setup(tmp_path)
+    seed = _seed(tmp_path)
+    operator_key = identity_public_key(seed)
+    assert operator_key is not None
+    daemon = workspace.control / "daemon"
+    broker_state = daemon / "broker"
+    requests_path = workspace.root / "exchange" / "requests"
+    responses_path = workspace.root / "exchange" / "responses"
+    for path in (daemon, broker_state, requests_path, responses_path):
+        path.mkdir(parents=True, exist_ok=True)
+    initialize_response_seed(daemon)
+    policy = Policy(
+        workspace=workspace.root,
+        workspace_id=workspace.workspace_id,
+        enrollment_id=ENROLLMENT_ID,
+        bwrap=tmp_path / "runtime/bwrap",
+        python=tmp_path / "runtime/python",
+        sbatch=tmp_path / "runtime/sbatch",
+        squeue=tmp_path / "runtime/squeue",
+        scancel=tmp_path / "runtime/scancel",
+        cluster="test-cluster",
+        launchers=(ApprovedLauncher("cpu", (("manager.confine", "bwrap"),), "a" * 64),),
+        authorized_keys=(operator_key,),
+    )
+    ledger = Ledger(broker_state, workspace.workspace_id, ENROLLMENT_ID, initialize=True)
+    other = Ledger(broker_state, workspace.workspace_id, ENROLLMENT_ID)
+    requests = MailboxDirectory(requests_path)
+    responses = MailboxDirectory(responses_path)
+    owner = _kernel.register_owner(workspace, kind="daemon", label="broker", allocation=None, advertised={})
+    broker = Broker(
+        policy,
+        _UnusedGateway(policy),
+        ledger,
+        requests,
+        responses,
+        response_seed=response_seed_path(daemon),
+        job_executor=JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST),
+    )
+    try:
+        command = _request(tmp_path, workspace.workspace_id, ref.job_id, number=71)
+        broker.requests.replace(f"{command.request_id}.json", encode_request(command))
+        broker.process_once(threading.Event())
+        assert decode_response(broker.responses.read(f"{command.request_id}.json")).outcome == "applied"
+        original = getattr(ledger, read)
+
+        def retired_meanwhile(entry: object) -> bytes | None:
+            # Another instance retires the command between the status lookup and this read.
+            assert other.retire((), cutoff_ns=1 << 62, max_age=1 << 40) == [command.request_id]
+            return original(entry)
+
+        monkeypatch.setattr(ledger, read, retired_meanwhile)
+        status = sign_request(
+            Request(
+                "00000000000000000000000000000072",
+                workspace.workspace_id,
+                "job_request_status",
+                enrollment_id=ENROLLMENT_ID,
+                command_id=command.request_id,
+            ),
+            seed_path=seed,
+            now=int(time.time()),
+            lifetime=300,
+        )
+        broker.requests.replace(f"{status.request_id}.json", encode_request(status))
+        assert broker.process_once(threading.Event()) == 1
+        answer = decode_response(broker.responses.read(f"{status.request_id}.json"))
+        assert (answer.outcome, answer.reason) == ("refused", "unknown_command")
+        assert ledger.verify() == 0
+    finally:
+        broker.close()
+        owner.close()
+        ledger.close()
+        other.close()
