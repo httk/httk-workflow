@@ -286,6 +286,7 @@ Jobs move through the exchange with the ordinary `job eject` and `job adopt`:
 
 ```console
 $ httk job eject JOB /mnt/cluster/exchange/inbox
+$ httk remote daemon show confined
 $ httk remote daemon start confined --configuration small
 $ httk remote daemon status confined
 $ httk remote daemon status confined --handle MANAGER_HANDLE
@@ -305,7 +306,8 @@ installed in the workspace, an operator task; until then the adopted job waits.
 returned tree, verifies it and removes the source from the exchange.
 `--configuration` names one of the global `slurm` launchers the operator
 approved for the daemon (each sets `manager.confine=bwrap`); `daemon.json`
-lists them with their digests. Every unrestricted confined manager of the workspace (no `--placement-prefix` or pool restriction), whether
+lists them with their digests and published resource settings (task layout,
+CPUs, memory, GRES, partition, workers and time limits), and `show` prints it. Every unrestricted confined manager of the workspace (no `--placement-prefix` or pool restriction), whether
 started by the daemon or not, adopts bundles from `inbox` and runs every job
 attempt confined to its own job directory; the daemon only starts, queries and
 cancels managers. `status` without `--handle` is passive: it prints the

@@ -116,6 +116,19 @@ def handle_remote_daemon_log(arguments: argparse.Namespace, context: CLIContext)
     return 0
 
 
+def handle_remote_daemon_show(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Print the validated ``daemon.json`` of the pinned daemon.
+
+    :param arguments: The parsed ``show`` command arguments.
+    :param context: The active CLI context.
+    :return: 0 after the document is printed.
+    """
+
+    _, endpoint = _mount_endpoint(arguments, context)
+    print(json.dumps(endpoint.live(), indent=2, sort_keys=True, default=dict))
+    return 0
+
+
 def handle_remote_daemon_take_back(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Take an ejected bundle back out of the exchange inbox before a manager adopts it.
 
@@ -215,11 +228,11 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
     if verb == "start":
         if type(configuration) is not str:
             raise ValueError("start requires a configuration name")
-        configurations = cast(Mapping[str, str], endpoint.live()["configurations"])
-        configuration_digest = configurations.get(configuration)
-        if configuration_digest is None:
+        configurations = cast(Mapping[str, Mapping[str, object]], endpoint.live()["configurations"])
+        if configuration not in configurations:
             available = ", ".join(sorted(configurations)) or "(none)"
             raise ValueError(f"unknown approved daemon configuration {configuration!r}; available: {available}")
+        configuration_digest = cast(str, configurations[configuration]["digest"])
     request_id = _request_id(arguments.request_id)
     intent = Request(
         request_id,
@@ -306,6 +319,17 @@ def build_daemon_remote_parser(
     )
     log.add_argument("remote", metavar="REMOTE", help="the configured mount-daemon remote")
     log.add_argument("--handle", required=True, metavar="HANDLE", help="broker-issued manager handle")
+    show = _leaf(
+        daemon_subparsers,
+        "show",
+        summary="print the daemon's published menu",
+        description=(
+            "Print EXCHANGE/daemon.json of the pinned daemon: its identities and the approved configurations "
+            "with their digests and published resource settings"
+        ),
+        handler=handle_remote_daemon_show,
+    )
+    show.add_argument("remote", metavar="REMOTE", help="the configured mount-daemon remote")
     take = _leaf(
         daemon_subparsers,
         "take-back",

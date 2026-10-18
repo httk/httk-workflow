@@ -113,7 +113,8 @@ The exchange is a directory of the workspace, `WORKSPACE/exchange/`:
 WORKSPACE/
   exchange/              the only client-mounted directory; not visible to confined jobs
     exchange.json        workspace identity, written when the extension is enabled
-    daemon.json          the daemon's public menu, written by the daemon
+    daemon.json          the daemon's public menu: identities and the approved
+                         configurations with their published resource settings
     status.json          exchange jobs, states and progress, written by the managers
     managers.json        manager rows, written by the daemon
     launchers/<handle>.log  published launcher logs, written by the daemon
@@ -596,6 +597,25 @@ manager runs, and `managers.json` when its rows change. Read them with
 `httk remote daemon status REMOTE`; add `--handle` for the scheduler
 state of one manager through a signed request.
 
+`daemon.json` (format version 3) lists every approved configuration as
+`{digest, settings}`. `settings` holds only the allow-listed launcher settings
+that are set: `manager.workers`, `slurm.partition`, `slurm.nodes`,
+`slurm.ntasks`, `slurm.ntasks_per_node`, `slurm.cpus_per_task`, `slurm.mem`,
+`slurm.gres`, `slurm.time_limit` and `slurm.time_limit_max`. Values are the
+operator's own, except that `slurm.time_limit` and `slurm.time_limit_max` are
+canonical `[D-]HH:MM:SS`, with the maximum resolved to its default, the time
+limit. Every other setting stays private, including `slurm.account`,
+`slurm.reservation`, `slurm.export`, `environment.prelude`, `manager.command`,
+`manager.launch_template`, `manager.launch_mpi`, `manager.allocation`,
+`manager.bind_cpus`, `manager.confine` and every `confine.*` setting: they can
+reveal site-internal shell setup, launch commands and accounting. The published
+launcher logs (`launchers/<handle>.log`) carry the manager's Slurm output, so
+anything a prelude prints reaches clients there. The client refuses a document
+with any other key. Approval refuses a launcher whose published setting has a
+control character or is longer than 256 characters, so the published menu
+always stays readable by clients. `httk remote daemon show REMOTE` prints the
+validated document of a pinned daemon.
+
 The daemon checks each submitted manager about once a minute: with `squeue`
 while Slurm lists it, then with `sacct` for its final state and exit code. A
 manager is final in `COMPLETED`, `FAILED`, `CANCELLED`, `TIMEOUT`,
@@ -661,7 +681,7 @@ exchange transfers and `job eject` move job bundles only and never include it.
 ### Upgrading an enrollment
 
 Clients and daemons must upgrade together: protocol 5, ledger 4 and
-`daemon.json` 2 are required. Workspace format 3, internal request format 3
+`daemon.json` 3 are required. Workspace format 3, internal request format 3
 and configuration schemas are unchanged. Old enrollments are refused;
 there is no automatic migration, history reset or old-protocol adapter.
 

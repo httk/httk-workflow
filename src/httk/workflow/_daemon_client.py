@@ -22,6 +22,7 @@ from httk.core.userdirs import data_home
 from . import _fs
 from ._daemon_auth import sign_request, verify_request, verify_response
 from ._daemon_mailbox import MailboxDirectory, read_regular
+from ._daemon_policy import PUBLISHED_LAUNCHER_SETTINGS, valid_published_value
 from ._daemon_protocol import Request, Response, decode_request, decode_response, encode_request, request_digest
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ _ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 _CONFIGURATION_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _DAEMON_FORMAT = "httk-workspace-daemon"
-_DAEMON_FORMAT_VERSION = 2
+_DAEMON_FORMAT_VERSION = 3
 _DAEMON_PROTOCOL_VERSION = 5
 _DAEMON_FILE = "daemon.json"
 _EXCHANGE_FORMAT = "httk-workspace-exchange"
@@ -98,18 +99,34 @@ def _canonical_public_key(value: object, name: str) -> str:
     return value
 
 
-def _configurations(value: object) -> Mapping[str, str]:
-    """Return an immutable validated approved-configuration catalog."""
+def _published_settings(value: object, name: str) -> Mapping[str, object]:
+    """Return the immutable validated published resource settings of one configuration."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError(f"settings of daemon configuration {name!r} must be an object")
+    for key, setting in value.items():
+        if key not in PUBLISHED_LAUNCHER_SETTINGS:
+            raise ValueError(f"daemon configuration {name!r} publishes an unknown setting")
+        if not valid_published_value(setting):
+            raise ValueError(f"invalid daemon configuration setting {key} for {name!r}")
+    return MappingProxyType(dict(value))
+
+
+def _configurations(value: object) -> Mapping[str, Mapping[str, object]]:
+    """Return an immutable validated approved-configuration catalog of ``{digest, settings}`` entries."""
 
     if not isinstance(value, Mapping):
         raise ValueError("configurations must be an object")
-    result: dict[str, str] = {}
-    for name, digest in value.items():
+    result: dict[str, Mapping[str, object]] = {}
+    for name, entry in value.items():
         if type(name) is not str or _CONFIGURATION_PATTERN.fullmatch(name) is None:
             raise ValueError("invalid daemon configuration name")
+        if not isinstance(entry, Mapping) or set(entry) != {"digest", "settings"}:
+            raise ValueError(f"daemon configuration {name!r} must be an object with exactly digest and settings")
+        digest = entry["digest"]
         if type(digest) is not str or _DIGEST_PATTERN.fullmatch(digest) is None:
             raise ValueError(f"invalid daemon configuration digest for {name!r}")
-        result[name] = digest
+        result[name] = MappingProxyType({"digest": digest, "settings": _published_settings(entry["settings"], name)})
     return MappingProxyType(result)
 
 
@@ -211,7 +228,7 @@ def read_daemon(exchange: Path) -> dict[str, object]:
     :param exchange: Absolute path of the mounted exchange directory.
     :return: The validated daemon document, with ``configurations`` as an immutable mapping.
     :raises OSError: If the directory or file cannot be opened without following symlinks.
-    :raises ValueError: If the file is not a bounded, strict, valid version 2 daemon document for protocol 5.
+    :raises ValueError: If the file is not a bounded, strict, valid version 3 daemon document for protocol 5.
     """
 
     with MailboxDirectory(exchange) as directory:
@@ -747,10 +764,10 @@ def prepare_request(endpoint: "Endpoint", intent: Request, *, seed_path: Path | 
 
     live = endpoint.live()
     if intent.operation == "start_manager":
-        approved_digest = cast(Mapping[str, str], live["configurations"]).get(intent.profile or "")
-        if approved_digest is None:
+        approved = cast(Mapping[str, Mapping[str, object]], live["configurations"]).get(intent.profile or "")
+        if approved is None:
             raise ValueError(f"daemon configuration is not approved: {intent.profile!r}")
-        if intent.configuration_digest != approved_digest:
+        if intent.configuration_digest != approved["digest"]:
             raise ValueError("daemon configuration digest does not match the approved endpoint catalog")
     elif intent.operation == "job_request" and intent.configuration_digest != live["configuration_digest"]:
         raise ValueError("daemon configuration digest does not match the active endpoint snapshot")

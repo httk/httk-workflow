@@ -46,13 +46,13 @@ def _seed(path: Path, byte: int) -> Path:
 def _document(public_key: str, **changes: object) -> dict[str, object]:
     document: dict[str, object] = {
         "format": "httk-workspace-daemon",
-        "format_version": 2,
+        "format_version": 3,
         "protocol_version": 5,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": public_key,
         "configuration_digest": CONFIGURATION_DIGEST,
-        "configurations": {"cpu": CONFIGURATION_DIGEST},
+        "configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {}}},
         "request_max_age": 3600,
     }
     document.update(changes)
@@ -155,13 +155,27 @@ def test_endpoint_accepts_exact_settings_and_checks_workspace(tmp_path: Path) ->
 
 def test_read_daemon_returns_validated_live_document(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
-    document = _document(endpoint.require_daemon()[1], configurations={"cpu": CONFIGURATION_DIGEST, "gpu": "c" * 64})
+    gpu = {
+        "digest": "c" * 64,
+        "settings": {
+            "slurm.gres": "gpu:4",
+            "slurm.ntasks": 8,
+            "slurm.mem": "64G",
+            "slurm.partition": "kärna",
+            "slurm.time_limit_max": "1-00:00:00",
+        },
+    }
+    cpu = {"digest": CONFIGURATION_DIGEST, "settings": {"slurm.partition": "p" * 256}}
+    document = _document(endpoint.require_daemon()[1], configurations={"cpu": cpu, "gpu": gpu})
     document["request_max_age"] = 900
     _write_endpoint(endpoint.exchange, document)
 
     value = client_module.read_daemon(endpoint.exchange)
 
-    assert dict(value["configurations"]) == {"cpu": CONFIGURATION_DIGEST, "gpu": "c" * 64}  # type: ignore[call-overload]
+    configurations = value["configurations"]
+    assert json.loads(json.dumps(configurations, default=dict)) == {"cpu": cpu, "gpu": gpu}
+    with pytest.raises(TypeError):
+        configurations["gpu"]["settings"]["slurm.mem"] = "1G"  # type: ignore[index]
     assert value["request_max_age"] == 900
 
 
@@ -232,12 +246,26 @@ def test_endpoint_check_refuses_exchange_of_another_workspace(tmp_path: Path) ->
         {"configurations": {"CPU": CONFIGURATION_DIGEST}},
         {"configurations": {"cpu": "B" * 64}},
         {"configurations": {"cpu": True}},
+        {"configurations": {"cpu": CONFIGURATION_DIGEST}},
+        {"configurations": {"cpu": {"digest": "B" * 64, "settings": {}}}},
+        {"configurations": {"cpu": {"digest": CONFIGURATION_DIGEST}}},
+        {"configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {}, "extra": 1}}},
+        {"configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": []}}},
+        {"configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {"slurm.account": "x"}}}},
+        {"configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {"environment.prelude": "x"}}}},
+        {"configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {"manager.workers": True}}}},
+        {"configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {"slurm.gres": ["gpu:1"]}}}},
+        {"configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {"slurm.gres": {"gpu": 1}}}}},
+        {"configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {"slurm.mem": None}}}},
+        {"configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {"slurm.partition": "p" * 257}}}},
+        {"configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {"slurm.partition": "a\x1b[2J"}}}},
         {"request_max_age": True},
         {"request_max_age": 0},
         {"request_max_age": 86_401},
         {"request_max_age": "3600"},
         {"format": "other"},
         {"format_version": 1},
+        {"format_version": 2},
         {"protocol_version": 4},
         {"protocol_version": True},
         {"configuration_digest": "A" * 64},

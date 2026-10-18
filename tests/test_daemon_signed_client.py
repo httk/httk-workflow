@@ -49,13 +49,13 @@ def endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Endpoint:
 def _write_endpoint(exchange: Path, public_key: str, **changes: object) -> None:
     document: dict[str, object] = {
         "format": "httk-workspace-daemon",
-        "format_version": 2,
+        "format_version": 3,
         "protocol_version": 5,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": public_key,
         "configuration_digest": ACTIVE_CONFIGURATION_DIGEST,
-        "configurations": {"cpu": CONFIGURATION_DIGEST},
+        "configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {}}},
         "request_max_age": 3600,
     }
     document.update(changes)
@@ -190,7 +190,11 @@ def test_prepare_request_can_use_selected_operator_seed(endpoint: Endpoint) -> N
 
 def test_new_start_uses_live_configuration_digest(endpoint: Endpoint) -> None:
     changed_digest = "c" * 64
-    _write_endpoint(endpoint.exchange, endpoint.require_daemon()[1], configurations={"cpu": changed_digest})
+    _write_endpoint(
+        endpoint.exchange,
+        endpoint.require_daemon()[1],
+        configurations={"cpu": {"digest": changed_digest, "settings": {}}},
+    )
 
     with pytest.raises(ValueError, match="does not match"):
         prepare_request(endpoint, _intent())
@@ -209,7 +213,11 @@ def test_prepare_request_refuses_changed_enrollment(endpoint: Endpoint) -> None:
 def test_reload_cannot_retarget_cached_request_id(endpoint: Endpoint) -> None:
     signed = prepare_request(endpoint, _intent())
     changed_digest = "c" * 64
-    _write_endpoint(endpoint.exchange, endpoint.require_daemon()[1], configurations={"cpu": changed_digest})
+    _write_endpoint(
+        endpoint.exchange,
+        endpoint.require_daemon()[1],
+        configurations={"cpu": {"digest": changed_digest, "settings": {}}},
+    )
     changed_intent = replace(_intent(), configuration_digest=changed_digest)
 
     # The original intent still replays its exact cached bytes; a request under the new digest is a conflict.

@@ -1498,8 +1498,9 @@ reports uncertain. Uncertainty authorizes no takeover or re-execution.
 `health`, `start_manager`, `manager_status`, `cancel_manager`, `job_request`
 and `job_request_status` share `exchange/requests/`; managers leave all these
 commands alone. The daemon signs every result and keeps its protected ledger
-in `.httk-workspace/daemon/broker/ledger/`. `daemon.json` version 2 declares
-protocol version 5 and the active configuration digest. Fresh signed
+in `.httk-workspace/daemon/broker/ledger/`. `daemon.json` version 3 declares
+protocol version 5 and the active configuration digest, and lists the approved
+configurations with their digests and published resource settings. Fresh signed
 `job_request_status` observations bypass permanent admission and cumulative
 quota. See {doc}`workspace_daemon` for confinement and enrollment upgrades.
 

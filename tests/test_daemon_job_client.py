@@ -55,7 +55,7 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Endpo
         json.dumps(
             {
                 "format": "httk-workspace-daemon",
-                "format_version": 2,
+                "format_version": 3,
                 "protocol_version": 5,
                 "workspace_id": WORKSPACE_ID,
                 "enrollment_id": ENROLLMENT_ID,

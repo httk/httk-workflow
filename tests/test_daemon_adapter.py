@@ -51,13 +51,13 @@ def _endpoint(tmp_path: Path) -> Endpoint:
     assert public_key is not None
     document = {
         "format": "httk-workspace-daemon",
-        "format_version": 2,
+        "format_version": 3,
         "protocol_version": 5,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": public_key,
         "configuration_digest": ACTIVE_CONFIGURATION_DIGEST,
-        "configurations": {"cpu": CONFIGURATION_DIGEST},
+        "configurations": {"cpu": {"digest": CONFIGURATION_DIGEST, "settings": {}}},
         "request_max_age": 3600,
     }
     (exchange / "daemon.json").write_text(json.dumps(document, sort_keys=True, separators=(",", ":")), encoding="utf-8")

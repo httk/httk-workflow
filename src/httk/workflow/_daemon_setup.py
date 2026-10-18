@@ -22,6 +22,8 @@ from ._daemon_cli import _anchored
 from ._daemon_keys import initialize_response_seed, response_public_key
 from ._daemon_policy import (
     _LAUNCHER_NAME,
+    MAX_PUBLISHED_TEXT,
+    PUBLISHED_LAUNCHER_SETTINGS,
     ApprovedLauncher,
     Policy,
     _object_without_duplicates,
@@ -31,6 +33,7 @@ from ._daemon_policy import (
     _reject_constant,
     load_policy,
     policy_document,
+    valid_published_value,
 )
 from ._daemon_policy import MAX_POLICY_BYTES as _MAX_RUNTIME_POLICY_BYTES
 from ._daemon_policy import (
@@ -38,6 +41,7 @@ from ._daemon_policy import (
 )
 from ._daemon_slurm import submission
 from ._daemon_state import Ledger
+from ._durations import effective_time_limit, format_duration, time_limit_bound
 from ._exchange import ExchangeUnavailableError, enable_exchange, install_document
 from .configuration import launchers_home
 from .launchers import LAUNCHER_METADATA, _validate_launcher_metadata
@@ -46,7 +50,7 @@ from .workspace import Workspace
 
 _DAEMON_DOCUMENT = "daemon.json"
 _DAEMON_FORMAT = "httk-workspace-daemon"
-_DAEMON_VERSION = 2
+_DAEMON_VERSION = 3
 _DAEMON_PROTOCOL_VERSION = 5
 _MAX_WORKSPACE_BYTES = 1024 * 1024
 _MAX_LAUNCHER_BYTES = 64 * 1024
@@ -293,6 +297,12 @@ def _approved_launcher(name: str, workspace: Path, *, force: bool) -> ApprovedLa
         raise ValueError(f"launcher {name!r} must set manager.confine=bwrap: the daemon starts only confined managers")
     confine_settings(settings)
     _check_resources(settings, force=force)
+    for key, value in published_settings(settings).items():
+        if not valid_published_value(value):
+            raise ValueError(
+                f"launcher {name!r} setting {key} cannot be published to clients: use at most "
+                f"{MAX_PUBLISHED_TEXT} characters without control characters"
+            )
     # The broker submits through the installed launch runtime and never runs the bundle's executable.
     return ApprovedLauncher(
         name, tuple(sorted(settings.items())), hashlib.sha256(_canonical_bytes(metadata)).hexdigest()
@@ -646,6 +656,29 @@ def _publish(policy: Policy) -> Path:
     return snapshot
 
 
+def published_settings(settings: Mapping[str, object]) -> dict[str, object]:
+    """Return the allow-listed launcher settings ``daemon.json`` publishes to clients.
+
+    Values are verbatim except the two durations, which are canonical ``[D-]HH:MM:SS``, with
+    ``slurm.time_limit_max`` resolved to its default, the time limit.
+
+    :param settings: The settings of an approved launcher.
+    :return: The allow-listed settings that are set, in :data:`PUBLISHED_LAUNCHER_SETTINGS` order.
+    """
+
+    bound = time_limit_bound(settings)
+    durations = {
+        "slurm.time_limit": effective_time_limit(settings, None),
+        "slurm.time_limit_max": None if bound is None else format_duration(bound),
+    }
+    published: dict[str, object] = {}
+    for key in PUBLISHED_LAUNCHER_SETTINGS:
+        value = durations[key] if key in durations else settings.get(key)
+        if value is not None:
+            published[key] = value
+    return published
+
+
 def _write_daemon_document(policy: Policy) -> None:
     """Install ``exchange/daemon.json``: the unsigned menu a client reads, never a trust anchor.
 
@@ -662,7 +695,13 @@ def _write_daemon_document(policy: Policy) -> None:
         "enrollment_id": policy.enrollment_id,
         "daemon_public_key": response_public_key(policy.response_seed),
         "configuration_digest": read_active_snapshot(policy.daemon)[1],
-        "configurations": {launcher.name: policy.configuration_digest(launcher.name) for launcher in policy.launchers},
+        "configurations": {
+            launcher.name: {
+                "digest": policy.configuration_digest(launcher.name),
+                "settings": published_settings(dict(launcher.settings)),
+            }
+            for launcher in policy.launchers
+        },
         "request_max_age": policy.request_max_age,
     }
     try:
@@ -874,4 +913,12 @@ def activate(workspace: Path) -> tuple[Path, tuple[str, ...] | None]:
     return snapshot, tuple(sorted({launcher.name for launcher in set(old.launchers) ^ set(new.launchers)}))
 
 
-__all__ = ["CONFIGURATION_KEYS", "INITIALIZE_KEYS", "activate", "configure", "describe", "initialize"]
+__all__ = [
+    "CONFIGURATION_KEYS",
+    "INITIALIZE_KEYS",
+    "activate",
+    "configure",
+    "describe",
+    "initialize",
+    "published_settings",
+]

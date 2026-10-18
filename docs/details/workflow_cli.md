@@ -783,6 +783,7 @@ remote meaning "this machine", so `remote add local` is refused.
 | `remote show NAME...` | describe remotes and their settings | `--json` |
 | `remote remove NAME...` | remove remote bundles; refused while a registered workspace holds a transfer bound for the remote | `--force` skips only the confirmation |
 | `remote daemon configure REMOTE` | pin the identities in the mounted `exchange.json` and `daemon.json` | required `--exchange` |
+| `remote daemon show REMOTE` | print the pinned daemon's `daemon.json`: approved configurations, digests and published resource settings | |
 | `remote daemon health REMOTE` | check the confined daemon | `--request-id`, `--wait-seconds` |
 | `remote daemon start REMOTE` | start one approved manager configuration | required `--configuration`; `--time-limit` (the job's Slurm `--time`, above 120 s and up to the configuration's `slurm.time_limit_max`), `--request-id`, `--wait-seconds` |
 | `remote daemon status REMOTE` | print passive status, inspect a manager with `--handle`, or inspect an original job command with `--request-id` | mutually exclusive `--handle` / `--request-id`; `--wait-seconds` |

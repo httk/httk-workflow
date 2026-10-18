@@ -35,13 +35,18 @@ def _write_exchange(exchange: Path, public_key: str, **changes: object) -> Path:
     )
     document: dict[str, object] = {
         "format": "httk-workspace-daemon",
-        "format_version": 2,
+        "format_version": 3,
         "protocol_version": 5,
         "workspace_id": WORKSPACE_ID,
         "enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": public_key,
         "configuration_digest": ACTIVE_CONFIGURATION_DIGEST,
-        "configurations": {"serial": CONFIGURATION_DIGEST},
+        "configurations": {
+            "serial": {
+                "digest": CONFIGURATION_DIGEST,
+                "settings": {"slurm.ntasks": "4", "slurm.time_limit": "01:00:00"},
+            }
+        },
         "request_max_age": 1800,
     }
     document.update(changes)
@@ -300,7 +305,7 @@ def test_start_uses_live_configuration_digest(project: Path, monkeypatch: pytest
 
     exchange = project.parent / "exchange"
     reloaded = "d" * 64
-    _write_exchange(exchange, _public_key(project), configurations={"serial": reloaded})
+    _write_exchange(exchange, _public_key(project), configurations={"serial": {"digest": reloaded, "settings": {}}})
     observed: dict[str, object] = {}
 
     def run_adapter(_bundle, _operation, payload, *, timeout):
@@ -325,7 +330,7 @@ def test_start_after_reload_cannot_replay_cached_request_under_new_digest(
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("stop")))
     args = ["start", "cluster", "--configuration", "serial", "--request-id", "e" * 32]
     assert _invoke(project, args)[0] == 2
-    _write_exchange(exchange, _public_key(project), configurations={"serial": "d" * 64})
+    _write_exchange(exchange, _public_key(project), configurations={"serial": {"digest": "d" * 64, "settings": {}}})
 
     code, _stdout, stderr = _invoke(project, args)
 
@@ -657,6 +662,30 @@ def test_status_without_handle_prints_the_passive_files(project: Path, monkeypat
     code, stdout, _stderr = _invoke(project, ["status", "cluster"])
     assert code == 0
     assert json.loads(stdout) == {"status": status, "managers": None}
+
+
+def test_show_prints_the_published_menu_and_needs_the_daemon_pins(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote as cli
+
+    with monkeypatch.context() as patched:
+        patched.setattr(cli, "run_adapter", lambda *_a, **_k: pytest.fail("no request may be sent"))
+        code, stdout, _stderr = _invoke(project, ["show", "cluster"])
+    assert code == 0
+    document = json.loads(stdout)
+    assert document["format_version"] == 3 and document["enrollment_id"] == ENROLLMENT_ID
+    assert document["configurations"] == {
+        "serial": {"digest": CONFIGURATION_DIGEST, "settings": {"slurm.ntasks": "4", "slurm.time_limit": "01:00:00"}}
+    }
+
+    public_key = _public_key(project)
+    exchange = _write_exchange(tmp_path / "mounted-exchange", public_key)
+    (exchange / "daemon.json").unlink()
+    assert _invoke(project, _configure_args(exchange))[0] == 0
+    _write_exchange(exchange, public_key)
+    code, stdout, stderr = _invoke(project, ["show", "cluster"])
+    assert (code, stdout) == (2, "") and "httk remote daemon configure" in stderr and "Traceback" not in stderr
 
 
 def test_status_without_handle_refuses_bad_files_and_request_id_is_original_job_command(project: Path) -> None:

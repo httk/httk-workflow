@@ -196,13 +196,28 @@ def test_initialize_freezes_slurm_launchers_and_publishes_the_daemon_document(
     assert (layout.exchange / "daemon.json").stat().st_mode & 0o777 == 0o644
     assert endpoint == {
         "format": "httk-workspace-daemon",
-        "format_version": 2,
+        "format_version": 3,
         "protocol_version": 5,
         "workspace_id": layout.workspace.workspace_id,
         "enrollment_id": policy.enrollment_id,
         "daemon_public_key": response_public_key(response_seed_path(policy.daemon)),
         "configuration_digest": read_active_snapshot(policy.daemon)[1],
-        "configurations": {name: policy.configuration_digest(name) for name in ("small", "large")},
+        "configurations": {
+            "small": {
+                "digest": policy.configuration_digest("small"),
+                "settings": {"manager.workers": "3", "slurm.partition": "short"},
+            },
+            "large": {
+                "digest": policy.configuration_digest("large"),
+                "settings": {
+                    "slurm.cpus_per_task": "8",
+                    "slurm.mem": "2G",
+                    "slurm.gres": "gpu:2",
+                    "slurm.time_limit": "01:00:01",
+                    "slurm.time_limit_max": "01:00:01",
+                },
+            },
+        },
         "request_max_age": 3600,
     }
     assert _active(layout) == snapshot
@@ -232,7 +247,7 @@ def test_bundle_edits_take_effect_at_the_next_activation_without_another_command
     first_snapshot = _initialize(layout)
     first = load_policy(first_snapshot)
     endpoint = (layout.exchange / "daemon.json").read_bytes()
-    _rewrite_launcher("small", **{"slurm.cpus_per_task": "16"})
+    _rewrite_launcher("small", **{"slurm.cpus_per_task": "16", "slurm.time_limit_max": "90"})
     layout.workspace.set_setting("slurm.cpus_per_task", "32")
     assert _active(layout) == first_snapshot
     assert (layout.exchange / "daemon.json").read_bytes() == endpoint
@@ -243,14 +258,55 @@ def test_bundle_edits_take_effect_at_the_next_activation_without_another_command
     assert second.launcher("small").digest != first.launcher("small").digest
     assert second.launcher("large") == first.launcher("large")
     configurations = json.loads((layout.exchange / "daemon.json").read_text(encoding="utf-8"))["configurations"]
-    assert configurations["small"] == second.configuration_digest("small") != first.configuration_digest("small")
-    assert configurations["large"] == first.configuration_digest("large")
+    assert (
+        configurations["small"]["digest"] == second.configuration_digest("small") != first.configuration_digest("small")
+    )
+    assert configurations["small"]["settings"] == {
+        "manager.workers": "3",
+        "slurm.partition": "short",
+        "slurm.cpus_per_task": "16",
+        "slurm.time_limit_max": "01:30:00",
+    }
+    assert configurations["large"]["digest"] == first.configuration_digest("large")
     # Nothing changed since: the next activation publishes nothing, but recreates a removed launcher log directory.
     (layout.workspace.root / "logs/launchers").rmdir()
     assert _daemon_setup.activate(layout.workspace.root) == (snapshot, None)
     assert (layout.workspace.root / "logs/launchers").is_dir()
     assert not (second.daemon / "jobs").exists()
     assert sorted(path.name for path in snapshot.parent.glob("*.json")) == sorted([first_snapshot.name, snapshot.name])
+
+
+def test_published_settings_are_the_allow_listed_values_with_canonical_durations() -> None:
+    settings = {
+        "manager.workers": "4",
+        "slurm.partition": "gpu",
+        "slurm.nodes": "2",
+        "slurm.ntasks": 64,
+        "slurm.ntasks_per_node": "32",
+        "slurm.cpus_per_task": "2",
+        "slurm.mem": "64G",
+        "slurm.gres": "gpu:4",
+        "slurm.time_limit": "30",
+        "slurm.time_limit_max": "1-0",
+        "slurm.account": "secret-project",
+        "slurm.reservation": None,
+        "environment.prelude": "module load vasp",
+        "manager.launch_template": "srun {command}",
+        "manager.confine": "bwrap",
+        "confine.bind": "/scratch",
+    }
+    published = _daemon_setup.published_settings(settings)
+    assert list(published) == list(_daemon_policy.PUBLISHED_LAUNCHER_SETTINGS)
+    assert published == {
+        **{key: settings[key] for key in _daemon_policy.PUBLISHED_LAUNCHER_SETTINGS[:-2]},
+        "slurm.time_limit": "00:30:00",
+        "slurm.time_limit_max": "1-00:00:00",
+    }
+    assert _daemon_setup.published_settings({"slurm.time_limit": "2:00:00"}) == {
+        "slurm.time_limit": "02:00:00",
+        "slurm.time_limit_max": "02:00:00",
+    }
+    assert _daemon_setup.published_settings({"slurm.mem": "4G", "slurm.gres": None}) == {"slurm.mem": "4G"}
 
 
 @pytest.mark.parametrize("kind", ["daemon", "pbs", None])
@@ -297,6 +353,17 @@ def test_launcher_settings_the_dispatcher_refuses_fail_at_approval(
     assert not _state(layout).exists()
 
 
+@pytest.mark.parametrize(("key", "value"), [("manager.workers", "3\x7f"), ("slurm.gres", "gpu:" + "1" * 300)])
+def test_a_launcher_whose_published_settings_clients_would_refuse_fails_at_approval(
+    key: str, value: object, tmp_path: Path
+) -> None:
+    layout = _layout(tmp_path)
+    _rewrite_launcher("small", **{key: value})
+    with pytest.raises(ValueError, match=f"launcher 'small' setting {key} cannot be published to clients"):
+        _initialize(layout, "small")
+    assert not _state(layout).exists()
+
+
 def test_other_launcher_settings_are_frozen_as_ordinary_slurm_settings(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     _rewrite_launcher("small", **{"slurm.qos": "high", "slurm.ntasks": 4, "environment.prelude": "module load x"})
@@ -306,6 +373,8 @@ def test_other_launcher_settings_are_frozen_as_ordinary_slurm_settings(tmp_path:
         4,
         "module load x",
     )
+    published = json.loads((layout.exchange / "daemon.json").read_bytes())["configurations"]["small"]["settings"]
+    assert published == {"manager.workers": "3", "slurm.partition": "short", "slurm.ntasks": 4}
 
 
 def test_slurm_export_default_keeps_the_digest_and_nil_changes_it(tmp_path: Path) -> None:
@@ -951,7 +1020,8 @@ def test_effective_slurm_configuration_precedence_drives_policy(
         assert policy.slurm_conf == configurations[source]
         assert policy.cluster == source
     digests = {name: policy.configuration_digest(name) for name in ("small", "large")}
-    assert json.loads((layout.exchange / "daemon.json").read_text(encoding="utf-8"))["configurations"] == digests
+    published = json.loads((layout.exchange / "daemon.json").read_text(encoding="utf-8"))["configurations"]
+    assert {name: entry["digest"] for name, entry in published.items()} == digests
     # Activation keeps the saved file; a configured one never changes the enrollment's fixed cluster.
     other = tmp_path / "slurm-other"
     other.mkdir()

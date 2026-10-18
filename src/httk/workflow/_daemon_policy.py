@@ -89,6 +89,37 @@ type SettingValue = str | int | float | None
 
 #: The launcher setting that selects the sbatch ``--export`` mode of a daemon manager submission.
 SLURM_EXPORT_SETTING = "slurm.export"
+#: The launcher settings ``daemon.json`` publishes to clients; everything else stays private to the operator.
+PUBLISHED_LAUNCHER_SETTINGS = (
+    "manager.workers",
+    "slurm.partition",
+    "slurm.nodes",
+    "slurm.ntasks",
+    "slurm.ntasks_per_node",
+    "slurm.cpus_per_task",
+    "slurm.mem",
+    "slurm.gres",
+    "slurm.time_limit",
+    "slurm.time_limit_max",
+)
+#: The longest published launcher setting string, in characters.
+MAX_PUBLISHED_TEXT = 256
+_PUBLISHED_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def valid_published_value(value: object) -> bool:
+    """Return whether *value* is a launcher setting value ``daemon.json`` may publish and clients accept.
+
+    :param value: The value to check.
+    :return: True for a string of at most :data:`MAX_PUBLISHED_TEXT` characters without control
+        characters, an integer that is not a bool, or a finite float.
+    """
+
+    if type(value) is str:
+        return len(value) <= MAX_PUBLISHED_TEXT and _PUBLISHED_CONTROL.search(value) is None
+    return type(value) is int or (type(value) is float and math.isfinite(value))
+
+
 #: The only accepted ``slurm.export`` values, case-sensitive and never stripped or coerced. ``ALL`` is
 #: excluded on purpose: it would leak the broker's sandbox environment (HOME=/tmp/home and the rest) into
 #: the submitted manager.
@@ -579,4 +610,12 @@ def load_policy(path: Path) -> Policy:
     return _load_policy_with_bytes(path)[0]
 
 
-__all__ = ["ApprovedLauncher", "Policy", "load_policy", "policy_document"]
+__all__ = [
+    "MAX_PUBLISHED_TEXT",
+    "PUBLISHED_LAUNCHER_SETTINGS",
+    "ApprovedLauncher",
+    "Policy",
+    "load_policy",
+    "policy_document",
+    "valid_published_value",
+]
