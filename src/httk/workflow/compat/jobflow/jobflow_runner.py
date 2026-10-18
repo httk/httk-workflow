@@ -51,6 +51,11 @@ _FORWARDED_PARAMETERS = frozenset(name for name, _variable in _VASP_COMMANDS) | 
 # ponytail: fixed, below the manager's default 10 s cancel grace so the SIGKILL escalation of
 # custodian's groups runs before the manager kills this runner; derive it if that grace is tuned.
 _STOP_GRACE_SECONDS = 5.0
+# Each lost race needs the parent re-claimed between one lookup and the next open: a
+# few tries make losing them all practically impossible.
+_PARENT_ATTEMPTS = 5
+# A bound for read_bounded only: the spool files are this workflow's own, written by the parent.
+_SPOOL_LIMIT = 1 << 31
 
 
 def _atomate2_environment(a: Attempt, *, vasp: bool = True) -> dict[str, str]:
@@ -347,13 +352,13 @@ def _input_members(values: object) -> set[str]:
     return members
 
 
-def _stage_directory_inputs(anchor: int | None, members: Iterable[str], root: Path) -> None:
+def _stage_directory_inputs(anchor: int, members: Iterable[str], root: Path) -> None:
     """Copy staged directory inputs from the parent's anchored ``files/inputs`` into this child's *root*.
 
     The copy reads through descriptors, so the parent's job directory may be renamed (re-claimed
     or moved) meanwhile without disturbing it.
 
-    :param anchor: A descriptor of the parent's staged-inputs directory, or ``None`` when it has none.
+    :param anchor: A descriptor of the parent's job directory.
     :param members: The ``<port>/<basename>`` directory inputs to copy.
     :param root: This child's ``inputs`` directory.
     :raises ValueError: If a directory input is not staged in the parent.
@@ -365,9 +370,7 @@ def _stage_directory_inputs(anchor: int | None, members: Iterable[str], root: Pa
         target = root / port / basename
         shutil.rmtree(target, ignore_errors=True)
         try:
-            if anchor is None:
-                raise FileNotFoundError(member)
-            port_directory = _fs.open_dir_under(anchor, port)
+            port_directory = _fs.open_dir_under(anchor, f"{STAGED_DIRECTORY}/{port}")
             try:
                 _fs.copy_tree(_fs.anchored(port_directory, basename), target, durable=False)
             finally:
@@ -865,21 +868,35 @@ def enter(a: Attempt) -> None:
         a.fail("jobflow.missing_dependency", str(exc))
         return
     try:
+        # The parent is renamed whenever it is re-claimed: everything is read through one
+        # descriptor of its job directory, which stays put, and a rename before it is open
+        # (or a lookup that missed the parent in transit) is answered by locating it afresh.
         parent = a.parent
-        if parent is None:
-            a.fail("jobflow.job_unloadable", "the parent job holding the spooled job is not in this workspace")
+        anchor: int | None = None
+        for _ in range(_PARENT_ATTEMPTS):
+            if parent is None:
+                parent = a._locate_parent(attempts=_PARENT_ATTEMPTS)
+            if parent is None:
+                a.fail("jobflow.job_unloadable", "the parent job holding the spooled job is not in this workspace")
+                return
+            try:
+                anchor = _fs.open_dir(parent.payload)
+                break
+            except FileNotFoundError:
+                parent = None
+            except (OSError, _fs.UnsafePath) as exc:
+                a.fail("jobflow.job_unloadable", f"cannot open the parent job directory: {exc}")
+                return
+        if anchor is None:
+            a.fail(
+                "jobflow.job_unloadable",
+                f"the parent job directory moved away each of {_PARENT_ATTEMPTS} times it was located",
+            )
             return
-        # Anchored at once: the parent is renamed whenever it is re-claimed, but a descriptor stays put.
-        # ponytail: a rename between the lookup and this open still loses it; re-locate if that shows up.
         try:
-            staged_inputs: int | None = _fs.open_dir(parent.payload / STAGED_DIRECTORY)
-        except (OSError, _fs.UnsafePath):
-            staged_inputs = None
-        try:
-            _enter(a, parent, staged_inputs)
+            _enter(a, parent, anchor)
         finally:
-            if staged_inputs is not None:
-                os.close(staged_inputs)
+            os.close(anchor)
     except Exception as exc:
         a.fail(
             "jobflow.job_failed",
@@ -888,22 +905,42 @@ def enter(a: Attempt) -> None:
         )
 
 
-def _enter(a: Attempt, parent: Any, staged_inputs: int | None) -> None:
-    """Run ``enter`` once the parent is located and its staged inputs are anchored."""
-    job_path = parent.workdir / str(a.parameter("jobflow_child_job"))
-    snapshot_path = parent.workdir / str(a.parameter("jobflow_child_snapshot"))
+def _read_json_under(anchor: int, relative: PurePosixPath) -> object:
+    """Read one JSON file below a directory descriptor, never following a symlink below it.
+
+    :param anchor: The directory descriptor.
+    :param relative: The file below it, at least one directory deep.
+    :return: The decoded JSON value.
+    :raises FileNotFoundError: If the file or a directory on its way is missing.
+    :raises ValueError: If *relative* leaves the directory or the content is not JSON.
+    :raises httk.workflow._fs.UnsafePath: If a component is a symlink or not the expected kind.
+    """
+    directory = _fs.open_dir_under(anchor, relative.parent)
     try:
-        spooled = json.loads(job_path.read_text(encoding="utf-8"))
+        data = _fs.read_bounded(_fs.anchored(directory, relative.name), _SPOOL_LIMIT)
+    finally:
+        os.close(directory)
+    if data is None:
+        raise FileNotFoundError(f"{relative} is not in the parent job")
+    return json.loads(data)
+
+
+def _enter(a: Attempt, parent: Any, anchor: int) -> None:
+    """Run ``enter`` once the parent is located and its job directory is anchored at *anchor*."""
+    # The spool paths are relative to the parent's workdir, read here below its anchored directory.
+    workdir = PurePosixPath(parent.workdir.relative_to(parent.payload).as_posix())
+    try:
+        spooled = _read_json_under(anchor, workdir / str(a.parameter("jobflow_child_job")))
         if not isinstance(spooled, dict):
             raise ValueError("the spooled job is not an object")
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, _fs.UnsafePath) as exc:
         a.fail("jobflow.job_unloadable", str(exc))
         return
     try:
-        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        snapshot = _read_json_under(anchor, workdir / str(a.parameter("jobflow_child_snapshot")))
         if not isinstance(snapshot, list):
             raise ValueError("jobflow store snapshot is not an array")
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, _fs.UnsafePath) as exc:
         a.fail("jobflow.snapshot_invalid", f"cannot load the jobflow store snapshot: {exc}")
         return
     # Before any job module (atomate2, pymatgen) is imported, which read these at import.
@@ -919,7 +956,7 @@ def _enter(a: Attempt, parent: Any, staged_inputs: int | None) -> None:
     inputs_root = a.workdir / "inputs"
     try:
         copied = _input_members(spooled)
-        _stage_directory_inputs(staged_inputs, copied, inputs_root)
+        _stage_directory_inputs(anchor, copied, inputs_root)
     except ValueError as exc:
         a.fail("jobflow.reference_unresolved", str(exc))
         return
@@ -952,7 +989,7 @@ def _enter(a: Attempt, parent: Any, staged_inputs: int | None) -> None:
     try:
         # The documents the job's references resolve to are its arguments too.
         named = _input_members(referenced) - copied
-        _stage_directory_inputs(staged_inputs, named, inputs_root)
+        _stage_directory_inputs(anchor, named, inputs_root)
         copied |= named
     except ValueError as exc:
         a.fail("jobflow.reference_unresolved", str(exc))

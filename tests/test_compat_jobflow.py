@@ -15,7 +15,7 @@ from typing import Any, cast
 import pytest
 from httk.core import DataRecord
 
-from attempt_fixtures import find, new_job
+from attempt_fixtures import every_job, fabricate, find, new_job
 from httk.workflow import Attempt, TaskManager, Workspace, collect, job_records
 from httk.workflow.collecting import JobRecord
 from httk.workflow.compat import LanguageRequest, available_languages, jobflow, match_document
@@ -1358,8 +1358,8 @@ def test_enter_fails_on_an_unresolved_input_directory_and_warns_for_the_store(tm
     absent = "00000000-0000-4000-8000-000000000001"
     other = "00000000-0000-4000-8000-000000000002"
     token = jobflow_runner.EXEC_TOKEN + absent
-    parent_workdir = tmp_path / "parent"
-    parent_workdir.mkdir()
+    parent_workdir = tmp_path / "parent" / "run"
+    parent_workdir.mkdir(parents=True)
     (parent_workdir / "job.json").write_text(json.dumps({"function": {"@module": "toy"}, "args": [token]}))
     producer = "11111111-1111-4111-8111-111111111111"
     store = [{"uuid": producer, "index": 1, "output": {"dir_name": f"{jobflow_runner.EXEC_TOKEN}{other}/x"}}]
@@ -1374,7 +1374,7 @@ def test_enter_fails_on_an_unresolved_input_directory_and_warns_for_the_store(tm
             "jobflow_child_job": "job.json",
             "jobflow_child_snapshot": "store.json",
         }[name],
-        parent=SimpleNamespace(workdir=parent_workdir, payload=tmp_path, placement=PurePosixPath(".")),
+        parent=SimpleNamespace(workdir=parent_workdir, payload=parent_workdir.parent, placement=PurePosixPath(".")),
         workdir=tmp_path / "child",
         fail=lambda code, message: events.append((code, message)),
         succeed=lambda: events.append(("succeeded", "")),
@@ -1806,7 +1806,7 @@ def test_directory_input_copy_survives_the_parent_being_renamed(
     (calculation / "sub").mkdir(parents=True)
     for name in ("INCAR", "OUTCAR", "sub/CHGCAR"):
         (calculation / name).write_text(name, encoding="utf-8")
-    anchor = _fs.open_dir(payload / "files" / "inputs")
+    anchor = _fs.open_dir(payload)
     real_copy = _fs._copy_file
 
     def copy_while_moving(*args: Any, **kwargs: Any) -> None:
@@ -1830,6 +1830,156 @@ def test_directory_input_copy_survives_the_parent_being_renamed(
         "OUTCAR",
         "sub/CHGCAR",
     ]
+
+
+def _spooled_child(tmp_path: Path, payload: Path, relocate: Any) -> tuple[SimpleNamespace, list[tuple[str, str]]]:
+    """Return an ``enter`` stub whose parent ``payload`` holds a spooled job and its store snapshot."""
+    from jobflow.core.job import store_inputs
+
+    from httk.workflow.compat.jobflow._driver import spool_job
+
+    spool = payload / "run" / "jobflow" / "spool"
+    spool.mkdir(parents=True)
+    (spool / "key.json").write_text(json.dumps(spool_job(store_inputs(5))), encoding="utf-8")
+    (spool / "key-store.json").write_text("[]", encoding="utf-8")
+    events: list[tuple[str, str]] = []
+    stub = SimpleNamespace(
+        context=SimpleNamespace(durable=False, settings={}, job_id="00000000-0000-4000-8000-000000000003"),
+        parameters={},
+        setting=lambda name, default=None: default,
+        parameter=lambda name, default=None: {
+            "jobflow_child_job": "jobflow/spool/key.json",
+            "jobflow_child_snapshot": "jobflow/spool/key-store.json",
+        }[name],
+        parent=_parent_at(payload),
+        _locate_parent=relocate,
+        workdir=tmp_path / "child",
+        fail=lambda code, message: events.append((code, message)),
+        succeed=lambda: events.append(("succeeded", "")),
+        log=SimpleNamespace(append=lambda kind, message: events.append((kind, message))),
+    )
+    return stub, events
+
+
+def _parent_at(payload: Path) -> SimpleNamespace:
+    return SimpleNamespace(workdir=payload / "run", payload=payload, placement=PurePosixPath("."))
+
+
+@NEEDS_JOBFLOW
+def test_enter_relocates_a_parent_renamed_before_it_is_anchored(tmp_path: Path) -> None:
+    ready, owned = tmp_path / "ready" / "parent", tmp_path / "owned" / "parent"
+    located: list[Path] = []
+
+    def relocate(attempts: int) -> SimpleNamespace:
+        located.append(owned)
+        return _parent_at(owned)
+
+    stub, events = _spooled_child(tmp_path, ready, relocate)
+    # Re-claimed between the cached lookup and the open.
+    owned.parent.mkdir()
+    ready.rename(owned)
+    jobflow_runner.enter(cast(Attempt, stub))
+    assert events == [("succeeded", "")]
+    assert located == [owned]
+
+
+@NEEDS_JOBFLOW
+def test_enter_reads_through_the_anchor_after_the_parent_is_renamed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow import _fs
+
+    ready, owned = tmp_path / "ready" / "parent", tmp_path / "owned" / "parent"
+
+    def relocate(attempts: int) -> None:
+        raise AssertionError("an anchored parent is never located again")
+
+    stub, events = _spooled_child(tmp_path, ready, relocate)
+    owned.parent.mkdir()
+    real_open_dir = _fs.open_dir
+
+    def open_then_rename(path: Path) -> int:
+        descriptor = real_open_dir(path)
+        # Re-claimed right after the anchor is open, before the spool is read.
+        ready.rename(owned)
+        return descriptor
+
+    monkeypatch.setattr(_fs, "open_dir", open_then_rename)
+    jobflow_runner.enter(cast(Attempt, stub))
+    assert events == [("succeeded", "")]
+    assert owned.is_dir() and not ready.exists()
+
+
+@NEEDS_JOBFLOW
+def test_enter_fails_a_parent_that_vanishes_every_time_it_is_located(tmp_path: Path) -> None:
+    gone = tmp_path / "ready" / "parent"
+    located: list[Path] = []
+
+    def relocate(attempts: int) -> SimpleNamespace:
+        located.append(gone)
+        return _parent_at(gone)
+
+    stub, events = _spooled_child(tmp_path, tmp_path / "staged", relocate)
+    stub.parent = _parent_at(gone)
+    jobflow_runner.enter(cast(Attempt, stub))
+    assert events == [
+        (
+            "jobflow.job_unloadable",
+            f"the parent job directory moved away each of {jobflow_runner._PARENT_ATTEMPTS} times it was located",
+        )
+    ]
+    assert len(located) == jobflow_runner._PARENT_ATTEMPTS - 1
+    # A spool file missing from an anchored parent stays unloadable, without relocating.
+    stub.parent, stub.parameter = _parent_at(tmp_path / "staged"), lambda name, default=None: "jobflow/none.json"
+    events.clear()
+    jobflow_runner.enter(cast(Attempt, stub))
+    assert events == [("jobflow.job_unloadable", "run/jobflow/none.json is not in the parent job")]
+    assert len(located) == jobflow_runner._PARENT_ATTEMPTS - 1
+
+
+@NEEDS_JOBFLOW
+def test_enter_relocates_a_parent_renamed_before_its_job_json_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jobflow.core.job import store_inputs
+
+    from httk.workflow import sdk
+    from httk.workflow.compat.jobflow._driver import spool_job
+
+    fabricated = fabricate(
+        tmp_path,
+        step="enter",
+        parent=True,
+        parameters={
+            "jobflow_child_job": "jobflow/spool/key.json",
+            "jobflow_child_snapshot": "jobflow/spool/key-store.json",
+        },
+    )
+    (parent,) = every_job(fabricated.workspace)
+    spool = parent.path / "run" / "jobflow" / "spool"
+    spool.mkdir(parents=True)
+    (spool / "key.json").write_text(json.dumps(spool_job(store_inputs(5))), encoding="utf-8")
+    (spool / "key-store.json").write_text("[]", encoding="utf-8")
+    waiting = parent.path.relative_to(fabricated.workspace.root / "jobs" / "waiting")
+    ready = fabricated.workspace.root / "jobs" / "ready" / waiting
+    real_from_path = sdk.JobDefinition.from_path
+    reads: list[Path] = []
+
+    def read_after_a_move(path: Path) -> Any:
+        if path == fabricated.payload / "job.json":
+            return real_from_path(path)
+        reads.append(path)
+        # Re-claimed between the listing that found it and the read of its job.json.
+        if parent.path.exists():
+            ready.parent.mkdir(parents=True)
+            parent.path.rename(ready)
+        return real_from_path(path)
+
+    monkeypatch.setattr(sdk.JobDefinition, "from_path", read_after_a_move)
+    jobflow_runner.enter(Attempt.initialize(fabricated.environment))
+    outcome = json.loads((fabricated.control / "outcome.ready" / "outcome.json").read_text(encoding="utf-8"))
+    assert outcome["action"] == "succeed", outcome
+    assert reads == [parent.path / "job.json", ready / "job.json"]
 
 
 def test_directory_tokens_never_name_the_inputs_root_or_climb(tmp_path: Path) -> None:

@@ -641,8 +641,14 @@ class Attempt:
             self._parent = self._locate_parent()
         return self._parent
 
-    def _locate_parent(self) -> ParentJob | None:
-        """Look up this job's ``parent`` member in the workspace, without changing anything."""
+    def _locate_parent(self, attempts: int = 1) -> ParentJob | None:
+        """Look up this job's ``parent`` member in the workspace, without changing anything.
+
+        :param attempts: How many listings to make while the parent is not found or moves before its
+            ``job.json`` is read; it is renamed whenever it is re-claimed. Each is one unsettled listing.
+        :return: The parent, or ``None``.
+        :raises httk.workflow.errors.FormatError: If a ``parent`` member or the parent's ``job.json`` is malformed.
+        """
 
         raw = self.job.parent
         if raw is None:
@@ -652,17 +658,21 @@ class Attempt:
         if state is not None and state.detached is not None:
             return None
         placement = parse_placement_text(raw["placement"], "parent placement")
-        ref = _kernel.locate(self._workspace(), str(raw["job_id"]), placement_hint=placement)
-        if ref is None:
-            return None
-        try:
-            definition = JobDefinition.from_path(ref.path / "job.json")
-        except FormatError:
-            # A parent moved between the listing and the read is absent, not corrupt.
-            if (ref.path / "job.json").exists():
-                raise
-            return None
-        if definition.id != raw["job_id"]:
+        for _ in range(attempts):
+            ref = _kernel.locate(self._workspace(), str(raw["job_id"]), placement_hint=placement)
+            if ref is None:
+                continue
+            try:
+                definition = JobDefinition.from_path(ref.path / "job.json")
+            except FormatError:
+                # A parent moved between the listing and the read is absent, not corrupt.
+                if (ref.path / "job.json").exists():
+                    raise
+                continue
+            if definition.id != raw["job_id"]:
+                return None
+            break
+        else:
             return None
         return ParentJob(
             job_id=definition.id,
