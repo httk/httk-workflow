@@ -5,7 +5,9 @@ A workflow URI has the form ``git+https://HOST/PATH[@REF][#SUBDIR]`` (see
 ``REF``, and the workflow is the ``httk_workflow.toml`` package in ``SUBDIR``
 (or in the repository root). The canonical URI always carries the full commit
 hash; it is the workflow id a job records and identifies the workflow
-*definition* (its code).
+*definition* (its code). A URI with no ``SUBDIR`` whose repository root holds an
+``httk_plugin.toml`` but no ``httk_workflow.toml`` names every workflow that
+plugin lists (:func:`fetch_workflows`).
 
 :func:`fetch_workflow` installs the workflow through the shared
 ``httk.core.git_sources`` cache (kind ``"workflows"``), and
@@ -16,17 +18,20 @@ too, without installed entries and without the network.
 
 import logging
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
 from httk.core.git_sources import (
     GitUri,
     InstalledGitMember,
+    fetch_git_checkout,
     install_git_member,
     installed_git_members,
     parse_git_uri,
     uninstall_git_members,
 )
+from httk.core.plugins import parse_plugin_manifest
 from httk.core.userdirs import data_home
 
 from ._pip_repositories import _pip_provider, _pip_seed, _pip_tag_commit, _reset_pip_repository_cache
@@ -34,10 +39,11 @@ from .scaffold import WorkflowProvider
 
 _LOGGER = logging.getLogger(__name__)
 
-__all__ = ["fetch_workflow", "fetched_workflows"]
+__all__ = ["fetch_workflow", "fetch_workflows", "fetched_workflows"]
 
 _KIND = "workflows"
 _MANIFEST = "httk_workflow.toml"
+_PLUGIN_MANIFEST = "httk_plugin.toml"
 
 
 def _load(uri: str, package: Path) -> WorkflowProvider:
@@ -56,6 +62,19 @@ def _claims(package: Path) -> tuple[str, ...]:
     return tuple(name for name in (provider.workflow_id, provider.alias) if name is not None)
 
 
+def _pip_prelude(uri: GitUri) -> tuple[GitUri, WorkflowProvider | None]:
+    """Map a pip-known tag ref to its commit; for a pinned URI, return its pip offer or seed the cache."""
+
+    if uri.ref is not None and not uri.pinned and (commit := _pip_tag_commit(uri.repository, uri.ref)) is not None:
+        uri = GitUri(uri.repository, commit, uri.subdir)
+    if uri.pinned:
+        pip = _pip_provider(str(uri))
+        if pip is not None:
+            return uri, pip
+        _pip_seed(uri)
+    return uri, None
+
+
 def fetch_workflow(reference: str) -> WorkflowProvider:
     """Fetch, install and return the workflow a git URI names.
 
@@ -71,14 +90,9 @@ def fetch_workflow(reference: str) -> WorkflowProvider:
     :raises ValueError: If the URI is invalid, git fails, or the package is missing or invalid.
     """
 
-    uri = parse_git_uri(reference)
-    if uri.ref is not None and not uri.pinned and (commit := _pip_tag_commit(uri.repository, uri.ref)) is not None:
-        uri = GitUri(uri.repository, commit, uri.subdir)
-    if uri.pinned:
-        pip = _pip_provider(str(uri))
-        if pip is not None:
-            return pip
-        _pip_seed(uri)
+    uri, pip = _pip_prelude(parse_git_uri(reference))
+    if pip is not None:
+        return pip
     installed = install_git_member(_KIND, str(uri), _MANIFEST, _claims)
     _reset_fetched_workflow_cache()
     provider = _load(installed.uri, installed.path)
@@ -93,6 +107,58 @@ def fetch_workflow(reference: str) -> WorkflowProvider:
                 installed.uri,
             )
     return provider
+
+
+def fetch_workflows(reference: str) -> tuple[WorkflowProvider, ...]:
+    """Fetch the workflows a git URI names: one package, or every package a root httk_plugin.toml lists.
+
+    A URI with ``#SUBDIR``, or whose repository root holds ``httk_workflow.toml``,
+    names one package (:func:`fetch_workflow`). Otherwise a root
+    ``httk_plugin.toml`` names its listed workflows, each fetched under its
+    commit-pinned member URI, with the plugin's ``requires`` merged in, and
+    returned callees first.
+
+    :param reference: Supply a ``git+…`` workflow URI.
+    :return: The providers, in dependency order.
+    :raises ValueError: If the URI is invalid, git fails, or a package or the plugin manifest is missing or invalid.
+    """
+
+    uri = parse_git_uri(reference)
+    if uri.subdir is not None:
+        return (fetch_workflow(reference),)
+    canonical, tree = fetch_git_checkout(_pip_prelude(uri)[0])
+    if (tree / _MANIFEST).is_file() or not (tree / _PLUGIN_MANIFEST).is_file():
+        return (fetch_workflow(str(canonical)),)
+    from .packages import _merged_requires
+
+    manifest = parse_plugin_manifest(tree)
+    if not manifest.workflows:
+        raise ValueError(f"{canonical} lists no workflows in its {_PLUGIN_MANIFEST}")
+    providers = [
+        fetch_workflow(str(GitUri(canonical.repository, canonical.ref, member))) for member in manifest.workflows
+    ]
+    if manifest.requires:  # the plugin's requirements apply to every member, as for an installed plugin
+        providers = [replace(p, requires=_merged_requires(manifest.requires, p.requires)) for p in providers]
+    return _ordered(providers)
+
+
+def _ordered(providers: list[WorkflowProvider]) -> tuple[WorkflowProvider, ...]:
+    """Order providers callees first, stably, so installing them in turn installs no callee twice.
+
+    Calls bind by the store's sibling mapping, not by this order; members in a cycle keep the given
+    order and the store reports the cycle.
+    """
+
+    remaining, done = list(providers), list[WorkflowProvider]()
+    while remaining:
+        for index, provider in enumerate(remaining):
+            others = {name for other in remaining if other is not provider for name in (other.name, other.alias)}
+            if not others.intersection((provider.calls or {}).values()):
+                done.append(remaining.pop(index))
+                break
+        else:  # a cycle: the store's install reports it
+            return (*done, *remaining)
+    return tuple(done)
 
 
 def _uninstall_workflows(selector: str) -> tuple[InstalledGitMember, ...]:

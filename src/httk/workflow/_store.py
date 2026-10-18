@@ -602,6 +602,7 @@ def install(
     build: bool = True,
     initial_step: str | None = None,
     language: str | None = None,
+    siblings: Mapping[str, WorkflowProvider] | None = None,
 ) -> Installed:
     """Install (or reinstall, replacing) a workflow package in the workspace.
 
@@ -621,13 +622,23 @@ def install(
     :param initial_step: The default step of an ad hoc package (runner file sources only); required
         when the runner registers several steps and none of them is ``start``.
     :param language: Force a workflow format for a bare document or directory.
+    :param siblings: Give the providers of one plugin source, keyed by id, short name and alias: a source
+        or call reference among the keys is that provider, so calls among them bind to each other.
     :return: The installation.
     :raises ValueError: For an unresolvable or invalid source, a symlink or special file in the
         package, a package registered in-process only, or a call cycle.
     """
 
     return _install(
-        workspace, owner, source, calls=calls, build=build, stack=(), initial_step=initial_step, language=language
+        workspace,
+        owner,
+        source,
+        calls=calls,
+        build=build,
+        stack=(),
+        initial_step=initial_step,
+        language=language,
+        siblings=siblings or {},
     )
 
 
@@ -641,20 +652,30 @@ def _install(
     stack: tuple[str, ...],
     initial_step: str | None = None,
     language: str | None = None,
+    siblings: Mapping[str, WorkflowProvider],
 ) -> Installed:
     with _scratch(owner) as work:
-        workflow_id, name, provider, origin = _resolve(
-            source, work, initial_step, by_name=bool(stack), language=language
-        )
+        sibling = siblings.get(os.fspath(source))
+        if sibling is not None:
+            workflow_id, name, provider = sibling.workflow_id, sibling.name or sibling.workflow_id, sibling
+            origin = os.fspath(source)
+        else:
+            workflow_id, name, provider, origin = _resolve(
+                source, work, initial_step, by_name=bool(stack), language=language
+            )
         if workflow_id in stack:
             raise ValueError(f"workflow calls form a cycle: {' -> '.join((*stack, workflow_id))}")
         if stack and (installed := lookup(workspace, workflow_id)) is not None and installed.id == workflow_id:
             return installed  # a callee already installed under its resolved id is kept
         recorded: dict[str, str] = {}
         for alias, reference in (provider.calls or {}).items():
-            found = lookup(workspace, reference)
+            # A sibling binds by its pinned id, so another installation of its name never answers.
+            bound = reference if (callee := siblings.get(reference)) is None else callee.workflow_id
+            found = lookup(workspace, bound)
             if found is None and calls:
-                found = _install(workspace, owner, reference, calls=True, build=build, stack=(*stack, workflow_id))
+                found = _install(
+                    workspace, owner, bound, calls=True, build=build, stack=(*stack, workflow_id), siblings=siblings
+                )
             # Without calls, an uninstalled reference is recorded as written; closure() reports it missing.
             recorded[alias] = reference if found is None else found.id
         assert provider.directory is not None  # _resolve refuses providers without a package directory

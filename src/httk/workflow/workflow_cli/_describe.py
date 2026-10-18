@@ -18,19 +18,20 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from httk.core.git_sources import parse_git_uri
+from httk.core.git_sources import GitUri, parse_git_uri
 
 from .. import _fs, _kernel, _store
 from .._durations import TIME_RESOURCES, format_duration
 from .._pip_repositories import _pip_names, _pip_owner, _pip_provider, _pip_tag_uris
 from ..adapters import probe_remote_workspace, resolve_remote, run_adapter
-from ..git_workflows import _uninstall_workflows, fetch_workflow
+from ..git_workflows import _uninstall_workflows, fetch_workflows
 from ..introspection import iter_jobs, read_job
 from ..models import WORKSPACE_DIRECTORY
 from ..packages import installed_plugin_workflow_owners, installed_plugin_workflows
 from ..registry import WorkspaceBinding
 from ..scaffold import (
     ResolvedWorkflow,
+    WorkflowProvider,
     _provider_resolution,
     describe_package_runner,
     describe_runner,
@@ -544,14 +545,15 @@ def _install_on_this_machine(arguments: argparse.Namespace) -> int:
                     "without --workspace, install takes a git+https://HOST/PATH[@REF][#SUBDIR] URI; "
                     "give --workspace WS to install a package, runner file or document into a workspace"
                 )
-            provider = fetch_workflow(target)
+            providers = fetch_workflows(target)
         except (OSError, ValueError) as exc:
             failed = True
             print(f"{target}: {exc}", file=sys.stderr)
             continue
-        rows.append({"uri": provider.workflow_id, "name": provider.name, "alias": provider.alias})
-        if not arguments.json:
-            print(f"{provider.workflow_id}\t{provider.name}")
+        for provider in providers:
+            rows.append({"uri": provider.workflow_id, "name": provider.name, "alias": provider.alias})
+            if not arguments.json:
+                print(f"{provider.workflow_id}\t{provider.name}")
     if arguments.json:
         print(json.dumps(rows, indent=2, sort_keys=True))
     return 1 if failed else 0
@@ -565,6 +567,29 @@ def _consume(workspace: Workspace, source: str) -> None:
     if parent.parent != tmp or not parent.name.startswith("push."):
         raise ValueError(f"--consume removes only a pushed copy below {tmp}/push.*: {source}")
     _fs.discard(_fs.loc(parent), trash_dir=tmp, durable=workspace.durable)
+
+
+def _install_targets(source: str) -> tuple[list[str], dict[str, WorkflowProvider] | None]:
+    """Return what one install source installs, and for a git source the fetched providers by id, name and alias.
+
+    The store installs those providers as fetched (with a plugin's merged ``requires``), and calls among
+    them bind to each other.
+    """
+
+    if not source.startswith("git+"):
+        return [source], None
+    providers = fetch_workflows(source)
+    siblings: dict[str, WorkflowProvider] = {}
+    for provider in providers:
+        for key in (provider.workflow_id, provider.name, provider.alias):
+            if key is None:
+                continue
+            other = siblings.setdefault(key, provider)
+            if other.workflow_id != provider.workflow_id:
+                raise ValueError(
+                    f"workflows {other.workflow_id} and {provider.workflow_id} both claim the name {key!r}"
+                )
+    return [provider.workflow_id for provider in providers], siblings
 
 
 def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
@@ -584,23 +609,25 @@ def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
     ) as owner:
         for source in arguments.sources:
             try:
-                with _stdout_to_stderr(arguments.json):
-                    installed = _store.install(
-                        workspace,
-                        owner,
-                        source,
-                        calls=not arguments.no_calls,
-                        build=not arguments.no_build,
-                        language=arguments.format,
-                    )
+                targets, siblings = _install_targets(source)
+                for target in targets:  # a plugin root's members; stop at the first failure
+                    with _stdout_to_stderr(arguments.json):
+                        installed = _store.install(
+                            workspace,
+                            owner,
+                            target,
+                            calls=not arguments.no_calls,
+                            build=not arguments.no_build,
+                            language=arguments.format,
+                            siblings=siblings,
+                        )
+                    rows.append(_installed_row(installed))
             except _ERRORS as exc:
                 failed = True
                 print(f"{source}: {exc}", file=sys.stderr)
-                continue
             finally:
                 if arguments.consume:
                     _consume(workspace, source)
-            rows.append(_installed_row(installed))
     _print_rows(rows, arguments, lambda row: f"{row['id']}\t{row['name']}")
     return 1 if failed else 0
 
@@ -612,7 +639,9 @@ def _push_source(source: str) -> str | Path:
     if path.exists():
         return path.resolve()
     if source.startswith("git+"):
-        return fetch_workflow(source).workflow_id
+        # The source itself, pinned: the remote expands a plugin root with the same sibling binding.
+        pinned = parse_git_uri(fetch_workflows(source)[0].workflow_id)
+        return str(GitUri(pinned.repository, pinned.ref, parse_git_uri(source).subdir))
     provider = workflow_provider(source)
     if provider is None:
         raise ValueError(f"no workflow package, git URI, runner file or known workflow name: {source!r}")
@@ -812,8 +841,9 @@ def build_install_parser(subparsers: argparse._SubParsersAction[argparse.Argumen
             "[#SUBDIR] URI, a runner file or workflow document (installed ad hoc), or a workflow name known on "
             "this machine. Its declared calls are installed too, and a [workflow.build] package is built for "
             "this platform. A REMOTE:WS workspace gets the source pushed through the remote's adapter (a git "
-            "source is fetched there by its pinned URI). Without --workspace, a git URI is only fetched into "
-            "this machine's cache"
+            "source is fetched there by its pinned URI). A git URI without #SUBDIR whose repository root carries "
+            "httk_plugin.toml installs every workflow that plugin lists. Without --workspace, a git URI is only "
+            "fetched into this machine's cache"
         ),
         handler=handle_workflow_install,
     )

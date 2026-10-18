@@ -64,6 +64,21 @@ credentials, queries, and ssh forms are refused. Git runs without global or
 system configuration and without credential helpers, so private repositories
 are not supported.
 
+A URI without `#subdir` whose repository root carries an `httk_plugin.toml`
+(see [below](#the-same-repository-as-a-plugin)) installs every workflow that
+file lists ({py:func}`~httk.workflow.git_workflows.fetch_workflows`), each
+under its pinned member URI. A call from one listed workflow to another, by
+name or alias, binds to the member at the same commit, and the plugin's
+`requires` apply to every member:
+
+```console
+httk workflow install --workspace WS 'git+https://github.com/httk/workflows-vasp-atomate2@wf-v0.2.0'
+```
+
+A root `httk_workflow.toml` is still a single package. A `REMOTE:WS` workspace
+gets the pinned repository URI and expands it there. `httk job new
+--workflow` and `httk workflow describe` still need `#subdir`.
+
 `httk workflow describe URI` fetches and describes without installing.
 `httk workflow uninstall --workspace WS SELECTOR` removes an installation by
 id or short name; jobs are not checked unless `--check` is given.
@@ -176,7 +191,9 @@ A repository may also carry an `httk_plugin.toml` listing its workflow
 directories, so that `httk plugin install git+https://github.com/httk/workflows-vasp`
 makes them known on this machine as a plugin. Both routes can coexist, and
 plugin names take precedence over fetched short names; either way a workspace
-runs a workflow only once it is installed there.
+runs a workflow only once it is installed there. `httk workflow install` of the
+repository URI without `#subdir` installs every listed workflow into a
+workspace ([Install it](#install-it)).
 
 ## Cache and trust
 

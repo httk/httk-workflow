@@ -221,11 +221,12 @@ in `workflows/<slug>--<h16>/` and are selected by id or short name.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workflow install SOURCE...` | install into a workspace: a package directory, a git URI, a runner file or workflow document (installed ad hoc), or a workflow name known here; declared calls are installed too and a `[workflow.build]` package is built | `--workspace`, `--no-calls`, `--no-build`, `--format`, `--json`, `--adapter-timeout` |
+| `workflow install SOURCE...` | install into a workspace: a package directory, a git URI, a runner file or workflow document (installed ad hoc), or a workflow name known here; a git URI without `#SUBDIR` whose repository root carries `httk_plugin.toml` installs every workflow that plugin lists; declared calls are installed too and a `[workflow.build]` package is built | `--workspace`, `--no-calls`, `--no-build`, `--format`, `--json`, `--adapter-timeout` |
 | `workflow uninstall SELECTOR...` | remove installed workflows by id or short name | `--workspace`, `--check` (warn about unfinished jobs using it), `--json` |
 
 ```console
 httk workflow install --workspace WORKSPACE 'git+https://github.com/httk/workflows-vasp#vasp-relax'
+httk workflow install --workspace WORKSPACE 'git+https://github.com/httk/workflows-vasp-atomate2@wf-v0.2.0'
 httk workflow install --workspace kappa:runs ./my-workflow
 ```
 

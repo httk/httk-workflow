@@ -1,12 +1,14 @@
 """Git URI workflow references: fetching, installation, resolution and the install verbs."""
 
+import contextlib
 import json
 import logging
 import shutil
 import subprocess
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httk.core import git_sources
@@ -14,10 +16,11 @@ from httk.core.cli import CLIContext
 from httk.core.plugins.install import install_plugin
 from httk.core.userdirs import data_home
 
-from conftest import register_ws
+from conftest import Remote, fake_remote, register_ws
 from httk.workflow import Attempt, TaskManager, Workspace, _kernel, _store, collect, git_workflows, scaffold
 from httk.workflow.git_workflows import fetch_workflow, fetched_workflows
 from httk.workflow.packages import _reset_plugin_workflow_cache, parse_workflow_manifest
+from httk.workflow.projects import initialize_project
 from httk.workflow.provenance import _definition_uri
 from httk.workflow.scaffold import (
     WorkflowProvider,
@@ -28,7 +31,7 @@ from httk.workflow.scaffold import (
     resolve_workflow,
     workflow_provider,
 )
-from httk.workflow.workflow_cli import command
+from httk.workflow.workflow_cli import _describe, command
 from httk.workflow.workflow_cli._collect import _collected_mapping
 from test_campaigns import _campaign_project
 from test_job_creation import workspace_at
@@ -45,12 +48,14 @@ def collect(record):
 """
 
 
-def _manifest(name: str, alias: str | None = None) -> str:
+def _manifest(name: str, alias: str | None = None, calls: dict[str, str] | None = None) -> str:
     alias_line = f'alias = "{alias}"\n' if alias else ""
+    calls_table = "".join(f'{key} = "{value}"\n' for key, value in (calls or {}).items())
     return (
         f'[workflow]\nname = "{name}"\n{alias_line}description = "Git workflow {name}."\n\n'
         '[workflow.runner]\nsteps = ["start"]\n\n[workflow.collect]\nfile = "collect.py"\n\n'
         '[workflow.outputs.total]\nentry_type = "records"\nref = "https://example.test/records"\n'
+        + (f"\n[workflow.calls]\n{calls_table}" if calls else "")
     )
 
 
@@ -89,6 +94,51 @@ def _commit(root: Path, message: str) -> str:
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", message)
     return _git(root, "rev-parse", "HEAD")
+
+
+def _plugin(root: Path, workflows: list[str], requires: str = "") -> str:
+    """Add a root ``httk_plugin.toml`` listing *workflows* to a repository; return the new commit."""
+
+    listed = ", ".join(f'"{member}"' for member in workflows)
+    text = f'[plugin]\nname = "tests-plugin"\nworkflows = [{listed}]\n'
+    (root / "httk_plugin.toml").write_text(text + (f'requires = ["{requires}"]\n' if requires else ""), "utf-8")
+    return _commit(root, "plugin")
+
+
+def _parent_and_child(
+    root: Path,
+    call: str = "tests.git.child",
+    *,
+    child_alias: str | None = None,
+    cycle: bool = False,
+    requires: str = "",
+) -> tuple[str, str]:
+    """A plugin repository listing ``parent`` (which calls *call*) before ``child`` (calling back with *cycle*)."""
+
+    _repository(root, {"parent": "tests.git.parent", "child": "tests.git.child"})
+    (root / "parent" / "httk_workflow.toml").write_text(_manifest("tests.git.parent", calls={"child": call}), "utf-8")
+    back = {"parent": "tests.git.parent"} if cycle else None
+    (root / "child" / "httk_workflow.toml").write_text(_manifest("tests.git.child", child_alias, back), "utf-8")
+    return f"git+file://{root}", _plugin(root, ["parent", "child"], requires)
+
+
+@contextlib.contextmanager
+def _impostor(tmp_path: Path, workflow_id: str, alias: str | None = None) -> Iterator[None]:
+    """Register an in-process workflow claiming a sibling's name or alias, which no sibling call may bind to."""
+
+    directory = tmp_path / "impostor"
+    _write_package(directory, workflow_id, alias)
+    register_workflow(WorkflowProvider(workflow_id=workflow_id, alias=alias, directory=directory, steps=("start",)))
+    try:
+        yield
+    finally:
+        scaffold._WORKFLOW_PROVIDERS.pop(workflow_id, None)
+
+
+def _store_workspace(tmp_path: Path) -> tuple[CLIContext, str, Workspace]:
+    context = CLIContext("httk", tmp_path)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    return context, register_ws(context, workspace.root, "store"), workspace
 
 
 @pytest.fixture(autouse=True)
@@ -542,3 +592,134 @@ def test_a_git_workflow_with_unmet_requires_is_created_but_never_claimed(tmp_pat
     with TaskManager(workspace) as manager:
         assert manager.run_until_idle(timeout=60).ready_claimable == 0
     assert [ref.job_id for ref in _kernel.list_jobs(workspace, "ready")] == [job.job_id]
+
+
+def test_plugin_root_uri_installs_every_listed_workflow_callees_first(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base, commit = _parent_and_child(tmp_path / "plugin")
+    context, name, workspace = _store_workspace(tmp_path)
+    with _impostor(tmp_path, "tests.git.child"):
+        assert command(["install", "--workspace", name, base], context) == 0
+    parent, child = f"{base}@{commit}#parent", f"{base}@{commit}#child"
+    assert capsys.readouterr().out.splitlines() == [f"{child}\ttests.git.child", f"{parent}\ttests.git.parent"]
+    installed_parent = _store.lookup(workspace, "tests.git.parent")
+    assert installed_parent is not None and installed_parent.record["calls"] == {"child": child}
+    installed_child = _store.lookup(workspace, "tests.git.child")
+    assert installed_child is not None and installed_child.id == child
+
+
+def test_plugin_sibling_calls_bind_by_alias_and_across_an_upgrade(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base, first = _parent_and_child(tmp_path / "plugin", "tests.alias.child", child_alias="tests.alias.child")
+    context, name, workspace = _store_workspace(tmp_path)
+    with _impostor(tmp_path, "tests.other.child", alias="tests.alias.child"):
+        assert command(["install", "--workspace", name, base], context) == 0
+        second = _commit(tmp_path / "plugin", "two")
+        assert command(["install", "--workspace", name, base], context) == 0, capsys.readouterr().err
+    calls = {
+        installed.id: installed.record["calls"]
+        for installed in _store.list_installed(workspace)
+        if installed.name == "tests.git.parent"
+    }
+    assert calls == {f"{base}@{commit}#parent": {"child": f"{base}@{commit}#child"} for commit in (first, second)}
+    assert len(_store.list_installed(workspace)) == 4  # the first commit's installations remain
+
+
+def test_a_plugin_sibling_call_cycle_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    base, _ = _parent_and_child(tmp_path / "plugin", cycle=True)
+    context, name, workspace = _store_workspace(tmp_path)
+    with _impostor(tmp_path, "tests.git.child"):
+        assert command(["install", "--workspace", name, base], context) == 1
+    assert "workflow calls form a cycle" in capsys.readouterr().err
+    assert _store.list_installed(workspace) == []
+
+
+def test_plugin_requires_reach_every_installed_member(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    base, _ = _parent_and_child(tmp_path / "plugin", requires="httk-core>=0.0.1")
+    context, name, workspace = _store_workspace(tmp_path)
+    assert command(["install", "--workspace", name, base], context) == 0
+    installed = _store.list_installed(workspace)
+    assert len(installed) == 2 and all(found.record["requires"] == ["httk-core>=0.0.1"] for found in installed)
+    capsys.readouterr()
+
+
+def test_plugin_root_uri_without_workspace_fetches_every_member(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, commit = _parent_and_child(tmp_path / "plugin")
+    context = CLIContext("httk", tmp_path)
+    assert command(["install", "--json", base], context) == 0
+    rows = [
+        {"uri": f"{base}@{commit}#child", "name": "tests.git.child", "alias": None},
+        {"uri": f"{base}@{commit}#parent", "name": "tests.git.parent", "alias": None},
+    ]
+    assert json.loads(capsys.readouterr().out) == rows
+
+    def refuse(*arguments: object, **options: object) -> None:
+        raise AssertionError("git must not run for a cached pinned reference")
+
+    monkeypatch.setattr(git_sources, "_git", refuse)
+    providers = git_workflows.fetch_workflows(f"{base}@{commit}")
+    assert [provider.workflow_id for provider in providers] == [row["uri"] for row in rows]
+
+
+def test_plugin_root_uri_rules_for_a_root_package_and_an_empty_list(tmp_path: Path) -> None:
+    both, _ = _repository(tmp_path / "both", {"": "tests.git.top", "a": "tests.git.a"})
+    commit = _plugin(both, ["a"])
+    (provider,) = git_workflows.fetch_workflows(f"git+file://{both}")
+    assert provider.workflow_id == f"git+file://{both}@{commit}" and provider.name == "tests.git.top"
+
+    empty, _ = _repository(tmp_path / "empty", {"a": "tests.git.a"})
+    commit = _plugin(empty, [])
+    with pytest.raises(ValueError, match=rf"git\+file://{empty}@{commit} lists no workflows"):
+        git_workflows.fetch_workflows(f"git+file://{empty}")
+    neither, _ = _repository(tmp_path / "neither", {"a": "tests.git.a"})
+    with pytest.raises(ValueError, match=r"no top-level httk_workflow.toml.*#subdir.*a"):
+        git_workflows.fetch_workflows(f"git+file://{neither}")
+
+
+def test_plugin_root_uri_on_a_remote_workspace_is_expanded_there(
+    tmp_path: Path, remote: Remote, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base, commit = _parent_and_child(tmp_path / "plugin")
+    project = tmp_path / "project"
+    initialize_project(project, name="remote-plugin")
+    fake_remote(project)
+    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
+    context = CLIContext("httk", project)
+    register_ws(context, workspace.root, "station")
+    invoked: list[list[str]] = []
+    real = _describe.run_adapter
+
+    def recording(bundle: Path, operation: str, request: Mapping[str, Any], **options: Any) -> dict[str, Any]:
+        if operation == "invoke":
+            invoked.append(list(request["argv"]))
+        return real(bundle, operation, request, **options)
+
+    monkeypatch.setattr(_describe, "run_adapter", recording)
+    assert command(["install", "--workspace", "cluster:station", "--json", base], context) == 0
+    (argv,) = (argv for argv in invoked if "install" in argv)
+    assert argv[-1] == f"{base}@{commit}"  # the remote expands the plugin root itself
+    members = {f"{base}@{commit}#child", f"{base}@{commit}#parent"}
+    assert {row["id"] for row in json.loads(capsys.readouterr().out)} == members
+    assert {installed.id for installed in _store.list_installed(workspace)} == members
+
+
+def test_a_one_member_plugin_keeps_its_requires(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, _ = _repository(tmp_path / "plugin", {"only": "tests.git.only"})
+    _plugin(root, ["only"], "httk-core>=0.0.1")
+    context, name, workspace = _store_workspace(tmp_path)
+    assert command(["install", "--workspace", name, f"git+file://{root}"], context) == 0
+    (installed,) = _store.list_installed(workspace)
+    assert installed.record["requires"] == ["httk-core>=0.0.1"]
+    capsys.readouterr()
+
+
+def test_plugin_members_claiming_one_name_are_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    base, _ = _parent_and_child(tmp_path / "plugin", child_alias="tests.git.parent")
+    context, name, workspace = _store_workspace(tmp_path)
+    assert command(["install", "--workspace", name, base], context) == 1
+    assert "both claim the name 'tests.git.parent'" in capsys.readouterr().err
+    assert _store.list_installed(workspace) == []
