@@ -415,7 +415,6 @@ LANGUAGE = WorkflowLanguage(
     document_policy="optional",
     open_ports=True,
     has_default_collector=True,
-    allows_modes=False,
     matches=_matches,
     ports=_ports,
     validate_runner=_validate_runner,

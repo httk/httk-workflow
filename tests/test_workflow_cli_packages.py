@@ -566,7 +566,6 @@ def test_workflow_install_list_describe_and_uninstall_a_workspace_store(tmp_path
     (described,) = json.loads(capfd.readouterr().out)
     assert described["workflow"] == "local:tests.package" and described["source"]["kind"] == "workspace"
     assert described["source"]["id"] == "local:tests.package" and described["build"]["present"] is True
-    assert "data_mode" not in described
     assert command(["describe", "--workspace", name, "tests.package"], context) == 0
     assert "source: workspace installation local:tests.package" in capfd.readouterr().out
     assert command(["describe", "--workspace", name, "tests.missing"], context) == 1

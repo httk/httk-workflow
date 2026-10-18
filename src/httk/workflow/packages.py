@@ -742,14 +742,8 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             raise _error(root, f"[workflow.runner].document is not used by format {language_name!r}")
         elif lang.document_policy == "optional" and "document" in runner:
             document_member = _member(root, runner.get("document"), "[workflow.runner].document")
-        if not lang.allows_modes:
-            for mode in ("data_mode", "workdir_mode"):
-                if mode in runner:
-                    raise _error(root, f"[workflow.runner].{mode} is not supported by format {language_name!r}")
         runner_options = {
-            key: value
-            for key, value in runner.items()
-            if key not in {"format", "document", "data_mode", "workdir_mode", "seal_succeeded"}
+            key: value for key, value in runner.items() if key not in {"format", "document", "seal_succeeded"}
         }
         try:
             lang.validate_runner(runner_options, root)
@@ -768,7 +762,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
     elif recognize is None:
         _unknown(
             runner,
-            {"entry", "command", "initial_step", "steps", "data_mode", "workdir_mode", "seal_succeeded"},
+            {"entry", "command", "initial_step", "steps", "seal_succeeded"},
             "[workflow.runner]",
             root,
         )
@@ -806,17 +800,9 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             initial_step = requested_initial_step
         if initial_step not in steps:
             raise _error(root, f"[workflow.runner].initial_step {initial_step!r} is not in steps")
-    # ponytail: data_mode and workdir_mode are still validated as documented but nothing reads them; retire the
-    # keys together with their documentation.
-    data_mode = runner.get("data_mode", "none")
-    workdir_mode = runner.get("workdir_mode", "persistent")
     seal_succeeded = runner.get("seal_succeeded")
     if seal_succeeded is not None and not isinstance(seal_succeeded, bool):
         raise _error(root, "[workflow.runner].seal_succeeded must be a boolean")
-    if data_mode not in {"none", "transactional"}:
-        raise _error(root, "[workflow.runner].data_mode must be 'none' or 'transactional'")
-    if workdir_mode not in {"persistent", "isolated"}:
-        raise _error(root, "[workflow.runner].workdir_mode must be 'persistent' or 'isolated'")
 
     # Validated here for a manifest-located error; the provider converts the authored values.
     resources = cast(Mapping[str, int | str], workflow.get("resources", {}))

@@ -238,7 +238,6 @@ class WorkflowLanguage:
     :param document_policy: State whether package manifests require, allow, or forbid a source document.
     :param open_ports: Skip manifest port validation when document ports cannot be enumerated statically.
     :param has_default_collector: Provide a default collector path.
-    :param allows_modes: Permit manifest data and workdir mode overrides.
     :param environment: Declare realization-provided environment metadata.
     :param required_modules: Name the importable modules a job of this format needs at run time.
     """
@@ -254,7 +253,6 @@ class WorkflowLanguage:
     document_policy: DocumentPolicy = "required"
     open_ports: bool = False
     has_default_collector: bool = True
-    allows_modes: bool = True
     environment: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     required_modules: tuple[str, ...] = ()
 

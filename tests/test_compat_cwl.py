@@ -258,7 +258,6 @@ def _package(
     *,
     input_port: str | None = None,
     input_entry_type: str = "strings",
-    data_mode: str = "none",
     extra_documents: dict[str, str] | None = None,
     runner_extra: str = "",
 ) -> Path:
@@ -271,7 +270,6 @@ name = "tests.language.{root.name}"
 [workflow.runner]
 format = "cwl"
 document = "{document_name}"
-data_mode = "{data_mode}"
 {runner_extra}
 
 [workflow.inputs.{input_name}]
@@ -548,7 +546,6 @@ def test_cwl_file_list_output_stays_a_data_record_descriptor_list(tmp_path: Path
         "messages",
         "transcripts",
         input_entry_type="strings",
-        data_mode="transactional",
         extra_documents={"echo.cwl": _ECHO_TOOL},
     )
     new_job(workspace, package, inputs={"messages": ["one", "two"]})
@@ -644,7 +641,6 @@ def test_cwl_language_scatter_runs_labeled_children_and_publishes_data(tmp_path:
         "messages",
         "transcript",
         input_entry_type="strings",
-        data_mode="transactional",
         extra_documents={"echo.cwl": _ECHO_TOOL, "count.cwl": _COUNT_TOOL},
     )
     job = new_job(workspace, package, inputs={"messages": ["alpha", "beta", "gamma"]}, tag="scatter")

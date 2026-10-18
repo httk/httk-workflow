@@ -262,7 +262,6 @@ LANGUAGE = WorkflowLanguage(
     initial_step="start",
     document_policy="forbidden",
     has_default_collector=False,
-    allows_modes=False,
     matches=matches,
     ports=ports,
     validate_runner=validate_runner,

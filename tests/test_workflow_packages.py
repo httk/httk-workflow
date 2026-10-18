@@ -653,6 +653,14 @@ def test_manifest_teaches_the_postprocess_shape(tmp_path: Path, extra: str, mess
         parse_workflow_manifest(_package(tmp_path / "package", manifest))
 
 
+def test_retired_runner_mode_keys_are_unknown(tmp_path: Path) -> None:
+    manifest = _MANIFEST.replace(
+        '[workflow.runner]\nsteps = ["start"]', '[workflow.runner]\nsteps = ["start"]\ndata_mode = "none"'
+    )
+    with pytest.raises(ValueError, match=r"unknown key \[workflow\.runner\.data_mode\]"):
+        parse_workflow_manifest(_package(tmp_path / "package", manifest))
+
+
 @pytest.mark.parametrize(
     ("file", "message"),
     [("missing.sh", "does not exist"), ("scripts/report.txt", "unknown key")],

@@ -46,9 +46,8 @@ installed package into the payload, renders every `*.template` member and runs
 parameters; path-valued structure inputs are loaded through `httk.core`.
 
 `taskset` becomes the job's claim pool and `attempts` is the legacy retry
-budget. The realization keeps a persistent `ht.run.current` workdir, and the
-manifest may not set `data_mode` or `workdir_mode`. It has no format-default
-collector, so a package that needs collection declares `[workflow.collect]`.
+budget. The realization keeps a persistent `ht.run.current` workdir. It has no
+format-default collector, so a package that needs collection declares `[workflow.collect]`.
 
 ## Runtime fidelity
 

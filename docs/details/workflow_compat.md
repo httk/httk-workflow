@@ -442,8 +442,7 @@ file = "collect.py"
 
 The directory must contain an executable `ht_steps` or `ht_run`, possibly as
 `.template`. `taskset` selects the claim pool and `attempts` sets the v1 retry
-budget. `data_mode` and `workdir_mode` are forbidden (as for jobflow): the
-realization keeps a persistent `ht.run.current`. The built-in `v1_runner.py`
+budget. The realization keeps a persistent `ht.run.current`. The built-in `v1_runner.py`
 runs like any other runner, with no v1-specific manager or capability.
 {doc}`/details/v1_compatibility` covers the environment entries and legacy
 runtime behavior.

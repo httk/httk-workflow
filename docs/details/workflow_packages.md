@@ -217,11 +217,8 @@ Without `format`, the table describes an executable runner.
 | `steps` | required | Nonempty runner step list. |
 
 `initial_step` is required when `steps` has several names and no `start`.
-The former keys `data_mode` (`"none"` or `"transactional"`) and
-`workdir_mode` (`"persistent"` or `"isolated"`) are still accepted, with
-their values validated, and ignored: every job can commit data with
-transactions, and its workdir is always the persistent `run/`. Drop them from
-new manifests.
+Every job can commit data with transactions, and its workdir is always the
+persistent `run/`.
 
 A descriptive entry name such as `run.py` or `run.sh` is recommended, because
 it keeps editors and linters working. An entry other than `run` is installed
@@ -283,7 +280,6 @@ package it reports the manifest alone.
 | `taskset` | forbidden | forbidden | label, default `"default"` | v1 claim pool. |
 | `attempts` | forbidden | forbidden | integer, default `10` | v1 retry budget. |
 | `entry`, `steps`, `initial_step` | forbidden | forbidden | forbidden | Built-in realization steps. |
-| `data_mode`, `workdir_mode` | accepted and ignored | forbidden | forbidden | Former mode keys; see the executable form. |
 
 `port` defaults to the manifest name. For a document format, each effective
 input and output port must exist in the document and occur only once. Jobflow
