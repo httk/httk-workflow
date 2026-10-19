@@ -542,7 +542,12 @@ to `DESTINATION` (default `./NAME`) and removes it. If the name is gone, a
 manager took it: cancel the job instead.
 
 Adoption gives the jobs fresh UUIDs and keeps the client's job UUID as the
-job's exchange name. Once the root and every job of its tree are finished
+job's exchange name. A fresh UUID keeps the first eight hex digits of the
+client's, so a unique prefix such as `httk job show 8f7047f2` selects the job
+in both workspaces. Jobs adopted before an upgrade that changes this
+derivation should finish and be returned before the daemon's *httk-workflow*
+is upgraded; otherwise they return under the daemon's job key, and a client's
+resubmission of such a job is refused as an exchange name in use. Once the root and every job of its tree are finished
 (`succeeded`, `failed` or `cancelled`), a manager returns the whole tree to
 `outbox/CLIENT_JOB_KEY`, where `CLIENT_JOB_KEY` is the client's own job key,
 `<tag>--<client job UUID>`, the name the bundle had in `inbox/`; while an

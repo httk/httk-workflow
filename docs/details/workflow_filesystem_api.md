@@ -1330,8 +1330,12 @@ never empty while a delivery is in doubt, so it always runs.
    fresh jobs (no `state.json`, `seal.json`, `logs`, `attempts` or
    `.httk-job`) in state `ready`, and its root has no parent. A trusted root
    may keep a parent outside the bundle.
-3. **Rekey** an untrusted bundle: each member gets the id
-   `uuid5(b480bb06-dc60-4d16-a78b-cc6b3af734b4, "<workspace-id>/<client-id>")`;
+3. **Rekey** an untrusted bundle: each member gets the id whose first group
+   (eight hex digits) is the client id's and whose rest is that of
+   `uuid5(b480bb06-dc60-4d16-a78b-cc6b3af734b4, "<workspace-id>/<client-id>")`,
+   so a unique prefix such as `httk job show 8f7047f2` selects the job in both
+   workspaces. A client thus chooses the first eight hex digits of its jobs'
+   ids here, which can make a prefix selector ambiguous and nothing more;
    keys keep their tags and parent links are mapped. The result is recorded in
    `<scratch>/rekey.json` (format `httk-workflow-rekey`, version 1:
    `{manifest, exchange_names: {new id: client id}}`) before anything is

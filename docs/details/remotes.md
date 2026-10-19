@@ -300,7 +300,9 @@ renames it into `inbox/` when complete. `job eject` records your identity's
 public key as optional `owner_key` in `bundle.json`; only untrusted (exchange)
 adoption uses it. The job must be fresh (never run) and
 have no parent there, since managers adopt it as untrusted input with fresh
-UUIDs, keeping your job UUID as its exchange name. Its workflow must be
+UUIDs, keeping your job UUID as its exchange name. The fresh UUID keeps the
+first eight hex digits of yours, so a unique prefix such as
+`httk job show 8f7047f2` selects the job in both workspaces. Its workflow must be
 installed in the workspace, an operator task; until then the adopted job waits.
 `job adopt --move` copies the
 returned tree, verifies it and removes the source from the exchange.

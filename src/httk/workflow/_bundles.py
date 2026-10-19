@@ -70,7 +70,8 @@ MAX_MANIFEST_BYTES = 1 << 20
 #: The largest accepted ``rekey.json`` (a manifest plus one name pair per member), in bytes.
 MAX_REKEY_BYTES = 4 << 20
 
-# The fixed namespace of rekeyed exchange job UUIDs: uuid5(namespace, "<workspace-id>/<client-uuid>").
+# The fixed namespace of rekeyed exchange job UUIDs: the client's first group, then the rest of
+# uuid5(namespace, "<workspace-id>/<client-uuid>").
 _EXCHANGE_NAMESPACE = uuid.UUID("b480bb06-dc60-4d16-a78b-cc6b3af734b4")
 _TRANSFER_ID = re.compile(r"[0-9a-f]{32}")
 _TIMESTAMP_LIMIT = 64
@@ -688,9 +689,14 @@ def rekeyed_id(workspace_id: str, job_id: str) -> str:
     :param workspace_id: The adopting workspace's id.
     :param job_id: The client's job UUID (kept as the job's ``exchange_name``).
     :return: The rekeyed job UUID, deterministic per workspace and client id.
+    :raises httk.workflow.errors.FormatError: If *job_id* is not canonical UUID text.
     """
 
-    return canonical_uuid(str(uuid.uuid5(_EXCHANGE_NAMESPACE, f"{workspace_id}/{job_id}")))
+    client = canonical_uuid(job_id, "job_id")
+    derived = str(uuid.uuid5(_EXCHANGE_NAMESPACE, f"{workspace_id}/{client}"))
+    # The client's first group keeps a unique prefix selecting the job on both sides; uuid5's version and
+    # variant bits lie past it, so the result stays a valid UUID.
+    return canonical_uuid(client[:8] + derived[8:])
 
 
 def _rekey(manifest: BundleManifest, names: Mapping[str, str]) -> BundleManifest:
@@ -729,7 +735,8 @@ def _load_rekey(scratch: Path) -> tuple[BundleManifest, dict[str, str]] | None:
 def rekey_untrusted(scratch: Path, bundle: Path, manifest: BundleManifest, *, workspace_id: str) -> BundleManifest:
     """Give the members of a validated untrusted bundle fresh job UUIDs; deterministic and crash-idempotent.
 
-    The new id of a member is ``uuid5(namespace, "<workspace_id>/<client id>")``; its key keeps the tag, and
+    The new id of a member keeps the first group of the client id; the rest is
+    ``uuid5(namespace, "<workspace_id>/<client id>")`` (:func:`rekeyed_id`). Its key keeps the tag, and
     parent links (``job_id``, ``job_key``, ``placement`` and ``workspace_id``, which becomes *workspace_id*)
     are mapped likewise. The result is recorded in ``<scratch>/rekey.json`` before anything is renamed; when
     that record exists it is loaded, never recomputed. Then each member's ``job.json`` is rewritten and its
@@ -765,7 +772,9 @@ def rekey_untrusted(scratch: Path, bundle: Path, manifest: BundleManifest, *, wo
         rekeyed, names = loaded
         forward = {old: new for new, old in names.items()}
         if any(rekeyed_id(workspace_id, old) != new for old, new in forward.items()):
-            raise BundleError(f"rekey.json was derived for another workspace than {workspace_id}")
+            raise BundleError(
+                f"rekey.json was derived for another workspace or by another rekey formula than {workspace_id}"
+            )
     original = _rekey(rekeyed, names)
     if manifest not in (original, rekeyed):
         raise BundleError("rekey.json belongs to another bundle")

@@ -16,6 +16,7 @@ from httk.workflow._bundles import BundleError, BundleManifest
 from httk.workflow._job import JobDefinition
 from httk.workflow._state import Release, StateDoc, read_state_unowned
 from httk.workflow.errors import FormatError, WorkflowError
+from httk.workflow.introspection import resolve_job
 from httk.workflow.models import make_job_key
 from test_bundles import family, key_of, manifest_of, write_bundle
 from v3_helpers import cli_owner, job_mapping, submit_mapping
@@ -516,6 +517,11 @@ def test_untrusted_adoption_rekeys_and_records_the_exchange_name(tmp_path: Path)
         assert doc is not None and not damaged and doc.origin == "exchange"
         names.add(doc.exchange_name)
     assert names == client_ids
+    # The client's unique prefix selects the rekeyed job here too.
+    for ref in report.published:
+        doc, _ = read_state_unowned(ref.path / "state.json")
+        assert doc is not None and doc.exchange_name is not None
+        assert resolve_job(ws, doc.exchange_name[:8]).job_id == ref.job_id
     assert (ws.control / "exchange-jobs" / str(jobs[0]["id"]) / "index.json").is_file()
     indexed = _kernel.exchange_index(ws, str(jobs[0]["id"]))
     assert indexed is not None
@@ -591,7 +597,7 @@ def test_untrusted_exchange_name_indexed_at_another_placement(tmp_path: Path) ->
     assert second is not None and second.already_adopted
     # An index entry at another placement whose job is gone is refused.
     other = family(str(uuid.uuid4()))[:1]
-    rekeyed = str(uuid.uuid5(uuid.UUID("b480bb06-dc60-4d16-a78b-cc6b3af734b4"), f"{ws.workspace_id}/{other[0]['id']}"))
+    rekeyed = _bundles.rekeyed_id(ws.workspace_id, str(other[0]["id"]))
     with cli_owner(ws) as owner:
         claim = _kernel.claim_exchange_name(ws, owner, str(other[0]["id"]), rekeyed, PurePosixPath("gone"), nonce="x")
         assert claim is _kernel.ExchangeClaim.WON

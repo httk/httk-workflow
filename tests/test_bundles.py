@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from httk.workflow import Workspace, _fs, _kernel
+from httk.workflow import Workspace, _bundles, _fs, _kernel
 from httk.workflow._bundles import (
     _EXCHANGE_NAMESPACE,
     BUNDLE_FORMAT,
@@ -838,7 +838,18 @@ def test_trusted_structural_positions_refuse_special_files(tmp_path: Path, where
 
 
 def rekeyed_id(workspace_id: str, job_id: object) -> str:
-    return str(uuid.uuid5(_EXCHANGE_NAMESPACE, f"{workspace_id}/{job_id}"))
+    return str(job_id)[:8] + str(uuid.uuid5(_EXCHANGE_NAMESPACE, f"{workspace_id}/{job_id}"))[8:]
+
+
+def test_rekeyed_id_keeps_the_client_prefix() -> None:
+    client = "8f7047f2-5b0f-4cfc-bad1-fcd085667c72"
+    result = _bundles.rekeyed_id(ADOPTER, client)
+    assert str(uuid.UUID(result)) == result and uuid.UUID(result).version == 5
+    assert result[:8] == client[:8]
+    assert result[8:] == str(uuid.uuid5(_EXCHANGE_NAMESPACE, f"{ADOPTER}/{client}"))[8:]
+    assert result == rekeyed_id(ADOPTER, client) == _bundles.rekeyed_id(ADOPTER, client)
+    sibling = client[:8] + "-0000-4000-8000-000000000000"
+    assert _bundles.rekeyed_id(ADOPTER, sibling)[:9] == "8f7047f2-" and _bundles.rekeyed_id(ADOPTER, sibling) != result
 
 
 def inbox(
