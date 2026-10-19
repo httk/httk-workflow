@@ -20,8 +20,9 @@ has one directory a client may write, ``WORKSPACE/exchange``:
 (:func:`install_document`, :func:`publish_file`).
 
 Job-control authentication and dispatch belong to the confined daemon: managers leave the
-``requests/`` and ``responses/`` command documents alone. Every unrestricted manager serving the
-exchange runs :class:`ExchangeService` in each tick:
+``requests/`` and ``responses/`` command documents alone. Every manager serving the exchange (an
+unrestricted one, or a daemon's manager of one key's ``exchange-`` pool) runs :class:`ExchangeService` in
+each tick:
 
 - **Inbox.** It adopts one inbox entry per pass as an untrusted bundle
   (:func:`httk.workflow._moving.adopt`, which takes it by a descriptor-anchored contested move): fresh job
@@ -59,7 +60,7 @@ import re
 import stat
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -67,8 +68,9 @@ from pathlib import Path, PurePosixPath
 from . import _fs, _kernel, _moving, _requests
 from ._bundles import BundleError
 from ._daemon_mailbox import MAX_DIRECTORY_ENTRIES, MAX_SCANNED_ENTRIES
+from ._job import JobDefinition
 from ._kernel import OWNED, TERMINAL_STATES, JobRef
-from ._state import encode_state, read_state_unowned
+from ._state import StateDoc, encode_state, read_state_unowned
 from ._util import json_bytes, utc_now
 from .errors import FormatError, WorkflowError
 from .introspection._reading import read_job_file
@@ -428,13 +430,19 @@ class ExchangeService:
 
     :param workspace: The workspace the manager serves.
     :param owner: The manager's owner.
+    :param pools: The manager's claim pools, whose finished trees :meth:`pending` counts; ``None`` for any pool.
     """
 
-    def __init__(self, workspace: Workspace, owner: _kernel.Owner) -> None:
+    def __init__(self, workspace: Workspace, owner: _kernel.Owner, *, pools: Collection[str] | None = None) -> None:
         self.workspace = workspace
         self.owner = owner
+        self._pools = None if pools is None else frozenset(pools)
         self._last: dict[str, float] = {}
         self._dirty = True
+        # The last pending() counts, recounted when stale; and the inbox entries whose adoption failed here.
+        self._pending: tuple[int, int] | None = None
+        self._pending_dirty = True
+        self._failed: set[str] = set()
         # Per job: the monotonic time of the last return request posted, and the wait before the next one.
         self._backoff: dict[str, tuple[float, float]] = {}
         # The last problem reported per subject, so a persisting one is logged once.
@@ -443,7 +451,7 @@ class ExchangeService:
     def invalidate(self) -> None:
         """Note that workflow state changed, so the next pass looks for finished exchange trees at once."""
 
-        self._dirty = True
+        self._dirty = self._pending_dirty = True
 
     def _report(self, subject: str, message: str, *, event: str, level: int = logging.WARNING) -> None:
         if self._reported.get(subject) == message:
@@ -496,12 +504,16 @@ class ExchangeService:
     # -- inbox ------------------------------------------------------------------------------------------------------
 
     def _adopt(self, directories: _Directories) -> bool:
-        """Adopt (or refuse) the first inbox entry another manager does not take first."""
+        """Adopt (or refuse) the first inbox entry another manager does not take first.
+
+        Entries whose adoption failed here come last, so they are retried only when no other entry is taken;
+        an entry that left the inbox is forgotten, so a resubmission under its name counts afresh.
+        """
 
         rejected = exchange_directory(self.workspace) / "outbox" / "rejected"
-        for name in _listing(directories.inbox):
-            if not _eligible(name):
-                continue
+        names = [name for name in _listing(directories.inbox) if _eligible(name)]
+        self._failed &= set(names)
+        for name in sorted(names, key=lambda name: name in self._failed):
             try:
                 report = _moving.adopt(
                     self.workspace,
@@ -511,10 +523,14 @@ class ExchangeService:
                     refused_to=rejected,
                 )
             except BundleError as exc:
+                self._failed.add(name)
                 _LOGGER.warning(
                     "exchange inbox entry %s: %s", name, exc, extra={"event": "exchange_refused", "entry": name}
                 )
                 return True
+            except Exception:
+                self._failed.add(name)  # retried by later passes, but it no longer holds this manager (pending)
+                raise
             if report is None:
                 continue  # another manager took it
             self._dirty = True
@@ -578,43 +594,125 @@ class ExchangeService:
             )
         return changed
 
-    def _return(self, job: _ExchangeJob, now: float, exchange: int) -> bool:
-        """Post the ``eject`` request of one finished exchange tree to ``outbox/<tag>--<exchange-name>/``.
+    def pending(self) -> tuple[int, int]:
+        """Count the exchange work this manager can progress now, recounted at most every :data:`STEP_INTERVAL`.
+
+        A manager that serves the exchange does not exit as idle while either count is nonzero. Counted are the
+        inbox entries it may adopt (not those whose adoption already failed here), and the finished exchange
+        trees of its pools whose return it can request now (no unfetched earlier copy in the outbox and no
+        backoff) or whose return request is not applied yet. Work it cannot progress holds no manager.
+
+        :return: The inbox entries and the returns.
+        """
+
+        now = time.monotonic()
+        if self._due("pending", now, STEP_INTERVAL) or self._pending_dirty or self._pending is None:
+            self._pending_dirty = False
+            self._pending = self._count_pending(now)
+        return self._pending
+
+    def _count_pending(self, now: float) -> tuple[int, int]:
+        try:
+            with _opened(self.workspace) as directories:
+                inbox = sum(1 for name in _listing(directories.inbox) if _eligible(name) and name not in self._failed)
+                try:
+                    requested = {name.split(".", 1)[0] for name in os.listdir(self.workspace.control / "requests")}
+                except FileNotFoundError:
+                    requested = set()
+                returns = 0
+                for job in self._scan():
+                    if not self._mine(job):
+                        continue
+                    # A posted request is applied by the next pass of the request queue, whatever the backoff.
+                    if job.job_id in requested:
+                        returns += self._finished(job) is not None
+                    else:
+                        returns += self._returnable(job, now, directories.exchange) is not None
+        except (ExchangeUnavailableError, OSError):
+            return 0, 0  # the exchange pass reports it
+        except _kernel.OwnerLost:
+            raise
+        except Exception as exc:
+            # As a failed exchange step: reported, and nothing is pending, so it cannot stop the manager.
+            _LOGGER.debug("counting the pending exchange work failed", exc_info=True)
+            self._report(
+                "step:pending",
+                f"counting the pending exchange work failed: {type(exc).__name__}: {exc}",
+                event="exchange_step_failed",
+                level=logging.ERROR,
+            )
+            return 0, 0
+        return inbox, returns
+
+    def _mine(self, job: _ExchangeJob) -> bool:
+        """Report whether an exchange root is in one of this manager's pools."""
+
+        if self._pools is None:
+            return True
+        if job.ref is None:
+            return False
+        try:
+            return JobDefinition.from_path(job.ref.path / "job.json").claim_pool in self._pools
+        except (FormatError, OSError):
+            return False
+
+    def _finished(self, job: _ExchangeJob) -> StateDoc | None:
+        """Return the root state of a finished exchange tree here (its root and every member terminal), else ``None``."""
+
+        ref = job.ref
+        if ref is None or ref.state not in TERMINAL_STATES:
+            return None
+        doc, damaged = read_state_unowned(ref.path / "state.json")
+        if damaged or doc is None or doc.origin != "exchange":
+            return None
+        try:
+            members = _moving.tree_members(self.workspace, job.job_id, doc)
+        except _moving.Busy:
+            return None
+        return None if any(member.state not in TERMINAL_STATES for member in members) else doc
+
+    def _returnable(self, job: _ExchangeJob, now: float, exchange: int) -> StateDoc | None:
+        """Return the root state of a finished exchange tree whose return may be requested now, else ``None``.
 
         *exchange* is the exchange directory's descriptor: the outbox is client-writable, so it is looked into
         anchored, never following a symlink.
         """
 
         ref = job.ref
-        if ref is None or ref.state not in TERMINAL_STATES:
-            return False
+        if ref is None:
+            return None
         backoff = self._backoff.get(job.job_id)
         if backoff is not None and 0.0 <= now - backoff[0] < backoff[1]:
-            return False  # an earlier request may still be applied, or its eject rolled back
-        doc, damaged = read_state_unowned(ref.path / "state.json")
-        if damaged or doc is None or doc.origin != "exchange":
-            return False
-        try:
-            members = _moving.tree_members(self.workspace, job.job_id, doc)
-        except _moving.Busy:
-            return False
-        if any(member.state not in TERMINAL_STATES for member in members):
-            return False
-        outbox = exchange_directory(self.workspace) / "outbox"
+            return None  # an earlier request may still be applied, or its eject rolled back
+        doc = self._finished(job)
+        if doc is None:
+            return None
         try:
             descriptor = _fs.open_dir_under(exchange, "outbox")
         except FileNotFoundError:
-            pass  # nothing returned yet
+            return doc  # nothing returned yet
         except _fs.UnsafePath:
-            return False  # a client replaced the outbox with a symlink or a file: the delivery would be refused
-        else:
-            try:
-                name = make_job_key(job.exchange_name, parse_job_key(ref.job_key)[0])
-                occupied = _fs.exists(_fs.anchored(descriptor, name))
-            finally:
-                os.close(descriptor)
-            if occupied:
-                return False  # the client has not fetched an earlier return: an eject now would only roll back
+            return None  # a client replaced the outbox with a symlink or a file: the delivery would be refused
+        try:
+            name = make_job_key(job.exchange_name, parse_job_key(ref.job_key)[0])
+            occupied = _fs.exists(_fs.anchored(descriptor, name))
+        finally:
+            os.close(descriptor)
+        # The client has not fetched an earlier return: an eject now would only roll back.
+        return None if occupied else doc
+
+    def _return(self, job: _ExchangeJob, now: float, exchange: int) -> bool:
+        """Post the ``eject`` request of one finished exchange tree to ``outbox/<tag>--<exchange-name>/``.
+
+        *exchange* is the exchange directory's descriptor (see :meth:`_returnable`).
+        """
+
+        ref = job.ref
+        doc = self._returnable(job, now, exchange)
+        if ref is None or doc is None:
+            return False
+        outbox = exchange_directory(self.workspace) / "outbox"
+        backoff = self._backoff.get(job.job_id)
         # One id per state of the root: every manager that sees this state posts the same request, and a rolled
         # back eject (which records the applied request) changes the state, so the retry is a fresh request.
         digest = hashlib.sha256(encode_state(doc)).hexdigest()

@@ -52,7 +52,7 @@ adapter and an unconfined Slurm launcher lack these guarantees.
 | Component | Runs | Can write |
 | --- | --- | --- |
 | broker (`httk workspace daemon`) | in its own Bubblewrap sandbox on the login or service node, with the host filesystem read-only | `jobs/`, `exchange/`, `.httk-workspace/{owners,requests,tmp,quarantine,exchange-jobs}` and `.httk-workspace/daemon/broker/` |
-| manager | unconfined, as you, in the Slurm batch job: `httk workflow manager run --idle` | the workspace |
+| manager | unconfined, as you, in the Slurm batch job: `httk workflow manager run --pool exchange-<key>`, until it is idle | the workspace |
 | job attempt | in a Bubblewrap sandbox the manager builds, on the manager's node | its own job directory |
 | rank of a confined launch | in the launch's Bubblewrap keeper sandbox on its node, which the trusted rank helpers build | its own job directory, the launch's shared-memory directory |
 
@@ -70,7 +70,8 @@ it does not do on the trusted side:
   workflow (`httk workflow install`, `httk workflow build`) is an operator
   action and runs unconfined, so review what you install.
 
-Every unrestricted manager of the workspace serves the exchange once the
+Every unrestricted manager of the workspace, and every manager whose pools
+include an exchange pool (the daemon's managers), serves the exchange once the
 extension is enabled (`httk workspace exchange enable`, which `daemon init` also
 does). On a workspace with the exchange extension enabled, every manager must
 confine its attempts (`manager.confine=bwrap`); otherwise it refuses to start,
@@ -449,12 +450,30 @@ recovery answers `uncertain` after its daemon crashed carries only a requested
 `time_limit`; without a request it stays null.
 
 The manager is `httk workflow manager run --by-path --workspace WORKSPACE
---idle` with the launcher's `--workers` (from `manager.workers`),
+--pool exchange-<key>` with the launcher's `--workers` (from `manager.workers`),
 `--allocation` (from `manager.allocation`, default `slurm`) and its pinned
-`--setting` values. Like every unrestricted confined manager it serves the
-exchange. It probes its Slurm allocation like any manager the
-`slurm` launcher starts, places attempts on the allocation's nodes and serves
-until Slurm's time limit drains it; see {doc}`taskmanager`.
+`--setting` values. `exchange-<key>` is the exchange pool of the key that
+signed the start: `exchange-` and the first 16 hexadecimal digits of the
+SHA-256 of the key text (`ed25519:...`). The manager claims only that pool's
+jobs, never `default`, so it runs only the jobs that key submitted and
+cancelling it touches no other client's work. It still serves the exchange:
+adoption, returns and `status.json` are global and run nobody's jobs. It probes
+its Slurm allocation like any manager the `slurm` launcher starts and places
+attempts on the allocation's nodes. It runs without `--idle`: it exits once it
+has nothing left to progress (no attempt running, no claimable job of its key's
+pool, no inbox entry it may still adopt, whoever sent it, and no finished tree
+of its key's pool whose return it can request or has requested), but not within the first 120 seconds
+(`--idle-grace`), so a bundle still arriving or being adopted elsewhere is not
+missed. Work it cannot progress does not keep it: a job of its pool it can
+never start (for example one needing more resources than the allocation has),
+an inbox entry whose adoption failed, another key's finished tree, or a return
+waiting while the client has not fetched an earlier copy. The summary it prints
+at exit names a job's blocker. A parent waiting on an unresolved join child
+(see `--join-grace-seconds`), or work that arrives after the manager exited,
+needs another `start`. If confinement becomes unavailable while its jobs are
+ready, it waits out the grace, then exits with status 2 naming confinement.
+While it has work, Slurm's time limit drains it as usual. See
+{doc}`taskmanager`.
 
 ### Configuration changes
 
@@ -519,8 +538,8 @@ The bundle is copied into the mount under a hidden partial name and renamed
 into `inbox/` when complete; a failed delivery returns the job to the state it
 left. `job eject` records the submitting identity's public key as the
 optional, unsigned `owner_key` in `bundle.json`; untrusted inbox adoption uses
-it to establish ownership. Every unrestricted confined manager of the workspace adopts bundles from
-`inbox` itself: it takes the entry, copies it anchored at directory descriptors
+it to establish ownership and the jobs' claim pool. Every confined manager that
+serves the exchange adopts bundles from `inbox` itself: it takes the entry, copies it anchored at directory descriptors
 into its own scratch, and validates, rekeys and publishes only that copy. An
 inbox bundle is untrusted input: it must hold only fresh jobs (never run, no
 `state.json`, logs, attempts or seal) in state `ready`, with no symlink, special
@@ -530,7 +549,17 @@ waits, and `status.json` shows it `ready`. A client that keeps
 descriptors open on its entry can change its bytes only until the copy
 completes; such a change affects only its own job. A refused bundle appears in
 `outbox/rejected/<unique>/`, as the bundle `<name>` and a `reason.json`, which
-holds the reason. Eject errors go to the manager log. With no manager running, bundles simply
+holds the reason. Eject errors go to the manager log.
+
+Adoption sets `claim.pool` in every member's `job.json`, whatever the client
+wrote: `exchange-<key>` for a bundle with an `owner_key` (the pool of that
+key's daemon managers), `default` for a keyless one. No daemon manager claims
+`default`, so keyless exchange jobs run only on managers an operator starts on
+the host. The children an exchange job spawns, keyed or keyless, always land in
+its pool, whichever pool its runner names; a job outside the exchange that
+names an exchange pool for a child fails with `protocol_error`. The `owner_key` is unsigned: a client
+that names another key's `owner_key` gives that key control of the job and puts
+it in that key's pool. With no manager running, bundles simply
 wait in `inbox`; the client can take one back before any manager does:
 
 ```console
@@ -598,7 +627,10 @@ to the `inbox` again.
 `progress.json` the job keeps in its payload; the managers write it. `managers.json` (format version 4) lists the
 daemon's manager starts with their ledger state, Slurm job ID, effective
 `time_limit`, scheduler state,
-exit code and start and end times. Unknown values are `null`. A row stays
+exit code and start and end times, whoever started them; only the key that
+signed a manager's `start_manager` may query (`manager_status`) or cancel
+(`cancel_manager`) it, and any other authorized key is refused with
+`not_owner`. Unknown values are `null`. A row stays
 until `retention.daemon_history_days` (30 days by default) after its manager
 ended and its launcher log was published, or after a start was refused; a start
 answered `uncertain` without a Slurm job ID stays for good. Both files are

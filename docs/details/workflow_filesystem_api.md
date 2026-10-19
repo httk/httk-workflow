@@ -626,7 +626,9 @@ There is no age-based collection of scratch: ownership decides.
 `job.json` (format `httk-workflow-job`, version 3) is the immutable
 declaration of a job: strict, at most 1 MiB, written as compact sorted JSON
 with a newline. The protocol never rewrites it, except that the adopter of an
-exchange bundle rewrites the client's ids before publication (§Adopt).
+exchange bundle rewrites the client's ids and `claim.pool` before publication
+(§Adopt), and the commit of an exchange job sets its children's `claim.pool`
+(§Children).
 
 | Member | Type | Meaning |
 | --- | --- | --- |
@@ -638,7 +640,7 @@ exchange bundle rewrites the client's ids before publication (§Adopt).
 | `workflow` | `{id, name}` | The installed workflow's id (§The workflow store) and its name. |
 | `initial_step` | step name | The step of the first activation. |
 | `priority` | `0`–`999` | The submitted priority. |
-| `claim` | `{pool, required_capabilities}` | Eligibility labels; pool `default` needs no routing. |
+| `claim` | `{pool, required_capabilities}` | Eligibility labels; pool `default` needs no routing. A pool `exchange-<16 hex>` is an exchange pool (§Adopt). |
 | `retry_policy` | `{maximum_attempts_per_activation?, maximum_total_attempts?, maximum_activations?, retry_on?}` | Budgets (absent is unbounded) and the manager-detected failure codes that are retried. |
 | `resources`, `step_resources` | objects | Requirements per job and per step; `maxtime`/`mintime` are seconds. |
 | `parameters`, `declarations`, `declared`, `environment` | objects | Workflow inputs and metadata, opaque to the protocol. |
@@ -1001,7 +1003,12 @@ unique labels and keys, this workspace, a `job_id` agreeing with the key, a
 real directory per child that passes `walk_untrusted`, no `state.json`,
 `seal.json`, `logs` or `attempts` at its top, a valid `job.json` whose key and
 placement match and whose `parent` names this job (id, key, placement,
-workspace, spawn id), and ids not already present. The plan records each
+workspace, spawn id), and ids not already present. A child of an exchange
+job (`origin` `exchange` in its trusted `state.json`, or a job in an exchange
+pool) gets exactly the parent's pool: validation rewrites the staged
+`job.json` when the runner named another (idempotently, so a revalidation
+after a crash finds the same child). A child of any other job that names an
+exchange pool fails the outcome. The plan records each
 child's initial `state.json`, inheriting the parent's `origin` and
 `exchange_name`.
 The manager publishes the children of every outcome action, but a `fail` or
@@ -1340,8 +1347,11 @@ never empty while a delivery is in doubt, so it always runs.
    `<scratch>/rekey.json` (format `httk-workflow-rekey`, version 1:
    `{manifest, exchange_names: {new id: client id}}`) before anything is
    renamed; then each `job.json` is rewritten, each member directory renamed,
-   and `bundle.json` rewritten. A client id that collides with a rekeyed id is
-   refused.
+   and `bundle.json` rewritten. The rewrite also sets `claim.pool`, whatever
+   the client wrote, from the recorded `owner_key`: `exchange-` and the first
+   16 hexadecimal digits of the SHA-256 of the key text, or `default` without
+   a key; a resumed rekey therefore sets the same pool. A client id that
+   collides with a rekeyed id is refused.
 4. **Deduplicate** with a settled `locate_many` at the members' placements,
    owned jobs included. All present: "already adopted". Some present: refused.
    A trusted root whose parent is present here: refused (adopt the parent's
@@ -1446,7 +1456,7 @@ anchored at descriptors opened `O_NOFOLLOW` from the workspace root, bounded
 and non-blocking, and files go in only through `write_file`. The exchange
 writer must be the workspace owner's account. Every manager of an exchange
 workspace MUST confine its attempts; only managers without placement prefixes
-that take the `default` pool serve the exchange.
+that take the `default` pool or an `exchange-` pool serve the exchange.
 
 The **exchange index** `.httk-workspace/exchange-jobs/<exchange-name>/` is
 trusted: `.nonce` and `index.json` (`{job_id, placement, adoption_nonce, owner_key}`, with

@@ -402,6 +402,37 @@ def test_a_lazy_probe_failure_holds_back_claims_until_bubblewrap_works(
         assert doc is not None and doc.counters["attempts_total"] == 1
 
 
+@pytest.mark.timing
+def test_ready_jobs_waiting_for_confinement_hold_the_manager_for_its_grace(tmp_path: Path, sandbox: _Sandbox) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    sandbox.probe_result = _confine.ConfinementUnavailableError("no user namespaces")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        workspace.set_setting("manager.confine", "bwrap")
+        workspace.set_setting("confine.bwrap", _BWRAP)
+        _submit(workspace, tmp_path / "source", "one")
+        started = time.monotonic()
+        census = manager.run_until_idle(timeout=60.0, poll_interval=0.02, idle_grace=0.5)
+    assert time.monotonic() - started >= 0.5
+    assert census.ready_blocked == {"confinement": {"manager.confine": 1}}
+
+
+def test_a_manager_stopped_by_unavailable_confinement_exits_non_zero_naming_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from httk.core.cli import CLIContext
+
+    from httk.workflow.manager import WorkCensus
+    from httk.workflow.workflow_cli import command
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    blocked = WorkCensus(0, 0, 0, {"confinement": {"manager.confine": 2}}, 0, 0, 0)
+    monkeypatch.setattr(TaskManager, "run_until_idle", lambda _self, **_options: blocked)
+    run = ["manager", "run", "--by-path", "--workspace", str(workspace.root), "--inline", "--allocation", "none"]
+    assert command(run, CLIContext("httk", tmp_path)) == 2
+    error = capsys.readouterr().err
+    assert "confinement is unavailable, so 2 ready job(s)" in error and "idle:" not in error
+
+
 def test_an_invalid_confinement_setting_holds_back_claims_naming_it(
     tmp_path: Path, sandbox: _Sandbox, caplog: pytest.LogCaptureFixture
 ) -> None:

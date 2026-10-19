@@ -54,6 +54,7 @@ from ._allocation import (
 )
 from ._attempt_env import attempt_context, runner_environment
 from ._attempt_process import start_gated, write_marker
+from ._bundles import EXCHANGE_POOL_PREFIX
 from ._durations import format_duration
 from ._exchange import ExchangeService
 from ._job import JobDefinition
@@ -171,6 +172,8 @@ class WorkCensus:
     :param waiting: Jobs waiting on their join children.
     :param paused: Jobs paused for an operator.
     :param actionable_count: Jobs this manager can still make progress on.
+    :param exchange_inbox: Inbox entries this manager, serving the exchange, may still adopt.
+    :param exchange_returns: Finished exchange trees of its pools whose return it can request or apply.
     """
 
     succeeded: int
@@ -180,6 +183,14 @@ class WorkCensus:
     waiting: int
     paused: int
     actionable_count: int
+    exchange_inbox: int = 0
+    exchange_returns: int = 0
+
+    @property
+    def exchange_pending(self) -> bool:
+        """Whether exchange work this manager can progress remains."""
+
+        return self.exchange_inbox > 0 or self.exchange_returns > 0
 
     @property
     def actionable(self) -> bool:
@@ -307,7 +318,9 @@ class WorkCensus:
         base = f"workspace is not idle after {seconds:.0f}s"
         advice = self.mismatch_advice()
         parts = [advice] if advice is not None else []
-        if not parts:
+        if self.exchange_pending:
+            parts.append(f"exchange work pending: {self.exchange_inbox} inbox entries, {self.exchange_returns} returns")
+        if advice is None and (self.actionable or not self.exchange_pending):
             parts.append(
                 "jobs are still running or claimable — rerun, raise --idle-timeout, or pass --idle to keep serving"
             )
@@ -600,11 +613,16 @@ class TaskManager:
                 time.time() - self.drain_start,
                 extra=self._event("drain_point_passed", end_time=self.end_time),
             )
-        # Only an unrestricted manager serves the exchange (whether the extension is enabled, and attempts are
-        # confined, is decided again on every tick): a restricted one could adopt jobs no manager runs.
+        # Only an unrestricted manager or a daemon's key-scoped one serves the exchange (whether the extension is
+        # enabled, and attempts are confined, is decided again on every tick): another restricted one could adopt
+        # jobs no manager runs. Adoption, returns and status are global and run nobody's jobs.
         self._exchange: ExchangeService | None = None
-        if not self.placement_prefixes and (self.accept_any_pool or "default" in self.pools):
-            self._exchange = ExchangeService(workspace, self.owner)
+        if not self.placement_prefixes and (
+            self.accept_any_pool
+            or "default" in self.pools
+            or any(pool.startswith(EXCHANGE_POOL_PREFIX) for pool in self.pools)
+        ):
+            self._exchange = ExchangeService(workspace, self.owner, pools=None if self.accept_any_pool else self.pools)
 
     def __repr__(self) -> str:
         return f"TaskManager(workspace={self.workspace!r}, pools={tuple(sorted(self.pools))!r})"
@@ -2150,19 +2168,30 @@ class TaskManager:
         poll_interval: float = 0.02,
         drain_timeout: float = 30.0,
         drain_grace_seconds: float = 10.0,
+        idle_grace: float = 0.0,
     ) -> WorkCensus:
         """Run until no local attempt or claimable job remains, and report the census.
 
         A job this manager cannot progress (another pool, capability or
         workflow, waiting on children or paused) does not keep it awake: it is
-        counted in the returned census. A ``SIGTERM`` or the allocation's drain
-        start drains the manager as :meth:`serve` does and then returns.
+        counted in the returned census. A manager serving the exchange also
+        stays while it has exchange work it can progress
+        (``ExchangeService.pending``), and does
+        not return as idle within *idle_grace* of its start, so a bundle still
+        being written or adopted elsewhere is not missed. A manager whose ready
+        jobs wait for unavailable confinement is held by the grace as well,
+        re-probing, and then returns a census naming them under
+        ``confinement``. The grace ends with the timeout at the latest. A
+        ``SIGTERM`` or the allocation's drain start drains the manager as
+        :meth:`serve` does and then returns.
 
         :param timeout: Stop waiting after this many seconds (extended by running attempts when the
             allocation end is known).
         :param poll_interval: Wait this long between scheduling passes.
         :param drain_timeout: Stop draining after this much time.
         :param drain_grace_seconds: Kill attempts after this much drain grace.
+        :param idle_grace: Seconds after the start in which a manager serving the exchange, or whose ready jobs wait
+            for confinement, does not return as idle.
         :return: The work census of the settled workspace.
         :raises httk.workflow.manager.NotIdleError: If the manager does not become idle before the timeout.
         """
@@ -2175,13 +2204,18 @@ class TaskManager:
             _LOGGER.warning("cannot install a drain handler for signal %d outside the main thread", signal.SIGTERM)
         try:
             deadline = time.monotonic() + timeout
+            # A grace longer than the timeout ends with it.
+            grace_end = min(time.monotonic() + idle_grace, deadline)
             quiet_passes = 0
+            census: WorkCensus | None = None
             while True:
                 if self._drain_begin(drain_timeout=drain_timeout, drain_grace_seconds=drain_grace_seconds):
                     return self._work_census()
                 if self.end_time is not None and self._running:
                     deadline = time.monotonic() + timeout
                 if not self._draining and time.monotonic() >= deadline:
+                    if quiet_passes >= 2 and census is not None:
+                        return census  # idle, held only by the grace
                     raise NotIdleError(self._work_census())
                 changed = self.tick()
                 if self._draining:
@@ -2194,8 +2228,13 @@ class TaskManager:
                     time.sleep(poll_interval)
                     continue
                 census = self._work_census()
-                quiet_passes = 0 if census.actionable else quiet_passes + 1
-                if quiet_passes >= 2:
+                quiet_passes = 0 if census.actionable or census.exchange_pending else quiet_passes + 1
+                # The grace holds a manager that serves the exchange (a bundle may still be arriving), or whose
+                # ready jobs wait for confinement (re-probed every tick); after it, the census says which.
+                held = "confinement" in census.ready_blocked or (
+                    self._exchange is not None and EXCHANGE_EXTENSION in self.workspace.extensions
+                )
+                if quiet_passes >= 2 and (not held or time.monotonic() >= grace_end):
                     return census
                 time.sleep(poll_interval)
         finally:
@@ -2205,7 +2244,12 @@ class TaskManager:
 
     def _work_census(self) -> WorkCensus:
         census = _manager_scheduling.work_census(self)
-        if not census.ready_claimable or self._draining or self._confinement_blocked() is None:
+        confined = self._confinement_blocked() is None
+        if confined and self._exchange is not None and EXCHANGE_EXTENSION in self.workspace.extensions:
+            # Exchange work this manager can progress is its work too; it is served only while attempts may start.
+            inbox, returns = self._exchange.pending()
+            census = dataclasses.replace(census, exchange_inbox=inbox, exchange_returns=returns)
+        if not census.ready_claimable or self._draining or confined:
             return census
         # Held back by a host or operator condition, the ready jobs are not this manager's work until it clears.
         return dataclasses.replace(

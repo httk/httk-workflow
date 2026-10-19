@@ -376,7 +376,11 @@ def _fake_manager(seen: dict[str, object]) -> type:
             return None
 
         def run_until_idle(self, **_kwargs: object) -> object:
-            return type("Census", (), {"summary_line": lambda _self: "idle", "time_advice": lambda _self: None})()
+            return type(
+                "Census",
+                (),
+                {"summary_line": lambda _self: "idle", "time_advice": lambda _self: None, "ready_blocked": {}},
+            )()
 
     return FakeManager
 

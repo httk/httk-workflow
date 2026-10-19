@@ -1,5 +1,6 @@
 """Exercise fixed scheduler operations with real bounded client processes."""
 
+import hashlib
 import json
 import os
 import shlex
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from httk.workflow._bundles import exchange_pool
 from httk.workflow._daemon_auth import sign_request
 from httk.workflow._daemon_keys import initialize_response_seed, response_public_key
 from httk.workflow._daemon_mailbox import MailboxDirectory
@@ -29,6 +31,7 @@ from httk.workflow._daemon_state import Ledger
 from httk.workflow.launch_runtime import SubmissionIdentity, slurm_submission
 
 _HANDLE = "a" * 32
+_KEY = "ed25519:" + "A" * 43 + "="
 
 
 def _client(path: Path, body: str) -> None:
@@ -87,7 +90,7 @@ def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
         monkeypatch.setenv(name, "untrusted")
     monkeypatch.setenv("NSC_RESOURCE_NAME", "tetralith")
     monkeypatch.setenv("LANG", "sv_SE.UTF-8")
-    result = SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE)
+    result = SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE, operator_key=_KEY)
     assert (result.job_id, result.cluster) == ("123", "cluster")
     argv, environment, script = json.loads(record.read_text())
     assert argv[1:] == [
@@ -121,13 +124,13 @@ def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
     exec_line = lines[-1]
     assert shlex.split(exec_line) == [
         "exec",
-        *manager_argv(policy),
+        *manager_argv(policy, _KEY),
         "--allocation",
         "slurm",
         "--setting",
         "manager.confine=bwrap",
     ]
-    assert manager_argv(policy) == [
+    assert manager_argv(policy, _KEY) == [
         sys.executable,
         "-I",
         "-m",
@@ -138,8 +141,11 @@ def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
         "--by-path",
         "--workspace",
         str(policy.workspace),
-        "--idle",
+        "--pool",
+        exchange_pool(_KEY),
     ]
+    # Only the signing key's exchange pool, never default, and no --idle: the manager exits when idle.
+    assert exchange_pool(_KEY) == "exchange-" + hashlib.sha256(_KEY.encode()).hexdigest()[:16]
 
 
 def _submission_identity(policy: Policy) -> SubmissionIdentity:
@@ -154,7 +160,7 @@ def _submission_identity(policy: Policy) -> SubmissionIdentity:
 def test_submission_emits_one_export_none_by_default(policy: Policy) -> None:
     argv, _script = slurm_submission(
         settings=dict(policy.launcher("cpu").settings),
-        argv=manager_argv(policy),
+        argv=manager_argv(policy, _KEY),
         workspace=str(policy.workspace),
         identity=_submission_identity(policy),
         launch_id=_HANDLE,
@@ -166,7 +172,7 @@ def test_submission_honours_slurm_export_nil(policy: Policy) -> None:
     launcher = _launcher("cpu", **{**CPU, "slurm.export": "NIL"})
     argv, _script = slurm_submission(
         settings=dict(launcher.settings),
-        argv=manager_argv(policy),
+        argv=manager_argv(policy, _KEY),
         workspace=str(policy.workspace),
         identity=_submission_identity(policy),
         launch_id=_HANDLE,
@@ -177,7 +183,7 @@ def test_submission_honours_slurm_export_nil(policy: Policy) -> None:
 def test_submission_time_limit_replaces_the_configured_one(policy: Policy) -> None:
     _argv, script = slurm_submission(
         settings=dict(policy.launcher("cpu").settings),
-        argv=manager_argv(policy),
+        argv=manager_argv(policy, _KEY),
         workspace=str(policy.workspace),
         identity=_submission_identity(policy),
         launch_id=_HANDLE,
@@ -192,7 +198,7 @@ def test_slurm_submission_defensively_refuses_an_unvalidated_export(policy: Poli
     with pytest.raises(ValueError, match="slurm.export must be exactly"):
         slurm_submission(
             settings={**CPU, "slurm.export": value},
-            argv=manager_argv(policy),
+            argv=manager_argv(policy, _KEY),
             workspace=str(policy.workspace),
             identity=_submission_identity(policy),
             launch_id=_HANDLE,
@@ -218,7 +224,7 @@ def test_submission_uses_only_the_frozen_launcher_settings(policy: Policy, tmp_p
             "slurm.nodes": "2",
         },
     )
-    assert SlurmGateway(policy).submit(launcher, _HANDLE).job_id == "1"
+    assert SlurmGateway(policy).submit(launcher, _HANDLE, operator_key=_KEY).job_id == "1"
     script = record.read_text()
     assert "#SBATCH --gres=gpu:a100=2" in script and "#SBATCH --reservation=maint.1" in script
     assert "#SBATCH --nodes=2" in script
@@ -226,8 +232,8 @@ def test_submission_uses_only_the_frozen_launcher_settings(policy: Policy, tmp_p
     command = shlex.split(script.splitlines()[-1])
     # After a prelude, the launcher's manager command replaces the isolated interpreter.
     assert command[:2] == ["exec", "site-httk"]
-    assert command[2:9] == manager_argv(policy)[4:]
-    assert command[9:] == [
+    assert command[2:10] == manager_argv(policy, _KEY)[4:]
+    assert command[10:] == [
         "--workers",
         "4",
         "--allocation",
@@ -247,7 +253,7 @@ def test_unexpressible_frozen_setting_fails_before_sbatch_runs(policy: Policy, t
     marker = tmp_path / "ran"
     _client(policy.sbatch, f"open({str(marker)!r}, 'w').close()\nprint('1')\n")
     with pytest.raises(SchedulerError, match="cannot build the submission: .*control characters"):
-        SlurmGateway(policy).submit(_launcher("bad", **{"slurm.partition": "a\nb"}), _HANDLE)
+        SlurmGateway(policy).submit(_launcher("bad", **{"slurm.partition": "a\nb"}), _HANDLE, operator_key=_KEY)
     assert not marker.exists()
 
 
@@ -255,19 +261,19 @@ def test_unexpressible_frozen_setting_fails_before_sbatch_runs(policy: Policy, t
 def test_unconfirmed_submission_is_uncertain(policy: Policy, output: str) -> None:
     _client(policy.sbatch, f"sys.stdin.read()\nprint({output!r})\n")
     with pytest.raises(UncertainSubmission):
-        SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE)
+        SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE, operator_key=_KEY)
 
 
 def test_nonzero_submission_reports_the_client_error(policy: Policy) -> None:
     _client(policy.sbatch, "sys.stdin.read()\nprint('sbatch: error: Invalid account',file=sys.stderr)\nsys.exit(1)\n")
     with pytest.raises(UncertainSubmission, match="^sbatch exited 1: sbatch: error: Invalid account$"):
-        SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE)
+        SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE, operator_key=_KEY)
 
 
 def test_unconfirmed_submission_reports_its_stdout(policy: Policy) -> None:
     _client(policy.sbatch, "sys.stdin.read()\nprint('Submitted batch job 12')\n")
     with pytest.raises(UncertainSubmission, match="^sbatch exited 0 without a confirmed job: Submitted batch job 12$"):
-        SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE)
+        SlurmGateway(policy).submit(policy.launcher("cpu"), _HANDLE, operator_key=_KEY)
 
 
 def test_client_error_excerpt_is_printable_and_bounded(policy: Policy) -> None:
@@ -366,9 +372,10 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
     policy = replace(policy, authorized_keys=(response_public_key(client_seed),))
     submitted_calls = tmp_path / "submitted"
     cancelled_calls = tmp_path / "cancelled"
+    script = tmp_path / "script"
     _client(
         policy.sbatch,
-        "sys.stdin.read()\n"
+        f"open({str(script)!r}, 'w').write(sys.stdin.read())\n"
         f"with open({str(submitted_calls)!r}, 'a') as record: record.write('submitted\\n')\n"
         "print('123;cluster')\n",
     )
@@ -428,6 +435,10 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
             assert decode_response(responses.read(cancel.request_id + ".json")).outcome == "cancel_requested"
             assert requests.names() == ()
     assert submitted_calls.read_text() == "submitted\n"
+    # The manager claims only the jobs of the start request's signing key.
+    command = shlex.split(script.read_text().splitlines()[-1])
+    assert command[command.index("--pool") + 1] == exchange_pool(response_public_key(client_seed))
+    assert "--idle" not in command and command.count("--pool") == 1
     assert json.loads(cancelled_calls.read_text()) == [
         "--ctld",
         "--clusters=cluster",

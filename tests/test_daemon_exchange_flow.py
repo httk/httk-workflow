@@ -8,6 +8,7 @@ by a pass-through.
 """
 
 import base64
+import dataclasses
 import json
 import os
 import shlex
@@ -17,16 +18,18 @@ from typing import Any
 
 import pytest
 
-from httk.workflow import TaskManager, Workspace, _confine, _daemon_setup
-from httk.workflow._bundles import BundleManifest
+from httk.workflow import TaskManager, Workspace, _confine, _daemon_setup, _kernel
+from httk.workflow._bundles import BundleManifest, exchange_pool
 from httk.workflow._daemon_policy import Policy, load_policy
 from httk.workflow._daemon_slurm import submission
+from httk.workflow._job import JobDefinition
 from httk.workflow._sandbox import PreparedSandbox
 from httk.workflow.launchers import add_launcher
-from test_bundles import write_bundle
+from test_bundles import manifest_of, write_bundle
 from v3_helpers import install, job_mapping
 
 AUTHORIZED_KEY = "ed25519:" + base64.b64encode(bytes(range(32))).decode("ascii")
+OTHER_KEY = "ed25519:" + base64.b64encode(bytes(range(32, 64))).decode("ascii")
 HANDLE = "a" * 32
 
 
@@ -72,7 +75,7 @@ def _enroll(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Workspace,
 def _submitted_manager(policy: Policy) -> list[str]:
     """Return the manager command line of the batch script the broker would submit."""
 
-    _argv, script = submission(policy, policy.launcher("confined"), HANDLE)
+    _argv, script = submission(policy, policy.launcher("confined"), HANDLE, operator_key=AUTHORIZED_KEY)
     words = shlex.split(script.decode("utf-8").splitlines()[-1])
     assert words[:5] == ["exec", str(policy.python), "-I", "-m", "httk.core.cli"]
     return words[5:]
@@ -98,19 +101,49 @@ def test_a_job_round_trips_through_the_exchange(
     exchange = server.root / "exchange"
     installed = install(server, tmp_path / "package")
     client_job = job_mapping(installed, {"start": "succeed"}, tag="trip", placement="client/trip")
-    write_bundle(exchange / "inbox" / "trip", [client_job])
+    write_bundle(
+        exchange / "inbox" / "trip",
+        [client_job],
+        dataclasses.replace(manifest_of([client_job]), owner_key=AUTHORIZED_KEY),
+    )
+    # Another key's job, which forges this key's pool, and a keyless job: adopted, but never run here.
+    forged = job_mapping(installed, {"start": "succeed"}, tag="other", placement="client/other")
+    forged["claim"] = {"pool": exchange_pool(AUTHORIZED_KEY), "required_capabilities": []}
+    write_bundle(
+        exchange / "inbox" / "other", [forged], dataclasses.replace(manifest_of([forged]), owner_key=OTHER_KEY)
+    )
+    keyless = job_mapping(installed, {"start": "succeed"}, tag="keyless", placement="client/keyless")
+    write_bundle(exchange / "inbox" / "keyless", [keyless])
 
-    # The approved launcher's submission starts a confined manager on the real workspace path; it serves the
-    # exchange because the workspace has the extension.
+    # The approved launcher's submission starts a confined manager on the real workspace path. It claims only
+    # the signing key's exchange pool, serves the exchange because the workspace has the extension, and exits
+    # when it has nothing left to do.
     argv = _submitted_manager(policy)
-    assert argv[:7] == ["workflow", "manager", "run", "--by-path", "--workspace", str(server.root), "--idle"]
+    assert argv[:9] == [
+        "workflow",
+        "manager",
+        "run",
+        "--by-path",
+        "--workspace",
+        str(server.root),
+        "--pool",
+        exchange_pool(AUTHORIZED_KEY),
+        "--allocation",
+    ]
+    assert "--idle" not in argv
     pins = dict(argv[index + 1].split("=", 1) for index, word in enumerate(argv) if word == "--setting")
     assert pins["manager.confine"] == "bwrap"
-    with TaskManager(server, heartbeat_interval=0.01, setting_overrides=pins) as manager:
-        # Until-idle here, so the test ends; the daemon's managers keep serving with --idle.
-        manager.run_until_idle(timeout=120.0, poll_interval=0.05)
+    pools = [exchange_pool(AUTHORIZED_KEY)]
+    with TaskManager(server, pools=pools, heartbeat_interval=0.01, setting_overrides=pins) as manager:
+        manager.run_until_idle(timeout=120.0, poll_interval=0.05, idle_grace=0.2)
     assert [call["settings"].mode for call in sandboxes] == ["bwrap"]
     assert sandboxes[0]["workspace_root"] == server.root
+    # The other two wait in their own pools for their own managers.
+    waiting = {
+        ref.job_key.split("--")[0]: JobDefinition.from_path(ref.path / "job.json").claim_pool
+        for ref in _kernel.list_jobs(server, "ready")
+    }
+    assert waiting == {"other": exchange_pool(OTHER_KEY), "keyless": "default"}
     bundle = exchange / "outbox" / f"trip--{client_job['id']}"
     assert sorted(os.listdir(exchange / "outbox")) == sorted([bundle.name, "rejected"])
     manifest = BundleManifest.from_json((bundle / "bundle.json").read_bytes())

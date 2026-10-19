@@ -277,6 +277,7 @@ def manager_option_defaults() -> dict[str, object]:
         "poll_interval": 1.0,
         "idle": False,
         "idle_timeout": 3600.0,
+        "idle_grace": 120.0,
         "join_grace_seconds": 3600.0,
         "drain_timeout": 30.0,
         "time_limit": None,
@@ -355,6 +356,16 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         metavar="SECONDS",
         help="without --idle, give up after this long if the workspace never becomes idle (default: 3600)",
+    )
+    parser.add_argument(
+        "--idle-grace",
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "without --idle, a manager serving the workspace's exchange, or whose ready jobs wait for "
+            "confinement, does not exit as idle this soon after it starts; still blocked by confinement "
+            "after it, it exits 2 (default: 120)"
+        ),
     )
     parser.add_argument(
         "--join-grace-seconds",
@@ -442,6 +453,16 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         metavar="SECONDS",
         help="without --idle, give up after this long if the workspace never becomes idle (default: 3600)",
+    )
+    parser.add_argument(
+        "--idle-grace",
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "without --idle, a manager serving the workspace's exchange, or whose ready jobs wait for "
+            "confinement, does not exit as idle this soon after it starts; still blocked by confinement "
+            "after it, it exits 2 (default: 120)"
+        ),
     )
     parser.add_argument(
         "--workers",
@@ -549,8 +570,11 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         argv += ["--allocation", parse_allocation_spec(arguments.allocation)]
     if getattr(arguments, "idle", False):
         argv.append("--idle")
-    elif changed("idle_timeout"):
-        argv += ["--idle-timeout", str(arguments.idle_timeout)]
+    else:
+        if changed("idle_timeout"):
+            argv += ["--idle-timeout", str(arguments.idle_timeout)]
+        if changed("idle_grace"):
+            argv += ["--idle-grace", str(arguments.idle_grace)]
     if changed("drain_timeout"):
         argv += ["--drain-timeout", str(arguments.drain_timeout)]
     # Parsed here because every launch path builds this tail first: a bad
@@ -770,15 +794,25 @@ def _run_in_process_manager(
                     timeout=getattr(arguments, "idle_timeout", 3600.0),
                     poll_interval=getattr(arguments, "poll_interval", 1.0),
                     drain_timeout=getattr(arguments, "drain_timeout", 30.0),
+                    idle_grace=getattr(arguments, "idle_grace", 120.0),
                 )
             except NotIdleError as exc:
                 print(exc.census.timeout_message(getattr(arguments, "idle_timeout", 3600.0)), file=sys.stderr)
                 return 2
+            confinement = sum(census.ready_blocked.get("confinement", {}).values())
             if manager.drained is not None:
                 print(
                     f"drained ({manager.drained}): {manager.running_attempts} attempt(s) left for recovery",
                     file=sys.stderr,
                 )
+            elif confinement:
+                # Not idle: its jobs wait for a host or operator condition the manager log names.
+                print(
+                    f"stopped: confinement is unavailable, so {confinement} ready job(s) of this manager's pools "
+                    "did not start; the manager log names the reason",
+                    file=sys.stderr,
+                )
+                return 2
             else:
                 print(census.summary_line(), file=sys.stderr)
             advice = census.time_advice()

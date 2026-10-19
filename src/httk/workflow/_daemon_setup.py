@@ -550,7 +550,7 @@ def _compile(
     )
     for launcher in approved:
         # Build each submission once now, so a setting the packaged dispatcher refuses fails at approval.
-        submission(policy, launcher, "0" * 32)
+        submission(policy, launcher, "0" * 32, operator_key="")  # the key only names the pool
     return policy
 
 

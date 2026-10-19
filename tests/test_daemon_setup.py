@@ -737,7 +737,9 @@ class _Gateway(SlurmGateway):
     def check(self) -> None:
         pass
 
-    def submit(self, launcher: ApprovedLauncher, handle: str, *, time_limit: str | None = None) -> Submission:
+    def submit(
+        self, launcher: ApprovedLauncher, handle: str, *, operator_key: str, time_limit: str | None = None
+    ) -> Submission:
         self.submissions.append(handle)
         return Submission(str(41 + len(self.submissions)), self.policy.cluster)
 

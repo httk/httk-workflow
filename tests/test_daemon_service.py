@@ -62,6 +62,7 @@ class RecordingGateway(SlurmGateway):
         self.policy = policy
         self.submissions: list[tuple[ApprovedLauncher, str]] = []
         self.time_limits: list[str | None] = []
+        self.operator_keys: list[str] = []
         self.statuses: list[tuple[str, str, str]] = []
         self.cancellations: list[tuple[str, str, str]] = []
         self.submit_error = False
@@ -72,9 +73,12 @@ class RecordingGateway(SlurmGateway):
     def check(self) -> None:
         pass
 
-    def submit(self, launcher: ApprovedLauncher, handle: str, *, time_limit: str | None = None) -> Submission:
+    def submit(
+        self, launcher: ApprovedLauncher, handle: str, *, operator_key: str, time_limit: str | None = None
+    ) -> Submission:
         self.submissions.append((launcher, handle))
         self.time_limits.append(time_limit)
+        self.operator_keys.append(operator_key)
         if self.stop is not None:
             self.stop.set()
         if self.submit_error:
@@ -246,6 +250,55 @@ def test_health_start_status_and_cancel_use_protected_identities(tmp_path: Path)
         assert gateway.cancellations == [("42", policy.cluster, submitted.handle)]
         calls = gateway.submissions + gateway.statuses + gateway.cancellations
         assert str(broker.response_seed) not in repr(calls)
+    finally:
+        stack.close()
+
+
+def test_only_the_starting_key_controls_its_manager(tmp_path: Path) -> None:
+    other_seed = _seed(tmp_path / "other.seed", 8)
+    other_key = identity_public_key(other_seed)
+    assert other_key is not None
+    policy = _policy(tmp_path)
+    policy = replace(policy, authorized_keys=(*policy.authorized_keys, other_key))
+    stack, broker, _ = _open(tmp_path, policy)
+    gateway = broker.gateway
+    assert isinstance(gateway, RecordingGateway)
+    try:
+        start = _request(tmp_path, 1, "start_manager", profile="cpu")
+        _publish(broker, start)
+        broker.process_once(threading.Event())
+        handle = _read(broker, start).handle
+        assert handle is not None
+        # The signing key reaches the submission, which scopes the manager to its exchange pool.
+        assert gateway.operator_keys == [identity_public_key(_operator_seed(tmp_path))]
+
+        foreign = [
+            _request(tmp_path, 2, "manager_status", handle=handle, seed=other_seed),
+            _request(tmp_path, 3, "cancel_manager", handle=handle, seed=other_seed),
+        ]
+        for request in foreign:
+            _publish(broker, request)
+        broker.process_once(threading.Event())
+        for request in foreign:
+            refused = _read(broker, request)
+            assert (refused.outcome, refused.reason) == ("refused", "not_owner")
+        assert gateway.statuses == [] and gateway.cancellations == []
+        # The request's own time window is checked first.
+        stale = _request(tmp_path, 6, "manager_status", handle=handle, seed=other_seed, now=1_000_000)
+        _publish(broker, stale)
+        broker.process_once(threading.Event())
+        assert _read(broker, stale).reason == "request_expired"
+
+        owned = [
+            _request(tmp_path, 4, "manager_status", handle=handle),
+            _request(tmp_path, 5, "cancel_manager", handle=handle),
+        ]
+        for request in owned:
+            _publish(broker, request)
+        broker.process_once(threading.Event())
+        assert [_read(broker, request).outcome for request in owned] == ["status", "cancel_requested"]
+        # managers.json still lists every manager, whoever started it.
+        assert [row["handle"] for row in broker.ledger.managers()] == [handle]
     finally:
         stack.close()
 
@@ -753,7 +806,7 @@ def test_scheduler_failure_detail_is_signed_logged_and_replayed(
     stack, broker, _ = _open(tmp_path, policy)
     message = "sbatch exited 1: sbatch: error: Invalid account or account/partition combination"
 
-    def refuse(_launcher: ApprovedLauncher, _handle: str, *, time_limit: str | None = None) -> Submission:
+    def refuse(_launcher: ApprovedLauncher, _handle: str, **_options: object) -> Submission:
         raise UncertainSubmission(message)
 
     monkeypatch.setattr(broker.gateway, "submit", refuse)
@@ -1632,10 +1685,12 @@ def test_recovery_answers_a_crashed_submission_and_a_late_winner_keeps_the_sched
         gateway = cast(RecordingGateway, first.gateway)
         original_submit = gateway.submit
 
-        def slow_submit(launcher: ApprovedLauncher, handle: str, *, time_limit: str | None = None) -> Submission:
+        def slow_submit(
+            launcher: ApprovedLauncher, handle: str, *, operator_key: str, time_limit: str | None = None
+        ) -> Submission:
             clock[0] += 3600
             second.process_once(threading.Event())
-            return original_submit(launcher, handle, time_limit=time_limit)
+            return original_submit(launcher, handle, operator_key=operator_key, time_limit=time_limit)
 
         monkeypatch.setattr(gateway, "submit", slow_submit)
         _publish(first, slow)
@@ -1734,10 +1789,10 @@ def test_an_activation_change_retires_an_instance_at_its_next_admission_without_
     original_submit = gateway.submit
 
     def submit_during_activation(
-        launcher: ApprovedLauncher, handle: str, *, time_limit: str | None = None
+        launcher: ApprovedLauncher, handle: str, *, operator_key: str, time_limit: str | None = None
     ) -> Submission:
         changed.append(None)  # the operator activates a new configuration while sbatch runs
-        return original_submit(launcher, handle, time_limit=time_limit)
+        return original_submit(launcher, handle, operator_key=operator_key, time_limit=time_limit)
 
     gateway.submit = submit_during_activation  # type: ignore[method-assign]
     broker.activation = activation
@@ -1943,9 +1998,11 @@ def test_the_decision_is_durable_before_sbatch_and_the_response_before_publicati
     gateway = cast(RecordingGateway, broker.gateway)
     original_submit, original_replace = gateway.submit, broker.responses.replace
 
-    def submit(launcher: ApprovedLauncher, handle: str, *, time_limit: str | None = None) -> Submission:
+    def submit(
+        launcher: ApprovedLauncher, handle: str, *, operator_key: str, time_limit: str | None = None
+    ) -> Submission:
         events.append("sbatch")
-        return original_submit(launcher, handle, time_limit=time_limit)
+        return original_submit(launcher, handle, operator_key=operator_key, time_limit=time_limit)
 
     def replace_response(name: str, data: bytes) -> None:
         events.append("publish")

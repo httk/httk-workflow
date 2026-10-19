@@ -644,7 +644,7 @@ given; it is the first leg a client runs on a remote SRC.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `run` | run managers through the workspace launcher until the workspace is idle, or keep serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--time-limit`, `--deadline-margin`, `--drain-timeout`, `--join-grace-seconds`, `--gc-interval`, `--inline`, `--launcher`, `--detach`, `--log-level`, `--log-file`, `--json-logs`, `--adapter-timeout` |
+| `run` | run managers through the workspace launcher until the workspace is idle, or keep serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--idle-grace`, `--time-limit`, `--deadline-margin`, `--drain-timeout`, `--join-grace-seconds`, `--gc-interval`, `--inline`, `--launcher`, `--detach`, `--log-level`, `--log-file`, `--json-logs`, `--adapter-timeout` |
 | `manager run` | the same, the advanced spelling | as `run` |
 
 Both follow the binding: a local workspace uses its `manager.launch` setting
@@ -670,8 +670,13 @@ are explained in {doc}`taskmanager` under resources, time requirements and
 allocations; the startup banner, idle summary and logs under running managers.
 
 Every confined manager without placement prefixes that takes the `default` pool
-serves the workspace's `exchange/` extension once it is enabled with
-`httk workspace exchange enable`; there is no `--exchange` option.
+or an `exchange-` pool serves the workspace's `exchange/` extension once it is
+enabled with `httk workspace exchange enable`; there is no `--exchange` option.
+Without `--idle`, such a manager does not exit as idle within `--idle-grace`
+seconds of starting (default 120), nor while it can still adopt an inbox entry
+or return a finished exchange tree of its pools. The grace also holds any
+manager whose ready jobs wait for unavailable confinement; still blocked after
+it, the manager exits with status 2. See {doc}`taskmanager`.
 
 ### `precheck`: readiness before an attempt
 

@@ -9,6 +9,7 @@ re-validates: a replay finds owner-written ``state.json`` files in the staged
 children, which validation would refuse.
 """
 
+import dataclasses
 import json
 import os
 import stat
@@ -18,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Self
 
 from httk.workflow import _fs, _kernel
+from httk.workflow._bundles import EXCHANGE_POOL_PREFIX
 from httk.workflow._job import JobDefinition
 from httk.workflow._state import StateDoc, _thaw, encode_state
 from httk.workflow._util import require_mapping, require_string
@@ -168,13 +170,15 @@ def validate_children(
     """Validate the children an outcome proposes and return their publication plan (commit step 1 only).
 
     :param job: The committing parent, owned and quiescent.
-    :param parent: The parent's ``job.json``.
+    :param parent: The parent's ``job.json``. A child of an exchange job (``origin`` ``exchange``, or a job in an
+        exchange pool) is rewritten into exactly the parent's pool, whatever its runner asked for; a child of any
+        other job may not name an exchange pool.
     :param parent_doc: The parent's ``state.json``; children inherit its ``origin`` and ``exchange_name``.
     :param outcome_dir: ``<job>/attempts/<A>/outcome.ready``.
     :param workspace_id: This workspace's id; children must name it.
     :return: The plans in ``spawn.json`` order; empty when the outcome spawns nothing.
-    :raises httk.workflow.errors.FormatError: If ``spawn.json`` or a child payload is malformed or unsafe, or a
-        child id names an existing job.
+    :raises httk.workflow.errors.FormatError: If ``spawn.json`` or a child payload is malformed or unsafe, a
+        child id names an existing job, or a child outside the exchange names an exchange pool.
     :raises httk.workflow.errors.UnsupportedExtensionError: If a child names another workspace.
     :raises httk.workflow.errors.WorkflowError: If an attempt of *job* is still live.
     :raises ValueError: If *outcome_dir* is not an outcome directory of *job*.
@@ -249,6 +253,16 @@ def validate_children(
         recorded = child.parent or {}
         if any(recorded.get(name) != value for name, value in expected_parent.items()):
             raise FormatError(f"spawned child {job_key} does not name this parent")
+        # An exchange job's runner is untrusted: its children stay in its pool (its key's, or default for a keyless
+        # one), and no other job may place work in a key's pool. The parent's job.json and state.json are trusted
+        # (read-only to its attempts); the rewrite is idempotent, so validating again after a crash finds the same
+        # child.
+        if parent_doc.origin == "exchange" or parent.claim_pool.startswith(EXCHANGE_POOL_PREFIX):
+            if child.claim_pool != parent.claim_pool:
+                forced = dataclasses.replace(child, claim_pool=parent.claim_pool, stored_digest=None)
+                _fs.write_file(_fs.loc(child_dir / "job.json"), forced.encode(), durable=job.owner.workspace.durable)
+        elif child.claim_pool.startswith(EXCHANGE_POOL_PREFIX):
+            raise FormatError(f"spawned child {job_key} names the exchange pool {child.claim_pool}")
         state = StateDoc.empty(child_id).updated(origin=parent_doc.origin, exchange_name=parent_doc.exchange_name)
         plans.append(
             ChildPlan(

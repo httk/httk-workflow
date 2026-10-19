@@ -89,7 +89,11 @@ def test_run_passes_cli_resources_over_slurm(tmp_path: Path, monkeypatch: pytest
             return None
 
         def run_until_idle(self, **_kwargs: object):
-            return type("Census", (), {"summary_line": lambda _self: "idle", "time_advice": lambda _self: None})()
+            return type(
+                "Census",
+                (),
+                {"summary_line": lambda _self: "idle", "time_advice": lambda _self: None, "ready_blocked": {}},
+            )()
 
     monkeypatch.setattr(_manager, "TaskManager", FakeManager)
     monkeypatch.setenv("SLURM_JOB_ID", "123")
@@ -286,6 +290,12 @@ def test_manager_option_defaults_match_the_parsers_and_cover_the_argv_tail(tmp_p
         assert {name: parsed[name] for name in defaults} == defaults
     tail = _manager.manager_argv_tail(argparse.Namespace(**defaults))
     assert tail == [] == _manager.manager_argv_tail(parser.parse_args(["manager", "run"]))
+    # The startup grace travels to launched managers, and --idle makes it moot.
+    assert _manager.manager_argv_tail(parser.parse_args(["manager", "run", "--idle-grace", "5"])) == [
+        "--idle-grace",
+        "5.0",
+    ]
+    assert _manager.manager_argv_tail(parser.parse_args(["run", "--idle", "--idle-grace", "5"])) == ["--idle"]
     source = inspect.getsource(_manager.manager_argv_tail)
     read = set(re.findall(r'(?:getattr\(arguments, |changed\()"(\w+)"', source))
     # The durability switches default to argparse.SUPPRESS; absent reads as false.

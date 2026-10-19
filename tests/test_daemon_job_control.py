@@ -1271,7 +1271,9 @@ class _UnusedGateway(SlurmGateway):
     def check(self) -> None:
         pass
 
-    def submit(self, launcher, handle, *, time_limit=None):  # pragma: no cover - a job command never submits
+    def submit(
+        self, launcher, handle, *, operator_key, time_limit=None
+    ):  # pragma: no cover - a job command never submits
         raise AssertionError((launcher, handle))
 
     def status(self, job_id, cluster, handle):  # pragma: no cover

@@ -541,11 +541,15 @@ class Broker:
         request = entry.request
         handle = entry.handle
         assert handle is not None and request.profile is not None
+        if request.operator_key is None:
+            raise LedgerError("admitted manager start has no operator key")
         time_limit: str | None = None
         try:
             launcher = self.policy.launcher(request.profile)
             time_limit = effective_time_limit(dict(launcher.settings), request.time_limit)
-            submission = self.gateway.submit(launcher, handle, time_limit=request.time_limit)
+            submission = self.gateway.submit(
+                launcher, handle, operator_key=request.operator_key, time_limit=request.time_limit
+            )
             if (
                 type(submission) is not Submission
                 or _JOB_ID.fullmatch(submission.job_id) is None
@@ -590,6 +594,10 @@ class Broker:
             check_request_time(request, max_age=self.policy.request_max_age)
         except ValueError:
             return self._refuse(entry, "request_expired")
+        # Only the key that signed the start controls the manager. Every admitted start was verified, so its stored
+        # request carries the key; a stored start without one (none is known) would be controlled by any key.
+        if manager.request.operator_key is not None and manager.request.operator_key != request.operator_key:
+            return self._refuse(entry, "not_owner", "only the key that started the manager may control it")
 
         if request.operation == "manager_status":
             try:

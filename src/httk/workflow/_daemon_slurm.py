@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._bundles import exchange_pool
 from ._daemon_bootstrap import _operator_environment
 from ._daemon_policy import ApprovedLauncher, Policy
 from .launch_runtime import SubmissionIdentity, slurm_submission
@@ -169,12 +170,14 @@ def _checked(argv: list[str], policy: Policy, *, data: bytes = b"") -> bytes:
     return stdout
 
 
-def manager_argv(policy: Policy) -> list[str]:
+def manager_argv(policy: Policy, operator_key: str) -> list[str]:
     """Return the manager command of every daemon submission, before the launcher's own additions.
 
     :param policy: Validated runtime policy.
-    :return: The approved interpreter running a serving manager on the real workspace path; the workspace
-        has the exchange extension, so every unrestricted manager serves its exchange.
+    :param operator_key: The authorized key that signed the start request.
+    :return: The approved interpreter running a manager on the real workspace path that claims only the jobs
+        of the key's exchange pool, serves the exchange (adoption, returns and status are global), and exits
+        when it has nothing left to do.
     """
 
     return [
@@ -188,12 +191,13 @@ def manager_argv(policy: Policy) -> list[str]:
         "--by-path",
         "--workspace",
         str(policy.workspace),
-        "--idle",
+        "--pool",
+        exchange_pool(operator_key),
     ]
 
 
 def submission(
-    policy: Policy, launcher: ApprovedLauncher, handle: str, time_limit: str | None = None
+    policy: Policy, launcher: ApprovedLauncher, handle: str, time_limit: str | None = None, *, operator_key: str
 ) -> tuple[list[str], bytes]:
     """Build the ``sbatch`` command and script of one manager from the frozen launcher content.
 
@@ -203,13 +207,14 @@ def submission(
     :param launcher: The approved launcher, whose frozen settings alone shape the script.
     :param handle: The broker's opaque manager handle, which names the job and its launcher log.
     :param time_limit: A checked Slurm ``--time`` replacing the launcher's ``slurm.time_limit``.
+    :param operator_key: The authorized key that signed the start request; the manager runs only its jobs.
     :return: The ``sbatch`` argument vector and the script bytes for its standard input.
     :raises ValueError: If a frozen setting cannot be expressed in the script.
     """
 
     argv, script = slurm_submission(
         settings=dict(launcher.settings),
-        argv=manager_argv(policy),
+        argv=manager_argv(policy, operator_key),
         workspace=str(policy.workspace),
         identity=SubmissionIdentity(
             job_name=f"httk-{handle}",
@@ -253,18 +258,21 @@ class SlurmGateway:
                     f"exited {code} and printed {printed!r}"
                 )
 
-    def submit(self, launcher: ApprovedLauncher, handle: str, *, time_limit: str | None = None) -> Submission:
+    def submit(
+        self, launcher: ApprovedLauncher, handle: str, *, operator_key: str, time_limit: str | None = None
+    ) -> Submission:
         """Submit one manager through the frozen launcher content, under the handle's job name.
 
         :param launcher: An approved launcher.
         :param handle: The broker's newly reserved opaque handle.
+        :param operator_key: The authorized key that signed the start request.
         :param time_limit: A checked Slurm ``--time`` replacing the launcher's ``slurm.time_limit``.
         :return: The confirmed scheduler job identity.
         :raises UncertainSubmission: If acceptance cannot be confirmed.
         """
 
         try:
-            argv, script = submission(self.policy, launcher, handle, time_limit)
+            argv, script = submission(self.policy, launcher, handle, time_limit, operator_key=operator_key)
         except ValueError as exc:
             raise SchedulerError(f"cannot build the submission: {exc}") from exc
         try:

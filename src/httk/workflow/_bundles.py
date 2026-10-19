@@ -35,6 +35,7 @@ publishes.
 import base64
 import contextlib
 import dataclasses
+import hashlib
 import json
 import os
 import re
@@ -73,6 +74,8 @@ MAX_REKEY_BYTES = 4 << 20
 # The fixed namespace of rekeyed exchange job UUIDs: the client's first group, then the rest of
 # uuid5(namespace, "<workspace-id>/<client-uuid>").
 _EXCHANGE_NAMESPACE = uuid.UUID("b480bb06-dc60-4d16-a78b-cc6b3af734b4")
+#: The claim pools of exchange jobs start with this; :func:`exchange_pool` names them.
+EXCHANGE_POOL_PREFIX = "exchange-"
 _TRANSFER_ID = re.compile(r"[0-9a-f]{32}")
 _TIMESTAMP_LIMIT = 64
 _LOCATOR_LIMIT = 4096
@@ -90,6 +93,19 @@ _JOBS = PurePosixPath("jobs")
 
 class BundleError(FormatError):
     """A bundle, its manifest or a rekey record is refused; the message names the precise reason."""
+
+
+def exchange_pool(owner_key: str | None) -> str:
+    """Return the claim pool of the exchange jobs a key owns, which only that key's daemon managers claim.
+
+    :param owner_key: The canonical public key text of a bundle's ``owner_key`` or a daemon request's signer.
+    :return: ``exchange-`` and the first 16 hexadecimal digits of the SHA-256 of the key text, or ``default``
+        for a keyless bundle.
+    """
+
+    if owner_key is None:
+        return "default"
+    return EXCHANGE_POOL_PREFIX + hashlib.sha256(owner_key.encode("utf-8")).hexdigest()[:16]
 
 
 # -- the manifest ---------------------------------------------------------------------------------------------------
@@ -739,8 +755,9 @@ def rekey_untrusted(scratch: Path, bundle: Path, manifest: BundleManifest, *, wo
     ``uuid5(namespace, "<workspace_id>/<client id>")`` (:func:`rekeyed_id`). Its key keeps the tag, and
     parent links (``job_id``, ``job_key``, ``placement`` and ``workspace_id``, which becomes *workspace_id*)
     are mapped likewise. The result is recorded in ``<scratch>/rekey.json`` before anything is renamed; when
-    that record exists it is loaded, never recomputed. Then each member's ``job.json`` is rewritten and its
-    directory renamed, and finally ``bundle.json`` is rewritten. See the module docstring for the
+    that record exists it is loaded, never recomputed. Then each member's ``job.json`` is rewritten, with its
+    ``claim.pool`` forced to :func:`exchange_pool` of the recorded ``owner_key`` whatever the client wrote, and
+    its directory renamed, and finally ``bundle.json`` is rewritten. See the module docstring for the
     crash-resume contract.
 
     :param scratch: The adopter's private scratch directory.
@@ -795,8 +812,11 @@ def rekey_untrusted(scratch: Path, bundle: Path, manifest: BundleManifest, *, wo
                     "job_key": link.job_key,
                     "placement": placement_text(link.placement),
                 }
-            # Derived from the record, not from job.json, so rewriting an already rewritten job.json is a no-op.
-            rekeyed_job = dataclasses.replace(job, id=new.job_id, parent=parent, stored_digest=None)
+            # Derived from the record, not from job.json, so rewriting an already rewritten job.json is a no-op. The
+            # pool too: an untrusted client must not choose which managers run its jobs.
+            rekeyed_job = dataclasses.replace(
+                job, id=new.job_id, parent=parent, claim_pool=exchange_pool(rekeyed.owner_key), stored_digest=None
+            )
             _fs.write_file(_fs.loc(old_dir / "job.json"), rekeyed_job.encode(), durable=True)
             # The new directory shares the old one's placement directory, so its parent exists.
             _fs.move_owned(_fs.loc(old_dir), _fs.loc(new_dir), durable=True)

@@ -2,6 +2,7 @@
 
 import base64
 import dataclasses
+import hashlib
 import json
 import os
 import shutil
@@ -912,6 +913,22 @@ def test_rekey(tmp_path: Path) -> None:
     assert sorted(path.name for path in scratch.iterdir()) == ["entry", "rekey.json"]
 
 
+@pytest.mark.parametrize("keyed", [True, False], ids=["keyed", "keyless"])
+def test_rekey_forces_the_claim_pool_of_the_owner_key(tmp_path: Path, keyed: bool) -> None:
+    key = "ed25519:" + base64.b64encode(b"k" * 32).decode("ascii")
+    other = "ed25519:" + base64.b64encode(b"o" * 32).decode("ascii")
+    jobs = family()
+    # The client forges pools: another key's exchange pool, default, and a site pool.
+    for mapping, pool in zip(jobs, (_bundles.exchange_pool(other), "default", "gpu"), strict=True):
+        mapping["claim"] = {"pool": pool, "required_capabilities": []}
+    scratch, bundle, manifest = inbox(tmp_path, "s", jobs, owner_key=key if keyed else None)
+    rekeyed = rekey_untrusted(scratch, bundle, manifest, workspace_id=ADOPTER)
+    expected = "exchange-" + hashlib.sha256(key.encode()).hexdigest()[:16] if keyed else "default"
+    assert _bundles.exchange_pool(key if keyed else None) == expected
+    pools = [JobDefinition.from_path(rekeyed.member_dir(bundle, m) / "job.json").claim_pool for m in rekeyed.members]
+    assert pools == [expected] * 3
+
+
 def test_rekey_is_deterministic_per_workspace(tmp_path: Path) -> None:
     jobs = family()
     results = []
@@ -966,6 +983,11 @@ def test_rekey_resumes_after_a_crash(tmp_path: Path, crash: Callable[[BundleMani
     )
     assert resumed == reference == read_rekeyed(scratch)
     assert validate_bundle(bundle, untrusted=False) == reference
+    # The forced pool is derived from the recorded owner key, so a resumed rewrite lands on the same one.
+    for member in resumed.members:
+        assert JobDefinition.from_path(resumed.member_dir(bundle, member) / "job.json").claim_pool == (
+            _bundles.exchange_pool(key)
+        )
     leftovers = [path for path in scratch.rglob(".*.tmp")]
     for path in leftovers:
         path.unlink()

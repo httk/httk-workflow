@@ -231,9 +231,27 @@ httk manager run --workspace WORKSPACE --workers 8
 httk manager run --workspace WORKSPACE --pool vasp --capability gpu --workers 4
 ```
 
-Without pool configuration, a manager advertises the reserved `default` pool.
+Without pool configuration, a manager advertises the reserved `default` pool;
+`--pool` replaces it, so `--pool vasp` alone does not claim `default` jobs.
 By default it runs until idle, which suits batch invocations and tests; pass
-`--idle` to keep serving.
+`--idle` to keep serving. Idle means no attempt running and no job it could
+claim; a manager that serves the workspace's exchange also waits while the
+inbox holds an entry it may still adopt or a finished exchange tree of its
+pools can be (or was asked to be) returned, and does not exit as idle within
+`--idle-grace` seconds of starting (default 120, ending with `--idle-timeout`
+when that is shorter), so a bundle still arriving or being adopted by another
+manager is not missed. Exchange work it cannot progress, such as a return
+waiting for the client to fetch an earlier copy, does not hold it. A manager
+whose ready jobs wait for unavailable confinement also waits out the grace,
+re-probing, and then exits with status 2 naming confinement instead of
+reporting idle.
+
+Pools whose name starts with `exchange-` belong to the exchange: adoption sets
+`exchange-<key>` from the bundle's `owner_key` (see {doc}`workspace_daemon`),
+the workspace daemon's managers claim only the pool of the key that started
+them, and the children of an exchange job (keyed or keyless, `origin`
+`exchange`) stay in its pool. A job outside the exchange cannot place a child in
+an exchange pool: its outcome fails with `protocol_error`.
 
 A manager registers as an owner in `.httk-workspace/owners/<owner-id>/`, claims
 a job by renaming its directory into `jobs/owned/<owner-id>/`, and is from then

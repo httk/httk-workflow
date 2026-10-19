@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,12 @@ import pytest
 
 import v3_helpers as h
 from httk.workflow import TaskManager, Workspace, _children, _kernel, _store
+from httk.workflow import manager as manager_module
+from httk.workflow._bundles import exchange_pool
+from httk.workflow._job import JobDefinition
+from httk.workflow._state import StateDoc, encode_state
 from test_commit_ownership import _gone
-from test_crash_injection import _all_jobs, _crash_and_recover, _crash_at_rename, _log
+from test_crash_injection import _all_jobs, _crash_and_recover, _crash_at_rename, _crash_on_entry, _log
 
 pytestmark = pytest.mark.slow
 
@@ -66,6 +71,8 @@ elif not parameters.get("child") and context["step"] == "start":
         key = label + "--" + child_id
         placement = parameters.get("placement", job["placement"] + "/" + label)
         child = dict(job, id=child_id, tag=label, name=label, placement=placement, parameters={"child": True})
+        if "child_pool" in parameters:
+            child["claim"] = dict(job["claim"], pool=parameters["child_pool"])
         child["parent"] = {
             "workspace_id": context["workspace_id"], "job_id": job["id"], "job_key": context["job_key"],
             "placement": job["placement"], "activation_id": context["activation_id"], "spawn_id": spawn_id,
@@ -191,6 +198,76 @@ def test_hostile_child_content_fails_the_parent_and_the_manager_keeps_running(
     assert len(list(failed.path.glob("attempts/*/outcome.ready/children/jobs/*"))) == 1
     assert h.state_of(failed).children == ()
     assert _snapshot(outside) == before
+
+
+@pytest.mark.parametrize("asked", ["default", exchange_pool("ed25519:other")])
+def test_an_exchange_jobs_child_stays_in_its_parents_pool(
+    ws: Workspace, installed: _store.Installed, asked: str
+) -> None:
+    pool = exchange_pool("ed25519:mine")
+    parent = h.submit(
+        ws, installed, {"start": "spawn", "gather": "succeed"}, pool=pool, parameters={"child_pool": asked}
+    )
+    h.run(ws, pools=[pool])
+
+    assert _outcome(ws, parent.job_id)[:2] == ("succeeded", None)
+    [child] = _children_of(ws, parent.job_id)
+    assert child.state == "succeeded"
+    assert JobDefinition.from_path(child.path / "job.json").claim_pool == pool
+
+
+def _keyless_exchange_spawner(ws: Workspace, installed: _store.Installed, **parameters: object) -> _kernel.JobRef:
+    """Submit a spawner as adoption publishes a keyless exchange job: pool ``default``, ``origin`` exchange."""
+
+    mapping = h.job_mapping(installed, {"start": "spawn", "gather": "succeed"}, parameters=parameters)
+    state = StateDoc.empty(str(mapping["id"])).updated(origin="exchange", exchange_name=str(uuid.uuid4()))
+    return h.submit_mapping(ws, mapping, members={"state.json": encode_state(state).decode("utf-8")})
+
+
+def _staged_pools(ws: Workspace, job_id: str) -> list[str]:
+    path = h.find(ws, job_id).path
+    return [
+        JobDefinition.from_path(child / "job.json").claim_pool
+        for child in path.glob("attempts/*/outcome.ready/children/jobs/*")
+    ]
+
+
+def test_a_keyless_exchange_jobs_child_stays_in_default(ws: Workspace, installed: _store.Installed) -> None:
+    parent = _keyless_exchange_spawner(ws, installed, child_pool="gpu")
+    h.run(ws)
+
+    assert _outcome(ws, parent.job_id)[:2] == ("succeeded", None)
+    [child] = _children_of(ws, parent.job_id)
+    assert JobDefinition.from_path(child.path / "job.json").claim_pool == "default"
+    assert h.state_of(child).origin == "exchange"
+
+
+def test_a_forced_child_pool_survives_a_crash_before_the_commit_intent(
+    ws: Workspace, installed: _store.Installed
+) -> None:
+    parent = _keyless_exchange_spawner(ws, installed, child_pool="gpu")
+    # Validation rewrote the staged child, then the manager died before deciding the commit.
+    _crash_and_recover(ws, _crash_on_entry(manager_module, "outcome_intent"))
+    assert _staged_pools(ws, parent.job_id) == ["default"] and not _children_of(ws, parent.job_id)
+
+    # Validating the already rewritten child again gives the same child.
+    h.run(ws)
+    assert _outcome(ws, parent.job_id)[:2] == ("succeeded", None)
+    [child] = _children_of(ws, parent.job_id)
+    assert child.state == "succeeded"
+    assert JobDefinition.from_path(child.path / "job.json").claim_pool == "default"
+
+
+def test_a_job_outside_the_exchange_cannot_spawn_into_an_exchange_pool(
+    ws: Workspace, installed: _store.Installed
+) -> None:
+    parent = _spawner(ws, installed, child_pool=exchange_pool("ed25519:victim"))
+    h.run(ws)
+
+    state, code, text = _outcome(ws, parent.job_id)
+    assert (state, code) == ("failed", "protocol_error")
+    assert "names the exchange pool" in text, text
+    assert not _children_of(ws, parent.job_id)
 
 
 def test_a_symlink_in_a_child_bundle_is_published_as_an_opaque_link_never_followed(

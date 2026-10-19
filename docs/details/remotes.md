@@ -309,15 +309,20 @@ returned tree, verifies it and removes the source from the exchange.
 `--configuration` names one of the global `slurm` launchers the operator
 approved for the daemon (each sets `manager.confine=bwrap`); `daemon.json`
 lists them with their digests and published resource settings (task layout,
-CPUs, memory, GRES, partition, workers and time limits), and `show` prints it. Every unrestricted confined manager of the workspace (no `--placement-prefix` or pool restriction), whether
-started by the daemon or not, adopts bundles from `inbox` and runs every job
+CPUs, memory, GRES, partition, workers and time limits), and `show` prints it. Every unrestricted confined manager of the workspace (no `--placement-prefix` or pool restriction), and
+every manager the daemon starts, adopts bundles from `inbox` and runs every job
 attempt confined to its own job directory; the daemon only starts, queries and
-cancels managers. `status` without `--handle` is passive: it prints the
+cancels managers. Adoption puts the jobs you eject in your key's exchange pool,
+and a manager the daemon starts for your key runs only those, then exits once
+it has nothing left to do; a keyless bundle waits for a manager an operator
+starts on the host. Only the key that started a manager may query or cancel it. `status` without `--handle` is passive: it prints the
 informational root `status.json` and `managers.json` from the exchange without
 a request. With `--handle` it sends the signed `manager_status` request.
 `managers.json` also reports each manager's outcome (scheduler state, exit
 code, times); once a manager's Slurm job has ended, `httk remote
-daemon log confined --handle MANAGER_HANDLE` prints its published log.
+daemon log confined --handle MANAGER_HANDLE` prints its published log. The
+published logs, like `managers.json`, are readable by every client of the
+exchange, not only the key that started the manager.
 
 To give up on a bundle that no manager has adopted, run `httk remote
 daemon take-back confined NAME [DESTINATION]`. It is client-only: it renames

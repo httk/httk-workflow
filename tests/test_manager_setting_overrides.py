@@ -292,7 +292,11 @@ def test_in_process_manager_uses_and_validates_effective_settings(
             return None
 
         def run_until_idle(self, **_kwargs: object) -> object:
-            return type("Census", (), {"summary_line": lambda _self: "idle", "time_advice": lambda _self: None})()
+            return type(
+                "Census",
+                (),
+                {"summary_line": lambda _self: "idle", "time_advice": lambda _self: None, "ready_blocked": {}},
+            )()
 
     def probe(_spec: str, _environ: object, *, cpu_slots: bool) -> None:
         slots.append(cpu_slots)

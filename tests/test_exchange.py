@@ -1,6 +1,7 @@
 """The exchange extension on a real filesystem: enabling it, inbox adoption, returns, job control and status."""
 
 import base64
+import dataclasses
 import errno
 import json
 import os
@@ -16,7 +17,7 @@ from httk.core.cli import CLIContext
 
 from conftest import configure_identity, register_ws
 from httk.workflow import TaskManager, Workspace, _confine, _exchange, _fs, _kernel, _moving, removal
-from httk.workflow._bundles import MAX_MANIFEST_BYTES, BundleManifest
+from httk.workflow._bundles import MAX_MANIFEST_BYTES, BundleManifest, exchange_pool
 from httk.workflow._daemon_client import Endpoint, read_passive_status
 from httk.workflow._exchange import (
     EXCHANGE_SUBDIRECTORIES,
@@ -28,9 +29,10 @@ from httk.workflow._exchange import (
 from httk.workflow._sandbox import PreparedSandbox
 from httk.workflow._state import Release, read_state_unowned
 from httk.workflow.errors import ConfinementUnavailableError, SealedError
+from httk.workflow.manager import NotIdleError, WorkCensus
 from httk.workflow.seals import seal_workspace
 from httk.workflow.workflow_cli import command
-from test_bundles import key_of, write_bundle
+from test_bundles import key_of, manifest_of, write_bundle
 from test_moving import claim_root
 from v3_helpers import cli_owner, install, job_mapping, submit_mapping
 from v3_helpers import workspace as v3_workspace
@@ -600,3 +602,156 @@ def test_only_unrestricted_managers_serve_the_exchange(tmp_path: Path, sandboxes
         manager.tick()
     assert os.listdir(exchange_directory(ws) / "inbox") == []
     assert len(_all_jobs(ws)) == 3
+
+
+def test_a_manager_of_only_an_exchange_pool_serves_the_exchange_but_runs_only_its_pool(
+    tmp_path: Path, sandboxes: list[Mapping[str, Any]]
+) -> None:
+    ws = _server(tmp_path / "ws")
+    installed = install(ws, tmp_path / "package")
+    key = _key(_seed(tmp_path, 3))
+    mine = job_mapping(installed, {"start": "succeed"}, tag="mine", placement="client/mine")
+    write_bundle(
+        exchange_directory(ws) / "inbox" / "mine", [mine], dataclasses.replace(manifest_of([mine]), owner_key=key)
+    )
+    # A keyless exchange job, and a job an operator submitted to the default pool, wait for an operator's manager.
+    keyless = job_mapping(installed, {"start": "succeed"}, tag="keyless", placement="client/keyless")
+    write_bundle(exchange_directory(ws) / "inbox" / "keyless", [keyless])
+    submit_mapping(ws, job_mapping(installed, {"start": "succeed"}, tag="operator", placement="operator"))
+    with TaskManager(ws, pools=[exchange_pool(key)], heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
+        manager.run_until_idle(timeout=120.0, poll_interval=0.02)
+    # Both entries adopted, only its own job run, and that finished tree returned.
+    assert len(sandboxes) == 1 and os.listdir(exchange_directory(ws) / "inbox") == []
+    assert (exchange_directory(ws) / "outbox" / key_of(mine) / "bundle.json").is_file()
+    assert sorted(ref.job_key.split("--")[0] for ref in _kernel.list_jobs(ws, "ready")) == ["keyless", "operator"]
+
+
+def test_pending_exchange_work_is_only_what_this_manager_can_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _server(tmp_path / "ws")
+    monkeypatch.setattr(_exchange, "STEP_INTERVAL", 0.0)
+    with cli_owner(ws) as owner:
+        service = ExchangeService(ws, owner, pools=["default"])
+        other_key = ExchangeService(ws, owner, pools=[exchange_pool("ed25519:other")])
+        (exchange_directory(ws) / "inbox" / ".partial").mkdir()
+        assert service.pending() == (0, 0)
+        jobs = _send(ws)
+        assert service.pending() == (1, 0)
+        service.run()
+        # Adopted and not finished: nothing is pending at the exchange; the jobs are claimable work.
+        assert service.pending() == (0, 0)
+        _finish(ws)
+        # Its own finished tree holds it; another key's manager is not held by it.
+        assert service.pending() == (0, 1) and other_key.pending() == (0, 0)
+        # Nor is any manager held by a return it cannot make: the client has not fetched an earlier copy.
+        occupant = exchange_directory(ws) / "outbox" / key_of(jobs[0])
+        occupant.mkdir()
+        assert service.pending() == (0, 0)
+        occupant.rmdir()
+        service.run()
+        # Requested, not yet applied (and inside its backoff): still pending, so the tree is never stranded.
+        assert service.pending() == (0, 1)
+    _apply(ws, _indexed(ws, jobs[0]["id"]))
+    with cli_owner(ws) as owner:
+        assert ExchangeService(ws, owner, pools=["default"]).pending() == (0, 0)
+
+
+def test_pending_is_recounted_only_when_stale(tmp_path: Path) -> None:
+    ws = _server(tmp_path / "ws")
+    with cli_owner(ws) as owner:
+        service = ExchangeService(ws, owner)
+        assert service.pending() == (0, 0)
+        _send(ws)
+        assert service.pending() == (0, 0)  # within STEP_INTERVAL, unchanged
+        service.invalidate()
+        assert service.pending() == (1, 0)
+
+
+def test_an_until_idle_manager_stays_while_an_inbox_entry_waits(
+    tmp_path: Path, sandboxes: list[Mapping[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _server(tmp_path / "ws")
+    _send(ws)
+    # Another manager is taking the entry: this one cannot, and must not exit as idle meanwhile.
+    monkeypatch.setattr(_moving, "adopt", lambda *_arguments, **_options: None)
+    with TaskManager(ws, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
+        with pytest.raises(NotIdleError):
+            manager.run_until_idle(timeout=0.5, poll_interval=0.02)
+        monkeypatch.undo()
+        manager.run_until_idle(timeout=120.0, poll_interval=0.02)
+    assert os.listdir(exchange_directory(ws) / "inbox") == []
+
+
+def test_exchange_work_a_manager_cannot_progress_does_not_hold_it(
+    tmp_path: Path, sandboxes: list[Mapping[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _server(tmp_path / "ws")
+    jobs = _send(ws)
+    _pass(ws)
+    _finish(ws)
+    # A finished tree of its pool whose earlier return the client has not fetched (any client can plant one) ...
+    occupant = exchange_directory(ws) / "outbox" / key_of(jobs[0])
+    occupant.mkdir()
+    # ... and an inbox entry whose adoption fails here.
+    _send(ws, "broken")
+
+    def fail(*_arguments: object, **_options: object) -> None:
+        raise RuntimeError("adoption failed")
+
+    monkeypatch.setattr(_moving, "adopt", fail)
+    with TaskManager(ws, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
+        census = manager.run_until_idle(timeout=10.0, poll_interval=0.02)
+    assert not census.exchange_pending and occupant.is_dir() and not (occupant / "bundle.json").exists()
+    assert os.listdir(exchange_directory(ws) / "inbox") == ["broken"]
+
+
+def test_an_entry_whose_adoption_fails_does_not_block_the_next_one(
+    tmp_path: Path, sandboxes: list[Mapping[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _server(tmp_path / "ws")
+    _send(ws, "a-broken")
+    good = _send(ws, "b-good")
+    real = _moving.adopt
+
+    def adopt(workspace: Workspace, owner: object, source: _fs.Loc, **options: Any) -> object:
+        if source.name() == "a-broken":
+            raise RuntimeError("adoption failed")
+        return real(workspace, owner, source, **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_moving, "adopt", adopt)
+    with TaskManager(ws, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
+        census = manager.run_until_idle(timeout=10.0, poll_interval=0.02)
+    assert not census.exchange_pending
+    assert os.listdir(exchange_directory(ws) / "inbox") == ["a-broken"]
+    assert _kernel.exchange_index(ws, str(good[0]["id"])) is not None
+
+
+def test_a_grace_longer_than_the_timeout_ends_with_it(tmp_path: Path, sandboxes: list[Mapping[str, Any]]) -> None:
+    ws = _server(tmp_path / "ws")
+    with TaskManager(ws, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
+        census = manager.run_until_idle(timeout=0.3, poll_interval=0.02, idle_grace=60.0)
+    assert not census.actionable and not census.exchange_pending
+
+
+def test_the_not_idle_message_names_pending_exchange_work() -> None:
+    census = WorkCensus(0, 0, 0, {}, 0, 0, 0, exchange_inbox=2, exchange_returns=1)
+    message = census.timeout_message(60)
+    assert "exchange work pending: 2 inbox entries, 1 returns" in message
+    assert "still running or claimable" not in message
+    assert "still running or claimable" in WorkCensus(0, 0, 1, {}, 0, 0, 1).timeout_message(60)
+
+
+@pytest.mark.timing
+def test_an_exchange_serving_manager_does_not_exit_as_idle_within_its_grace(
+    tmp_path: Path, sandboxes: list[Mapping[str, Any]]
+) -> None:
+    ws = _server(tmp_path / "ws")
+    with TaskManager(ws, heartbeat_interval=0.01, setting_overrides=_PINNED) as manager:
+        started = time.monotonic()
+        manager.run_until_idle(timeout=120.0, poll_interval=0.02, idle_grace=0.5)
+        assert time.monotonic() - started >= 0.5
+    # A manager that does not serve an exchange has nothing that can arrive unseen: no grace holds it.
+    plain = v3_workspace(tmp_path / "plain")
+    with TaskManager(plain, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=5.0, poll_interval=0.02, idle_grace=60.0)
