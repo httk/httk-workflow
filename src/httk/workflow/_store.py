@@ -43,6 +43,7 @@ from typing import cast
 
 from httk.core.building import DEFAULT_TAG, BuildSpec, execute_build
 from httk.core.digests import sha256_file
+from httk.core.git_sources import parse_git_uri
 
 from httk.workflow import _fs, git_workflows, scaffold
 from httk.workflow._kernel import KernelWorkspace, Owner, reconcile_scratch
@@ -81,6 +82,8 @@ _PROBE_STDERR_TAIL = 1024
 _PLATFORM_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], str] = {}
 _INSTALLATION = re.compile(r"[a-z0-9._-]*--[0-9a-f]{16}")
 _REPLACED = re.compile(r"[a-z0-9._-]*--[0-9a-f]{16}\.old\.[a-z2-7]{16}")
+# Every installation id starts with one of these (see _resolve); such text never selects by short name.
+_ID_PREFIXES = ("local:", "adhoc:", "git+")
 
 
 @dataclass(frozen=True)
@@ -256,13 +259,56 @@ def list_installed(workspace: KernelWorkspace) -> list[Installed]:
     return [found for directory in _installations(workspace) if (found := _read(directory)) is not None]
 
 
+def _git_reference(text: str) -> str | None:
+    """Return the tag or branch a ``git+…`` source text names; ``None`` for a commit, no ref or another source."""
+
+    if not text.startswith("git+"):
+        return None
+    uri = parse_git_uri(text)
+    return None if uri.pinned else uri.ref
+
+
+def _selected_by(found: Installed, ref: str) -> bool:
+    """Whether *ref* is the reference *found* was installed from, or a prefix (7+ digits) of its pinned commit."""
+
+    if found.record.get("reference") == ref:
+        return True
+    try:
+        commit = parse_git_uri(found.id).ref if found.id.startswith("git+") else None
+    except ValueError:
+        return False
+    return len(ref) >= 7 and commit is not None and commit.startswith(ref.lower())
+
+
+def _installed_order(found: Installed) -> tuple[float, str]:
+    try:
+        stamp = datetime.fromisoformat(cast(str, found.record.get("installed_at"))).timestamp()
+    except (TypeError, ValueError):
+        stamp = float("-inf")
+    return stamp, found.directory.name
+
+
+def _candidates(installed: list[Installed], text: str) -> list[Installed]:
+    """Return the installations a short name, else ``NAME@REF``, selects."""
+
+    named = [found for found in installed if found.name == text]
+    name, _, ref = text.rpartition("@")
+    if not named and name and ref:
+        named = [found for found in installed if found.name == name and _selected_by(found, ref)]
+    return named
+
+
 def lookup(workspace: KernelWorkspace, id_or_name: str) -> Installed | None:
-    """Return the installation with this exact id, else the one with this short name.
+    """Return the installation with this exact id, else the newest one with this short name.
+
+    Id-shaped text (``local:``, ``adhoc:``, ``git+``) only ever matches an id. Text that no installation
+    has as its short name is read as ``NAME@REF``, which selects among the installations of ``NAME`` by the
+    tag or branch an installation was made from, or by a prefix of at least seven characters of its pinned
+    commit. Several installations selected alike resolve to the most recently installed one.
 
     :param workspace: The workspace.
-    :param id_or_name: An id or a short name.
+    :param id_or_name: An id, a short name, or ``NAME@REF``.
     :return: The installation, or ``None``.
-    :raises ValueError: If several installations share the name; the message lists their ids.
     """
 
     # The slug of a git id's short name is not derivable from the id, so the
@@ -272,10 +318,9 @@ def lookup(workspace: KernelWorkspace, id_or_name: str) -> Installed | None:
         stem = directory.name.partition(".old.")[0]
         if stem.endswith(suffix) and (found := _read(directory)) is not None and found.id == id_or_name:
             return found
-    named = [found for found in list_installed(workspace) if found.name == id_or_name]
-    if len(named) > 1:
-        raise ValueError(f"workflow name {id_or_name!r} is ambiguous; use an id: {', '.join(f.id for f in named)}")
-    return named[0] if named else None
+    if id_or_name.startswith(_ID_PREFIXES):
+        return None  # a short name spelled like an id must not stand in for an uninstalled id
+    return max(_candidates(list_installed(workspace), id_or_name), key=_installed_order, default=None)
 
 
 def closure(workspace: KernelWorkspace, workflow_id: str, *, check_builds: bool) -> ClosureReport:
@@ -302,10 +347,7 @@ def closure(workspace: KernelWorkspace, workflow_id: str, *, check_builds: bool)
         if reference in seen:
             continue
         seen.add(reference)
-        try:
-            found = lookup(workspace, reference)
-        except ValueError:
-            found = None
+        found = lookup(workspace, reference)
         if found is None:
             missing.append(reference)
             continue
@@ -603,6 +645,7 @@ def install(
     initial_step: str | None = None,
     language: str | None = None,
     siblings: Mapping[str, WorkflowProvider] | None = None,
+    reference: str | None = None,
 ) -> Installed:
     """Install (or reinstall, replacing) a workflow package in the workspace.
 
@@ -624,6 +667,8 @@ def install(
     :param language: Force a workflow format for a bare document or directory.
     :param siblings: Give the providers of one plugin source, keyed by id, short name and alias: a source
         or call reference among the keys is that provider, so calls among them bind to each other.
+    :param reference: Record this tag or branch as the one the source was installed from (``NAME@REF``
+        selects by it); by default that of a ``git+…@REF`` source, ``None`` for a commit or no ref.
     :return: The installation.
     :raises ValueError: For an unresolvable or invalid source, a symlink or special file in the
         package, a package registered in-process only, or a call cycle.
@@ -639,6 +684,7 @@ def install(
         initial_step=initial_step,
         language=language,
         siblings=siblings or {},
+        reference=reference,
     )
 
 
@@ -653,6 +699,7 @@ def _install(
     initial_step: str | None = None,
     language: str | None = None,
     siblings: Mapping[str, WorkflowProvider],
+    reference: str | None = None,
 ) -> Installed:
     with _scratch(owner) as work:
         sibling = siblings.get(os.fspath(source))
@@ -663,21 +710,31 @@ def _install(
             workflow_id, name, provider, origin = _resolve(
                 source, work, initial_step, by_name=bool(stack), language=language
             )
+        if reference is None:
+            reference = _git_reference(origin)
         if workflow_id in stack:
             raise ValueError(f"workflow calls form a cycle: {' -> '.join((*stack, workflow_id))}")
         if stack and (installed := lookup(workspace, workflow_id)) is not None and installed.id == workflow_id:
             return installed  # a callee already installed under its resolved id is kept
         recorded: dict[str, str] = {}
-        for alias, reference in (provider.calls or {}).items():
+        for alias, written in (provider.calls or {}).items():
             # A sibling binds by its pinned id, so another installation of its name never answers.
-            bound = reference if (callee := siblings.get(reference)) is None else callee.workflow_id
+            bound = written if (callee := siblings.get(written)) is None else callee.workflow_id
             found = lookup(workspace, bound)
             if found is None and calls:
                 found = _install(
-                    workspace, owner, bound, calls=True, build=build, stack=(*stack, workflow_id), siblings=siblings
+                    workspace,
+                    owner,
+                    bound,
+                    calls=True,
+                    build=build,
+                    stack=(*stack, workflow_id),
+                    siblings=siblings,
+                    # A sibling comes from the same plugin source, so it was installed from the same reference.
+                    reference=None if callee is None else reference,
                 )
             # Without calls, an uninstalled reference is recorded as written; closure() reports it missing.
-            recorded[alias] = reference if found is None else found.id
+            recorded[alias] = written if found is None else found.id
         assert provider.directory is not None  # _resolve refuses providers without a package directory
         tree = work / "tree"
         tree.mkdir()
@@ -689,6 +746,7 @@ def _install(
             "id": workflow_id,
             "name": name,
             "source": origin,
+            "reference": reference,
             "tree_sha256": tree_sha256,
             "installed_at": datetime.now(UTC).isoformat(),
             "calls": recorded,
@@ -721,14 +779,22 @@ def uninstall(workspace: KernelWorkspace, owner: Owner, id_or_name: str) -> Inst
 
     :param workspace: The workspace.
     :param owner: The registered owner whose scratch receives the removed tree.
-    :param id_or_name: The id or unique short name.
+    :param id_or_name: The id, short name or ``NAME@REF`` (see :func:`lookup`).
     :return: The removed installation.
-    :raises ValueError: If nothing matches or the name is ambiguous.
+    :raises ValueError: If nothing matches, or the short name or ``NAME@REF`` selects several installations.
     """
 
     found = lookup(workspace, id_or_name)
     if found is None:
         raise ValueError(f"workflow {id_or_name!r} is not installed")
+    if found.id != id_or_name:
+        # Removing "the newest" of several is too easy to get wrong; build may use it, uninstall may not.
+        shared = [other.id for other in _candidates(list_installed(workspace), id_or_name)]
+        if len(shared) > 1:
+            raise ValueError(
+                f"workflow {id_or_name!r} selects {len(shared)} installations; "
+                f"select one by id or by a prefix of its pinned commit (NAME@COMMIT): {', '.join(shared)}"
+            )
     with _scratch(owner) as work:
         # Moved into the scratch first: the scratch cleanup makes it writable and discards it there.
         _fs.move_owned(_fs.loc(found.directory), _fs.loc(work / "old"), durable=workspace.durable)
@@ -740,7 +806,7 @@ def build(workspace: KernelWorkspace, owner: Owner, id_or_name: str) -> Path:
 
     :param workspace: The workspace.
     :param owner: The registered owner whose scratch hosts the build.
-    :param id_or_name: The id or unique short name.
+    :param id_or_name: The id, short name (the newest installation of it) or ``NAME@REF`` (see :func:`lookup`).
     :return: The build directory.
     :raises ValueError: If the workflow is not installed or declares no ``[workflow.build]``.
     :raises httk.core.building.BuildError: If the build fails.

@@ -215,14 +215,16 @@ answers it, and is required without a terminal. `workspace fsck` and
 ## Workflows and builds
 
 A job runs only a workflow installed in its workspace. Installed workflows live
-in `workflows/<slug>--<h16>/` and are selected by id or short name.
+in `workflows/<slug>--<h16>/` and are selected by id, short name (the most
+recently installed one of that name) or `NAME@REF` (see
+[Short names](workflow_uris.md#short-names)).
 
 ### `install` and `uninstall`
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `workflow install SOURCE...` | install into a workspace: a package directory, a git URI, a runner file or workflow document (installed ad hoc), or a workflow name known here; a git URI without `#SUBDIR` whose repository root carries `httk_plugin.toml` installs every workflow that plugin lists; declared calls are installed too and a `[workflow.build]` package is built | `--workspace`, `--no-calls`, `--no-build`, `--format`, `--json`, `--adapter-timeout` |
-| `workflow uninstall SELECTOR...` | remove installed workflows by id or short name | `--workspace`, `--check` (warn about unfinished jobs using it), `--json` |
+| `workflow uninstall SELECTOR...` | remove installed workflows by id, short name or `NAME@REF`; a selector several installations share is refused | `--workspace`, `--check` (warn about unfinished jobs using it), `--json` |
 
 ```console
 httk workflow install --workspace WORKSPACE 'git+https://github.com/httk/workflows-vasp#vasp-relax'
@@ -258,7 +260,8 @@ httk workflow build [--workspace WORKSPACE] [--json] WORKFLOW...
 httk workflow build [--workspace WORKSPACE] [--json] --list
 ```
 
-`build` builds installed workflows (by id or short name) that declare
+`build` builds installed workflows (by id, `NAME@REF` or short name, which
+selects the newest installation of that name) that declare
 `[workflow.build]` for this platform, in the foreground, and registers the
 artifacts in the installation's `builds/<platform>/`; a `REMOTE:WS` workspace
 builds on the remote. `install` already builds for the platform it runs on; run
@@ -318,7 +321,10 @@ httk job new --from-runner ./my_runner.py --step characterize --parameter sites=
 httk job new --from-command 'my_executable {input}' --file input=input_files/a.dat --tag a
 ```
 
-`--workflow` names an installed workflow by id or short name. A workflow that
+`--workflow` names an installed workflow by id or short name (the most
+recently installed one of that name), or as `NAME@REF` by the tag, branch or
+commit prefix it was installed from (see
+[Short names](workflow_uris.md#short-names)). A workflow that
 is not installed is refused, unless `--install` installs it first (with its
 calls): a git URI `git+https://HOST/PATH[@REF][#SUBDIR]`, a package directory
 (`--workflow-dir`), or a workflow name known on this machine. A runner file,

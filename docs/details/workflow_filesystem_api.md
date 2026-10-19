@@ -1180,7 +1180,7 @@ file or a bare workflow document.
 
 ```json
 {"format": "httk-workflow-install", "format_version": 1, "id": "local:hello", "name": "hello",
- "source": "/home/me/hello", "tree_sha256": "<hex>", "installed_at": "<utc>",
+ "source": "/home/me/hello", "reference": null, "tree_sha256": "<hex>", "installed_at": "<utc>",
  "calls": {"inner": "local:inner"}, "requires": ["httk-workflow>=2.1"],
  "runner": {"command": null, "entry": "run.py", "builtin": null},
  "steps": ["start"], "initial_step": "start", "build": false}
@@ -1195,7 +1195,11 @@ platform_tag, built_at}`.
 
 - **Lookup** by id scans `workflows/` for the `--<h16>` suffix and compares
   the `install.json` id; lookup by short name reads every `install.json` and
-  refuses an ambiguous name.
+  takes the latest `installed_at` among the installations of that name.
+  `NAME@REF` keeps only those whose `reference` (the tag or branch a git
+  install was given, `null` otherwise) is `REF`, or whose pinned commit starts
+  with `REF` (at least 7 characters), when no installation has the whole text
+  as its name. Id-shaped text (`local:`, `adhoc:`, `git+`) matches only an id.
 - **Install** assembles the tree in a `build` scratch (installing declared
   calls first, recursively, and building for this platform when the package
   has a build section), then moves an existing installation aside to

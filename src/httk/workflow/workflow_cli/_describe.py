@@ -385,10 +385,15 @@ def _installed_row(installed: _store.Installed) -> dict[str, object]:
         "id": installed.id,
         "name": installed.name,
         "source": record.get("source"),
+        "reference": record.get("reference"),
         "tree_sha256": record.get("tree_sha256"),
         "installed_at": record.get("installed_at"),
         "builds": sorted(path.parent.name for path in builds.glob("*/build.json")),
     }
+
+
+def _selector(row: Mapping[str, object]) -> str:
+    return f"{row['name']}@{row['reference']}" if row.get("reference") else str(row["name"])
 
 
 def _remote_relay(binding: WorkspaceBinding, context: Any, arguments: argparse.Namespace, verb: str, *tail: str) -> int:
@@ -471,7 +476,8 @@ def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
     rows = [_installed_row(installed) for installed in _store.list_installed(Workspace(root))]
     if not rows and not arguments.json:
         print(f"no workflows installed in {root}")
-    _print_rows(rows, arguments, lambda row: f"{row['id']}\t{row['name']}\t{row['source']}")
+    # A recorded tag or branch shows as the NAME@REF selector of that installation.
+    _print_rows(rows, arguments, lambda row: f"{row['id']}\t{_selector(row)}\t{row['source']}")
     return 0
 
 
@@ -610,6 +616,8 @@ def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
         for source in arguments.sources:
             try:
                 targets, siblings = _install_targets(source)
+                # The members are installed by pinned id: the tag or branch given here is recorded for NAME@REF.
+                reference = _store._git_reference(source)
                 for target in targets:  # a plugin root's members; stop at the first failure
                     with _stdout_to_stderr(arguments.json):
                         installed = _store.install(
@@ -620,6 +628,7 @@ def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
                             build=not arguments.no_build,
                             language=arguments.format,
                             siblings=siblings,
+                            reference=reference,
                         )
                     rows.append(_installed_row(installed))
             except _ERRORS as exc:

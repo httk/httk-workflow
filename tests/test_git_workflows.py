@@ -627,6 +627,37 @@ def test_plugin_sibling_calls_bind_by_alias_and_across_an_upgrade(
     assert len(_store.list_installed(workspace)) == 4  # the first commit's installations remain
 
 
+def test_a_plugin_root_tag_is_recorded_and_selects_an_older_install(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base, first = _parent_and_child(tmp_path / "plugin")
+    _git(tmp_path / "plugin", "tag", "wf-v1")
+    context, name, workspace = _store_workspace(tmp_path)
+    assert command(["install", "--workspace", name, f"{base}@wf-v1"], context) == 0
+    second = _commit(tmp_path / "plugin", "two")
+    assert command(["install", "--workspace", name, base], context) == 0, capsys.readouterr().err
+    references = {found.id: found.record["reference"] for found in _store.list_installed(workspace)}
+    assert references == {
+        f"{base}@{first}#parent": "wf-v1",
+        f"{base}@{first}#child": "wf-v1",
+        f"{base}@{second}#parent": None,
+        f"{base}@{second}#child": None,
+    }
+    newest = _store.lookup(workspace, "tests.git.parent")
+    assert newest is not None and newest.id == f"{base}@{second}#parent"
+    for selector in ("tests.git.parent@wf-v1", f"tests.git.parent@{first[:7]}"):
+        found = _store.lookup(workspace, selector)
+        assert found is not None and found.id == f"{base}@{first}#parent", selector
+    capsys.readouterr()
+    assert command(["list", "--workspace", name], context) == 0
+    listed = {line.split("\t")[0]: line.split("\t")[1] for line in capsys.readouterr().out.splitlines()}
+    assert listed[f"{base}@{first}#parent"] == "tests.git.parent@wf-v1"
+    assert listed[f"{base}@{second}#parent"] == "tests.git.parent"
+    assert command(["list", "--workspace", name, "--json"], context) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert {row["id"]: row["reference"] for row in rows} == references
+
+
 def test_a_plugin_sibling_call_cycle_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     base, _ = _parent_and_child(tmp_path / "plugin", cycle=True)
     context, name, workspace = _store_workspace(tmp_path)

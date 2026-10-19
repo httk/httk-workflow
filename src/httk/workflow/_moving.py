@@ -1001,11 +1001,7 @@ def _finish(
 
 
 def _installed(workspace: "Workspace", workflow_id: str) -> object:
-    try:
-        return _store.lookup(workspace, workflow_id)
-    except ValueError:
-        # An ambiguous name is not this id.
-        return None
+    return _store.lookup(workspace, workflow_id)
 
 
 def _isolate(owner: Owner, scratch: Path, name: str, record: _Record) -> _Record | str:

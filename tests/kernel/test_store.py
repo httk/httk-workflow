@@ -91,26 +91,120 @@ def test_install_from_directory(ws: FakeWorkspace, owner: Owner, tmp_path: Path)
     assert [entry.name for entry in (ws.control / "tmp").iterdir() if ".build." in entry.name] == []
 
 
-def test_lookup_list_ambiguity_and_uninstall(ws: FakeWorkspace, owner: Owner, tmp_path: Path) -> None:
+def test_lookup_list_shared_name_and_uninstall(ws: FakeWorkspace, owner: Owner, tmp_path: Path) -> None:
     first = _store.install(ws, owner, package(tmp_path / "a", "demo"))
     assert _store.lookup(ws, "local:demo") == first and _store.lookup(ws, "demo") == first
     assert _store.lookup(ws, "nothing") is None
     second = _store.install(ws, owner, package(tmp_path / "b", "other"))
     assert {found.id for found in _store.list_installed(ws)} == {first.id, second.id}
-    # A git install claiming the same short name makes the name ambiguous.
+    # A later git install claiming the same short name takes the name over.
     git_provider = parse_workflow_manifest(package(tmp_path / "c", "demo"), _uri=GIT_ID)
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(git_workflows, "fetch_workflow", lambda uri: git_provider)
         third = _store.install(ws, owner, GIT_ID)
     assert third.id == GIT_ID and third.name == "demo" and third.record["source"] == GIT_ID
-    with pytest.raises(ValueError, match="ambiguous.*local:demo"):
-        _store.lookup(ws, "demo")
+    assert _store.lookup(ws, "demo") == third
     assert _store.lookup(ws, GIT_ID) == third
     removed = _store.uninstall(ws, owner, "local:demo")
     assert removed.id == "local:demo" and not removed.directory.exists()
     assert _store.lookup(ws, "demo") == third
     with pytest.raises(ValueError, match="not installed"):
         _store.uninstall(ws, owner, "local:demo")
+
+
+def _git_install(ws: FakeWorkspace, owner: Owner, source: Path, workflow_id: str, text: str) -> _store.Installed:
+    provider = parse_workflow_manifest(source, _uri=workflow_id)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(git_workflows, "fetch_workflow", lambda uri: provider)
+        return _store.install(ws, owner, text)
+
+
+def _installed_at(installed: _store.Installed, when: str) -> None:
+    path = installed.directory / "install.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**record, "installed_at": when}), encoding="utf-8")
+
+
+def test_a_shared_name_selects_the_newest_install_and_name_at_ref_an_older_one(
+    ws: FakeWorkspace, owner: Owner, tmp_path: Path
+) -> None:
+    newer_id = "git+https://example.test/workflows.git@" + "b" * 40 + "#sub"
+    older = _git_install(
+        ws, owner, package(tmp_path / "a", "demo"), GIT_ID, "git+https://example.test/workflows.git@v1#sub"
+    )
+    newer = _git_install(ws, owner, package(tmp_path / "b", "demo"), newer_id, newer_id)
+    assert older.record["reference"] == "v1" and newer.record["reference"] is None
+    assert json.loads((older.directory / "install.json").read_text(encoding="utf-8"))["reference"] == "v1"
+    assert _store.lookup(ws, "demo") == newer
+    # The order is install time, not the directory listing.
+    _installed_at(older, "2999-01-01T00:00:00+00:00")
+    found = _store.lookup(ws, "demo")
+    assert found is not None and found.id == GIT_ID
+    _installed_at(older, "2000-01-01T00:00:00+00:00")
+    assert _store.lookup(ws, "demo") == newer
+    # NAME@REF: the tag or branch given at install time, or at least seven characters of the pinned commit.
+    found = _store.lookup(ws, "demo@v1")
+    assert found is not None and found.id == GIT_ID
+    assert _store.lookup(ws, "demo@bbbbbbb") == newer
+    found = _store.lookup(ws, "demo@" + "A" * 9)
+    assert found is not None and found.id == GIT_ID
+    for selector in ("demo@nope", "demo@bbbbbb", "demo@", "@v1", "other@v1", "demo@v2"):
+        assert _store.lookup(ws, selector) is None, selector
+    # An exact id still wins over the selector form, and a local install is never selected by a ref.
+    assert _store.lookup(ws, newer_id) == newer
+    local = _store.install(ws, owner, package(tmp_path / "c", "demo"))
+    assert local.record["reference"] is None and _store.lookup(ws, "demo") == local
+    assert _store.lookup(ws, "demo@bbbbbbb") == newer
+
+
+def test_id_shaped_text_never_selects_a_short_name(ws: FakeWorkspace, owner: Owner, tmp_path: Path) -> None:
+    real = _store.install(ws, owner, package(tmp_path / "a", "demo"))
+    impostor = _store.install(ws, owner, package(tmp_path / "b", "local:demo"))
+    assert impostor.id == "local:local:demo" and _store.lookup(ws, "local:demo") == real
+    _store.uninstall(ws, owner, "local:demo")
+    assert _store.lookup(ws, "local:demo") is None
+    assert _store.closure(ws, "local:demo", check_builds=False).missing == ("local:demo",)
+    assert _store.lookup(ws, "local:local:demo") == impostor
+
+
+def test_a_name_containing_at_is_a_name_before_it_is_a_selector(
+    ws: FakeWorkspace, owner: Owner, tmp_path: Path
+) -> None:
+    tagged = _git_install(ws, owner, package(tmp_path / "a", "odd"), GIT_ID, "git+https://example.test/w.git@v1#sub")
+    assert _store.lookup(ws, "odd@v1") == tagged
+    literal = _store.install(ws, owner, package(tmp_path / "b", "odd@v1"))
+    assert _store.lookup(ws, "odd@v1") == literal
+    found = _store.lookup(ws, "odd@aaaaaaa")
+    assert found is not None and found.id == GIT_ID
+
+
+def test_uninstall_refuses_a_bare_shared_name(ws: FakeWorkspace, owner: Owner, tmp_path: Path) -> None:
+    tagged = _git_install(ws, owner, package(tmp_path / "a", "demo"), GIT_ID, "git+https://example.test/w.git@v1#sub")
+    local = _store.install(ws, owner, package(tmp_path / "b", "demo"))
+    with pytest.raises(ValueError, match=r"selects 2 installations; select one by id .*local:demo"):
+        _store.uninstall(ws, owner, "demo")
+    # A branch recorded on two commits selects both: refused too, a commit prefix selects one.
+    other_id = "git+https://example.test/w.git@" + "c" * 40 + "#sub"
+    other = _git_install(ws, owner, package(tmp_path / "c", "demo"), other_id, "git+https://example.test/w.git@v1#sub")
+    with pytest.raises(ValueError, match=r"selects 2 installations.*" + "c" * 40):
+        _store.uninstall(ws, owner, "demo@v1")
+    assert _store.uninstall(ws, owner, "demo@ccccccc").id == other.id
+    assert _store.uninstall(ws, owner, "demo@v1").id == tagged.id
+    # One installation left: the bare name is unique again.
+    assert _store.uninstall(ws, owner, "demo").id == local.id and _store.list_installed(ws) == []
+
+
+def test_install_reference_defaults_to_the_tag_or_branch_of_the_source(
+    ws: FakeWorkspace, owner: Owner, tmp_path: Path
+) -> None:
+    assert _store._git_reference("git+https://example.test/r.git@wf-v0.2.1") == "wf-v0.2.1"
+    assert _store._git_reference("git+https://example.test/r.git@main#sub") == "main"
+    assert _store._git_reference("git+https://example.test/r.git#sub") is None
+    assert _store._git_reference(GIT_ID) is None and _store._git_reference("local:demo") is None
+    # An explicit reference (the CLI's, for a plugin root's members installed by pinned id) is recorded as given.
+    sibling = parse_workflow_manifest(package(tmp_path, "demo"), _uri=GIT_ID)
+    given = _store.install(ws, owner, GIT_ID, siblings={GIT_ID: sibling}, reference="v3")
+    assert given.record["reference"] == "v3" and given.record["source"] == GIT_ID
 
 
 @pytest.mark.slow

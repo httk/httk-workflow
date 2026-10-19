@@ -1401,10 +1401,7 @@ def _job_collector(
     pinned = (record.runner_provenance or {}).get("tree_sha256")
     if not isinstance(pinned, str):
         return None, None, "the job records no pinned installed workflow"
-    try:
-        installed = _store.lookup(workspace, workflow_id)
-    except ValueError as exc:
-        return None, None, f"job workflow {workflow_id!r} cannot be looked up: {exc}"
+    installed = _store.lookup(workspace, workflow_id)
     if installed is None or installed.id != workflow_id:
         return None, None, f"job workflow {workflow_id!r} is not installed in this workspace"
     if installed.record.get("tree_sha256") != pinned:

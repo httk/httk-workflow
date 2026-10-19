@@ -81,7 +81,8 @@ gets the pinned repository URI and expands it there. `httk job new
 
 `httk workflow describe URI` fetches and describes without installing.
 `httk workflow uninstall --workspace WS SELECTOR` removes an installation by
-id or short name; jobs are not checked unless `--check` is given.
+id, short name or `NAME@REF` (a selector several installations share is
+refused); jobs are not checked unless `--check` is given.
 
 ## The machine cache
 
@@ -102,8 +103,20 @@ workflows registered in-process and points plugin workflows to
 ## Short names
 
 Within a workspace, `--workflow vasp.relax` selects the installation with that
-short name; two installations sharing it are refused, and the id must be
-used. `httk workflow list --workspace WS` lists them.
+short name; when several installations share it, the most recently installed
+one. `--workflow vasp.relax@REF` selects among them by the tag or branch
+the installation was made from (as given to `httk workflow install`; an
+install on a remote workspace records none), or by at least seven characters
+of its pinned commit, as in `vasp.relax@wf-v0.2.0` or `vasp.relax@561f44b`.
+An installation keeps one reference, the tag or branch of its last install
+(none when last installed by commit): two tags at one commit are one
+installation. A name that an installation itself carries, `@` included,
+selects by name first. `httk workflow list --workspace WS` lists the
+installations with their ids, which always select exactly one, and shows a
+recorded reference as `NAME@REF`. `httk workflow uninstall` refuses a
+selector that several installations share, and `httk workflow build` builds
+the newest. A `[workflow.calls]` entry written as a short name binds at install
+time to the newest installation of that name and is then recorded by its id.
 
 On this machine, outside any workspace, a fetched workflow is also known by
 its short name, so `httk workflow install --workspace WS vasp.relax` installs
