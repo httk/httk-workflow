@@ -1004,6 +1004,11 @@ placement match and whose `parent` names this job (id, key, placement,
 workspace, spawn id), and ids not already present. The plan records each
 child's initial `state.json`, inheriting the parent's `origin` and
 `exchange_name`.
+The manager publishes the children of every outcome action, but a `fail` or
+`retry` outcome published through the SDK carries none: its outcome draft,
+which native Python runners, the Bash bridge and builder composition all
+publish through, discards the children the attempt staged, so a failed parent
+leaves no orphans and a retried activation does not stage them twice.
 
 
 Publication (step 4) works from the plan alone: for each child whose staged

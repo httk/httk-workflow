@@ -117,6 +117,60 @@ def test_call_runs_another_installed_workflow_and_resumes_at_the_gather(tmp_path
     assert len(every_job(workspace)) == 2
 
 
+_DISCARDING_RUNNER = """#!/usr/bin/env python3
+from httk.workflow import Runner
+
+run = Runner("tests.caller")
+
+
+@run.step
+def start(a):
+    a.call("sub", label="sub", files={"input.txt": "@INPUT@"})
+    if "@ACTION@" == "fail":
+        a.fail("caller.broken", "failed after calling")
+    elif a.context.attempt_ordinal == 1:
+        a.retry("call again")
+    else:
+        a.gather("finish")
+
+
+@run.step
+def finish(a):
+    a.succeed()
+
+
+if __name__ == "__main__":
+    raise SystemExit(run.main())
+"""
+
+
+@pytest.mark.timing
+@pytest.mark.parametrize(("action", "state", "jobs"), [("fail", "failed", 1), ("retry", "succeeded", 2)])
+def test_fail_or_retry_discards_the_children_the_attempt_called(
+    tmp_path: Path, action: str, state: str, jobs: int
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    input_file = tmp_path / "input.txt"
+    input_file.write_text("hello\n", encoding="utf-8")
+    runner = _DISCARDING_RUNNER.replace("@INPUT@", str(input_file)).replace("@ACTION@", action)
+    caller = package(
+        tmp_path / "caller",
+        "tests.caller",
+        ["start", "finish"],
+        runner=runner,
+        extra='\n[workflow.calls]\nsub = "tests.sub"\n',
+    )
+    _install(workspace, package(tmp_path / "sub", "tests.sub", ["run_sub"], runner=_SUB_RUNNER))
+    _install(workspace, caller)
+    job = new_job(workspace, "tests.caller", placement="project/caller")
+
+    run_manager(workspace, timeout=60.0)
+
+    assert find(workspace, job.job_id).state == state
+    # No orphan under a failed parent; a retried activation's child is not duplicated.
+    assert len(every_job(workspace)) == jobs
+
+
 def test_call_by_alias_or_id_builds_the_child_from_the_installed_package(tmp_path: Path) -> None:
     fabricated = fabricate(tmp_path, step="start", calls={"sub": sub_package(tmp_path / "sub")})
     attempt = Attempt.initialize(fabricated.environment)

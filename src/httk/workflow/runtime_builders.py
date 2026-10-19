@@ -651,6 +651,8 @@ class OutcomeDraft:
     ) -> Path:
         """Publish this outcome atomically.
 
+        A ``fail`` or ``retry`` outcome discards the children this draft staged.
+
         :param action: Select the next job action.
         :param next_step: Name the next step for ``advance`` or ``wait``.
         :param priority: Override the next marker priority.
@@ -719,6 +721,11 @@ class OutcomeDraft:
             "resources": resources,
         }
         body.update({key: value for key, value in optional.items() if value is not None})
+        if action in {"fail", "retry"} and (self.root / "children").exists():
+            # A failed or retried attempt spawns nothing: its staged children would run on as
+            # orphans of a failed parent, or be staged again by the repeated activation.
+            shutil.rmtree(self.root / "children")
+            self._children.clear()
         # Draft-internal: durability of the whole draft is the one batched tree
         # sync below, so this final write is not synchronized on its own.
         write_json_atomic(self.root / "outcome.json", body, durable=False)
