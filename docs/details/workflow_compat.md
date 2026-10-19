@@ -266,11 +266,31 @@ and the census show what it waits for.
 
 #### Overrides
 
-The job parameter `jobflow_overrides` is a list of operations applied, in
-order, to the flow `make()` returned, before anything runs. It needs no
-`[workflow.parameters]` declaration, is checked when the job is created, and is
-recorded in `job.json`; a failing operation fails the job with
-`jobflow.override_failed`, naming its index. The kinds are:
+The job parameter `jobflow_overrides` is a list of operations applied before
+anything runs. It needs no `[workflow.parameters]` declaration, is checked when
+the job is created, and is recorded in `job.json`; a failing operation fails
+the job with `jobflow.override_failed`, naming its index. The root Maker is
+built with the declared parameters as constructor arguments, then every `maker`
+operation updates it, then `make()` runs, then the other kinds apply to the
+flow it returned; each group keeps list order, wherever in the list its
+operations stand. The kinds are:
+
+- `{"kind": "maker", "update": {"path": value, ...}}` sets fields of the root
+  Maker before `make()`. A path is dotted field names, through nested Makers and
+  into mappings, whose last key may be new; values are JSON, decoded with
+  `monty`, so an object with `@module`/`@class` becomes that object (one whose
+  module or class cannot be imported fails the job with
+  `jobflow.override_failed`), and `null` is a value (atomate2 skips a step
+  whose Maker is `None`). The Makers and mappings along a path are rebuilt,
+  never modified. This is the way to set the
+  fields `make()` itself reads, which `maker_kwargs` cannot reach, for atomate2's
+  `PhononMaker`:
+
+  ```json
+  [{"kind": "maker", "update": {
+    "min_length": 10,
+    "phonon_displacement_maker.input_set_generator.user_incar_settings.ENCUT": 600}}]
+  ```
 
 - `{"kind": "maker_kwargs", "update": {...}, "name_filter": ..., "class_filter":
   "module:Class", "nested": true, "dict_mod": false}` calls

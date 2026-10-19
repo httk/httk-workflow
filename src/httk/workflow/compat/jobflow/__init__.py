@@ -42,6 +42,8 @@ DEFAULT_DATA_PREFIX = "jobflow"
 OUTPUTS_FILE = "jobflow-outputs.json"
 
 _MAKER_SPEC = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$")
+#: A ``maker`` override path: dotted field names and mapping keys.
+_MAKER_PATH = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 
 class JobflowFormatError(ValueError):
@@ -119,6 +121,7 @@ _OVERRIDE_MEMBERS = {
     "maker_kwargs": ({"update"}, {"name_filter", "class_filter", "nested", "dict_mod"}),
     "config": ({"config"}, {"name_filter", "attributes", "dynamic", "dict_mod"}),
     "function": ({"function"}, {"kwargs"}),
+    "maker": ({"update"}, set()),
 }
 
 
@@ -144,6 +147,10 @@ def _validate_overrides(value: object) -> None:
         for name in ("update", "config", "kwargs"):
             if name in item and not isinstance(item[name], Mapping):
                 raise ValueError(f"{where}.{name} must be an object")
+        if kind == "maker" and (
+            not item["update"] or not all(isinstance(p, str) and _MAKER_PATH.fullmatch(p) for p in item["update"])
+        ):
+            raise ValueError(f"{where}.update must be a non-empty object keyed by dotted field paths")
         for name in ("nested", "dynamic", "dict_mod"):
             if name in item and not isinstance(item[name], bool):
                 raise ValueError(f"{where}.{name} must be a boolean")

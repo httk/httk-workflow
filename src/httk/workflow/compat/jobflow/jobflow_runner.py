@@ -431,6 +431,51 @@ def _load_maker(a: Attempt, kwargs: Mapping[str, object]) -> object:
     return maker
 
 
+def _apply_maker_override(maker: object, update: Mapping[str, object]) -> object:
+    """Return ``maker`` with each dotted path of a ``maker`` override set, without mutating it.
+
+    Each path walks dataclass fields, or keys of a mapping; a mapping leaf may be a new key.
+    Values are monty-decoded, so an ``@module``/``@class`` object becomes the instance it names.
+    Rebuilt mappings are plain dicts.
+
+    :param maker: The root Maker, before ``make()``.
+    :param update: The override's ``update``: dotted path to JSON value, applied in order.
+    :return: The rebuilt root Maker.
+    :raises ValueError: If a path names no field or key, passes through ``None``, or a value cannot be decoded.
+    """
+    from dataclasses import fields, is_dataclass, replace
+
+    from monty.json import MontyDecoder
+
+    def put(obj: object, segments: list[str], value: object, path: str) -> object:
+        segment, rest = segments[0], segments[1:]
+        if isinstance(obj, Mapping):
+            if rest and segment not in obj:
+                raise ValueError(f"path {path!r}: no key {segment!r}")
+            mapping = cast(Mapping[str, object], obj)
+            return {**mapping, segment: put(mapping[segment], rest, value, path) if rest else value}
+        if obj is None:
+            raise ValueError(f"path {path!r}: {segment!r} is reached through None")
+        if not is_dataclass(obj) or isinstance(obj, type) or segment not in {f.name for f in fields(obj)}:
+            raise ValueError(f"path {path!r}: {segment!r} is not a field of {type(obj).__name__}")
+        child = put(getattr(obj, segment), rest, value, path) if rest else value
+        return replace(obj, **{segment: child})
+
+    def undecoded(value: object) -> bool:
+        if isinstance(value, Mapping):
+            return ("@module" in value and "@class" in value) or any(undecoded(v) for v in value.values())
+        return isinstance(value, list) and any(undecoded(v) for v in cast(list[object], value))
+
+    decoder = MontyDecoder()
+    for path, value in update.items():
+        decoded = decoder.process_decoded(value)
+        # monty keeps an object it cannot import as its dict; refuse it before any job runs.
+        if undecoded(decoded):
+            raise ValueError(f"path {path!r}: the value cannot be decoded (an @module/@class object is not importable)")
+        maker = put(maker, path.split("."), decoded, path)
+    return maker
+
+
 def _import_spec(spec: str) -> Any:
     """Import the object a ``module:name`` spec names."""
     module_name, _, name = spec.partition(":")
@@ -673,6 +718,27 @@ def start(a: Attempt) -> None:
     except Exception as exc:
         a.fail("jobflow.maker_config_failed", f"cannot configure the jobflow Maker: {exc}")
         return
+    overrides = a.parameter("jobflow_overrides", [])
+    try:
+        # Checked at job creation too; a job that arrived another way is checked here.
+        _validate_overrides(overrides)
+    except ValueError as exc:
+        a.fail("jobflow.override_failed", str(exc))
+        return
+    # Declared-parameter constructor kwargs, then ``maker`` overrides (before ``make()`` reads the
+    # Maker), then ``make()``, then the flow kinds; each group keeps list order.
+    operations = list(enumerate(cast(list[Mapping[str, Any]], overrides)))
+    for index, override in operations:
+        if override["kind"] != "maker":
+            continue
+        try:
+            maker = _apply_maker_override(maker, override["update"])
+        except Exception as exc:
+            a.fail(
+                "jobflow.override_failed",
+                f"jobflow_overrides[{index}] (maker) failed: {type(exc).__name__}: {exc}",
+            )
+            return
     make = getattr(maker, "make", None)
     if not callable(make):
         a.fail("jobflow.document_invalid", "the configured Maker has no callable make method")
@@ -693,14 +759,9 @@ def start(a: Attempt) -> None:
     if not isinstance(flow, (Flow, Job)):
         a.fail("jobflow.make_failed", f"Maker.make returned {type(flow).__name__}, not a jobflow Flow or Job")
         return
-    overrides = a.parameter("jobflow_overrides", [])
-    try:
-        # Checked at job creation too; a job that arrived another way is checked here.
-        _validate_overrides(overrides)
-    except ValueError as exc:
-        a.fail("jobflow.override_failed", str(exc))
-        return
-    for index, override in enumerate(cast(list[Mapping[str, Any]], overrides)):
+    for index, override in operations:
+        if override["kind"] == "maker":
+            continue
         try:
             flow = _apply_override(flow, override)
         except Exception as exc:

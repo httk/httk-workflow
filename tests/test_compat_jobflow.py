@@ -4,10 +4,12 @@ import importlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import signal
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, cast
@@ -907,15 +909,25 @@ def replace_with_constant(flow, value):
 def keep(flow):
     return None
 
+@dataclass
 class Maker:
+    offset: int = 10
+    step: Step = field(default_factory=Step)
+
     def make(self):
-        step = Step().make(10)
+        step = self.step.make(self.offset)
         return Flow([step], output=step.output)
 """
 
 
-def _override_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overrides: list[Any]) -> tuple[Workspace, str]:
-    package = _jobflow_package(tmp_path / "override-package", _OVERRIDE_FLOW)
+def _override_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overrides: list[Any], *, document: bool = False
+) -> tuple[Workspace, str]:
+    if document:
+        package = _jobflow_package(tmp_path / "override-package", _OVERRIDE_FLOW, maker=None, document="maker.json")
+        (package / "maker.json").write_text(json.dumps({"@module": "toy", "@class": "Maker"}), encoding="utf-8")
+    else:
+        package = _jobflow_package(tmp_path / "override-package", _OVERRIDE_FLOW)
     _set_pythonpath(monkeypatch, package)
     workspace = Workspace.initialize(tmp_path / "workspace")
     job = new_job(workspace, package, parameters={"jobflow_overrides": overrides})
@@ -952,12 +964,101 @@ def test_jobflow_function_override_replaces_the_flow(tmp_path: Path, monkeypatch
 
 
 @NEEDS_JOBFLOW
-def test_jobflow_failing_override_is_named_by_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    overrides = [{"kind": "function", "function": "toy:keep"}, {"kind": "function", "function": "toy:missing"}]
+@pytest.mark.parametrize(
+    ("overrides", "expected", "document"),
+    [
+        # Nested and top-level fields that make() reads, on a Maker spec and on a staged Maker document.
+        ([{"kind": "maker", "update": {"offset": 100, "step.settings.value": 3}}], 103, False),
+        ([{"kind": "maker", "update": {"offset": 100, "step.settings.value": 3}}], 103, True),
+        # Listed after maker_kwargs, the maker override still precedes make(); both take effect.
+        (
+            [
+                {"kind": "maker_kwargs", "update": {"value": 5}, "class_filter": "toy:Settings"},
+                {"kind": "maker", "update": {"offset": 100}},
+            ],
+            105,
+            False,
+        ),
+    ],
+)
+def test_jobflow_maker_override_precedes_make(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overrides: list[Any], expected: int, document: bool
+) -> None:
+    workspace, job_id = _override_job(tmp_path, monkeypatch, overrides, document=document)
+    assert _collected_value(workspace, job_id) == expected
+
+
+@dataclass
+class _Inner:
+    settings: dict[str, object] = field(default_factory=lambda: {"keep": 1})
+    config: object = None
+
+
+@dataclass
+class _Outer:
+    inner: _Inner | None = field(default_factory=_Inner)
+    plain: int = 0
+
+
+@NEEDS_JOBFLOW
+def test_maker_override_rebuilds_immutably_and_decodes_values() -> None:
+    from jobflow.core.job import JobConfig
+
+    original = _Outer()
+    config = JobConfig(resolve_references=False)
+    updated = cast(
+        _Outer,
+        jobflow_runner._apply_maker_override(
+            original, {"inner.settings.ENCUT": 600, "inner.config": config.as_dict(), "plain": None}
+        ),
+    )
+    assert updated.inner is not None and updated.inner.settings == {"keep": 1, "ENCUT": 600}
+    assert updated.inner.config == config and updated.plain is None
+    # The original Maker and its shared mapping are untouched.
+    assert original.inner is not None and original.inner.settings == {"keep": 1} and original.inner.config is None
+    assert cast(_Outer, jobflow_runner._apply_maker_override(original, {"inner": None})).inner is None
+
+
+@NEEDS_JOBFLOW
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        ({"nothing": 1}, "path 'nothing': 'nothing' is not a field of _Outer"),
+        ({"plain.x": 1}, "path 'plain.x': 'x' is not a field of int"),
+        ({"inner.settings.missing.x": 1}, "path 'inner.settings.missing.x': no key 'missing'"),
+        ({"inner": None, "inner.settings": {}}, "path 'inner.settings': 'settings' is reached through None"),
+        (
+            {"inner.config": [{"@module": "nonexistent.module", "@class": "X"}]},
+            "path 'inner.config': the value cannot be decoded",
+        ),
+    ],
+)
+def test_maker_override_refuses_unknown_paths(update: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=re.escape(message)):
+        jobflow_runner._apply_maker_override(_Outer(), update)
+
+
+@NEEDS_JOBFLOW
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            [{"kind": "function", "function": "toy:keep"}, {"kind": "function", "function": "toy:missing"}],
+            "jobflow_overrides[1] (function) failed: AttributeError",
+        ),
+        (
+            [{"kind": "function", "function": "toy:keep"}, {"kind": "maker", "update": {"step.nothing": 1}}],
+            "jobflow_overrides[1] (maker) failed: ValueError: path 'step.nothing'",
+        ),
+    ],
+)
+def test_jobflow_failing_override_is_named_by_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overrides: list[Any], message: str
+) -> None:
     workspace, job_id = _override_job(tmp_path, monkeypatch, overrides)
     parent = _parent_record(workspace, job_id, states=("failed",))
     assert parent.failure is not None and parent.failure.code == "jobflow.override_failed"
-    assert parent.failure.message.startswith("jobflow_overrides[1] (function) failed: AttributeError")
+    assert parent.failure.message.startswith(message)
 
 
 @pytest.mark.parametrize(
@@ -969,6 +1070,10 @@ def test_jobflow_failing_override_is_named_by_index(tmp_path: Path, monkeypatch:
         ([{"kind": "function", "function": "toy:keep", "extra": 1}], "unknown member 'extra'"),
         ([{"kind": "maker_kwargs", "update": {}, "class_filter": "Settings"}], "class_filter must be"),
         ([{"kind": "config", "config": {}, "dynamic": "yes"}], "dynamic must be a boolean"),
+        ([{"kind": "maker", "update": []}], r"jobflow_overrides\[0\]\.update must be an object"),
+        ([{"kind": "maker", "update": {}}], r"jobflow_overrides\[0\]\.update must be a non-empty object"),
+        ([{"kind": "maker", "update": {"step..name": 1}}], r"\.update must be a non-empty object keyed by dotted"),
+        ([{"kind": "maker", "update": {"offset": 1}, "name_filter": "x"}], "unknown member 'name_filter'"),
     ],
 )
 def test_jobflow_malformed_overrides_are_refused_at_job_creation(
