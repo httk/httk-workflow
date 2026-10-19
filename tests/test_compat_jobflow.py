@@ -298,14 +298,15 @@ def test_atomate2_environment_prepends_the_launch_prefix(monkeypatch: pytest.Mon
     from httk.workflow.compat.jobflow.jobflow_runner import _atomate2_environment
 
     monkeypatch.setenv("HTTK_WORKFLOW_LAUNCH", "srun -n 4")
+    # Without httk-workflow-vasp's launch wrapper, commands map directly behind the prefix.
+    monkeypatch.setattr(jobflow_runner.importlib.util, "find_spec", lambda name, package=None: None)
     mapped = _atomate2_environment(_settings_attempt({"vasp.command": "vasp_std -x"}))
     assert mapped == {
         "ATOMATE2_VASP_CMD": "srun -n 4 vasp_std -x",
         "ATOMATE2_VASP_GAMMA_CMD": "srun -n 4 vasp_std -x",
         "ATOMATE2_VASP_NCL_CMD": "srun -n 4 vasp_std -x",
     }
-    # Without httk-workflow-vasp's dispatcher, variant commands map directly, after one warning.
-    monkeypatch.setattr(jobflow_runner.importlib.util, "find_spec", lambda name, package=None: None)
+    # Variant commands then map directly too, after one warning.
     attempt = _settings_attempt({"vasp.command": "vasp_std", "vasp.gamma_command": "vasp_gam"})
     mapped = _atomate2_environment(attempt)
     assert mapped["ATOMATE2_VASP_GAMMA_CMD"] == "srun -n 4 vasp_gam"
@@ -316,12 +317,24 @@ def test_atomate2_environment_prepends_the_launch_prefix(monkeypatch: pytest.Mon
 _DISPATCH = [sys.executable, "-P", "-m", "httk.codes.vasp.launch"]
 
 
+def _vasp_argv(value: object, command: str) -> bool:
+    """Return whether a child's ``ATOMATE2_VASP_CMD`` maps ``vasp.command`` without a launch prefix.
+
+    The child's interpreter path may differ in spelling from this process's ``sys.executable``.
+    """
+    argv = shlex.split(str(value))
+    if jobflow_runner._dispatcher_installed():
+        return argv[1:] == [*_DISPATCH[1:], "--standard", command, "--ncl", command]
+    return argv == [command]
+
+
 @pytest.mark.usefixtures("_no_launch")
 @pytest.mark.parametrize(
     ("variants", "flags"),
     [
+        ({}, ["--ncl", "vasp_std -x"]),
         ({"vasp.ncl_command": "vasp_ncl"}, ["--ncl", "vasp_ncl"]),
-        ({"vasp.gamma_command": "vasp_gam -q"}, ["--gamma", "vasp_gam -q"]),
+        ({"vasp.gamma_command": "vasp_gam -q"}, ["--ncl", "vasp_std -x", "--gamma", "vasp_gam -q"]),
         (
             {"vasp.ncl_command": "vasp_ncl", "vasp.gamma_command": "vasp_gam"},
             ["--ncl", "vasp_ncl", "--gamma", "vasp_gam"],
@@ -336,11 +349,13 @@ def test_atomate2_environment_dispatches_vasp_variants(
     monkeypatch.setattr(jobflow_runner, "_dispatcher_installed", lambda: True)
     monkeypatch.setenv("HTTK_WORKFLOW_LAUNCH", "srun -n 4")
     mapped = _atomate2_environment(_settings_attempt({"vasp.command": "vasp_std -x", **variants}))
-    # The prefix is prepended once, to the dispatcher; the inner commands stay program-only.
-    dispatcher = shlex.join(["srun", "-n", "4", *_DISPATCH, "--standard", "vasp_std -x", *flags])
+    # The wrapper runs in front of the prefix and applies it itself: the mapping prepends nothing,
+    # and the inner commands stay program-only.
+    wrapper = shlex.join([*_DISPATCH, "--standard", "vasp_std -x", *flags])
     assert mapped == {
-        name: dispatcher for name in ("ATOMATE2_VASP_CMD", "ATOMATE2_VASP_GAMMA_CMD", "ATOMATE2_VASP_NCL_CMD")
+        name: wrapper for name in ("ATOMATE2_VASP_CMD", "ATOMATE2_VASP_GAMMA_CMD", "ATOMATE2_VASP_NCL_CMD")
     }
+    assert "srun" not in mapped["ATOMATE2_VASP_CMD"]
 
 
 @pytest.mark.usefixtures("_no_launch")
@@ -360,6 +375,7 @@ def test_atomate2_environment_refuses_a_launcher_only_under_a_prefix(monkeypatch
     from httk.workflow.compat.jobflow import jobflow_runner
     from httk.workflow.compat.jobflow.jobflow_runner import _atomate2_environment
 
+    monkeypatch.setattr(jobflow_runner, "_dispatcher_installed", lambda: False)
     attempt = _settings_attempt({"vasp.command": "srun vasp_std"})
     assert _atomate2_environment(attempt)["ATOMATE2_VASP_CMD"] == "srun vasp_std"
     monkeypatch.setenv("HTTK_WORKFLOW_LAUNCH", "srun -n 4")
@@ -381,8 +397,10 @@ def test_atomate2_environment_refuses_a_launcher_only_under_a_prefix(monkeypatch
 
 
 @pytest.mark.usefixtures("_no_launch")
-def test_atomate2_environment_maps_library_settings_and_layers() -> None:
+def test_atomate2_environment_maps_library_settings_and_layers(monkeypatch: pytest.MonkeyPatch) -> None:
     from httk.workflow.compat.jobflow.jobflow_runner import _atomate2_environment
+
+    monkeypatch.setattr(jobflow_runner, "_dispatcher_installed", lambda: False)
 
     settings: dict[str, object] = {
         "pymatgen.psp_dir": "/potcars",
@@ -430,11 +448,9 @@ class Maker:
     job = new_job(workspace, package)
     _drive(workspace)
     assert find(workspace, job.job_id).state == "succeeded"
-    assert _collected_value(workspace, job.job_id) == {
-        "ATOMATE2_VASP_CMD": "vasp_std",
-        "PMG_VASP_PSP_DIR": "/potcars",
-        "ATOMATE2_VASP_INCAR_UPDATES": "{}",
-    }
+    collected = cast(dict[str, object], _collected_value(workspace, job.job_id))
+    assert _vasp_argv(collected.pop("ATOMATE2_VASP_CMD"), "vasp_std")
+    assert collected == {"PMG_VASP_PSP_DIR": "/potcars", "ATOMATE2_VASP_INCAR_UPDATES": "{}"}
 
 
 @NEEDS_JOBFLOW
@@ -1795,7 +1811,7 @@ class Maker:
     job = new_job(workspace, package, parameters={"vasp.command": "x"})
     _drive(workspace)
     assert find(workspace, job.job_id).state == "succeeded"
-    assert _collected_value(workspace, job.job_id) == "x"
+    assert _vasp_argv(_collected_value(workspace, job.job_id), "x")
 
 
 @NEEDS_JOBFLOW

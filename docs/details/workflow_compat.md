@@ -377,44 +377,56 @@ attempt cannot see (its `HOME` is private):
 
 The three VASP commands resolve like `a.setting` (job parameter, then
 `HTTK_VASP_COMMAND` and so on, then the workspace setting). Job parameters with
-these names, or starting with `atomate2.` or `pymatgen.`, are forwarded from
-the parent to every child job, so a job-level value reaches each step that runs
-VASP. As for the VASP code package, `vasp.command` names only the program, such
-as `vasp_std`, and the attempt's launch prefix (`HTTK_WORKFLOW_LAUNCH`) is
-prepended. A command that starts with `srun`, `mpirun` or another launcher
-while a prefix applies fails a job whose function lives in an `atomate2.`
-module with `jobflow.launch_conflict`. Any other jobflow job runs without the
-VASP variables, with a run-log warning; a custom Maker defined elsewhere that
-still calls atomate2's `run_vasp` therefore gets that warning and atomate2's
-own configuration.
-The gamma and noncollinear commands default to the `vasp.command` mapping, so
-custodian's automatic Gamma-only switch never runs a bare `vasp_gam` outside
-the launch prefix. Do not set `atomate2.vasp_cmd` through the generic
-passthrough: it bypasses the launch prefix; use `vasp.command`.
+these names or `vasp.parallelization`, or starting with `atomate2.` or
+`pymatgen.`, are forwarded from the parent to every child job, so a job-level
+value reaches each step that runs VASP. As for the VASP code package,
+`vasp.command` names only the program, such as `vasp_std`. A command that
+starts with `srun`, `mpirun` or another launcher while a launch prefix applies
+fails a job whose function lives in an `atomate2.` module with
+`jobflow.launch_conflict`. Any other jobflow job runs without the VASP
+variables, with a run-log warning; a custom Maker defined elsewhere that still
+calls atomate2's `run_vasp` therefore gets that warning and atomate2's own
+configuration. Do not set `atomate2.vasp_cmd` through the generic passthrough:
+it bypasses the launch prefix; use `vasp.command`.
 
-When `vasp.ncl_command` or `vasp.gamma_command` is set and *httk-workflow-vasp*
-is installed where the jobs run, all three VASP variables name its dispatcher
-instead, with the launch prefix prepended once:
+When *httk-workflow-vasp* is installed where the jobs run (checked without
+importing the VASP package), all three VASP variables name its launch wrapper,
+in front of the launch prefix:
 
 ```console
-<launch prefix> <python> -P -m httk.codes.vasp.launch --standard 'vasp_std' --ncl 'vasp_ncl' --gamma 'vasp_gam'
+<python> -P -m httk.codes.vasp.launch --standard 'vasp_std' --ncl 'vasp_ncl' --gamma 'vasp_gam'
 ```
 
-Each command is a program-only shell-quoted string (a launcher in any of them
-is a `jobflow.launch_conflict` as above); `-P` keeps the job's working
-directory off the dispatcher's module path. Whether the dispatcher is installed
-is checked without importing the VASP package. The program cannot be chosen in
-advance: a job's `LSORBIT`/`LNONCOLLINEAR` comes from its input-set generator,
-`ATOMATE2_VASP_INCAR_UPDATES`, an inherited `prev_dir` INCAR and pymatgen's
-handling of non-collinear magnetic moments, and the INCAR is only written
-inside the job. The dispatcher reads that INCAR and KPOINTS and runs the
-non-collinear program for `LSORBIT` or `LNONCOLLINEAR`, the Gamma-only one for
-a Gamma-only mesh (custodian's rule, never under `LEPSILON` or `LOPTICS`), and
-the standard one otherwise; a non-collinear INCAR without `vasp.ncl_command`
-fails the run rather than start the standard program. Whichever command custodian's automatic Gamma-only
-switch picks, it runs the same dispatcher, which decides Gamma itself. Without
-*httk-workflow-vasp* the variant commands map directly, after a run-log
-warning; atomate2 itself never reads `ATOMATE2_VASP_NCL_CMD`.
+`--ncl` is `vasp.command` when `vasp.ncl_command` is unset, and `--gamma` is
+passed only when `vasp.gamma_command` is set. Each command is a program-only
+shell-quoted string (a launcher in any of them is a `jobflow.launch_conflict`
+as above); `-P` keeps the job's working directory off the wrapper's module
+path. The wrapper runs once per VASP launch, in the job, because that is where
+its inputs exist: a job's `LSORBIT`/`LNONCOLLINEAR` comes from its input-set
+generator, `ATOMATE2_VASP_INCAR_UPDATES`, an inherited `prev_dir` INCAR and
+pymatgen's handling of non-collinear magnetic moments, and the INCAR is only
+written inside the job. It runs the non-collinear program for `LSORBIT` or
+`LNONCOLLINEAR`, the Gamma-only one for a Gamma-only mesh (custodian's rule,
+never under `LEPSILON` or `LOPTICS`), and the standard one otherwise. Before
+that it writes the `KPAR` and `NCORE` it plans from the inputs and the
+attempt's rank count into the INCAR, unless the INCAR sets `KPAR`, `NCORE` or
+`NPAR` already (so custodian's fixes stick; with atomate2's `VASP_INHERIT_INCAR`
+enabled, which is not the default, later steps inherit the planned tags even
+on a different rank count, so leave it off or set the tags explicitly) or
+`vasp.parallelization` is `off`;
+then it applies the attempt's launch prefix (`HTTK_WORKFLOW_LAUNCH`) itself and
+execs. Each decision is a `httk.codes.vasp.launch: parallel:` line in the
+job's `std_err.txt` and `httk-vasp-launch.log`; *httk-workflow-vasp*'s
+documentation states the planning rules. Whichever command custodian's
+automatic Gamma-only switch picks, it runs the same wrapper, which decides
+Gamma itself.
+
+Without *httk-workflow-vasp* each command maps directly with the launch prefix
+prepended, the gamma and noncollinear commands defaulting to the `vasp.command`
+mapping so custodian's automatic Gamma-only switch never runs a bare `vasp_gam`
+outside the prefix; set variant commands are then mapped after a run-log
+warning, and no parallelization is planned. atomate2 itself never reads
+`ATOMATE2_VASP_NCL_CMD`.
 
 `pymatgen.psp_dir` is a POTCAR library in pymatgen's layout
 (`POT_GGA_PAW_PBE/POTCAR.<El>` and so on), distinct from *httk-workflow-vasp*'s

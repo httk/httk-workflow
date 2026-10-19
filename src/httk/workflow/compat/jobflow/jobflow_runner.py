@@ -42,12 +42,15 @@ _VASP_COMMANDS = (
     ("vasp.gamma_command", "ATOMATE2_VASP_GAMMA_CMD"),
     ("vasp.ncl_command", "ATOMATE2_VASP_NCL_CMD"),
 )
-#: httk-workflow-vasp's VASP variant dispatcher, run as a module; this runner never imports it.
+#: httk-workflow-vasp's VASP launch wrapper, run as a module; this runner never imports it.
 _DISPATCHER = "httk.codes.vasp.launch"
 #: Workspace setting prefixes passed through to the variables a library reads.
 _LIBRARY_PREFIXES = {"atomate2.": "ATOMATE2_", "pymatgen.": "PMG_"}
 #: Job parameters a parent forwards to every child, so the job layer of these settings reaches ``enter``.
-_FORWARDED_PARAMETERS = frozenset(name for name, _variable in _VASP_COMMANDS) | {"pymatgen.psp_dir"}
+_FORWARDED_PARAMETERS = frozenset(name for name, _variable in _VASP_COMMANDS) | {
+    "pymatgen.psp_dir",
+    "vasp.parallelization",
+}
 # ponytail: fixed, below the manager's default 10 s cancel grace so the SIGKILL escalation of
 # custodian's groups runs before the manager kills this runner; derive it if that grace is tuned.
 _STOP_GRACE_SECONDS = 5.0
@@ -64,14 +67,19 @@ def _atomate2_environment(a: Attempt, *, vasp: bool = True) -> dict[str, str]:
     Workspace settings and job parameters ``atomate2.<key>`` and ``pymatgen.<key>``
     become ``ATOMATE2_<KEY>`` and ``PMG_<KEY>``; ``pymatgen.psp_dir`` instead becomes
     ``PMG_VASP_PSP_DIR``. With *vasp*, when ``vasp.command`` resolves, it and
-    ``vasp.gamma_command``/``vasp.ncl_command`` (defaulting to it) become
-    ``ATOMATE2_VASP_CMD``/``ATOMATE2_VASP_GAMMA_CMD``/``ATOMATE2_VASP_NCL_CMD``
-    with the attempt's launch prefix (``HTTK_WORKFLOW_LAUNCH``) prepended. When a
-    gamma or ncl command is set and *httk-workflow-vasp* is installed, all three
-    instead name its dispatcher, ``python -m httk.codes.vasp.launch``, which picks
-    the program from the job's INCAR and KPOINTS; without it a run-log warning is
-    appended and the direct mapping is kept. These variables override the
-    libraries' own configuration files, which a confined attempt cannot see.
+    ``vasp.gamma_command``/``vasp.ncl_command`` set ``ATOMATE2_VASP_CMD``,
+    ``ATOMATE2_VASP_GAMMA_CMD`` and ``ATOMATE2_VASP_NCL_CMD``. When
+    *httk-workflow-vasp* is installed, all three name its launch wrapper,
+    ``python -m httk.codes.vasp.launch`` with the commands as ``--standard``,
+    ``--ncl`` (``vasp.command`` when unset) and ``--gamma`` (when set), in front of
+    the launch prefix: run once per launch in the job, it picks the program from
+    the INCAR and KPOINTS, writes planned ``KPAR``/``NCORE`` into the INCAR (unless
+    ``vasp.parallelization`` is ``off``) and applies the attempt's launch prefix
+    (``HTTK_WORKFLOW_LAUNCH``) itself. Without it each command maps directly with
+    the launch prefix prepended, an unset gamma/ncl command reusing
+    ``vasp.command``, and a set one appends a run-log warning. These variables
+    override the libraries' own configuration files, which a confined attempt
+    cannot see.
 
     :param a: The attempt whose settings are mapped.
     :param vasp: Whether to map the VASP commands.
@@ -97,22 +105,24 @@ def _atomate2_environment(a: Attempt, *, vasp: bool = True) -> dict[str, str]:
         for name, _variable in _VASP_COMMANDS
         if isinstance(value := a.setting(name, None), str) and value.strip()
     }
+    if _dispatcher_installed():
+        for name, value in commands.items():
+            try:
+                launch_command(shlex.split(value))  # refuses a launcher while a prefix applies
+            except ValueError as exc:
+                raise ValueError(f"the {name} setting: {exc}") from exc
+        # -P: the job's writable working directory stays off the wrapper's sys.path. An unset
+        # ncl command reuses vasp.command, as run_vasp does, so a run keeps the command it was given.
+        argv = [sys.executable, "-P", "-m", _DISPATCHER, "--standard", commands["vasp.command"]]
+        argv += ["--ncl", commands.get("vasp.ncl_command", commands["vasp.command"])]
+        if "vasp.gamma_command" in commands:
+            argv += ["--gamma", commands["vasp.gamma_command"]]
+        # The INCAR is written inside the job, so the variant and parallelization are chosen there,
+        # once, before the wrapper applies the launch prefix; whichever command custodian's
+        # auto_gamma picks, it runs this same wrapper.
+        wrapper = shlex.join(argv)
+        return {**result, **{variable: wrapper for _name, variable in _VASP_COMMANDS}}
     if commands.keys() - {"vasp.command"}:
-        if _dispatcher_installed():
-            for name, value in commands.items():
-                try:
-                    launch_command(shlex.split(value))  # refuses a launcher while a prefix applies
-                except ValueError as exc:
-                    raise ValueError(f"the {name} setting: {exc}") from exc
-            # -P: the job's writable working directory stays off the dispatcher's sys.path.
-            argv = [sys.executable, "-P", "-m", _DISPATCHER, "--standard", commands["vasp.command"]]
-            for name, flag in (("vasp.ncl_command", "--ncl"), ("vasp.gamma_command", "--gamma")):
-                if name in commands:
-                    argv += [flag, commands[name]]
-            # The INCAR is written inside the job, so the variant is chosen there; whichever
-            # command custodian's auto_gamma picks, it runs this same dispatcher.
-            dispatcher = shlex.join(launch_command(argv))
-            return {**result, **{variable: dispatcher for _name, variable in _VASP_COMMANDS}}
         a.log.append(
             "warning",
             "vasp.ncl_command and vasp.gamma_command need httk-workflow-vasp where the job runs; "
