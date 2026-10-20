@@ -32,15 +32,13 @@ A file a job produced is collected as a `files` entry whose URL is
 `data/<workspace name>/<path relative to the workspace root>`, for example
 `data/default/jobs/succeeded/<job directory>/data/report.json`. The workspace
 name is its registered name, or its directory's name when it is not
-registered. `--data-path PATH` replaces the leading `data`, so a site that
-serves the workspace files gives clients fetchable URLs:
-`--data-path https://example.org/files` yields
-`https://example.org/files/default/jobs/...`. An empty `--data-path` is
-refused. The URL is part of a file entry's identity, so its content id depends
-on the workspace's registered name and on `--data-path`: collect into a store
-with the same registered workspace name and the same `--data-path` every time,
-because changing either changes the URLs and therefore the file entries and
-the links that name them.
+registered. The prefix is fixed, and the URL is part of a file entry's
+identity, so its content id depends on the workspace's registered name: collect
+into a store under the same registered workspace name every time, because
+another name changes the URLs and therefore the file entries and the links that
+name them. When the store is served,
+`httk serve optimade serve --data-path PATH` maps the leading `data` onto a
+real location (an option of *httk-serve*).
 
 A job's declared inputs become stored entries too, each named by an input
 edge of the job's run, so a `product_of` curation links a result to the input

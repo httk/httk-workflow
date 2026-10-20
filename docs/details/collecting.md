@@ -31,18 +31,18 @@ standard `files` entry (`type = "files"`). File lists remain values within
 their role record.
 
 A `files` entry of a workspace job whose URL is a relative path (neither
-absolute nor `scheme://`) gets the URL `<data_path>/<workspace name>/<url>`,
-with `data_path` defaulting to `data` (`collect(..., data_path=...)`,
-`--data-path PATH`; a trailing `/` is dropped and an empty value is refused).
+absolute nor `scheme://`) gets the fixed URL `data/<workspace name>/<url>`.
 The workspace name is the registered name whose path is the workspace root, or
 the root directory's name. A hook that builds a `FileRecord` with the bare
 workspace-relative path is prefixed the same way. Only a normalized relative
 path is prefixed; one with an empty, `.` or `..` segment, or one that already
 starts with the prefix, is left as it is with a warning naming the job and the
 role. Because the URL is part of a file entry's identity, the same workspace
-collected under another registered name or `data_path` yields other file
-entries. The URL is entry content, so it is fixed at collect
-time, before the run's edges and the content ids `--into` remaps are derived.
+collected under another registered name yields other file entries. The URL
+is entry content, so it is fixed at collect time, before the run's edges and
+the content ids `--into` remaps are derived. Mapping the leading `data` onto a
+real location is a serving-time option instead:
+`httk serve optimade serve --data-path PATH` of *httk-serve*.
 Recognized calculation trees keep their URLs as their collectors give them.
 
 ### Inputs

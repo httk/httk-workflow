@@ -728,7 +728,7 @@ See {doc}`monitor` for the panes, keys, and read budget.
 
 | Options | Apply to |
 | --- | --- |
-| `--state`, `--placement`, `--job JOB` (repeatable; not with `--placement`), `--data-path PATH`, `--raw`, `--allow-job-collector` | a workspace only |
+| `--state`, `--placement`, `--job JOB` (repeatable; not with `--placement`), `--raw`, `--allow-job-collector` | a workspace only |
 | `--dry-run`, `--prefer NAME`, `--exclude PATTERN`, `--collector DIR` | a calculation tree only |
 | `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--no-id-ledger`, `--id-ledger PATH`, `--no-bare-runs`, `--upgrade`, `--degraded`, `--fail-fast`, `--batch-size N` | both |
 

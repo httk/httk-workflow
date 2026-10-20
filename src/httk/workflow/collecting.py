@@ -1890,7 +1890,6 @@ def collect(
     fail_fast: bool = False,
     batch_size: int = 64,
     jobs: Iterable[str] | None = None,
-    data_path: str | None = None,
 ) -> Iterator[CollectedJob]:
     """Collect records through registered or explicitly allowed job collectors.
 
@@ -1916,11 +1915,8 @@ def collect(
         once; must be a positive integer.
     :param jobs: Collect only these jobs and their descendants, selected as
         :func:`job_records` selects them.
-    :param data_path: Replace the ``data`` prefix of file-entry URLs: a file
-        entry at a workspace-relative path gets the URL
-        ``<data_path>/<workspace name>/<path>``.
     :yields: Framework-assembled collected jobs, including degraded jobs.
-    :raises ValueError: If ``batch_size`` or ``data_path`` is invalid, or
+    :raises ValueError: If ``batch_size`` is invalid, or
         *fail_fast* observes a per-job collection failure.
     """
 
@@ -1931,10 +1927,7 @@ def collect(
     if fail_fast:
         batch_size = 1
     records = job_records(workspace, states=states, placement=placement, on_skipped=on_skipped, jobs=jobs)
-    base = "data" if data_path is None else data_path.rstrip("/")
-    if not base:
-        raise ValueError("data_path must name a location, such as https://example.org/files")
-    url_prefix = f"{base}/{_workspace_name(workspace)}"
+    url_prefix = f"data/{_workspace_name(workspace)}"
 
     def assemble(
         identity: str, record: JobRecord, provider: object | None, run: httk.core.Run, raw: object

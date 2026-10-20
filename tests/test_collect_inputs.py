@@ -4,7 +4,7 @@ A declared input staged as a file (``destination``) is loaded by the framework
 into an entry with a run input edge; a collect hook may hand over the inputs it
 read instead (a :class:`~httk.workflow.hookapi.Collected` in process, or the
 ``"inputs"`` member of an executable response). File entries get
-``<data_path>/<workspace name>/<workspace-relative path>`` URLs.
+``data/<workspace name>/<workspace-relative path>`` URLs.
 """
 
 import io
@@ -138,15 +138,15 @@ def test_a_staged_input_becomes_an_entry_that_the_product_links_to(tmp_path: Pat
     (product,) = item.products
     assert (product.source_type, product.source_id) == ("structures", item.run.inputs[0].entry_id)
     assert product.label == "relaxed_structure"
-    # The file entry's URL is <data>/<workspace name>/<workspace-relative path>; unregistered, the name is the root's.
+    # The file entry's URL is data/<workspace name>/<workspace-relative path>; unregistered, the name is the root's.
     report = item.outputs["report"]
     assert isinstance(report, FileRecord)
     relative = f"{item.record.payload_path.as_posix()}/run/report.txt"
     assert report.url == f"data/workspace/{relative}"
 
     register_ws(CLIContext("httk", tmp_path), ws.root, "named")
-    named = next(collect(ws, allow_job_collector=True, data_path="https://x/y/"))
-    assert getattr(named.outputs["report"], "url", None) == f"https://x/y/named/{relative}"
+    named = next(collect(ws, allow_job_collector=True))
+    assert getattr(named.outputs["report"], "url", None) == f"data/named/{relative}"
 
 
 def test_only_normalized_relative_urls_are_prefixed(caplog: pytest.LogCaptureFixture) -> None:
@@ -162,13 +162,6 @@ def test_only_normalized_relative_urls_are_prefixed(caplog: pytest.LogCaptureFix
         value = FileRecord(url=url, name="a.txt")
         assert _prefixed_url("ws:job", "report", value, "data/ws") is value
     assert len(caplog.records) == 4 and "ws:job" in caplog.text and "'report'" in caplog.text
-
-
-def test_an_empty_data_path_is_refused(tmp_path: Path) -> None:
-    ws = Workspace.initialize(tmp_path / "ws")
-    for data_path in ("", "/"):
-        with pytest.raises(ValueError, match="data_path must name a location"):
-            list(collect(ws, data_path=data_path))
 
 
 def test_a_destination_with_a_directory_is_read_where_it_was_staged(
@@ -274,7 +267,10 @@ def test_into_stores_the_input_and_the_prefixed_file(tmp_path: Path, capsys: pyt
     name = register_ws(context, ws.root, "stored")
     store_path = tmp_path / "results.sqlite"
     argv = ["collect", "--workspace", name, "--allow-job-collector", "--into", str(store_path)]
-    argv += ["--id-base", "httk.inputs", "--data-path", "https://example.org/files"]
+    argv += ["--id-base", "httk.inputs"]
+    # The URL prefix is fixed at collect time; mapping it is a serving option.
+    assert command([*argv, "--data-path", "https://example.org/files"], context) == 2
+    assert "unrecognized arguments: --data-path" in capsys.readouterr().err
     assert command(argv, context) == 0
     report = json.loads(capsys.readouterr().out.splitlines()[0])
     assert "products_unlinked" not in report and len(report["products"]) == 1
@@ -293,7 +289,7 @@ def test_into_stores_the_input_and_the_prefixed_file(tmp_path: Path, capsys: pyt
     assert [(edge.label, edge.entry_id) for edge in getattr(product, "product_of", ())] == [
         ("initial_structure", edges["initial_structure"].entry_id)
     ]
-    assert file_entry.url.startswith("https://example.org/files/stored/jobs/succeeded/")
+    assert file_entry.url.startswith("data/stored/jobs/succeeded/")
 
 
 def test_a_python_hook_hands_over_its_inputs(tmp_path: Path) -> None:

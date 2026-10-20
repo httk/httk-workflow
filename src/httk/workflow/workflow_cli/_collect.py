@@ -24,7 +24,6 @@ _WORKSPACE_ONLY = (
     ("state", "--state"),
     ("placement", "--placement"),
     ("job", "--job"),
-    ("data_path", "--data-path"),
     ("raw", "--raw"),
     ("allow_job_collector", "--allow-job-collector"),
 )
@@ -269,7 +268,6 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             fail_fast=arguments.fail_fast,
             batch_size=64 if arguments.batch_size is None else arguments.batch_size,
             jobs=jobs,
-            data_path=arguments.data_path,
         )
 
         def resolve_keys() -> Sequence[tuple[str, bytes]]:
@@ -368,11 +366,6 @@ def build_collect_parser(
             "collect only this job and its descendants: UUID, key, unique prefix, or a path inside the "
             "workspace (repeatable)"
         ),
-    )
-    parser.add_argument(
-        "--data-path",
-        metavar="PATH",
-        help="replace the `data` prefix of file-entry URLs, e.g. https://example.org/files",
     )
     parser.add_argument(
         "--degraded",
