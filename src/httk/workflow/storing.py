@@ -39,6 +39,11 @@ _REBUILD_KEEP = (
 _PREDATES_TYPED = "{target} predates typed records: its values are stored as generic DataRecord rows. Rebuild it: " + (
     _REBUILD_KEEP
 )
+_RUN_TIMING = ("name", "started_at", "finished_at")
+_RUN_PREDATES_TIMING = (
+    "run stored before run names and times existed; rebuild the store from the workspace "
+    "(collect into a new file) to name and time it"
+)
 _REBUILD_TYPED = (
     "{target} holds generic DataRecord rows of definitions that are now stored as typed records ({ids}); "
     "rebuild it: " + _REBUILD_KEEP
@@ -739,6 +744,7 @@ def store_collected(
         from httk.store import EntryIdScheme, SqliteStore  # pyright: ignore[reportMissingImports]
         from httk.store.backend.schema import SchemaError  # pyright: ignore[reportMissingImports]
         from httk.store.backend.sql import StorageLayoutUpgradeRequiredError  # pyright: ignore[reportMissingImports]
+        from httk.store.store_common import EntryMetadataConflictError  # pyright: ignore[reportMissingImports]
     except ImportError as exc:
         raise ValueError("--into requires httk-store with its database dependencies") from exc
 
@@ -1025,12 +1031,18 @@ def store_collected(
                     )
                     if predecessor is not None:
                         rewritten_run = replace(rewritten_run, id=predecessor.id)
-                        if content_id(predecessor) == content_id(rewritten_run):
-                            run_sid = store.save(rewritten_run)
-                        else:
-                            before = store.sid_of(predecessor)
-                            run_sid = store.replace(predecessor, rewritten_run)
-                            revised = revised or (before is not None and run_sid > before)
+                        try:
+                            if content_id(predecessor) == content_id(rewritten_run):
+                                run_sid = store.save(rewritten_run)
+                            else:
+                                before = store.sid_of(predecessor)
+                                run_sid = store.replace(predecessor, rewritten_run)
+                                revised = revised or (before is not None and run_sid > before)
+                        except EntryMetadataConflictError as exc:
+                            # Stored metadata is never rewritten silently, so the job is a storage error.
+                            if all(getattr(predecessor, name, None) is None for name in _RUN_TIMING):
+                                raise ValueError(_RUN_PREDATES_TIMING) from exc
+                            raise ValueError(f"run metadata changed since it was stored: {exc}") from exc
                     else:
                         run_chosen = (
                             _ledger_entry_id(

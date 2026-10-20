@@ -9,7 +9,15 @@ consumes them.
 httk collect --workspace default
 httk collect --workspace default --state succeeded --state failed --placement project/screening
 httk collect --workspace default --into results.sqlite --id-base httk.campaign
+httk collect --workspace default --job <job-key> --into results.sqlite --id-base httk.campaign
 ```
+
+`--job JOB` (repeatable) collects one job and every job it spawned, directly
+or through its children, instead of the whole workspace. JOB is anything
+`httk job show` accepts: a UUID, a job key, a unique prefix, or a path inside
+the workspace. Only jobs in the collected states (`--state`, default
+`succeeded`) are collected, so a failed parent yields its succeeded
+descendants; a selected job that has not finished yet is refused. It cannot be combined with `--placement`.
 
 Each collected job prints one JSON summary line, and the sweep ends with one
 summary line of counts. The command exits non-zero only when a job could not be
@@ -19,6 +27,27 @@ output entries, its run and its product links in a file-backed SQLite store;
 beside the store keeps stable across rebuilds (see {doc}`provenance`).
 Re-collecting is stateless and deduplicated, so running the same collect twice
 changes nothing.
+
+A file a job produced is collected as a `files` entry whose URL is
+`data/<workspace name>/<path relative to the workspace root>`, for example
+`data/default/jobs/succeeded/<job directory>/data/report.json`. The workspace
+name is its registered name, or its directory's name when it is not
+registered. `--data-path PATH` replaces the leading `data`, so a site that
+serves the workspace files gives clients fetchable URLs:
+`--data-path https://example.org/files` yields
+`https://example.org/files/default/jobs/...`. An empty `--data-path` is
+refused. The URL is part of a file entry's identity, so its content id depends
+on the workspace's registered name and on `--data-path`: collect into a store
+with the same registered workspace name and the same `--data-path` every time,
+because changing either changes the URLs and therefore the file entries and
+the links that name them.
+
+A job's declared inputs become stored entries too, each named by an input
+edge of the job's run, so a `product_of` curation links a result to the input
+it came from. An input staged as a file (a `destination` such as `POSCAR`) is
+loaded by the framework; an input handed over another way, such as a jobflow
+port, is collected when the workflow's collect hook hands it over (see
+{doc}`details/collecting`).
 
 ## What a record holds
 

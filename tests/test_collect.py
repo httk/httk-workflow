@@ -315,6 +315,85 @@ def test_the_placement_filter_collects_one_subtree(campaign: tuple[Workspace, di
     assert list(job_records(ws, placement="project/absent")) == []
 
 
+def test_a_job_selection_collects_one_job_tree_parent_first(campaign: tuple[Workspace, dict[str, Any]]) -> None:
+    ws, identifiers = campaign
+    both = ("succeeded", "failed")
+    tree = list(job_records(ws, states=both, jobs=[f"campaign--{identifiers['parent']}"]))
+    assert [record.job_key.split("--")[0] for record in tree[:1]] == ["campaign"]
+    assert sorted(_by_label(tree)) == ["alpha", "beta", "campaign"] and len(tree) == 3
+    # The default state filter applies to the walked tree; a repeated selector adds nothing.
+    tree = list(job_records(ws, jobs=[identifiers["parent"], identifiers["parent"][:13]]))
+    assert [record.job_key.split("--")[0] for record in tree] == ["campaign", "alpha"]
+    # A child selects only its own subtree, here by its directory path.
+    alpha = find(ws, identifiers["alpha"]).path
+    assert [record.job_id for record in job_records(ws, jobs=[str(alpha)])] == [identifiers["alpha"]]
+    with pytest.raises(ValueError, match="'no-such-job'"):
+        list(job_records(ws, jobs=["no-such-job"]))
+    with pytest.raises(ValueError, match="placement or by job"):
+        list(job_records(ws, jobs=[identifiers["parent"]], placement="project"))
+
+
+@pytest.mark.parametrize(
+    ("state", "refused"), [("failed", False), ("cancelled", False), ("owned", True), ("ready", True)]
+)
+def test_a_selected_job_outside_the_states_is_walked_or_refused(
+    campaign: tuple[Workspace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch, state: str, refused: bool
+) -> None:
+    ws, identifiers = campaign
+    parent = find(ws, identifiers["parent"])
+
+    class Resolver:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        def resolve_one(self, _selector: str) -> list[Any]:
+            # The real parent directory, reported in another state.
+            return [replace(parent, state=state)]
+
+    monkeypatch.setattr(collecting_module, "JobSelectorResolver", Resolver)
+    if refused:
+        with pytest.raises(ValueError, match=rf"job campaign--.* is {state}; collect reads only stopped jobs"):
+            list(job_records(ws, jobs=[identifiers["parent"]]))
+        return
+    # A finished parent outside the states is left out, and its succeeded children are still collected.
+    assert [record.job_id for record in job_records(ws, jobs=[identifiers["parent"]])] == [identifiers["alpha"]]
+
+
+def test_a_job_whose_children_cannot_be_read_is_reported(
+    campaign: tuple[Workspace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws, identifiers = campaign
+    real = collecting_module.read_state
+
+    def damaged(ref: Any) -> Any:
+        return (None, "state.json is damaged") if ref.job_id == identifiers["parent"] else real(ref)
+
+    monkeypatch.setattr(collecting_module, "read_state", damaged)
+    skipped: list[str] = []
+    tree = list(job_records(ws, jobs=[identifiers["parent"]], on_skipped=skipped.append))
+    # The job itself is still collected; its lost subtree is reported, not silently dropped.
+    assert [record.job_id for record in tree] == [identifiers["parent"]]
+    assert skipped == [f"campaign--{identifiers['parent']}"]
+
+
+def test_a_child_that_cannot_be_found_is_skipped(
+    campaign: tuple[Workspace, dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws, identifiers = campaign
+    from httk.workflow import introspection
+
+    real = introspection.iter_jobs
+    monkeypatch.setattr(
+        collecting_module,
+        "iter_jobs",
+        lambda workspace: (ref for ref in real(workspace) if ref.job_id != identifiers["alpha"]),
+    )
+    skipped: list[str] = []
+    tree = list(job_records(ws, jobs=[identifiers["parent"]], on_skipped=skipped.append))
+    assert [record.job_id for record in tree] == [identifiers["parent"]]
+    assert skipped == [f"alpha--{identifiers['alpha']}"]
+
+
 # ---------------------------------------------------------------------------
 # The command line
 # ---------------------------------------------------------------------------
@@ -360,6 +439,19 @@ def test_the_command_selects_states_and_placements(
     assert len(lines[:-1]) == 1
     record = JobRecord.from_mapping(json.loads(lines[0]))
     assert record.job_id == identifiers["beta"] and record.state == "failed"
+
+    # --job collects one tree; a child selects only its own subtree.
+    argv = ["collect", "--workspace", name, "--state", "succeeded", "--state", "failed", "--raw"]
+    assert command([*argv, "--job", f"campaign--{identifiers['parent']}"], context) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [json.loads(line)["job_key"].split("--")[0] for line in lines[:-1]] == ["campaign", "alpha", "beta"]
+    assert command(["collect", "--workspace", name, "--job", identifiers["alpha"], "--degraded"], context) == 1
+    *summaries, summary = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [item["job_id"] for item in summaries] == [identifiers["alpha"]] and summary["degraded"] == 1
+    assert command(["collect", "--workspace", name, "--job", "no-such-job"], context) == 2
+    assert "'no-such-job'" in capsys.readouterr().err
+    assert command(["collect", "--workspace", name, "--job", identifiers["alpha"], "--placement", "x"], context) == 2
+    assert "--job cannot be combined with --placement" in capsys.readouterr().err
 
     # An unusable state is refused by the parser rather than silently ignored.
     assert command(["collect", "--workspace", name, "--state", "ready"], context) == 2

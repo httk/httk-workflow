@@ -45,7 +45,10 @@ deduplicates while distinct jobs stay distinct. A run names its workflow
 twice: `workflow_declaration_uri` is the `$id` of the declaration document, and
 `workflow_definition_uri` is the commit-pinned git URI of the code that ran,
 when there is one. Each child job collects to its own run, and
-`collect --into` links a parent's run to its children's. See
+`collect --into` links a parent's run to its children's. The run's input edges
+name the entries a job consumed: a declared input staged as a file is loaded by
+the framework at collect time, and an input given another way, such as a
+jobflow port, is named when the collect hook hands it over. See
 {doc}`details/provenance`.
 
 ## Stable ids

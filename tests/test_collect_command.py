@@ -137,6 +137,7 @@ def test_workspace_paths_dispatch_to_workspace_collection(tmp_path: Path, capsys
         ("tree", ["--state", "failed"], "--state only applies to a workspace"),
         ("tree", ["--placement", "x"], "--placement only applies to a workspace"),
         ("tree", ["--raw"], "--raw only applies to a workspace"),
+        ("tree", ["--job", "x"], "--job only applies to a workspace"),
         ("tree", ["--allow-job-collector"], "--allow-job-collector only applies to a workspace"),
         ("tree", ["--dry-run", "--into", "x.sqlite"], "--dry-run cannot be combined with --into"),
         ("tree", ["--dry-run", "--fail-fast"], "--dry-run cannot be combined with --fail-fast"),

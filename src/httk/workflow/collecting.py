@@ -41,6 +41,7 @@ record reads only that job's own directory.
 from __future__ import annotations
 
 import importlib
+import io
 import json
 import logging
 import os
@@ -64,8 +65,8 @@ from ._kernel import JobRef
 from ._state import TERMINAL_STATES, UNOWNED_STATES, StateDoc, _thaw
 from ._util import require_mapping, require_string
 from .errors import FormatError, WorkflowError
-from .hookapi import COLLECT_STREAM_FORMAT, COLLECT_STREAM_VERSION
-from .introspection import job_events, read_job, read_state
+from .hookapi import COLLECT_STREAM_FORMAT, COLLECT_STREAM_VERSION, Collected
+from .introspection import JobSelectorResolver, iter_jobs, job_events, read_job, read_state
 from .introspection._reading import JSON_LIMIT, read_job_file
 from .models import (
     JOB_STATE_DIRECTORY,
@@ -122,6 +123,8 @@ MAX_COLLECT_RESPONSE_LINE_BYTES = 1024 * 1024
 MAX_COLLECT_STDERR_LINE_BYTES = 64 * 1024
 #: Maximum total stderr retained from an executable collector.
 MAX_COLLECT_STDERR_BYTES = 1024 * 1024
+#: Default size bound of :meth:`JobRecord.read_file` and of a staged input the framework loads.
+READ_FILE_LIMIT = 64 << 20
 
 
 class _CollectEnvironmentError(RuntimeError):
@@ -172,9 +175,10 @@ class CollectedJob:
     :param child_runs: Name the child jobs this job spawned, as ``(label,
         run source id)`` pairs read from its spawn records, so a store can link
         this job's run to theirs.
-    :param inputs: Map declared input roles to entries a recognized-calculation
-        collector read from its directory; empty for workspace jobs, whose
-        inputs are staged entries named by their run.
+    :param inputs: Map declared input roles to the entries the job consumed:
+        those a recognized-calculation collector read from its directory, or,
+        for a workspace job, those its collect hook handed over plus the
+        declared inputs staged as files that the framework loaded.
     """
 
     workflow_id: str
@@ -341,6 +345,7 @@ def _job_mapping(job: JobDefinition) -> dict[str, object]:
         "resources": _thaw(job.resources),
         "parameters": _thaw(job.parameters),
         "parent": _thaw(job.parent),
+        "declared": _thaw(job.declared),
     }
     if job.environment:
         result["environment"] = _thaw(job.environment)
@@ -546,6 +551,30 @@ class JobRecord:
         if found is None:
             raise ValueError(f"{identity}: expected workdir file {path}")
         return found
+
+    def read_file(self, relative: str, *, limit: int = READ_FILE_LIMIT) -> bytes:
+        """Read one file below this job's payload the way job-writable content must be read.
+
+        No symlink below the payload is followed, a FIFO or other special file
+        is refused without blocking, and the size is bounded, so a collect hook
+        can read files the job wrote without trusting them.
+
+        :param relative: The file's POSIX path relative to the payload, such as
+            ``data/jobflow/jobflow-outputs.json``.
+        :param limit: The largest accepted size in bytes.
+        :return: The file's content.
+        :raises ValueError: If the file is absent, is or passes through a
+            symlink, is not a regular file, or is larger than *limit*.
+        """
+
+        identity = f"{self.workspace_id}:{self.job_id}"
+        try:
+            data = read_job_file(self.payload, relative, limit)
+        except (WorkflowError, OSError, ValueError) as exc:
+            raise ValueError(f"{identity}: cannot read {relative}: {exc}") from exc
+        if data is None:
+            raise ValueError(f"{identity}: the job has no file {relative}")
+        return data
 
     def as_mapping(self) -> dict[str, object]:
         """Return the JSON representation of this record."""
@@ -787,6 +816,7 @@ def job_records(
     states: Iterable[str] = DEFAULT_COLLECT_STATES,
     placement: str | PurePosixPath | None = None,
     on_skipped: Callable[[str], None] | None = None,
+    jobs: Iterable[str] | None = None,
 ) -> Iterator[JobRecord]:
     """Yield one :class:`~httk.workflow.collecting.JobRecord` per finished job of *workspace*.
 
@@ -795,6 +825,18 @@ def job_records(
     ``COLLECTABLE_KINDS`` before anything is read. *placement* restricts the
     job_records to the jobs at or below one placement, exactly as
     ``httk job list --placement`` does.
+
+    *jobs* instead selects job trees: each selector is resolved as
+    ``httk job show`` resolves it (a UUID, a job key, a unique prefix, or a
+    path inside the workspace, relative to the current directory), and the
+    selected jobs and every descendant they spawned are reported depth-first,
+    parent before its children, each job once. A selected job that has not
+    finished and is not in *states* (ready, running, waiting, or paused unless
+    requested) is refused; a finished job outside *states*, selected or a
+    descendant, is skipped as in a sweep while its descendants are still
+    walked. A
+    descendant whose directory cannot be found, and a job whose ``state.json``
+    is damaged so its children cannot be followed, are passed to *on_skipped*.
 
     The result is a lazy iterator over one listing of the requested state
     directories. Nothing is materialized, and building a record reads only that
@@ -806,21 +848,81 @@ def job_records(
     :param states: Select the stopped state kinds to report.
     :param placement: Restrict results to this placement and its descendants.
     :param on_skipped: Receive the job key of every selected job dropped for an
-        unreadable ``job.json``, so a caller can count skips it never sees.
+        unreadable ``job.json`` or a missing directory, so a caller can count
+        skips it never sees.
+    :param jobs: Select these jobs and their descendants instead of scanning
+        the requested states.
     :yields: Mechanical job records, one for each readable selected job.
-    :raises ValueError: If ``states`` contains no collectable state.
+    :raises ValueError: If ``states`` contains no collectable state, a *jobs*
+        selector names no single job or an unfinished job outside *states*, or *jobs* is
+        combined with *placement*.
     """
 
     kinds = collect_kinds(states)
-    prefixes = () if placement is None else (normalize_placement(placement),)
-    for state in kinds:
-        for ref in _kernel.list_jobs(workspace, state, prefixes=prefixes):
-            record = record_of(workspace, ref)
-            if record is None:
+    if jobs is not None and placement is not None:
+        raise ValueError("select jobs either by placement or by job, not both")
+    refs = _job_trees(workspace, jobs, kinds, on_skipped) if jobs is not None else None
+    if refs is None:
+        prefixes = () if placement is None else (normalize_placement(placement),)
+        refs = (ref for state in kinds for ref in _kernel.list_jobs(workspace, state, prefixes=prefixes))
+    for ref in refs:
+        if ref.state not in kinds:
+            continue
+        record = record_of(workspace, ref)
+        if record is None:
+            if on_skipped is not None:
+                on_skipped(ref.job_key)
+            continue
+        yield record
+
+
+def _job_trees(
+    workspace: Workspace,
+    selectors: Iterable[str],
+    kinds: tuple[str, ...],
+    on_skipped: Callable[[str], None] | None,
+) -> Iterator[JobRef]:
+    """Yield the jobs *selectors* name and their descendants, depth-first and each once.
+
+    A selected job neither in *kinds* nor finished is refused; any other job
+    outside *kinds* is yielded for the caller to skip, and its descendants are walked. A job whose ``state.json`` cannot be read is
+    yielded and also passed to *on_skipped*, since its children cannot be followed.
+    """
+
+    resolver = JobSelectorResolver(workspace, Path.cwd())
+    selected = [ref for selector in selectors for ref in resolver.resolve_one(selector)]
+    for ref in selected:
+        # A finished job outside the states is walked, not yielded, as a sweep would treat it.
+        if ref.state not in kinds and ref.state not in TERMINAL_STATES:
+            raise ValueError(
+                f"job {ref.job_key} is {ref.state}; collect reads only stopped jobs in --state {', '.join(kinds)}"
+            )
+    by_id: dict[str, JobRef] | None = None
+    seen: set[str] = set()
+    stack = selected[::-1]
+    while stack:
+        ref = stack.pop()
+        if ref.job_id in seen:
+            continue
+        seen.add(ref.job_id)
+        yield ref
+        doc, damage = read_state(ref)
+        if damage is not None and on_skipped is not None:
+            on_skipped(ref.job_key)
+        children = () if doc is None else doc.children
+        if children and by_id is None:
+            # ponytail: one listing of the whole workspace per selection; a
+            # placement-hinted locate per child is the upgrade if this shows up.
+            by_id = {job.job_id: job for job in iter_jobs(workspace)}
+        found: list[JobRef] = []
+        for child in children:
+            child_ref = None if by_id is None else by_id.get(str(child.get("job_id")))
+            if child_ref is None:
                 if on_skipped is not None:
-                    on_skipped(ref.job_key)
+                    on_skipped(str(child.get("job_key") or child.get("job_id")))
                 continue
-            yield record
+            found.append(child_ref)
+        stack.extend(reversed(found))
 
 
 def _overlay_edges(
@@ -1107,11 +1209,16 @@ def _entry_record(value: Mapping[str, object], declared: Mapping[str, object]) -
     raise ValueError(f"unknown entry type {entry_type!r}; known types: {', '.join(sorted(known)) or '(none)'}")
 
 
-def _resolve_executable_output(record: JobRecord, provider: object, role: str, value: object) -> object:
+def _resolve_executable_output(
+    record: JobRecord, provider: object, role: str, value: object, declared: Mapping[str, object] | None = None
+) -> object:
+    """Resolve one executable-collector descriptor; *declared* overrides the output role's declaration."""
+
     if not isinstance(value, Mapping):
         raise ValueError("output must be exactly one of {'entry': {...}}, {'value': ...}, or {'file': '...'}")
     keys = set(value)
-    declared = _provider_output_roles(provider).get(role, {})
+    if declared is None:
+        declared = _provider_output_roles(provider).get(role, {})
     if keys == {"entry"} and isinstance(value.get("entry"), Mapping):
         return _entry_record(cast(Mapping[str, object], value["entry"]), declared)
     if keys == {"value"}:
@@ -1137,7 +1244,7 @@ def _resolve_executable_output(record: JobRecord, provider: object, role: str, v
 
 def _run_executable_collector(
     records: Sequence[JobRecord], provider: object, root: Path
-) -> tuple[dict[int, Mapping[str, object]], dict[int, str], int | None]:
+) -> tuple[dict[int, Collected], dict[int, str], int | None]:
     """Run one executable collector and resolve its ordered responses.
 
     The third element is the collector's exit status when it is nonzero after a
@@ -1346,7 +1453,7 @@ def _run_executable_collector(
         return {}, group_failures(breach_reason), None
 
     responses = response_lines
-    resolved: dict[int, Mapping[str, object]] = {}
+    resolved: dict[int, Collected] = {}
     failures: dict[int, str] = {}
     for index, record in enumerate(records):
         identity = f"{record.workspace_id}:{record.job_id}"
@@ -1370,10 +1477,20 @@ def _run_executable_collector(
             outputs = response.get("outputs")
             if not isinstance(outputs, Mapping):
                 raise ValueError("response has no outputs mapping")
-            resolved[index] = {
-                str(role): _resolve_executable_output(record, provider, str(role), output)
-                for role, output in outputs.items()
-            }
+            inputs = response.get("inputs", {})
+            if not isinstance(inputs, Mapping):
+                raise ValueError("response inputs is not a mapping")
+            input_roles = _input_roles(_job_workflow_document(record, provider)) if inputs else {}
+            resolved[index] = Collected(
+                {
+                    str(role): _resolve_executable_output(record, provider, str(role), output)
+                    for role, output in outputs.items()
+                },
+                {
+                    str(role): _resolve_executable_output(record, provider, str(role), item, input_roles.get(role, {}))
+                    for role, item in inputs.items()
+                },
+            )
         except (ImportError, _CollectEnvironmentError):
             raise
         except UnicodeDecodeError as exc:
@@ -1495,13 +1612,21 @@ def _assemble_collected(
     run: httk.core.Run,
     outputs: Mapping[str, object],
     inputs: Mapping[str, object] | None = None,
+    url_prefix: str | None = None,
 ) -> CollectedJob:
     """Validate outputs and overlay their edges onto one collected run.
 
-    A recognized calculation also hands over the *inputs* its collector read;
-    they become the run's input edges before ``product_of`` curations resolve.
+    A collector may also hand over the *inputs* it read; they become the run's
+    input edges before ``product_of`` curations resolve. With *url_prefix*, a
+    workspace-relative file-entry URL becomes ``<url_prefix>/<url>``.
     """
 
+    if url_prefix is not None:
+        # The URL is entry content: edges, product links and the ids store_collected
+        # remaps all key on the content ids derived below, so it is final here and
+        # can never be rewritten at store time.
+        outputs = {role: _prefixed_url(identity, role, value, url_prefix) for role, value in outputs.items()}
+        inputs = {role: _prefixed_url(identity, role, value, url_prefix) for role, value in (inputs or {}).items()}
     workflow_id = record.job.get("workflow")
     workflow_id = workflow_id if isinstance(workflow_id, str) else ""
     document = _job_workflow_document(record, provider)
@@ -1521,16 +1646,7 @@ def _assemble_collected(
     core = _core()
     outputs = _attach_product_of(identity, dict(outputs), roles, run, provider)
     owned = tuple(_entry_edge(identity, role, value, roles[role]) for role, value in outputs.items())
-    run = core.Run(
-        workflow_declaration_uri=run.workflow_declaration_uri,
-        workflow_definition_uri=run.workflow_definition_uri,
-        inputs=run.inputs,
-        artifacts=_overlay_edges(run.artifacts, owned),
-        outputs=_overlay_edges(run.outputs, owned),
-        source_id=run.source_id,
-        immutable_id=run.immutable_id,
-        last_modified=run.last_modified,
-    )
+    run = replace(run, artifacts=_overlay_edges(run.artifacts, owned), outputs=_overlay_edges(run.outputs, owned))
     products: list[httk.core.ProductLink] = []
     products_unlinked: list[str] = []
     input_edges = {edge.label: edge for edge in run.inputs}
@@ -1576,6 +1692,123 @@ def _assemble_collected(
         products_unlinked=tuple(products_unlinked),
         inputs=inputs,
     )
+
+
+def _prefixed_url(identity: str, role: str, value: object, prefix: str) -> object:
+    """Prefix the URL of a ``FileRecord`` that is a normalized relative path; leave anything else alone.
+
+    An absolute or ``scheme://`` URL is left as it is. A relative URL with an
+    empty, ``.`` or ``..`` segment, or one that already starts with *prefix*,
+    is left as it is with a warning naming the job and the role.
+    """
+
+    from httk.core import FileRecord
+
+    if not isinstance(value, FileRecord) or "://" in value.url or value.url.startswith("/"):
+        return value
+    if value.url.startswith(f"{prefix}/") or any(part in {"", ".", ".."} for part in value.url.split("/")):
+        _LOGGER.warning(
+            "%s: leaving the URL %r of role %r unprefixed: it is not a normalized workspace-relative path",
+            identity,
+            value.url,
+            role,
+        )
+        return value
+    return replace(value, url=f"{prefix}/{value.url}")
+
+
+def _workspace_name(workspace: Workspace) -> str:
+    """Return the registered name of *workspace*, or its root directory's name when it is unregistered."""
+
+    from .registry import list_workspaces
+
+    root = workspace.root.resolve()
+    for binding in list_workspaces():
+        if binding.path is not None and Path(binding.path).resolve() == root:
+            return binding.name
+    return root.name
+
+
+def _staged_inputs(
+    record: JobRecord, provider: object | None, run: httk.core.Run, taken: Mapping[str, object]
+) -> dict[str, object]:
+    """Load the declared inputs staged as files that neither the collect hook nor the run names.
+
+    An input of the job's ``declared`` metadata with a ``destination`` and an
+    ``entry_type`` was staged where the scaffold stages it
+    (:func:`~httk.workflow.scaffold.payload_relative`: a bare name below
+    ``files/``, a name with a directory as written). It is read once with
+    :meth:`JobRecord.read_file` and loaded from those bytes by the reader its
+    name selects; a structure that loads as something else is wrapped as a
+    ``UnitcellStructureView``. Anything unsafe, compressed or not loadable as
+    its entry type is skipped with a warning, and an unstaged input likewise
+    (at info level when it is not required).
+    """
+
+    from httk.core.loading import load_source
+
+    from .scaffold import payload_relative
+
+    declared = record.job.get("declared")
+    entries = declared.get("inputs") if isinstance(declared, Mapping) else None
+    if not isinstance(entries, Mapping) or not entries:
+        return {}
+    known = _input_roles(_job_workflow_document(record, provider))
+    edged = {edge.label for edge in run.inputs}
+    loaded: dict[str, object] = {}
+    for entry in entries.values():
+        if not isinstance(entry, Mapping):
+            continue
+        destination, entry_type, role = entry.get("destination"), entry.get("entry_type"), entry.get("role")
+        if (
+            not isinstance(destination, str)
+            or not isinstance(entry_type, str)
+            or not isinstance(role, str)
+            or role in taken
+            or role in edged
+            or role not in known
+        ):
+            continue
+        try:
+            relative = payload_relative(destination)
+        except (ValueError, WorkflowError) as exc:
+            _LOGGER.warning("not collecting input %r of %s: %s", role, record.job_key, exc)
+            continue
+        if split_compression_suffix(relative.name)[1] is not None:
+            # A compressed input could decompress past any bound; read_file only bounds the stored bytes.
+            _LOGGER.warning(
+                "not collecting input %r of %s: a compressed staged file (%s) is not loaded",
+                role,
+                record.job_key,
+                destination,
+            )
+            continue
+        if not os.path.lexists(record.payload.joinpath(*relative.parts)):
+            # Only chooses the log level; read_file below is what reads the file safely.
+            level = logging.INFO if entry.get("required") is False else logging.WARNING
+            _LOGGER.log(level, "not collecting input %r of %s: %s is not staged", role, record.job_key, destination)
+            continue
+        try:
+            # Job-writable content is read once, bounded and without following symlinks, and loaded
+            # from those bytes; the file name only selects the reader.
+            data = record.read_file(relative.as_posix())
+            value = load_source(io.BytesIO(data), relative.name)
+            if getattr(value, "type", None) != entry_type:
+                if entry_type != "structures":
+                    raise ValueError(f"it loads as {type(value).__name__}, not as a {entry_type!r} entry")
+                try:
+                    from httk.atomistic import UnitcellStructureView  # pyright: ignore[reportMissingImports]
+                except ImportError:
+                    _LOGGER.warning(
+                        "not collecting input %r of %s: loading a structure needs httk-atomistic", role, record.job_key
+                    )
+                    continue
+                value = UnitcellStructureView(value)
+        except Exception as exc:
+            _LOGGER.warning("not collecting input %r of %s from %s: %s", role, record.job_key, destination, exc)
+            continue
+        loaded[role] = value
+    return loaded
 
 
 def _degraded_job(record: JobRecord, provider: object | None, run: httk.core.Run, reason: str) -> CollectedJob:
@@ -1656,6 +1889,8 @@ def collect(
     on_skipped: Callable[[str], None] | None = None,
     fail_fast: bool = False,
     batch_size: int = 64,
+    jobs: Iterable[str] | None = None,
+    data_path: str | None = None,
 ) -> Iterator[CollectedJob]:
     """Collect records through registered or explicitly allowed job collectors.
 
@@ -1679,9 +1914,14 @@ def collect(
         collection failure instead of yielding its degraded result.
     :param batch_size: Limit records retained and executable requests grouped at
         once; must be a positive integer.
+    :param jobs: Collect only these jobs and their descendants, selected as
+        :func:`job_records` selects them.
+    :param data_path: Replace the ``data`` prefix of file-entry URLs: a file
+        entry at a workspace-relative path gets the URL
+        ``<data_path>/<workspace name>/<path>``.
     :yields: Framework-assembled collected jobs, including degraded jobs.
-    :raises ValueError: If ``batch_size`` is invalid, or *fail_fast* observes a
-        per-job collection failure.
+    :raises ValueError: If ``batch_size`` or ``data_path`` is invalid, or
+        *fail_fast* observes a per-job collection failure.
     """
 
     from .provenance import _definition_uri, run_record
@@ -1690,7 +1930,22 @@ def collect(
     # Fail-fast must not execute later collectors after observing a failed job.
     if fail_fast:
         batch_size = 1
-    records = job_records(workspace, states=states, placement=placement, on_skipped=on_skipped)
+    records = job_records(workspace, states=states, placement=placement, on_skipped=on_skipped, jobs=jobs)
+    base = "data" if data_path is None else data_path.rstrip("/")
+    if not base:
+        raise ValueError("data_path must name a location, such as https://example.org/files")
+    url_prefix = f"{base}/{_workspace_name(workspace)}"
+
+    def assemble(
+        identity: str, record: JobRecord, provider: object | None, run: httk.core.Run, raw: object
+    ) -> CollectedJob:
+        outputs, inputs = (raw.outputs, raw.inputs) if isinstance(raw, Collected) else (raw, {})
+        if not isinstance(outputs, Mapping) or not isinstance(inputs, Mapping):
+            raise ValueError("collector must return a mapping of output roles or a Collected")
+        outputs, inputs = cast(Mapping[str, object], outputs), cast(Mapping[str, object], inputs)
+        inputs = {**inputs, **_staged_inputs(record, provider, run, inputs)}
+        return _assemble_collected(identity, record, provider, run, outputs, inputs=inputs, url_prefix=url_prefix)
+
     while window := list(islice(records, batch_size)):
         results: list[CollectedJob | None] = [None] * len(window)
         executable_groups: dict[str, list[tuple[int, JobRecord, WorkflowProvider, httk.core.Run]]] = {}
@@ -1820,10 +2075,7 @@ def collect(
                 provider = fallback_provider
                 fallback = True
             try:
-                raw_outputs = adapter(record)
-                if not isinstance(raw_outputs, Mapping):
-                    raise ValueError("collector must return a mapping of output roles")
-                results[index] = _assemble_collected(identity, record, provider, run, raw_outputs)
+                results[index] = assemble(identity, record, provider, run, adapter(record))
             except (ImportError, _CollectEnvironmentError):
                 raise
             except Exception as exc:
@@ -1850,7 +2102,7 @@ def collect(
                     built = _degraded_job(record, group_provider, run, failure_reason)
                 else:
                     try:
-                        built = _assemble_collected(identity, record, group_provider, run, resolved[local_index])
+                        built = assemble(identity, record, group_provider, run, resolved[local_index])
                     except (ImportError, _CollectEnvironmentError):
                         raise
                     except Exception as exc:

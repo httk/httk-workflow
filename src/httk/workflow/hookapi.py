@@ -18,6 +18,7 @@ __all__ = [
     "INSTANTIATE_FORMAT",
     "INSTANTIATE_VERSION",
     "Claim",
+    "Collected",
     "InstantiateRequest",
     "Unclaimed",
     "collect_main",
@@ -65,6 +66,22 @@ class Claim:
         if len(set(consumes)) != len(consumes):
             raise ValueError(f"claim consumes repeats a directory: {consumes!r}")
         object.__setattr__(self, "consumes", consumes)
+
+
+@dataclass(frozen=True)
+class Collected:
+    """A collect hook's result when it also hands over the inputs the job consumed.
+
+    A hook may return a plain mapping of output roles instead. In the
+    executable stream, *inputs* is written as the response's ``"inputs"``
+    member, with the same descriptor forms as ``"outputs"``.
+
+    :param outputs: Map declared output roles to their values.
+    :param inputs: Map declared input roles to the entries the job consumed.
+    """
+
+    outputs: Mapping[str, object]
+    inputs: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -156,10 +173,11 @@ def instantiate_main(fn: Callable[[InstantiateRequest], Mapping[str, Any]]) -> N
         raise SystemExit(str(exc) or type(exc).__name__) from exc
 
 
-def collect_main(fn: Callable[[Mapping[str, Any]], Mapping[str, Any]]) -> None:
+def collect_main(fn: Callable[[Mapping[str, Any]], Mapping[str, Any] | Collected]) -> None:
     """Run *fn* as a streaming executable collector.
 
-    :param fn: Convert one serialized job record into role-to-value wrappers.
+    :param fn: Convert one serialized job record into role-to-value wrappers,
+        or into a :class:`Collected` of output and input wrappers.
     :return: Nothing; responses are written as JSONL to standard output.
     """
 
@@ -176,10 +194,13 @@ def collect_main(fn: Callable[[Mapping[str, Any]], Mapping[str, Any]]) -> None:
             request = json.loads(line)
             record = request["record"]
             job_id = record["job_id"]
-            outputs = fn(record)
-            if not isinstance(outputs, Mapping):
-                raise TypeError("collector must return a mapping of output roles")
+            result = fn(record)
+            outputs, inputs = (result.outputs, result.inputs) if isinstance(result, Collected) else (result, {})
+            if not isinstance(outputs, Mapping) or not isinstance(inputs, Mapping):
+                raise TypeError("collector must return a mapping of output roles or a Collected")
             response: dict[str, Any] = {"job_id": job_id, "outputs": dict(outputs)}
+            if inputs:
+                response["inputs"] = dict(inputs)
             print(json.dumps(response, separators=(",", ":"), allow_nan=False), flush=True)
         except Exception as exc:
             response = {"job_id": job_id, "error": str(exc) or type(exc).__name__}

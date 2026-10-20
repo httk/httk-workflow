@@ -28,6 +28,7 @@ from httk.workflow.collecting import (
 )
 from httk.workflow.compat import _data_record
 from httk.workflow.compat.cwl import _file_record
+from httk.workflow.hookapi import Collected
 from httk.workflow.packages import parse_workflow_manifest
 from httk.workflow.scaffold import WorkflowProvider
 from httk.workflow.workflow_cli._describe import _workflow_description
@@ -166,7 +167,7 @@ def test_executable_unreadable_output_degrades_only_its_job(monkeypatch: pytest.
         [_record(tmp_path, "bad"), _record(tmp_path, "good")], provider, tmp_path
     )
     assert "unreadable output" in failures[0]
-    assert resolved == {1: {"answer": 7}}
+    assert resolved == {1: Collected({"answer": 7})}
 
 
 def test_collect_windows_input_and_keeps_mixed_collector_order(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -254,9 +255,9 @@ def test_executable_outputs_resolve_core_records(tmp_path: Path) -> None:
     )
     resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert failures == {}
-    assert isinstance(resolved[0]["value"], DataRecord)
-    assert isinstance(resolved[0]["file"], FileRecord)
-    assert isinstance(resolved[0]["entry"], FileRecord)
+    assert isinstance(resolved[0].outputs["value"], DataRecord)
+    assert isinstance(resolved[0].outputs["file"], FileRecord)
+    assert isinstance(resolved[0].outputs["entry"], FileRecord)
 
 
 def test_non_utf8_response_degrades_only_that_job(tmp_path: Path) -> None:
@@ -420,7 +421,7 @@ def test_unicode_line_separator_inside_json_survives(tmp_path: Path) -> None:
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
     resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert failures == {}
-    answer = resolved[0]["answer"]
+    answer = resolved[0].outputs["answer"]
     assert isinstance(answer, DataRecord)
     assert answer.value == "left\u2028right"
 
@@ -520,8 +521,9 @@ def test_in_process_and_executable_collectors_have_identical_results(
         states: Iterable[str],
         placement: str | PurePosixPath | None,
         on_skipped: Callable[[str], None] | None = None,
+        jobs: Iterable[str] | None = None,
     ) -> Iterator[JobRecord]:
-        del states, placement, on_skipped
+        del states, placement, on_skipped, jobs
         yield record
 
     provider = WorkflowProvider(
@@ -720,7 +722,7 @@ def test_executable_exit_status_is_surfaced_after_complete_responses(tmp_path: P
     )
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={})
     resolved, failures, exit_status = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
-    assert failures == {} and resolved[0] == {}
+    assert failures == {} and resolved[0] == Collected({})
     assert exit_status == 3
 
 
@@ -762,7 +764,7 @@ def test_an_executable_structure_entry_stores_like_the_python_collector(tmp_path
     )
     resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert failures == {}
-    collected = resolved[0]["relaxed"]
+    collected = resolved[0].outputs["relaxed"]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         expected = atomistic.UnitcellStructureView(httk.core.load(str(tmp_path / "CONTCAR")))
@@ -885,8 +887,9 @@ def test_a_malformed_served_entry_degrades_only_its_job(
         states: Iterable[str],
         placement: str | PurePosixPath | None,
         on_skipped: Callable[[str], None] | None = None,
+        jobs: Iterable[str] | None = None,
     ) -> Iterator[JobRecord]:
-        del states, placement, on_skipped
+        del states, placement, on_skipped, jobs
         yield from records
 
     provider = WorkflowProvider(

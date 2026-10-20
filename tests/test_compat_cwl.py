@@ -314,7 +314,9 @@ def test_bare_cwl_document_runs_and_collects_without_a_provider(package: Path, w
     item = next(collect(workspace))
     assert isinstance(item.outputs["spoken"], FileRecord)
     output = item.outputs["spoken"]
-    assert (workspace.root / output.url).read_text(encoding="utf-8").strip() == "hello"
+    prefix = f"data/{workspace.root.name}/"
+    assert output.url.startswith(prefix)
+    assert (workspace.root / output.url.removeprefix(prefix)).read_text(encoding="utf-8").strip() == "hello"
 
 
 def test_bare_cwl_document_can_be_forced(package: Path, workspace: Workspace) -> None:
@@ -402,10 +404,12 @@ def test_cwl_file_output_collects_a_workspace_relative_descriptor(tmp_path: Path
     assert isinstance(value, FileRecord)
     assert value.type == "files"
     assert re.fullmatch(r"[0-9a-f]{64}", content_id(value))
-    assert value.url == old_path
+    # An unregistered workspace's file URLs are data/<root directory name>/<workspace-relative path>.
+    prefix = f"data/{workspace.root.name}/"
+    assert value.url == prefix + old_path
     assert not PurePosixPath(value.url).is_absolute()
     assert value.name == "spoken.txt"
-    expected = hashlib.sha256((workspace.root / value.url).read_bytes()).hexdigest()
+    expected = hashlib.sha256((workspace.root / value.url.removeprefix(prefix)).read_bytes()).hexdigest()
     assert value.sha256 == expected
     assert value.size == len("hello\n")
     assert value.media_type is None
@@ -505,11 +509,12 @@ def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: W
     package = _package(tmp_path / "collect-into", "echo.cwl", _ECHO_TOOL, "message", "spoken")
     new_job(workspace, package, inputs={"message": "hello"})
     _drive(workspace)
-    item = next(collect(workspace))
-    value = item.outputs["spoken"]
-
     context = CLIContext("httk", tmp_path)
     workspace_name = register_ws(context, workspace.root, "language-collect-into")
+    # The URL names the registered workspace, so collect after registering, as the CLI does.
+    item = next(collect(workspace))
+    value = item.outputs["spoken"]
+    assert isinstance(value, FileRecord) and value.url.startswith("data/language-collect-into/jobs/")
     store_path = tmp_path / "results.sqlite"
     assert (
         command(

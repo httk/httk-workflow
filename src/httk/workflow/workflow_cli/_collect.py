@@ -10,6 +10,7 @@ from httk.core.cli import CLIContext
 from ..calculations import DirectoryClaim, claims, collect_tree
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, CollectedJob, collect, job_records
 from ..errors import ResolutionMiss, SealError
+from ..introspection import selector_is_path
 from ..seals import default_workspace_keys, tree_ledger_keys
 from ..storing import _collected_mapping, store_collected
 from ..workspace import Workspace
@@ -22,6 +23,8 @@ _TREE_ONLY = (("dry_run", "--dry-run"), ("prefer", "--prefer"), ("exclude", "--e
 _WORKSPACE_ONLY = (
     ("state", "--state"),
     ("placement", "--placement"),
+    ("job", "--job"),
+    ("data_path", "--data-path"),
     ("raw", "--raw"),
     ("allow_job_collector", "--allow-job-collector"),
 )
@@ -201,6 +204,8 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
         raise ValueError("--no-bare-runs only applies with --into")
     if arguments.into is None and arguments.upgrade:
         raise ValueError("--upgrade only applies with --into")
+    if arguments.job and arguments.placement:
+        raise ValueError("--job cannot be combined with --placement")
     if arguments.degraded and arguments.raw:
         raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
     skipped = 0
@@ -233,12 +238,20 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
 
     else:
         workspace = Workspace(root)
+        cwd = Path(context.cwd)
+        # The API resolves path selectors against the process directory; the CLI's is context.cwd.
+        jobs = (
+            None
+            if arguments.job is None
+            else [str(cwd / selector) if selector_is_path(cwd, selector) else selector for selector in arguments.job]
+        )
         if arguments.raw:
             records = job_records(
                 workspace,
                 states=arguments.state or DEFAULT_COLLECT_STATES,
                 placement=arguments.placement,
                 on_skipped=_skip,
+                jobs=jobs,
             )
             collected = 0
             for record in records:
@@ -255,6 +268,8 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             on_skipped=_skip,
             fail_fast=arguments.fail_fast,
             batch_size=64 if arguments.batch_size is None else arguments.batch_size,
+            jobs=jobs,
+            data_path=arguments.data_path,
         )
 
         def resolve_keys() -> Sequence[tuple[str, bytes]]:
@@ -345,6 +360,20 @@ def build_collect_parser(
         help=f"state kind to collect (repeatable, default: {', '.join(DEFAULT_COLLECT_STATES)})",
     )
     parser.add_argument("--placement", metavar="PLACEMENT", help="collect only jobs at or below this placement")
+    parser.add_argument(
+        "--job",
+        action="append",
+        metavar="JOB",
+        help=(
+            "collect only this job and its descendants: UUID, key, unique prefix, or a path inside the "
+            "workspace (repeatable)"
+        ),
+    )
+    parser.add_argument(
+        "--data-path",
+        metavar="PATH",
+        help="replace the `data` prefix of file-entry URLs, e.g. https://example.org/files",
+    )
     parser.add_argument(
         "--degraded",
         action="store_true",
