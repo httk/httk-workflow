@@ -30,6 +30,17 @@ When an output role is a single file-valued result, its run edge points to a
 standard `files` entry (`type = "files"`). File lists remain values within
 their role record.
 
+A `files` entry is identified by its content: its media type
+(`application/octet-stream` unless known), its `format` (the *httk₂* reader
+tag, such as `vasp-poscar`, when one is set) and the SHA-256 digest of its
+bytes. The same bytes at many locations are one entry, which keeps the URL,
+name and size it was first stored with. A `FileRecord` therefore needs a
+`sha256` of 64 lowercase hex digits: a hook building one (or returning a
+`{"entry": {"type": "files", ...}}` response) must compute it, for example
+with `httk.core.digests.sha256_file`. The framework computes it, and sets
+`format` from the file name, for a `{"file": ...}` response and for staged
+inputs.
+
 A `files` entry of a workspace job whose URL is a relative path (neither
 absolute nor `scheme://`) gets the fixed URL `data/<workspace name>/<url>`.
 The workspace name is the registered name whose path is the workspace root, or
@@ -58,21 +69,22 @@ input edges name their stored ids. Inputs come from two places:
   `httk.workflow.hookapi.Collected(outputs, inputs)` instead of a mapping of
   output roles. This is how an input given through a port, such as a jobflow
   structure staged as a pymatgen JSON file, names the entry it consumed.
-- The framework loads every declared input (`declared.inputs` of `job.json`)
+- The framework records every declared input (`declared.inputs` of `job.json`)
   that has both a `destination` and an `entry_type`, whose role the hook did
   not hand over and that has no input edge in the observed provenance yet. The
   staged file is where submission staged it: a bare name such as `POSCAR` at
   `<payload>/files/POSCAR`, a name with a directory such as `inputs/POSCAR` at
   `<payload>/inputs/POSCAR`. It is read once with `record.read_file` (below),
-  so a symlink, a special file or a file over 64 MiB is refused, and loaded
-  from those bytes by the reader its file name selects, as `httk.core.load`
-  would select it. A compressed staged file (`POSCAR.gz`) is not loaded, since
-  decompression could exceed the bound. A value whose `type` is the declared
-  `entry_type` is used as it is; for `structures`, any other loaded structure
-  is wrapped as a `UnitcellStructureView`, which needs *httk-atomistic*. An
-  input that is unsafe, compressed, or cannot be loaded as its entry type is
-  skipped with a warning naming the job and the role; one that is not staged
-  is skipped with a warning, or an info message when it is not `required`.
+  so a symlink, a special file or a file over 64 MiB is refused, and recorded
+  from those bytes as described under
+  [Staged inputs record the exact file](#staged-inputs-record-the-exact-file).
+  A compressed staged file (`POSCAR.gz`) is not recorded, since decompression
+  could exceed the bound. An input of another entry type is loaded by the
+  reader its file name selects, as `httk.core.load` would select it, and used
+  when its `type` is the declared `entry_type`. An input that is unsafe,
+  compressed, or cannot be loaded as its entry type is skipped with a warning
+  naming the job and the role; one that is not staged is skipped with a
+  warning, or an info message when it is not `required`.
 
 A hook reads the files a job wrote with `record.read_file(relative)`, which
 returns the bytes of a file below the job's payload (for example
@@ -84,6 +96,37 @@ special file without blocking, and refuses a file larger than `limit` (default
 An input role the job's workflow declaration does not list is a collector
 error that degrades the job; the framework only loads roles the declaration
 lists.
+
+### Staged inputs record the exact file
+
+Inputs are staged into the job verbatim, and what the workflow does with them
+afterwards is its own business, so the store records exactly the file the
+workflow received:
+
+- A `files` input becomes the `files` entry of the staged file: its URL
+  (`data/<workspace name>/<workspace-relative path>`), name, size, SHA-256
+  digest and, when a registered reader matches the name, its `format` (for
+  example `vasp-poscar`). The file is not loaded. File entries are identified
+  by content, so the same bytes staged by many jobs are one entry, which keeps
+  the URL it was first stored with.
+- A `structures` input becomes two entries. The main entry is the structure
+  as *httk₂* reads it by default (any loaded structure wrapped as a
+  `UnitcellStructureView`, which needs *httk-atomistic*), so equal structures
+  share it. Its alternative of kind `file_<hex>` (the first 16 hex digits of
+  the staged file entry's content id) holds the structure read with
+  `as_written=True`, the numbers exactly as written, and the staged file as
+  its `source_file`. Different files of one structure are different
+  alternatives of the same main; the same bytes are one. When the file cannot
+  be read as written, the alternative holds the default reading, with a
+  warning. This happens for a CIF whose coordinates are not exactly on a
+  declared Wyckoff position, and for one that writes a special position as a
+  rounded decimal (`0.3333`): read exactly, its symmetry images become
+  separate sites, so the site count differs from the default reading.
+
+The run's input edge, and any product link drawn from that role, names the
+alternative as `<main id>~file_<hex>`. The bytes stay in the workspace; the
+store holds the URL and the digest, which tells whether a copy is still the
+file the job received.
 
 ### Runs and product curation
 

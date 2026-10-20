@@ -19,7 +19,7 @@ from typing import Any, cast
 from httk.core import DataRecord, Run, RunEdge
 from httk.core.storage import content_id, resolve_storage_record
 
-from .collecting import CollectedJob
+from .collecting import CollectedJob, StructureInput
 from .id_keys import UnstableIdentityError, ledger_key
 
 __all__ = ["store_collected"]
@@ -498,6 +498,18 @@ def _latest_stored_entry(store: Any, value: object, entry_id: str) -> Any:
     return None if row is None else row.entry
 
 
+def _latest_stored_alternative(store: Any, value: StructureInput, main_id: str) -> Any:
+    """Return the latest stored revision of *value*'s alternative ``<main_id>~<kind>``, if any."""
+
+    searcher = store.searcher(only_latest=True, only_main_alt=False)
+    variable = searcher.variable(resolve_storage_record(value.alternative))
+    searcher.add(variable.id == main_id)
+    # An alternative's immutable ids are <main id>~<kind>~<n>; the main's are <main id>~<n>.
+    prefix = f"{main_id}~{value.kind}~"
+    rows = searcher.results(entry=variable)
+    return next((row.entry for row in rows if str(row.entry.immutable_id).startswith(prefix)), None)
+
+
 def _id_settable(value: object) -> bool:
     """Report whether an output value can be handed an explicit entry id.
 
@@ -698,7 +710,10 @@ def store_collected(
 
     The entries a recognized calculation read (the ``inputs`` of
     :class:`~httk.workflow.collecting.CollectedJob`) are stored like its
-    outputs, and the run's input edges name their stored ids.
+    outputs, and the run's input edges name their stored ids. A staged
+    structure input stores its default reading as the main entry and the
+    reading of its exact file as the alternative ``<main id>~file_<hex>``,
+    which its input edge names.
     Collector outputs arrive carrying content ids; every edge, product link and
     ``product_of`` reference is rewritten to the id the store stored it under.
 
@@ -835,7 +850,7 @@ def store_collected(
                 if index in failures:
                     break
                 try:
-                    stored_as = _typed(value, typed)
+                    stored_as = _typed(value.alternative if isinstance(value, StructureInput) else value, typed)
                 except (TypeError, ValueError) as exc:
                     # A value the typed record refuses (a list-valued total energy) fails this job only.
                     failures[index] = f"cannot store role {role!r}: {exc}"
@@ -956,6 +971,30 @@ def store_collected(
                     for role, value in (*item.outputs.items(), *item.inputs.items()):
                         if getattr(value, "product_of", ()):
                             deferred_outputs.setdefault(index, []).append((role, value))
+                            continue
+                        if isinstance(value, StructureInput):
+                            # The main is stored as any structure; the alternative records the staged
+                            # file under it, addressed as <main id>~<kind>, which the run's edge names.
+                            main_key = content_id(value.main)
+                            revised |= _save_output(
+                                item,
+                                role,
+                                value.main,
+                                original_key=main_key,
+                                pending_remap=pending_remap,
+                                entry_ids=entry_ids,
+                            )
+                            main_id = pending_remap[main_key]
+                            # The same file read differently as written (a reader fix) revises its alternative.
+                            predecessor = _latest_stored_alternative(store, value, main_id)
+                            if predecessor is not None and content_id(predecessor) != content_id(value.alternative):
+                                before = store.sid_of(predecessor)
+                                sid = store.replace(predecessor, value.alternative)
+                                revised |= before is not None and sid > before
+                            else:
+                                store.save(value.alternative, alternative_of=main_id, alternative_kind=value.kind)
+                            pending_remap[content_id(value.alternative)] = f"{main_id}~{value.kind}"
+                            entry_ids.append(f"{main_id}~{value.kind}")
                             continue
                         revised |= _save_output(
                             item,

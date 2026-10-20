@@ -245,7 +245,7 @@ def test_executable_outputs_resolve_core_records(tmp_path: Path) -> None:
         "    print(json.dumps({'job_id': job_id, 'outputs': {\n"
         "        'value': {'value': 3},\n"
         "        'file': {'file': 'result.txt'},\n"
-        "        'entry': {'entry': {'type': 'files', 'url': 'result.txt', 'name': 'result.txt'}}\n"
+        "        'entry': {'entry': {'type': 'files', 'url': 'result.txt', 'name': 'result.txt', 'sha256': '0' * 64}}\n"
         "    }}), flush=True)",
     )
     provider = SimpleNamespace(

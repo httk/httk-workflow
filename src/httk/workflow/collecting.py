@@ -40,6 +40,7 @@ record reads only that job's own directory.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import io
 import json
@@ -97,6 +98,7 @@ __all__ = [
     "DEFAULT_COLLECT_STATES",
     "CollectedJob",
     "JobRecord",
+    "StructureInput",
     "children_of",
     "collect",
     "collect_kinds",
@@ -178,7 +180,8 @@ class CollectedJob:
     :param inputs: Map declared input roles to the entries the job consumed:
         those a recognized-calculation collector read from its directory, or,
         for a workspace job, those its collect hook handed over plus the
-        declared inputs staged as files that the framework loaded.
+        declared inputs staged as files that the framework recorded (a staged
+        structure is a ``StructureInput``, whose alternative the run's edge names).
     """
 
     workflow_id: str
@@ -194,6 +197,27 @@ class CollectedJob:
     run_only: bool = False
     child_runs: tuple[tuple[str, str], ...] = ()
     inputs: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StructureInput:
+    """Pair a staged structure input's default reading with the alternative recording its file.
+
+    :param main: The structure as *httk₂* reads it by default.
+    :param alternative: The ``UnitcellStructureRecord`` of the as-written reading,
+        with the staged file as ``source_file``.
+    :param kind: The alternative kind, ``file_`` and the first 16 hex digits of
+        the staged file record's content id.
+    """
+
+    main: object
+    alternative: Any
+    kind: str
+
+    @property
+    def type(self) -> str:
+        """Name the entry type both readings are stored as."""
+        return "structures"
 
 
 # ---------------------------------------------------------------------------
@@ -987,6 +1011,9 @@ def _provider_output_roles(provider: object | None) -> dict[str, Mapping[str, ob
 
 
 def _entry_edge(identity: str, role: str, value: object, declared: Mapping[str, object]) -> httk.core.RunEdge:
+    if isinstance(value, StructureInput):
+        # The run consumed exactly the staged file: its edge names the alternative that records it.
+        value = value.alternative
     entry_id = getattr(value, "id", None)
     if not isinstance(entry_id, str):
         try:
@@ -1022,7 +1049,7 @@ def _workspace_file_record(
 ) -> object:
     """Resolve one workspace-confined path into a core ``FileRecord``."""
 
-    from httk.core import FileRecord
+    from httk.core import FileRecord, reader_format_for
 
     root = record.workspace_root.resolve()
     recorded_path = Path(recorded)
@@ -1058,11 +1085,13 @@ def _workspace_file_record(
     if actual is None:
         raise ValueError(f"file path {recorded!r} is missing or outside the workspace/workdir/data roots")
     descriptor_path = actual.relative_to(root).as_posix()
+    file_name = recorded_path.name if name is None else name
     return FileRecord(
         url=descriptor_path,
-        name=recorded_path.name if name is None else name,
+        name=file_name,
         size=actual.stat().st_size,
         sha256=sha256_file(actual),
+        format=reader_format_for(file_name),
     )
 
 
@@ -1704,6 +1733,9 @@ def _prefixed_url(identity: str, role: str, value: object, prefix: str) -> objec
 
     from httk.core import FileRecord
 
+    if isinstance(value, StructureInput):
+        source = _prefixed_url(identity, role, value.alternative.source_file, prefix)
+        return replace(value, alternative=replace(value.alternative, source_file=source))
     if not isinstance(value, FileRecord) or "://" in value.url or value.url.startswith("/"):
         return value
     if value.url.startswith(f"{prefix}/") or any(part in {"", ".", ".."} for part in value.url.split("/")):
@@ -1732,20 +1764,25 @@ def _workspace_name(workspace: Workspace) -> str:
 def _staged_inputs(
     record: JobRecord, provider: object | None, run: httk.core.Run, taken: Mapping[str, object]
 ) -> dict[str, object]:
-    """Load the declared inputs staged as files that neither the collect hook nor the run names.
+    """Record the declared inputs staged as files that neither the collect hook nor the run names.
 
     An input of the job's ``declared`` metadata with a ``destination`` and an
     ``entry_type`` was staged where the scaffold stages it
     (:func:`~httk.workflow.scaffold.payload_relative`: a bare name below
     ``files/``, a name with a directory as written). It is read once with
-    :meth:`JobRecord.read_file` and loaded from those bytes by the reader its
-    name selects; a structure that loads as something else is wrapped as a
-    ``UnitcellStructureView``. Anything unsafe, compressed or not loadable as
-    its entry type is skipped with a warning, and an unstaged input likewise
-    (at info level when it is not required).
+    :meth:`JobRecord.read_file`, and those bytes are what is recorded: a
+    ``files`` input becomes the ``FileRecord`` of the staged file (not loaded).
+    A ``structures`` input becomes a ``StructureInput``: the default
+    reading (wrapped as a ``UnitcellStructureView`` when it loads as something
+    else) and an alternative holding the as-written reading with the staged file
+    as ``source_file``; when the as-written reading fails, the alternative holds
+    the default reading, with a warning. Any other entry type is loaded by the
+    reader its name selects. Anything unsafe, compressed or not loadable as its
+    entry type is skipped with a warning, and an unstaged input likewise (at
+    info level when it is not required).
     """
 
-    from httk.core.loading import load_source
+    from httk.core import FileRecord, reader_format_for
 
     from .scaffold import payload_relative
 
@@ -1789,26 +1826,84 @@ def _staged_inputs(
             _LOGGER.log(level, "not collecting input %r of %s: %s is not staged", role, record.job_key, destination)
             continue
         try:
-            # Job-writable content is read once, bounded and without following symlinks, and loaded
-            # from those bytes; the file name only selects the reader.
+            # Job-writable content is read once, bounded and without following symlinks, and recorded
+            # and loaded from those bytes; the file name only selects the reader.
             data = record.read_file(relative.as_posix())
-            value = load_source(io.BytesIO(data), relative.name)
-            if getattr(value, "type", None) != entry_type:
-                if entry_type != "structures":
-                    raise ValueError(f"it loads as {type(value).__name__}, not as a {entry_type!r} entry")
+            file_record = FileRecord(
+                url=f"{record.payload_path.as_posix()}/{relative.as_posix()}",
+                name=relative.name,
+                size=len(data),
+                sha256=hashlib.sha256(data).hexdigest(),
+                format=reader_format_for(relative.name),
+            )
+            if entry_type == "files":
+                loaded[role] = file_record
+                continue
+            value = _loaded_input(data, relative.name, entry_type)
+            if entry_type == "structures":
+                from httk.atomistic import (  # pyright: ignore[reportMissingImports]
+                    UnitcellStructureRecord,
+                    UnitcellStructureView,
+                )
+
                 try:
-                    from httk.atomistic import UnitcellStructureView  # pyright: ignore[reportMissingImports]
-                except ImportError:
-                    _LOGGER.warning(
-                        "not collecting input %r of %s: loading a structure needs httk-atomistic", role, record.job_key
+                    exact = _loaded_input(data, relative.name, entry_type, as_written=True)
+                    # As written, a CIF site off its special position is not merged onto it; that is
+                    # another crystal, not the exact numbers of this one.
+                    written, default = (
+                        len(UnitcellStructureView(cast(Any, s)).species_at_sites) for s in (exact, value)
                     )
-                    continue
-                value = UnitcellStructureView(value)
+                    if written != default:
+                        raise ValueError(f"it has {written} sites where the default reading has {default}")
+                except Exception as exc:
+                    _LOGGER.warning(
+                        "input %r of %s: %s cannot be read as written (%s); its exact alternative holds the default "
+                        "reading",
+                        role,
+                        record.job_key,
+                        destination,
+                        exc,
+                    )
+                    exact = value
+                alternative = replace(
+                    UnitcellStructureRecord.from_structure(UnitcellStructureView(cast(Any, exact))),
+                    source_file=file_record,
+                )
+                value = StructureInput(value, alternative, f"file_{content_id(file_record)[:16]}")
         except Exception as exc:
             _LOGGER.warning("not collecting input %r of %s from %s: %s", role, record.job_key, destination, exc)
             continue
         loaded[role] = value
     return loaded
+
+
+def _loaded_input(data: bytes, name: str, entry_type: str, *, as_written: bool = False) -> object:
+    """Load staged-input bytes by the reader *name* selects, as a *entry_type* entry.
+
+    A structure that loads as something else is wrapped as a ``UnitcellStructureView``.
+
+    :param data: The staged file's bytes.
+    :param name: The staged file name, which selects the reader.
+    :param entry_type: The declared entry type.
+    :param as_written: Read the numbers exactly as written (structure readers only).
+    :return: The loaded entry.
+    :raises ValueError: If it does not load as *entry_type*, or a structure needs httk-atomistic.
+    """
+
+    from httk.core.loading import load_source
+
+    # Only structure readers take ``as_written``, so other readers never see it.
+    options: dict[str, Any] = {"as_written": True} if as_written else {}
+    value = load_source(io.BytesIO(data), name, **options)
+    if getattr(value, "type", None) == entry_type:
+        return value
+    if entry_type != "structures":
+        raise ValueError(f"it loads as {type(value).__name__}, not as a {entry_type!r} entry")
+    try:
+        from httk.atomistic import UnitcellStructureView  # pyright: ignore[reportMissingImports]
+    except ImportError as exc:
+        raise ValueError("loading a structure needs httk-atomistic") from exc
+    return UnitcellStructureView(value)
 
 
 def _degraded_job(record: JobRecord, provider: object | None, run: httk.core.Run, reason: str) -> CollectedJob:

@@ -7,6 +7,7 @@ read instead (a :class:`~httk.workflow.hookapi.Collected` in process, or the
 ``data/<workspace name>/<workspace-relative path>`` URLs.
 """
 
+import hashlib
 import io
 import json
 import logging
@@ -14,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from httk.core import DataRecord, FileRecord
@@ -23,7 +24,7 @@ from httk.core.cli import CLIContext
 from conftest import register_ws
 from httk.workflow import Workspace, _store, collect
 from httk.workflow import scaffold as scaffold_module
-from httk.workflow.collecting import JobRecord, _prefixed_url
+from httk.workflow.collecting import JobRecord, StructureInput, _prefixed_url
 from httk.workflow.workflow_cli import command
 from test_collect_fallback import _DATA_MANIFEST
 from test_workflow_packages import _package
@@ -39,6 +40,7 @@ role = "report"
 """
 )
 _POSCAR = "Si\n5.43\n0 0.5 0.5\n0.5 0 0.5\n0.5 0.5 0\nSi\n2\nDirect\n0 0 0\n0.25 0.25 0.25\n"
+_DIGEST = "0" * 64
 _DECLARED = {
     "inputs": {
         "structure": {
@@ -151,15 +153,15 @@ def test_a_staged_input_becomes_an_entry_that_the_product_links_to(tmp_path: Pat
 
 def test_only_normalized_relative_urls_are_prefixed(caplog: pytest.LogCaptureFixture) -> None:
     for url in ("https://example.org/a.txt", "/srv/files/a.txt"):
-        value = FileRecord(url=url, name="a.txt")
+        value = FileRecord(url=url, name="a.txt", sha256=_DIGEST)
         assert _prefixed_url("ws:job", "report", value, "data/ws") is value
     record = DataRecord.from_value("https://example.test/energy", "total", 1.5)
     assert _prefixed_url("ws:job", "energy", record, "data/ws") is record
-    prefixed = _prefixed_url("ws:job", "report", FileRecord(url="jobs/a.txt", name="a.txt"), "data/ws")
+    prefixed = _prefixed_url("ws:job", "report", FileRecord(url="jobs/a.txt", name="a.txt", sha256=_DIGEST), "data/ws")
     assert getattr(prefixed, "url", None) == "data/ws/jobs/a.txt"
     assert not caplog.records
     for url in ("jobs/../a.txt", "./a.txt", "jobs//a.txt", "data/ws/jobs/a.txt"):
-        value = FileRecord(url=url, name="a.txt")
+        value = FileRecord(url=url, name="a.txt", sha256=_DIGEST)
         assert _prefixed_url("ws:job", "report", value, "data/ws") is value
     assert len(caplog.records) == 4 and "ws:job" in caplog.text and "'report'" in caplog.text
 
@@ -214,8 +216,9 @@ def test_a_staged_input_is_loaded_from_the_bytes_read_file_returned(
     assert read == ["files/POSCAR"]
     expected = load_source(io.BytesIO(germanium.encode()), "POSCAR")
     assert content_id(expected) != content_id(load_source(io.BytesIO(_POSCAR.encode()), "POSCAR"))
-    assert content_id(item.inputs["initial_structure"]) == content_id(expected)
-    assert item.run.inputs[0].entry_id == content_id(expected)
+    value = item.inputs["initial_structure"]
+    assert isinstance(value, StructureInput) and content_id(value.main) == content_id(expected)
+    assert item.run.inputs[0].entry_id == content_id(value.alternative)
 
 
 def test_optional_unstaged_and_compressed_inputs_are_skipped(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -312,7 +315,8 @@ def test_an_executable_hook_hands_over_inputs_in_its_response(tmp_path: Path) ->
         "collect_main(lambda record: Collected(\n"
         "    {'relaxed_structure': {'value': 1.5}},\n"
         "    {'initial_structure': {'entry': {\n"
-        "        'type': 'files', 'url': record['payload_path'] + '/files/POSCAR', 'name': 'POSCAR'}}},\n"
+        "        'type': 'files', 'url': record['payload_path'] + '/files/POSCAR', 'name': 'POSCAR',\n"
+        f"        'sha256': {_DIGEST!r}}}}}}},\n"
         "))\n"
     )
     manifest = _MANIFEST.replace('[workflow.collect]\nfile = "collect.py"', '[workflow.collect]\nfile = "collect"')
@@ -373,3 +377,293 @@ def test_a_run_stored_before_run_names_and_times_teaches_a_rebuild(tmp_path: Pat
     moved = replace(item, run=replace(item.run, finished_at=datetime(2030, 1, 1, tzinfo=UTC)))
     (report,) = store_collected([moved], other, id_base="httk.t")
     assert "run metadata changed since it was stored: " in str(report["storage_error"])
+
+
+_DIAMOND = _POSCAR.replace("5.43", "3.567")
+_FILES_MANIFEST = _MANIFEST.replace(
+    '[workflow.inputs.structure]\ndestination = "POSCAR"\nentry_type = "structures"',
+    '[workflow.inputs.structure]\ndestination = "POSCAR"\nentry_type = "files"',
+)
+_FILES_DECLARED = {"inputs": {"structure": {**_DECLARED["inputs"]["structure"], "entry_type": "files"}}}
+
+
+def _structure_input(item: Any) -> StructureInput:
+    value = item.inputs["initial_structure"]
+    assert isinstance(value, StructureInput)
+    return value
+
+
+def test_a_files_input_is_recorded_as_its_file_not_loaded(tmp_path: Path) -> None:
+    from httk.core.storage import content_id
+
+    first, second = (
+        next(
+            collect(
+                _finished(tmp_path / name, manifest=_FILES_MANIFEST, declared=_FILES_DECLARED), allow_job_collector=True
+            )
+        )
+        for name in ("a", "b")
+    )
+
+    value = first.inputs["initial_structure"]
+    assert isinstance(value, FileRecord)
+    assert value.url == f"data/workspace/{first.record.payload_path.as_posix()}/files/POSCAR"
+    assert (value.name, value.size, value.format) == ("POSCAR", len(_POSCAR), "vasp-poscar")
+    assert value.sha256 == hashlib.sha256(_POSCAR.encode()).hexdigest()
+    assert [(edge.label, edge.entry_type, edge.entry_id) for edge in first.run.inputs] == [
+        ("initial_structure", "files", content_id(value))
+    ]
+    # The same bytes staged by another job, at another path, are the same file entry.
+    other = second.inputs["initial_structure"]
+    assert isinstance(other, FileRecord) and other.url != value.url
+    assert content_id(other) == content_id(value)
+
+
+def test_a_staged_structure_records_its_exact_file_as_an_alternative(tmp_path: Path) -> None:
+    from fractions import Fraction
+
+    from httk.atomistic import UnitcellStructureView
+    from httk.core.storage import content_id
+
+    item = next(collect(_finished(tmp_path, members={"files/POSCAR": _DIAMOND}), allow_job_collector=True))
+
+    value = _structure_input(item)
+    # The default reading snaps the written scale 3.567 to 346/97; the alternative keeps it as written.
+    main: Any = UnitcellStructureView(cast(Any, value.main))
+    exact: Any = UnitcellStructureView(value.alternative)
+    assert main.cell.basis.fractions[0][1] == Fraction(173, 97)
+    assert exact.cell.basis.fractions[0][1] == Fraction(3567, 2000)
+    source = value.alternative.source_file
+    assert source.sha256 == hashlib.sha256(_DIAMOND.encode()).hexdigest() and source.format == "vasp-poscar"
+    assert source.url == f"data/workspace/{item.record.payload_path.as_posix()}/files/POSCAR"
+    assert value.kind == f"file_{content_id(source)[:16]}"
+    # The run's edge, and the product link drawn from it, name the alternative.
+    assert [(edge.entry_type, edge.entry_id) for edge in item.run.inputs] == [
+        ("structures", content_id(value.alternative))
+    ]
+    (product,) = item.products
+    assert product.source_id == content_id(value.alternative)
+
+
+# P3 with one B site at {xy}; {wyckoff} may declare it on Wyckoff position 2b.
+_TRIGONAL_CIF = """data_test
+_cell_length_a 3.567
+_cell_length_b 3.567
+_cell_length_c 4.1
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 120
+_symmetry_space_group_name_H-M 'P 3'
+loop_
+_symmetry_equiv_pos_as_xyz
+x,y,z
+-y,x-y,z
+-x+y,-x,z
+loop_
+_atom_site_label
+_atom_site_type_symbol{wyckoff_tag}
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+B1 B{wyckoff} {xy} 0.25
+"""
+
+
+def _cif_job(tmp_path: Path, cif: str) -> Any:
+    """Collect one job whose structure input is staged as ``x.cif``."""
+
+    manifest = _MANIFEST.replace('destination = "POSCAR"', 'destination = "x.cif"')
+    declared = {"inputs": {"structure": {**_DECLARED["inputs"]["structure"], "destination": "x.cif"}}}
+    ws = _finished(tmp_path, manifest=manifest, declared=declared, members={"files/x.cif": cif})
+    return next(collect(ws, allow_job_collector=True))
+
+
+def test_a_staged_cif_records_its_coordinates_as_written(tmp_path: Path) -> None:
+    from fractions import Fraction
+
+    from httk.atomistic import UnitcellStructureView
+
+    # A general position: its orbit is the same three sites in both readings.
+    cif = _TRIGONAL_CIF.format(wyckoff_tag="", wyckoff="", xy="0.1234 0.5678")
+    value = _structure_input(_cif_job(tmp_path, cif))
+
+    main: Any = UnitcellStructureView(cast(Any, value.main))
+    exact: Any = UnitcellStructureView(value.alternative)
+    assert len(main.species_at_sites) == len(exact.species_at_sites) == 3
+    assert exact.sites.reduced_coords.to_fractions() == [
+        [Fraction(1234, 10000), Fraction(5678, 10000), Fraction(1, 4)],
+        [Fraction(4322, 10000), Fraction(5556, 10000), Fraction(1, 4)],
+        [Fraction(4444, 10000), Fraction(8766, 10000), Fraction(1, 4)],
+    ]
+    assert exact.cell.lengths[0] == Fraction(3567, 1000)
+    source = value.alternative.source_file
+    assert source.format == "cif" and source.sha256 == hashlib.sha256(cif.encode()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("wyckoff_tag", "wyckoff", "reason"),
+    [
+        # Declared on 2b but written 2e-4 off it: as written, the declaration is refused.
+        ("\n_atom_site_Wyckoff_symbol", " b", "does not lie on its declared Wyckoff position"),
+        # Undeclared: as written, the site is not merged onto 2b and its orbit has three sites, not one.
+        ("", "", "it has 3 sites where the default reading has 1"),
+    ],
+)
+def test_an_input_that_cannot_be_read_as_written_keeps_the_default_reading(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, wyckoff_tag: str, wyckoff: str, reason: str
+) -> None:
+    from fractions import Fraction
+
+    from httk.atomistic import UnitcellStructureRecord, UnitcellStructureView
+    from httk.core.storage import content_id
+
+    cif = _TRIGONAL_CIF.format(wyckoff_tag=wyckoff_tag, wyckoff=wyckoff, xy="0.3333 0.6667")
+    value = _structure_input(_cif_job(tmp_path, cif))
+
+    main: Any = UnitcellStructureView(cast(Any, value.main))
+    assert main.sites.reduced_coords.to_fractions() == [[Fraction(1, 3), Fraction(2, 3), Fraction(1, 4)]]
+    assert len(UnitcellStructureView(value.alternative).species_at_sites) == 1
+    default = UnitcellStructureRecord.from_structure(main)
+    assert content_id(replace(value.alternative, source_file=None)) == content_id(default)
+    assert value.alternative.source_file is not None and value.alternative.source_file.format == "cif"
+    assert "input 'initial_structure'" in caplog.text and "cannot be read as written" in caplog.text
+    assert reason in caplog.text
+
+
+def test_a_changed_reading_of_the_same_file_revises_its_alternative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("httk.store")
+    import httk.core.loading
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+
+    from httk.workflow import store_collected
+
+    path = str(tmp_path / "store.sqlite")
+    ws = _finished(tmp_path, members={"files/POSCAR": _DIAMOND})
+    first = next(collect(ws, allow_job_collector=True))
+    (report,) = store_collected([first], path, id_base="httk.t")
+    main_id, alternative_id = _structure_ids(report)
+
+    # The same file read differently as written, as after a reader fix: here, as by default.
+    load_source = httk.core.loading.load_source
+
+    def reread(source: Any, name: str, **options: Any) -> Any:
+        options.pop("as_written", None)
+        return load_source(source, name, **options)
+
+    monkeypatch.setattr(httk.core.loading, "load_source", reread)
+    second = next(collect(ws, allow_job_collector=True))
+    assert _structure_input(second).kind == _structure_input(first).kind
+    assert _structure_input(second).alternative != _structure_input(first).alternative
+    (again,) = store_collected([second], path, id_base="httk.t")
+
+    assert "storage_error" not in again, again["storage_error"]
+    assert again["revised"] is True and _structure_ids(again) == (main_id, alternative_id)
+    with Backend.sqlite(path) as database:
+        store = SqlStore(database)
+        assert _input_edge(store, again) == alternative_id
+        latest = _rows(store, main_id)[alternative_id]
+        assert [revision.immutable_id for revision in store.history(latest)] == [
+            f"{alternative_id}~1",
+            f"{alternative_id}~2",
+        ]
+
+
+def _rows(store: Any, main_id: str) -> dict[str, Any]:
+    """Map the main id and each ``<main id>~<kind>`` of a structure group to its stored record."""
+
+    from httk.atomistic import UnitcellStructureRecord
+
+    searcher = store.searcher(only_main_alt=False)
+    variable = searcher.variable(UnitcellStructureRecord)
+    searcher.add(variable.id == main_id)
+    # An immutable id is <id>~<n> for a main and <id>~<kind>~<n> for an alternative.
+    return {row.entry.immutable_id.rsplit("~", 1)[0]: row.entry for row in searcher.results(entry=variable)}
+
+
+def _structure_ids(report: Mapping[str, Any]) -> tuple[str, str]:
+    """Return the stored main id and ``<main id>~<kind>`` id of a report's staged structure."""
+
+    entries = report["stored"]["entries"]
+    (alternative_id,) = [entry for entry in entries if "~" in entry]
+    main_id = alternative_id.split("~")[0]
+    assert main_id in entries
+    return main_id, alternative_id
+
+
+def _input_edge(store: Any, report: Mapping[str, Any]) -> str:
+    """Return the entry id the input edge of a report's stored run names."""
+
+    from httk.core import Run
+
+    (edge,) = _stored(store, Run, report["stored"]["run"]).inputs
+    return edge.entry_id
+
+
+def test_into_stores_the_main_and_the_file_alternative_the_run_names(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+
+    from httk.workflow import store_collected
+
+    path = str(tmp_path / "store.sqlite")
+    first = next(collect(_finished(tmp_path / "a", members={"files/POSCAR": _DIAMOND}), allow_job_collector=True))
+    (report,) = store_collected([first], path, id_base="httk.t")
+    assert "storage_error" not in report
+    kind = _structure_input(first).kind
+    main_id, alternative_id = _structure_ids(report)
+    assert alternative_id == f"{main_id}~{kind}"
+    with Backend.sqlite(path) as database:
+        store = SqlStore(database)
+        rows = _rows(store, main_id)
+        assert set(rows) == {main_id, alternative_id}
+        assert rows[main_id].source_file is None
+        assert rows[alternative_id].source_file.sha256 == hashlib.sha256(_DIAMOND.encode()).hexdigest()
+        assert _input_edge(store, report) == alternative_id
+
+    # Collecting the same job again changes nothing.
+    (again,) = store_collected([first], path, id_base="httk.t")
+    assert "storage_error" not in again and again["revised"] is False
+    assert again["stored"] == report["stored"]
+
+    # Other bytes of the same structure: the same main, a second alternative, each run naming its own.
+    padded = _DIAMOND.replace("3.567", "3.5670")
+    second = next(collect(_finished(tmp_path / "b", members={"files/POSCAR": padded}), allow_job_collector=True))
+    (other,) = store_collected([second], path, id_base="httk.t")
+    assert "storage_error" not in other, other
+    assert _structure_input(second).kind != kind
+    other_alternative = f"{main_id}~{_structure_input(second).kind}"
+    assert _structure_ids(other) == (main_id, other_alternative)
+    with Backend.sqlite(path) as database:
+        store = SqlStore(database)
+        assert set(_rows(store, main_id)) == {main_id, alternative_id, other_alternative}
+        assert _input_edge(store, report) == alternative_id
+        assert _input_edge(store, other) == other_alternative
+
+
+def test_identical_staged_bytes_at_other_paths_store_one_alternative_and_one_file(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+
+    from httk.workflow import store_collected
+
+    path = str(tmp_path / "store.sqlite")
+    items = [
+        next(collect(_finished(tmp_path / name, members={"files/POSCAR": _DIAMOND}), allow_job_collector=True))
+        for name in ("a", "b")
+    ]
+    reports = [store_collected([item], path, id_base="httk.t")[0] for item in items]
+    assert all("storage_error" not in report for report in reports), reports
+    main_id, alternative_id = _structure_ids(reports[0])
+    assert _structure_ids(reports[1]) == (main_id, alternative_id)
+    with Backend.sqlite(path) as database:
+        store = SqlStore(database)
+        assert set(_rows(store, main_id)) == {main_id, alternative_id}
+        searcher = store.searcher()
+        variable = searcher.variable(FileRecord)
+        searcher.add(variable.sha256 == hashlib.sha256(_DIAMOND.encode()).hexdigest())
+        (staged,) = [row.entry for row in searcher.results(entry=variable)]
+        # The first collected location is kept.
+        assert staged.url == f"data/workspace/{items[0].record.payload_path.as_posix()}/files/POSCAR"
+        assert _input_edge(store, reports[0]) == _input_edge(store, reports[1])

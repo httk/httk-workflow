@@ -412,7 +412,7 @@ def test_cwl_file_output_collects_a_workspace_relative_descriptor(tmp_path: Path
     expected = hashlib.sha256((workspace.root / value.url.removeprefix(prefix)).read_bytes()).hexdigest()
     assert value.sha256 == expected
     assert value.size == len("hello\n")
-    assert value.media_type is None
+    assert value.media_type == "application/octet-stream" and value.format is None
     assert find(workspace, job.job_id).path.exists()
 
 

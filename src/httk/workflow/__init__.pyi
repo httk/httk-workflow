@@ -28,7 +28,7 @@ reached through its submodule.
 """
 
 from .calculations import AmbiguousClaimError, DirectoryClaim, IdentityCollisionError, claims, collect_tree
-from .collecting import CollectedJob, JobRecord, collect, job_records
+from .collecting import CollectedJob, JobRecord, StructureInput, collect, job_records
 from .errors import (
     FormatError,
     RunnerResolutionError,
@@ -76,6 +76,7 @@ __all__ = [
     "Runner",
     "RunnerResolutionError",
     "ScaffoldedJob",
+    "StructureInput",
     "TaskManager",
     "TransactionError",
     "TransitionLostError",
