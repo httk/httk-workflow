@@ -93,14 +93,28 @@ stay distinct, and `collect --into` stores a job's changed run as a new
 revision of the same entry rather than a second entry. `Run.immutable_id` is
 left `None` for *httk-store* to mint as its per-revision identifier.
 
+A run also carries a readable `name` and its timing, all metadata outside
+content identity, so re-collecting a job still deduplicates. `Run.name` is the
+job's name, or its job key when the job has none; a *jobflow* sub-job is named
+after its *jobflow* job, e.g. `tight relax 1`. `Run.started_at` is the start of
+the job's first attempt and `Run.finished_at` (also `last_modified`) the end of
+its last, both timezone-aware. Over OPTIMADE they are served as `_httk_name`,
+`_httk_started_at` and `_httk_finished_at`, filterable and sortable. A store
+created before these fields existed refuses the new run layout on reopen;
+`httk collect --into STORE --upgrade` adds the empty columns once without
+rewriting stored rows. Runs stored before the upgrade keep no name or timing,
+and collecting such a job again reports a metadata conflict for it, since
+stored metadata is never silently rewritten; rebuild the store from the
+workspace to name and time every run.
+
 `run_record` does not fold children into the parent run. Each child collects
 to its own `Run`, including a child that only called or spawned further jobs,
 and `collect --into` links them: the parent's stored run gains a
 `has_artifact` edge of type `runs` to each child's run (see
 {doc}`/details/collecting`). A parent still names child products explicitly in its
 observed declaration. The installed-workflow pin (`runner_provenance`), the
-attempt timeline, and failure stay on the `JobRecord` for callers that need
-them.
+rest of the attempt timeline, and failure stay on the `JobRecord` for callers
+that need them.
 
 For package workflows, the installed tree digest in `runner_provenance` and
 the generated or external workflow declaration in `job.json` anchor this

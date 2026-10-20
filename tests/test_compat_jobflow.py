@@ -536,9 +536,15 @@ def test_jobflow_linear_maker_runs_through_task_manager(tmp_path: Path, monkeypa
         == 2
     )
     assert _collected_value(workspace, job.job_id) == 2
-    collected = next(item for item in collect(workspace) if item.record.job_id == job.job_id)
+    items = list(collect(workspace))
+    collected = next(item for item in items if item.record.job_id == job.job_id)
     assert collected.run.inputs == ()
     assert collected.record.provenance["activations"]
+    # Each sub-job is named after its jobflow job, in job.json and on its stored run.
+    jobs = [(item, cast(dict[str, Any], item.record.job)) for item in items]
+    children = [(item, job) for item, job in jobs if "jobflow_child_job" in job.get("parameters", {})]
+    assert sorted(cast(str, job["name"]) for _, job in children) == ["first", "second"]
+    assert sorted(cast(str, item.run.name) for item, _ in children) == ["first", "second"]
 
 
 @NEEDS_JOBFLOW

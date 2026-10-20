@@ -891,6 +891,8 @@ def advance(a: Attempt) -> None:
                     "jobflow_child_job": spool_path.relative_to(a.workdir).as_posix(),
                     "jobflow_child_snapshot": snapshot_path.relative_to(a.workdir).as_posix(),
                 },
+                # The jobflow job's own name (e.g. "tight relax 1"); empty falls back to the generated name.
+                name=job.name if isinstance(job.name, str) else None,
                 resources=resources,
             ),
             label=label,

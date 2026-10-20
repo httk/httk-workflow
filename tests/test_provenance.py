@@ -1,6 +1,7 @@
 """The provenance declaration is interpreted without changing the collect record."""
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -179,6 +180,34 @@ def test_last_modified_is_the_latest_aware_finished_timestamp() -> None:
 def test_last_modified_is_aware_on_a_really_run_job(real_record: JobRecord) -> None:
     run = run_record(real_record)
     assert run.last_modified is not None and run.last_modified.tzinfo is not None
+    assert run.name == real_record.job["name"]
+    assert run.started_at is not None and run.started_at.tzinfo is not None
+    assert run.started_at <= run.last_modified == run.finished_at
+
+
+def test_run_name_and_timing_come_from_the_job_and_its_attempt_timeline() -> None:
+    record = _record(
+        {},
+        timeline=[
+            {"attempts": [{"started_at": "2026-08-06T10:00:00Z", "finished_at": "2026-08-06T10:30:00Z"}]},
+            {
+                "attempts": [
+                    {"started_at": "not-a-timestamp", "finished_at": "2026-08-06T09:00:00"},
+                    {"started_at": "2026-08-06T09:00:00+00:00", "finished_at": "2026-08-06T12:00:00Z"},
+                ]
+            },
+        ],
+    )
+    run = run_record(record)
+    assert run.name == "job--job"
+    assert run.started_at == datetime(2026, 8, 6, 9, tzinfo=UTC)
+    assert run.finished_at == run.last_modified == datetime(2026, 8, 6, 12, tzinfo=UTC)
+    named = run_record(replace(record, job={"name": "tight relax 1"}))
+    assert named.name == "tight relax 1"
+    assert named == run
+    assert run_record(replace(record, job={"name": " padded "})).name == "job--job"
+    bare = run_record(_record({}))
+    assert (bare.started_at, bare.finished_at) == (None, None)
 
 
 def test_a_submit_time_entity_claim_survives_collection_as_an_input_edge(tmp_path: Path) -> None:

@@ -106,11 +106,11 @@ def _timestamp(value: object) -> datetime | None:
     return parsed
 
 
-def _last_modified(record: JobRecord) -> datetime | None:
-    latest: datetime | None = None
+def _attempt_times(record: JobRecord, key: str) -> list[datetime]:
+    times: list[datetime] = []
     activations = record.provenance.get("activations")
     if not isinstance(activations, Sequence) or isinstance(activations, (str, bytes)):
-        return None
+        return times
     for activation in activations:
         if not isinstance(activation, Mapping):
             continue
@@ -118,12 +118,14 @@ def _last_modified(record: JobRecord) -> datetime | None:
         if not isinstance(attempts, Sequence) or isinstance(attempts, (str, bytes)):
             continue
         for attempt in attempts:
-            if not isinstance(attempt, Mapping):
-                continue
-            parsed = _timestamp(attempt.get("finished_at"))
-            if parsed is not None and (latest is None or parsed > latest):
-                latest = parsed
-    return latest
+            if isinstance(attempt, Mapping) and (parsed := _timestamp(attempt.get(key))) is not None:
+                times.append(parsed)
+    return times
+
+
+def _name(record: JobRecord) -> str:
+    name = record.job.get("name")
+    return name if isinstance(name, str) and name and name == name.strip() else record.job_key
 
 
 def run_record(record: JobRecord) -> Run:
@@ -137,13 +139,16 @@ def run_record(record: JobRecord) -> Run:
     ``id`` string members, and insertion order is preserved.
 
     ``source_id`` is ``"<workspace_id>:<job_id>"``. ``immutable_id`` is left for
-    the store to mint. ``last_modified`` is the latest parseable aware
-    ``finished_at`` timestamp in the attempt timeline;
-    absent or unparseable timestamps produce ``None``. Children are not folded
-    in: each child collects to its own ``Run``, while a parent can name child
-    products explicitly in its observed declaration. Runner identity, timeline,
-    and failure are deliberately not folded into ``Run``; the caller's
-    ``JobRecord`` remains the extra-information channel.
+    the store to mint. ``name`` is the job's name when it is a non-empty string
+    without surrounding whitespace, otherwise its job key. ``started_at`` is the
+    earliest parseable aware ``started_at`` and ``finished_at`` (also used as
+    ``last_modified``) the latest parseable aware ``finished_at`` timestamp in
+    the attempt timeline; absent or unparseable timestamps produce ``None``.
+    Children are not folded in: each child collects to its own ``Run``, while a
+    parent can name child products explicitly in its observed declaration. The
+    name and the first start and last end are folded into ``Run``; runner
+    identity, the rest of the attempt timeline, and failure deliberately stay
+    on the caller's ``JobRecord``, the extra-information channel.
 
     :param record: Supply the mechanical readout of one collected job.
     :return: The framework-owned run assembled from the selected declaration.
@@ -172,6 +177,7 @@ def run_record(record: JobRecord) -> Run:
     else:
         workflow_uri = _workflow_uri(identity, declarations)
 
+    finished_at = max(_attempt_times(record, "finished_at"), default=None)
     return Run(
         workflow_declaration_uri=workflow_uri,
         workflow_definition_uri=_definition_uri(record.job.get("workflow")),
@@ -179,5 +185,8 @@ def run_record(record: JobRecord) -> Run:
         artifacts=() if document is None else _edges(identity, document, "artifacts"),
         outputs=() if document is None else _edges(identity, document, "outputs"),
         source_id=identity,
-        last_modified=_last_modified(record),
+        name=_name(record),
+        started_at=min(_attempt_times(record, "started_at"), default=None),
+        finished_at=finished_at,
+        last_modified=finished_at,
     )
