@@ -954,7 +954,7 @@ def test_command_file_placeholder_is_staged_and_runs(tmp_path: Path, capsys) -> 
     )
     report = json.loads(capsys.readouterr().out)[0]
     runner_text = _runner_text(workspace, report)
-    assert '"$HTTK_WORKFLOW_JOB_DIR/files/POSCAR"' in runner_text
+    assert '"$PWD/POSCAR"' in runner_text
     assert (Path(report["payload_path"]) / "files" / "POSCAR").read_text(encoding="utf-8") == source.read_text(
         encoding="utf-8"
     )
@@ -1427,7 +1427,7 @@ def test_command_template_grammar_and_argv_value_fidelity(tmp_path: Path, capsys
     assert '"--n=$(httk_workflow_parameter n)"' in rendered
     assert "'{not a parameter}'" in rendered
     file_rendered = _command_runner_text("echo '--in={input}'", {}, {"input": tmp_path / "input.dat"})
-    assert '"--in=$HTTK_WORKFLOW_JOB_DIR/files/input"' in file_rendered
+    assert '"--in=$PWD/input"' in file_rendered
 
     workspace = Workspace.initialize(tmp_path / "command-values")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-values")

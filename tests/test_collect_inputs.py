@@ -12,7 +12,7 @@ import io
 import json
 import logging
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -101,7 +101,7 @@ def _finished(
     manifest: str = _MANIFEST,
     declared: Mapping[str, object] = _DECLARED,
     members: Mapping[str, str] | None = None,
-    staged_files: list[str] | None = None,
+    staged_files: Sequence[Mapping[str, object]] | None = None,
 ) -> Workspace:
     """Install the package and run one job with a staged POSCAR and a report file to success."""
 
@@ -122,7 +122,7 @@ def _finished(
         parameters={"files": {"start": {"report.txt": "hello"}}},
     )
     if staged_files is not None:
-        mapping["staged_files"] = staged_files
+        mapping["staged_files"] = list(staged_files)
     submit_mapping(ws, mapping, members={"files/POSCAR": _POSCAR} if members is None else members)
     run(ws)
     scaffold_module._WORKFLOW_PROVIDERS.pop(_WORKFLOW, None)
@@ -300,7 +300,7 @@ def test_an_input_collect_does_not_read_is_recorded_as_its_file(
 
     assert sorted(edge.label for edge in item.run.inputs) == ["frames", "topology"]
     assert _file_edge(item, "frames").sha256 == hashlib.sha256(b"frames\n").hexdigest()
-    assert _file_edge(item, "topology").url.endswith("/files/topol.top")
+    assert str(_file_edge(item, "topology").url).endswith("/files/topol.top")
     assert "collect does not read 'trajectories' entries" in caplog.text
 
 
@@ -770,7 +770,10 @@ def test_files_staged_with_job_new_are_the_runs_file_inputs(tmp_path: Path) -> N
 
     assert item.run_only and item.missing_collector is None
     job = JobDefinition.from_path(item.record.payload / "job.json")
-    assert job.staged_files == ("files/INCAR", "files/KPOINTS", "files/POTCAR")
+    assert job.as_mapping()["staged_files"] == [
+        {"path": f"files/{name}", "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        for name, data in (("INCAR", b"ENCUT = 520\n"), ("KPOINTS", b"kpoints 0\n"), ("POTCAR", b"potcar\n"))
+    ]
     assert sorted(edge.label for edge in item.run.inputs) == ["files/INCAR", "files/KPOINTS", "files/POTCAR"]
     incar = _file_edge(item, "files/INCAR")
     assert (incar.name, incar.sha256) == ("INCAR", hashlib.sha256(b"ENCUT = 520\n").hexdigest())
@@ -778,17 +781,171 @@ def test_files_staged_with_job_new_are_the_runs_file_inputs(tmp_path: Path) -> N
     assert _file_edge(item, "files/POTCAR").format == "vasp-potcar"
 
 
-def test_a_staged_file_missing_at_collect_is_skipped_at_info(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_a_staged_file_deleted_during_the_job_is_recorded_as_lost(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     ws, _ = _staged_jobs(tmp_path, "ENCUT = 520\n")
     (item,) = collect(ws, allow_job_collector=True)
     (item.record.payload / "files" / "KPOINTS").unlink()
+    _unseal(item)
     caplog.set_level(logging.INFO)
 
     (item,) = collect(ws, allow_job_collector=True)
 
-    assert sorted(edge.label for edge in item.run.inputs) == ["files/INCAR", "files/POTCAR"]
-    (message,) = [record for record in caplog.records if "files/KPOINTS is not staged" in record.getMessage()]
-    assert message.levelno == logging.INFO
+    _assert_lost(item, "files/KPOINTS", b"kpoints 0\n")
+    assert any("files/KPOINTS was deleted during the job" in record.getMessage() for record in caplog.records)
+
+
+def _assert_lost(item: Any, label: str, staged: bytes) -> None:
+    """Assert *label* is recorded as lost: no URL, the staging digest, a ``files`` edge."""
+
+    lost = _file_edge(item, label)
+    assert lost.url is None
+    assert (lost.sha256, lost.size) == (hashlib.sha256(staged).hexdigest(), len(staged))
+
+
+def _reseal(tmp_path: Path, item: Any, *, signed: bool) -> None:
+    """Replace the job's seal with one describing the payload as it is now, signed by a fresh key or unsigned."""
+
+    import base64
+
+    from httk.core.crypto import ed25519_generate_seed
+    from httk.core.project.sealing import resolve_seal_keys
+
+    from httk.workflow.seals import seal_payload
+
+    seed = tmp_path / "seal.seed"
+    if signed and not seed.exists():
+        seed.write_text(base64.b64encode(ed25519_generate_seed()).decode("ascii"), encoding="utf-8")
+    keys = resolve_seal_keys([str(seed)], project_root=tmp_path).keys if signed else ()
+    record = item.record
+    seal_payload(record.payload, job_id=record.job_id, job_key=record.job_key, keys=keys, durable=False)
+
+
+def _unseal(item: Any) -> None:
+    (item.record.payload / ".httk-job" / "seal.json").unlink()
+
+
+def _counting_digests(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the payload-relative path of every staged file collect hashes."""
+
+    from httk.workflow.introspection import _reading
+
+    digested: list[str] = []
+    original = _reading.digest_job_file
+
+    def counting(job: Path, relative: Any, keep: int) -> Any:
+        digested.append(str(relative))
+        return original(job, relative, keep)
+
+    monkeypatch.setattr(_reading, "digest_job_file", counting)
+    return digested
+
+
+@pytest.mark.parametrize("signed", [False, True])
+def test_a_sealed_unchanged_staged_file_is_recorded_without_hashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, signed: bool
+) -> None:
+    ws, _ = _staged_jobs(tmp_path, "ENCUT = 520\n")
+    (item,) = collect(ws, allow_job_collector=True)
+    _reseal(tmp_path, item, signed=signed)
+    caplog.set_level(logging.INFO)
+    digested = _counting_digests(monkeypatch)
+
+    (item,) = collect(ws, allow_job_collector=True)
+
+    assert digested == []
+    assert "job seal" not in caplog.text
+    incar = _file_edge(item, "files/INCAR")
+    assert incar.url == f"data/staged/{item.record.payload_path.as_posix()}/files/INCAR"
+    assert (incar.sha256, incar.size) == (hashlib.sha256(b"ENCUT = 520\n").hexdigest(), 12)
+
+
+@pytest.mark.parametrize("signed", [False, True])
+def test_a_staged_file_the_seal_records_changed_is_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signed: bool
+) -> None:
+    ws, _ = _staged_jobs(tmp_path, "ENCUT = 520\n")
+    (item,) = collect(ws, allow_job_collector=True)
+    (item.record.payload / "files" / "INCAR").write_text("ENCUT = 600\n", encoding="utf-8")
+    _reseal(tmp_path, item, signed=signed)
+    digested = _counting_digests(monkeypatch)
+
+    (item,) = collect(ws, allow_job_collector=True)
+
+    assert digested == []
+    _assert_lost(item, "files/INCAR", b"ENCUT = 520\n")
+    # The mutated bytes are recorded nowhere: no input or output names them.
+    mutated = hashlib.sha256(b"ENCUT = 600\n").hexdigest()
+    assert all(getattr(value, "sha256", None) != mutated for value in (*item.inputs.values(), *item.outputs.values()))
+
+
+@pytest.mark.parametrize("tampered", ["unsigned body", "signed body", "signature"])
+def test_an_invalid_seal_is_not_used_and_the_file_is_hashed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tampered: str
+) -> None:
+    import base64
+
+    ws, _ = _staged_jobs(tmp_path, "ENCUT = 520\n")
+    (item,) = collect(ws, allow_job_collector=True)
+    _reseal(tmp_path, item, signed=tampered != "unsigned body")
+    seal = item.record.payload / ".httk-job" / "seal.json"
+    document = json.loads(seal.read_text(encoding="utf-8"))
+    if tampered == "signature":
+        document["signatures"][0]["signature"] = base64.b64encode(b"\0" * 64).decode("ascii")
+    else:
+        # A tampered body claims the INCAR changed; it no longer matches its digest, so it is not believed.
+        (incar,) = [entry for entry in document["records"] if entry["path"] == "files/INCAR"]
+        incar["sha256"] = "f" * 64
+    seal.write_text(json.dumps(document), encoding="utf-8")
+    digested = _counting_digests(monkeypatch)
+
+    (item,) = collect(ws, allow_job_collector=True)
+
+    assert sorted(digested) == ["files/INCAR", "files/KPOINTS", "files/POTCAR"]
+    assert _file_edge(item, "files/INCAR").url is not None
+
+
+def test_an_unsealed_staged_file_that_changed_is_lost(tmp_path: Path) -> None:
+    ws, _ = _staged_jobs(tmp_path, "ENCUT = 520\n")
+    (item,) = collect(ws, allow_job_collector=True)
+    (item.record.payload / "files" / "INCAR").write_text("ENCUT = 600\n", encoding="utf-8")
+    _unseal(item)
+
+    (item,) = collect(ws, allow_job_collector=True)
+
+    _assert_lost(item, "files/INCAR", b"ENCUT = 520\n")
+    assert _file_edge(item, "files/KPOINTS").url is not None
+
+
+def test_a_changed_structure_input_is_lost_and_not_loaded(tmp_path: Path) -> None:
+    staged = [_entry("files/POSCAR", _POSCAR.encode())]
+    ws = _finished(tmp_path, staged_files=staged)
+    item = next(collect(ws, allow_job_collector=True))
+    assert isinstance(item.inputs["initial_structure"], StructureInput)
+    (item.record.payload / "files" / "POSCAR").write_text(_POSCAR.replace("5.43", "5.50"), encoding="utf-8")
+    _unseal(item)
+
+    item = next(collect(ws, allow_job_collector=True))
+
+    _assert_lost(item, "initial_structure", _POSCAR.encode())
+    # No main or alternative entry: the product links to the staged bytes by their digest.
+    assert [edge.entry_type for edge in item.run.inputs] == ["files"]
+    assert [(product.source_type, product.source_id) for product in item.products] == [
+        ("files", item.run.inputs[0].entry_id)
+    ]
+
+
+def test_a_staged_file_without_a_digest_is_hashed_as_it_is(tmp_path: Path) -> None:
+    members = {"files/POSCAR": _POSCAR, "files/extra": "extra\n"}
+    ws = _finished(tmp_path, members=members, staged_files=[{"path": "files/extra"}])
+    item = next(collect(ws, allow_job_collector=True))
+    (item.record.payload / "files" / "extra").write_text("changed\n", encoding="utf-8")
+
+    item = next(collect(ws, allow_job_collector=True))
+
+    extra = _file_edge(item, "files/extra")
+    assert extra.url is not None and extra.sha256 == hashlib.sha256(b"changed\n").hexdigest()
 
 
 def test_identical_staged_files_of_two_jobs_store_one_file_row(
@@ -819,12 +976,127 @@ def test_identical_staged_files_of_two_jobs_store_one_file_row(
         assert [edge.entry_id for run in runs for edge in run.inputs if edge.label == label] == [rows[digest]] * 2
 
 
+def test_a_lost_input_is_stored_and_a_later_identical_copy_fills_its_location(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("httk.store")
+    from httk.core import Run
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+
+    context = CLIContext("httk", tmp_path)
+    ws, name = _staged_jobs(tmp_path, "ENCUT = 520\n")
+    (first,) = collect(ws, allow_job_collector=True)
+    # The job changed its INCAR: its (unsigned) seal records the changed bytes.
+    (first.record.payload / "files" / "INCAR").write_text("ENCUT = 600\n", encoding="utf-8")
+    _reseal(tmp_path, first, signed=False)
+    store_path = tmp_path / "results.sqlite"
+    argv = ["collect", "--workspace", name, "--allow-job-collector", "--into", str(store_path), "--id-base", "httk.t"]
+    incar = hashlib.sha256(b"ENCUT = 520\n").hexdigest()
+
+    def file_rows() -> list[tuple[str, str | None]]:
+        with closing(sqlite3.connect(store_path)) as connection:
+            return connection.execute("SELECT id, url FROM core_file WHERE sha256 = ?", (incar,)).fetchall()
+
+    def stored_reports() -> list[dict[str, Any]]:
+        assert command(argv, context) == 0
+        *reports, _summary = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert all(report["stored"] for report in reports), reports
+        return reports
+
+    capsys.readouterr()
+    # Stored alone, the lost INCAR is a row without a location.
+    (lost_report,) = stored_reports()
+    ((lost_id, lost_url),) = file_rows()
+    assert lost_url is None
+
+    # A second job stages the same bytes and leaves them alone.
+    directory = tmp_path / "again"
+    directory.mkdir()
+    for file_name, text in (("INCAR", "ENCUT = 520\n"), ("KPOINTS", "kpoints 1\n"), ("POTCAR", "potcar\n")):
+        (directory / file_name).write_text(text, encoding="utf-8")
+    job_new = ["job", "new", "--workspace", name, "--from-command", "true", "--files", str(directory)]
+    assert command([*job_new, "--tag", "again"], context) == 0
+    run(ws)
+    capsys.readouterr()
+    reports = stored_reports()
+
+    second = next(item for item in collect(ws, allow_job_collector=True) if item.record.job_key.startswith("again"))
+    # One row, now at the second job's copy.
+    assert file_rows() == [(lost_id, f"data/{name}/{second.record.payload_path.as_posix()}/files/INCAR")]
+    with Backend.sqlite(store_path) as database:
+        runs = [_stored(SqlStore(database), Run, report["stored"]["run"]) for report in reports]
+    assert len(runs) == 2
+    assert [edge.entry_id for run in runs for edge in run.inputs if edge.label == "files/INCAR"] == [lost_id] * 2
+    assert lost_report["stored"]["run"] in {report["stored"]["run"] for report in reports}
+
+
 def test_a_declared_inputs_destination_is_not_recorded_twice(tmp_path: Path) -> None:
     # A file staged with --file at a declared input's destination is that input, recorded once under its role.
     members = {"files/POSCAR": _POSCAR, "files/extra": "extra\n"}
-    ws = _finished(tmp_path, members=members, staged_files=["files/POSCAR", "files/extra"])
+    ws = _finished(tmp_path, members=members, staged_files=[{"path": "files/POSCAR"}, {"path": "files/extra"}])
 
     item = next(collect(ws, allow_job_collector=True))
 
     assert sorted(edge.label for edge in item.run.inputs) == ["files/extra", "initial_structure"]
     assert isinstance(item.inputs["initial_structure"], StructureInput)
+
+
+def _entry(path: str, data: bytes) -> dict[str, object]:
+    return {"path": path, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def test_job_new_records_the_digest_of_every_staged_file_and_declared_input(tmp_path: Path) -> None:
+    from httk.workflow._job import JobDefinition
+    from httk.workflow.scaffold import new_job
+
+    pytest.importorskip("httk.atomistic")
+    from httk.core import load
+
+    context = CLIContext("httk", tmp_path)
+    ws = workspace(tmp_path / "workspace")
+    name = register_ws(context, ws.root, "digests")
+    with cli_owner(ws) as owner:
+        _store.install(ws, owner, _package(tmp_path / "package", _MANIFEST))
+    directory = tmp_path / "inputs"
+    directory.mkdir()
+    (directory / "INCAR").write_text("ENCUT = 520\n", encoding="utf-8")
+    (tmp_path / "Si.vasp").write_text(_POSCAR, encoding="utf-8")
+    argv = ["job", "new", "--workspace", name, "--workflow", _WORKFLOW, "--files", str(directory)]
+    assert command([*argv, "--input", f"structure={tmp_path / 'Si.vasp'}", "--tag", "copied"], context) == 0
+    # A loaded structure is written with httk.core.save; its destination is hashed as written.
+    new_job(ws, _WORKFLOW, inputs={"structure": load(str(tmp_path / "Si.vasp"))}, tag="saved")
+    assert command(["job", "new", "--workspace", name, "--from-command", "true", "--tag", "plain"], context) == 0
+
+    copied = JobDefinition.from_path(next((ws.root / "jobs").rglob("copied--*")) / "job.json")
+    assert copied.as_mapping()["staged_files"] == [
+        _entry("files/INCAR", b"ENCUT = 520\n"),
+        _entry("files/POSCAR", _POSCAR.encode()),
+    ]
+    saved = next((ws.root / "jobs").rglob("saved--*"))
+    written = (saved / "files" / "POSCAR").read_bytes()
+    assert JobDefinition.from_path(saved / "job.json").as_mapping()["staged_files"] == [_entry("files/POSCAR", written)]
+    # Nothing staged: the member is omitted.
+    plain = next((ws.root / "jobs").rglob("plain--*")) / "job.json"
+    assert "staged_files" not in json.loads(plain.read_text(encoding="utf-8"))
+
+
+def test_a_command_file_placeholder_names_the_workdir_copy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    context = CLIContext("httk", tmp_path)
+    ws = workspace(tmp_path / "workspace")
+    name = register_ws(context, ws.root, "placeholder")
+    source = tmp_path / "INCAR"
+    source.write_text("a\n", encoding="utf-8")
+    argv = ["job", "new", "--workspace", name, "--from-command", "sed -i s/a/b/ {INCAR}"]
+    # A file staged into the workdir would itself be the copy the command rewrites.
+    refused = ["job", "new", "--workspace", name, "--from-command", "true", "--file", f"run/INCAR={source}"]
+    assert command(refused, context) == 2
+    assert "stages into the workdir run/" in capsys.readouterr().err
+    assert command([*argv, "--file", f"INCAR={source}"], context) == 0
+    run(ws)
+
+    (item,) = collect(ws, allow_job_collector=True)
+
+    assert (item.record.payload / "run" / "INCAR").read_text(encoding="utf-8") == "b\n"
+    assert (item.record.payload / "files" / "INCAR").read_text(encoding="utf-8") == "a\n"
+    incar = _file_edge(item, "files/INCAR")
+    assert incar.url is not None and incar.sha256 == hashlib.sha256(b"a\n").hexdigest()

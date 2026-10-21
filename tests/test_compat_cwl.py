@@ -315,7 +315,7 @@ def test_bare_cwl_document_runs_and_collects_without_a_provider(package: Path, w
     assert isinstance(item.outputs["spoken"], FileRecord)
     output = item.outputs["spoken"]
     prefix = f"data/{workspace.root.name}/"
-    assert output.url.startswith(prefix)
+    assert output.url is not None and output.url.startswith(prefix)
     assert (workspace.root / output.url.removeprefix(prefix)).read_text(encoding="utf-8").strip() == "hello"
 
 
@@ -407,9 +407,9 @@ def test_cwl_file_output_collects_a_workspace_relative_descriptor(tmp_path: Path
     # An unregistered workspace's file URLs are data/<root directory name>/<workspace-relative path>.
     prefix = f"data/{workspace.root.name}/"
     assert value.url == prefix + old_path
-    assert not PurePosixPath(value.url).is_absolute()
+    assert not PurePosixPath(str(value.url)).is_absolute()
     assert value.name == "spoken.txt"
-    expected = hashlib.sha256((workspace.root / value.url.removeprefix(prefix)).read_bytes()).hexdigest()
+    expected = hashlib.sha256((workspace.root / str(value.url).removeprefix(prefix)).read_bytes()).hexdigest()
     assert value.sha256 == expected
     assert value.size == len("hello\n")
     assert value.media_type == "application/octet-stream" and value.format is None
@@ -514,7 +514,7 @@ def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: W
     # The URL names the registered workspace, so collect after registering, as the CLI does.
     item = next(collect(workspace))
     value = item.outputs["spoken"]
-    assert isinstance(value, FileRecord) and value.url.startswith("data/language-collect-into/jobs/")
+    assert isinstance(value, FileRecord) and str(value.url).startswith("data/language-collect-into/jobs/")
     store_path = tmp_path / "results.sqlite"
     assert (
         command(

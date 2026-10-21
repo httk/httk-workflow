@@ -57,7 +57,7 @@ from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, TypedDict, cast
 
 from httk.core.building import BuildSpec
-from httk.core.digests import tree_digest
+from httk.core.digests import sha256_file, tree_digest
 from httk.core.report import context_logger
 from httk.core.requirements import check_requirements, parse_requirements
 
@@ -2133,7 +2133,9 @@ def _build_payload(
         declarations=_merge_provenance_declaration(workflow.declarations, provenance),
         declared=declared_member,
         seal_succeeded=installed.provider().seal_succeeded,
-        staged_files=tuple(payload_relative(member).as_posix() for member in user_files),
+        staged_files=_staged_entries(
+            destination, [*user_files, *(member for member in workflow.inputs.values() if member is not None)]
+        ),
     )
     if prepared.finalize is not None:
         spec = prepared.finalize(spec)
@@ -2388,6 +2390,25 @@ def _stage_files(payload: Path, files: Mapping[str, str | os.PathLike[str]]) -> 
         destination = payload.joinpath(*payload_relative(name).parts)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, destination)
+
+
+def _staged_entries(payload: Path, members: Iterable[str]) -> tuple[dict[str, object], ...]:
+    """Describe every staged file present in the payload by its path, size and SHA-256.
+
+    This runs in ``job new``, before the job does, so the just-written files are trusted.
+    """
+
+    entries: dict[str, dict[str, object]] = {}
+    for member in members:
+        relative = payload_relative(member)
+        path = payload.joinpath(*relative.parts)
+        if relative.as_posix() not in entries and path.is_file() and not path.is_symlink():
+            entries[relative.as_posix()] = {
+                "path": relative.as_posix(),
+                "size": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+    return tuple(entries.values())
 
 
 def _stage_inputs(

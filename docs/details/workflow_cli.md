@@ -365,9 +365,10 @@ the job moves between states.
   name. Subdirectories and other non-file entries are skipped with one stderr
   warning.
 
-`job.json` lists the payload-relative paths of the `--file`/`--files` files
-under `staged_files`, and `collect` records each as a `files` input of the
-job's run, labelled by that path (see
+`job.json` lists the `--file`/`--files` files, and the declared inputs'
+destinations, under `staged_files` with the size and SHA-256 of each as
+staged, and `collect` records each `--file`/`--files` file as a `files` input
+of the job's run, labelled by its payload-relative path (see
 [Collecting results](collecting.md#staged-inputs-record-the-exact-file)).
 
 After a batch, one final stderr line reports `submitted N jobs`. If a batch
@@ -382,11 +383,15 @@ Bash runner, installed ad hoc as `adhoc:command@<digest>`. The template is an
 argv-only word list with no shell syntax. Each `{name}` placeholder must have a
 matching `--parameter NAME=VALUE` or `--file NAME=PATH`. Parameter placeholders
 resolve through `httk_workflow_parameter` at run time; file placeholders resolve
-to the absolute staged path. `{{` and `}}` emit literal braces.
+to the absolute path of the file's copy in the job workdir (`$PWD/<basename>`,
+since the command runs there), never to the staged payload file, so the command
+cannot rewrite the input `collect` records. `{{` and `}}` emit literal braces.
 
-Each `--file` input is also copied into the job workdir under its basename
-before the command runs; existing workdir entries are never replaced. The
-generated runner can be edited and passed back with `--from-runner`.
+Each `--file` input is copied into the job workdir under its basename before
+the command runs; two inputs with the same basename are refused at `job new`,
+as is a `--file` staged below the workdir `run/`. Existing workdir entries are
+never replaced, so a retry keeps working on the copy an earlier attempt left.
+The generated runner can be edited and passed back with `--from-runner`.
 
 ### Running workflow documents
 

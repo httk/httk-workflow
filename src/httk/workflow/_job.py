@@ -7,6 +7,7 @@ The job digest is the SHA-256 of the stored bytes, exactly as submitted.
 
 import dataclasses
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -70,6 +71,8 @@ _MEMBERS = frozenset(
 _RETRY_MEMBERS = frozenset(
     {"maximum_attempts_per_activation", "maximum_total_attempts", "maximum_activations", "retry_on"}
 )
+_STAGED_MEMBERS = frozenset({"path", "size", "sha256"})
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 _PARENT_MEMBERS = frozenset({"workspace_id", "job_id", "job_key", "placement", "activation_id", "spawn_id"})
 
 
@@ -96,11 +99,15 @@ def _placement(value: object, name: str) -> PurePosixPath:
     return placement
 
 
-def _staged_files(value: object) -> tuple[str, ...]:
+def _staged_files(value: object) -> tuple[Mapping[str, Frozen], ...]:
     if not isinstance(value, list) or not value:
         raise FormatError("staged_files must be a non-empty array")
-    for path in value:
-        text = require_string(path, "staged_files[]")
+    paths = []
+    for entry in value:
+        staged = _exact(entry, "staged_files[]", _STAGED_MEMBERS, optional=frozenset({"size", "sha256"}))
+        if ("size" in staged) != ("sha256" in staged):
+            raise FormatError("staged_files[] carries size and sha256 together or neither")
+        text = require_string(staged["path"], "staged_files[].path")
         parts = text.split("/")
         if (
             text.startswith("/")
@@ -109,9 +116,15 @@ def _staged_files(value: object) -> tuple[str, ...]:
             or _reserved_payload_member(parts[0])
         ):
             raise FormatError(f"staged_files names a path that is not a normalized payload path: {text!r}")
-    if value != sorted(set(value)):
-        raise FormatError("staged_files must be sorted and without duplicates")
-    return tuple(value)
+        if "size" in staged:
+            require_int(staged["size"], "staged_files[].size", minimum=0)
+            sha256 = staged["sha256"]
+            if not isinstance(sha256, str) or not _SHA256.fullmatch(sha256):
+                raise FormatError(f"staged_files[].sha256 of {text!r} is not 64 lowercase hex digits")
+        paths.append(text)
+    if paths != sorted(set(paths)):
+        raise FormatError("staged_files must be sorted by path and without duplicates")
+    return tuple(_frozen(entry) for entry in value)
 
 
 def _parent(value: object) -> Mapping[str, Frozen] | None:
@@ -150,8 +163,9 @@ class JobDefinition:
     :param environment: The declared and overridden workflow environment.
     :param parent: ``{workspace_id, job_id, job_key, placement, activation_id, spawn_id}`` of the spawning job.
     :param seal_succeeded: Whether a succeeded job is sealed; ``None`` uses the workspace setting ``seal.succeeded``.
-    :param staged_files: The payload-relative paths of the files staged with ``--file``/``--files``, sorted;
-        the member is absent when there are none.
+    :param staged_files: The files staged into the payload (``--file``/``--files`` and declared-input
+        destinations), sorted by path: each ``{path, size, sha256}``, or only ``{path}`` from a
+        runner-prepared payload; the member is absent when there are none.
     :param stored_digest: The SHA-256 of the stored bytes this definition was read from, if any.
     """
 
@@ -174,7 +188,7 @@ class JobDefinition:
     environment: Mapping[str, Frozen]
     parent: Mapping[str, Frozen] | None
     seal_succeeded: bool | None
-    staged_files: tuple[str, ...] = ()
+    staged_files: tuple[Mapping[str, Frozen], ...] = ()
     stored_digest: str | None = field(default=None, compare=False, repr=False)
 
     @property
@@ -308,7 +322,7 @@ class JobDefinition:
             "environment": _thaw(self.environment),
             "parent": _thaw(self.parent),
             "seal_succeeded": self.seal_succeeded,
-            **({"staged_files": list(self.staged_files)} if self.staged_files else {}),
+            **({"staged_files": [_thaw(entry) for entry in self.staged_files]} if self.staged_files else {}),
         }
 
     def encode(self) -> bytes:

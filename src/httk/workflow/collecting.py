@@ -375,7 +375,7 @@ def _job_mapping(job: JobDefinition) -> dict[str, object]:
     if job.environment:
         result["environment"] = _thaw(job.environment)
     if job.staged_files:
-        result["staged_files"] = list(job.staged_files)
+        result["staged_files"] = [_thaw(entry) for entry in job.staged_files]
     return result
 
 
@@ -1740,7 +1740,7 @@ def _assemble_collected(
 def _prefixed_url(identity: str, role: str, value: object, prefix: str) -> object:
     """Prefix the URL of a ``FileRecord`` that is a normalized relative path; leave anything else alone.
 
-    An absolute or ``scheme://`` URL is left as it is. A relative URL with an
+    A lost file's ``None`` URL stays ``None``. An absolute or ``scheme://`` URL is left as it is. A relative URL with an
     empty, ``.`` or ``..`` segment, or one that already starts with *prefix*,
     is left as it is with a warning naming the job and the role.
     """
@@ -1750,7 +1750,7 @@ def _prefixed_url(identity: str, role: str, value: object, prefix: str) -> objec
     if isinstance(value, StructureInput):
         source = _prefixed_url(identity, role, value.alternative.source_file, prefix)
         return replace(value, alternative=replace(value.alternative, source_file=source))
-    if not isinstance(value, FileRecord) or "://" in value.url or value.url.startswith("/"):
+    if not isinstance(value, FileRecord) or value.url is None or "://" in value.url or value.url.startswith("/"):
         return value
     if value.url.startswith(f"{prefix}/") or any(part in {"", ".", ".."} for part in value.url.split("/")):
         _LOGGER.warning(
@@ -1789,6 +1789,10 @@ def _staged_inputs(record: JobRecord, run: httk.core.Run, taken: Mapping[str, ob
     streamed read without a size bound, compressed or not (see
     :func:`_staged_input`). A ``structures`` input *httk₂* can read is a
     ``StructureInput`` instead, whose alternative carries that file record.
+    A staged file whose ``job.json`` digest the job's usable seal confirms is
+    recorded without reading it (unless it is loaded); one the job mutated or
+    deleted is recorded as lost, by its staging digest only. The seal is read
+    at most once.
     """
 
     from .scaffold import payload_relative
@@ -1819,21 +1823,82 @@ def _staged_inputs(record: JobRecord, run: httk.core.Run, taken: Mapping[str, ob
         elif path not in skip:
             # The hook (or the run) names the role's entry; the staged file is still recorded, by its path.
             wanted[path] = (relative, None, False)
-    for path in staged if isinstance(staged, list) else ():
-        if isinstance(path, str) and path not in destinations and path not in skip:
-            wanted[path] = (PurePosixPath(path), None, False)
+    digests: dict[str, tuple[int, str] | None] = {}
+    for item in staged if isinstance(staged, list) else ():
+        staged_path = item.get("path") if isinstance(item, Mapping) else None
+        if isinstance(staged_path, str):
+            size, sha256 = item.get("size"), item.get("sha256")
+            digests[staged_path] = (size, sha256) if isinstance(size, int) and isinstance(sha256, str) else None
+            if staged_path not in destinations and staged_path not in skip:
+                wanted[staged_path] = (PurePosixPath(staged_path), None, False)
+    staging = {label: digests.get(relative.as_posix()) for label, (relative, _, _) in wanted.items()}
+    sealed = _sealed_digests(record) if any(staging.values()) else None
     loaded: dict[str, object] = {}
     for label, (relative, entry_type, required) in wanted.items():
-        value = _staged_input(record, label, relative, entry_type, required)
+        value = _staged_input(record, label, relative, entry_type, required, staging[label], sealed)
         if value is not None:
             loaded[label] = value
     return loaded
 
 
+def _sealed_digests(record: JobRecord) -> dict[str, str] | None:
+    """Return the SHA-256 of every file the job's seal records, or ``None`` without a usable seal.
+
+    The seal sits in the trust domain of ``job.json``, so it is usable when its
+    recorded body digest matches its body; a signature adds nothing there, but
+    a signed seal whose signatures do not verify is not used. The payload is
+    not re-hashed.
+    """
+
+    from httk.core.project.sealing import INVALID, sign_seal_body, verify_signed_body
+
+    from .seals import _job_seal_bytes, _parse_job_seal, job_seal_path
+
+    try:
+        data = _job_seal_bytes(record.payload)
+        if data is None:
+            return None
+        seal = _parse_job_seal(data, job_seal_path(record.payload))
+    except (ValueError, OSError) as exc:
+        _LOGGER.info("%s: staged inputs are hashed: the job seal is unreadable: %s", record.job_key, exc)
+        return None
+    if seal.signatures:
+        # Checks the body digest too.
+        verification = verify_signed_body(seal.body_bytes, seal.body_sha256, seal.signatures)
+        reason = verification.reason if verification.verdict == INVALID else None
+    else:
+        # Signing with no keys is the seal's own (domain-separated) body digest.
+        unsigned = sign_seal_body(json.loads(seal.body_bytes), ())[0] == seal.body_sha256
+        reason = None if unsigned else "the seal body does not match its recorded digest"
+    if reason is not None:
+        _LOGGER.info("%s: staged inputs are hashed: the job seal is invalid: %s", record.job_key, reason)
+        return None
+    return {
+        str(entry["path"]): str(entry["sha256"])
+        for entry in seal.records
+        if entry.get("type") == "file" and isinstance(entry.get("sha256"), str)
+    }
+
+
 def _staged_input(
-    record: JobRecord, label: str, relative: PurePosixPath, entry_type: str | None, required: bool
+    record: JobRecord,
+    label: str,
+    relative: PurePosixPath,
+    entry_type: str | None,
+    required: bool,
+    staging: tuple[int, str] | None = None,
+    sealed: Mapping[str, str] | None = None,
 ) -> object | None:
     """Record one staged file: its ``FileRecord``, or a ``StructureInput`` when it reads as a structure.
+
+    With its *staging* digest from ``job.json``, a file the usable job seal
+    (*sealed*) records with that digest is as staged and is recorded without
+    reading it, unless it is loaded; a file the seal records otherwise, or not
+    at all, was mutated or deleted during the job and is recorded as lost: a
+    ``FileRecord`` with a ``None`` URL and the staging digest, never the
+    current bytes. Without a usable seal the file is read and a missing file or
+    another digest is likewise lost. Without a staging digest it cannot be
+    told lost and is recorded as read.
 
     The file is read once, streamed without a size bound and without following
     a symlink (:func:`~httk.workflow.introspection._reading.digest_job_file`),
@@ -1846,15 +1911,17 @@ def _staged_input(
     file record as ``source_file``; when the as-written reading fails, the
     alternative holds the default reading, with a warning. A structure that is
     compressed, too large or not loadable is recorded as its file, with a
-    warning naming why; any other entry type is recorded as its file. An
-    unsafe file is skipped with a warning, an absent one likewise (at info
-    level when it is not required).
+    warning naming why; any other entry type is recorded as its file. Without a
+    staging digest, an unsafe file is skipped with a warning, an absent one
+    likewise (at info level when it is not required).
 
     :param record: The job.
     :param label: The input edge label: the declared role, or the staged path.
     :param relative: The payload-relative path of the staged file.
     :param entry_type: The declared entry type, if any.
     :param required: Whether an absent file is worth a warning.
+    :param staging: The ``(size, sha256)`` ``job.json`` recorded at staging, if any.
+    :param sealed: The digests of the files the usable job seal records, if there is one.
     :return: The recorded value, or ``None`` when nothing is recorded.
     """
 
@@ -1863,26 +1930,48 @@ def _staged_input(
     from .introspection._reading import digest_job_file
 
     name = relative.name
+    path = relative.as_posix()
+
+    def lost(how: str) -> FileRecord:
+        assert staging is not None
+        _LOGGER.info(
+            "input %r of %s: %s was %s during the job; it is recorded by its staged digest only",
+            label,
+            record.job_key,
+            path,
+            how,
+        )
+        return FileRecord(None, name, sha256=staging[1], size=staging[0], format=reader_format_for(name))
+
     compressed = split_compression_suffix(name)[1] is not None
-    # A compressed file could decompress past any bound, so its bytes are never kept to load.
-    keep = READ_FILE_LIMIT if entry_type == "structures" and not compressed else -1
-    try:
-        digested = digest_job_file(record.payload, relative, keep)
-    except (WorkflowError, OSError, ValueError) as exc:
-        _LOGGER.warning("not collecting input %r of %s: cannot read %s: %s", label, record.job_key, relative, exc)
-        return None
-    if digested is None:
-        level = logging.WARNING if required else logging.INFO
-        _LOGGER.log(level, "not collecting input %r of %s: %s is not staged", label, record.job_key, relative)
-        return None
-    size, sha256, data = digested
-    file_record = FileRecord(
-        url=f"{record.payload_path.as_posix()}/{relative.as_posix()}",
-        name=name,
-        size=size,
-        sha256=sha256,
-        format=reader_format_for(name),
-    )
+    load = entry_type == "structures" and not compressed
+    confirmed = staging is not None and sealed is not None and sealed.get(path) == staging[1]
+    url = f"{record.payload_path.as_posix()}/{path}"
+    if staging is not None and sealed is not None and not confirmed:
+        return lost("mutated or deleted")
+    data: bytes | None = None
+    if confirmed and not load:
+        assert staging is not None
+        size, sha256 = staging
+    else:
+        # A compressed file could decompress past any bound, so its bytes are never kept to load.
+        try:
+            digested = digest_job_file(record.payload, relative, READ_FILE_LIMIT if load else -1)
+        except (WorkflowError, OSError, ValueError) as exc:
+            if staging is not None:
+                return lost(f"made unreadable ({exc})")
+            _LOGGER.warning("not collecting input %r of %s: cannot read %s: %s", label, record.job_key, relative, exc)
+            return None
+        if digested is None:
+            if staging is not None:
+                return lost("deleted")
+            level = logging.WARNING if required else logging.INFO
+            _LOGGER.log(level, "not collecting input %r of %s: %s is not staged", label, record.job_key, relative)
+            return None
+        size, sha256, data = digested
+        if staging is not None and sha256 != staging[1]:
+            return lost("mutated")
+    file_record = FileRecord(url=url, name=name, size=size, sha256=sha256, format=reader_format_for(name))
     if entry_type in (None, "files"):
         return file_record
     if entry_type != "structures":

@@ -673,14 +673,14 @@ def test_job_prepare_takes_staged_files_only_as_an_array(tmp_path: Path, capsys:
     from httk.workflow.errors import FormatError
 
     spec = {"name": "Prepared", "workflow_id": "local:tests.bash", "workflow_name": "tests.bash"}
-    for index, staged in enumerate((["files/INCAR"], "files/INCAR")):
+    for index, staged in enumerate(([{"path": "files/INCAR"}], "files/INCAR")):
         (tmp_path / "spec.json").write_text(json.dumps({**spec, "staged_files": staged}), encoding="utf-8")
         destination = tmp_path / f"child{index}"
         destination.mkdir()
         arguments = Namespace(spec=str(tmp_path / "spec.json"), destination=str(destination))
         if isinstance(staged, list):
             _shell_bridge._job_prepare(arguments)
-            assert JobDefinition.from_path(destination / "job.json").staged_files == ("files/INCAR",)
+            assert JobDefinition.from_path(destination / "job.json").as_mapping()["staged_files"] == staged
         else:
             with pytest.raises(FormatError, match="staged_files must be an array"):
                 _shell_bridge._job_prepare(arguments)

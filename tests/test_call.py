@@ -119,7 +119,10 @@ def test_call_runs_another_installed_workflow_and_resumes_at_the_gather(tmp_path
     assert (child.path / "run" / "seen.txt").read_text(encoding="utf-8") == "sub-saw:hello-from-parent\n"
     assert len(every_job(workspace)) == 2
     # A child's staged files are recorded exactly as a main job's: listed in job.json, collected as file inputs.
-    assert JobDefinition.from_path(child.path / "job.json").staged_files == ("files/input.txt",)
+    data = b"hello-from-parent\n"
+    assert JobDefinition.from_path(child.path / "job.json").as_mapping()["staged_files"] == [
+        {"path": "files/input.txt", "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    ]
     (collected,) = [item for item in collect(workspace, allow_job_collector=True) if item.record.job_id == child_id]
     staged = collected.inputs["files/input.txt"]
     assert isinstance(staged, FileRecord)

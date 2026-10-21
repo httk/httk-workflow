@@ -110,6 +110,46 @@ workflow received. Two kinds of staged file are recorded:
   declared input's destination is recorded once, as that input. A job created
   before `staged_files` existed records none of these.
 
+When `job new` stages a file, `--file`/`--files` and declared-input
+destinations alike (copied, or written with `httk.core.save` for a loaded
+object), it records the file's size and SHA-256 in `staged_files`. Collect
+then records each input exactly as staged:
+
+- When the job has a usable seal (`.httk-job/seal.json`, written when the job
+  succeeds), a file the seal records with the staging digest is as staged
+  and is recorded without being read again. A file the seal records with
+  another digest, or not at all, was mutated or deleted during the job. The
+  seal is trusted like `job.json`, so it is usable, signed or not, when its
+  body matches its recorded digest; a seal whose body was tampered with, or a
+  signed one whose signature does not verify, is no seal (with an info
+  message).
+- Without a usable seal, the file is read as below: a missing file, or one
+  with another digest, was mutated or deleted during the job.
+- A runner-prepared payload whose `staged_files` lists a path without a digest
+  is read and recorded as it is; a changed file cannot be detected there.
+
+A mutated or deleted input is recorded as **lost**: a `files` entry with no
+URL (`url` is `null`), the staged name and the staging size and digest, with an
+info message naming the role or path. The run's input edge names it, and a
+`structures` input that is lost is recorded as this file only, not loaded.
+A lost entry is served with an `ni:///sha-256;...` URI in place of its URL,
+and the store's `fsck` counts it as lost instead of checking a location. The mutated bytes are
+not recorded as an input: they are recorded only when the workflow declares
+them as an output. Because file entries are identified by content, a later
+job that stages the same bytes and leaves them alone fills in the lost
+entry's location when it is stored.
+
+A staged input file in the payload is the job's record of that input, so a
+runner works on copies in its working directory (as `stage_input` makes
+them) and never rewrites a payload input. Staging
+digests are taken at `job new`, after its instantiate hooks, so a runner that
+rewrites a payload input at run start has that input recorded as lost.
+
+Mutation detection is authoritative only with a signed seal from a trusted
+manager. In an unconfined run a job can rewrite its own unsigned seal, so the
+comparison then relies on the job not tampering with its own state, as
+`job.json` does.
+
 Every such file that is a regular file, of any size, type or name (`POTCAR`
 included), becomes at least a `files` entry: its URL
 (`data/<workspace name>/<workspace-relative path>`), name, size, SHA-256
@@ -122,8 +162,8 @@ compressed file (`POSCAR.gz`) is hashed as stored, not decompressed, and its
 content, so the same bytes staged by many jobs are one entry, which keeps the
 URL it was first stored with. The bytes stay in the workspace; the store
 holds the URL and the digest. A declared input that is not staged is skipped
-with a warning, or an info message when it is not `required`; a listed staged
-file that is gone is skipped with an info message. A job collected into a
+with a warning, or an info message when it is not `required`; a staged file
+that is gone is recorded as lost (above). A job collected into a
 store by an earlier *httk₂* that recorded fewer inputs gains these edges on
 its next `--into` sweep, so its run is stored again as a new revision
 (`revised` in the report); this is expected, not a sign of changed results.

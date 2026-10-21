@@ -212,6 +212,9 @@ def _command_runner_text(
     )
     staged_basenames: dict[str, str] = {}
     for staged_path, name, basename in staged_files:
+        if PurePosixPath(staged_path).parts[0] == "run":
+            # The payload file would itself be the workdir entry the command runs on.
+            raise ValueError(f"--file input {name} stages into the workdir run/; stage it elsewhere, such as files/")
         previous = staged_basenames.get(basename)
         if previous is not None:
             raise ValueError(f"--file inputs {previous} and {name} would both stage as {basename} in the workdir")
@@ -223,6 +226,9 @@ def _command_runner_text(
         for staged_path, _, basename in staged_files
     )
 
+    def quoted(text: str) -> str:
+        return text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
     def render_word(parts: list[tuple[str, str]]) -> str:
         if not any(kind == "parameter" for kind, _ in parts):
             return shlex.quote("".join(value for _, value in parts))
@@ -232,9 +238,10 @@ def _command_runner_text(
                 if value in parameters:
                     pieces.append(f"$(httk_workflow_parameter {value})")
                 else:
-                    pieces.append(f"$HTTK_WORKFLOW_JOB_DIR/{file_paths[value]}")
+                    # The workdir copy (the command runs in the workdir), never the payload input itself.
+                    pieces.append(f"$PWD/{quoted(PurePosixPath(file_paths[value]).name)}")
             else:
-                pieces.append(value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`"))
+                pieces.append(quoted(value))
         pieces.append('"')
         return "".join(pieces)
 

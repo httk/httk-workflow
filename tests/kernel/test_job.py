@@ -90,6 +90,9 @@ def test_definition_is_immutable_all_the_way_down() -> None:
     assert job.parameters["encut"] == 520
 
 
+_DIGEST = {"size": 3, "sha256": "0" * 64}
+
+
 @pytest.mark.parametrize(
     ("member", "value"),
     [
@@ -123,15 +126,23 @@ def test_definition_is_immutable_all_the_way_down() -> None:
         ("seal_succeeded", "yes"),
         ("staged_files", []),
         ("staged_files", "files/INCAR"),
-        ("staged_files", ["INCAR"]),
-        ("staged_files", ["files/../INCAR"]),
-        ("staged_files", ["/files/INCAR"]),
-        ("staged_files", ["files/POSCAR", "files/INCAR"]),
-        ("staged_files", ["files/INCAR", "files/INCAR"]),
-        ("staged_files", ["attempts/1/x"]),
-        ("staged_files", [".httk-job/seal.json"]),
-        ("staged_files", ["logs/run.log"]),
-        ("staged_files", ["job.json/x"]),
+        ("staged_files", ["files/INCAR"]),
+        ("staged_files", [{"path": "INCAR"}]),
+        ("staged_files", [{"path": "files/../INCAR"}]),
+        ("staged_files", [{"path": "/files/INCAR"}]),
+        ("staged_files", [{"path": "files/POSCAR"}, {"path": "files/INCAR"}]),
+        ("staged_files", [{"path": "files/INCAR"}, {"path": "files/INCAR", **_DIGEST}]),
+        ("staged_files", [{"path": "attempts/1/x"}]),
+        ("staged_files", [{"path": ".httk-job/seal.json"}]),
+        ("staged_files", [{"path": "logs/run.log"}]),
+        ("staged_files", [{"path": "job.json/x"}]),
+        ("staged_files", [{"path": "files/INCAR", "size": 3}]),
+        ("staged_files", [{"path": "files/INCAR", "sha256": _DIGEST["sha256"]}]),
+        ("staged_files", [{"path": "files/INCAR", **_DIGEST, "sha256": "A" * 64}]),
+        ("staged_files", [{"path": "files/INCAR", **_DIGEST, "sha256": "a" * 63}]),
+        ("staged_files", [{"path": "files/INCAR", **_DIGEST, "size": -1}]),
+        ("staged_files", [{"path": "files/INCAR", **_DIGEST, "size": True}]),
+        ("staged_files", [{"path": "files/INCAR", **_DIGEST, "mode": 1}]),
     ],
 )
 def test_malformed_members_are_refused(member: str, value: object) -> None:
@@ -140,8 +151,9 @@ def test_malformed_members_are_refused(member: str, value: object) -> None:
 
 
 def test_staged_files_is_optional_and_absent_when_empty() -> None:
-    job = JobDefinition.from_mapping(_mapping(staged_files=["files/INCAR", "inputs/POSCAR"]))
-    assert job.staged_files == ("files/INCAR", "inputs/POSCAR")
+    staged = [{"path": "files/INCAR", **_DIGEST}, {"path": "inputs/POSCAR"}]
+    job = JobDefinition.from_mapping(_mapping(staged_files=staged))
+    assert job.as_mapping()["staged_files"] == staged
     assert JobDefinition.from_mapping(job.as_mapping()) == job
     # A job without staged files encodes exactly as before the member existed.
     plain = JobDefinition.from_mapping(_mapping())
