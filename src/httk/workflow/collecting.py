@@ -134,8 +134,10 @@ class _CollectEnvironmentError(RuntimeError):
 
 if TYPE_CHECKING:
     import httk.core
+    from httk.core.project.sealing import Seal
 
     from .scaffold import WorkflowProvider
+    from .seals import Release
 
 
 def _core():
@@ -183,6 +185,10 @@ class CollectedJob:
         its role, a ``--file``/``--files`` file under its payload-relative path,
         each a ``FileRecord`` or, for a structure *httk₂* reads, a
         ``StructureInput`` whose alternative the run's edge names.
+    :param relocations: Name the files moved out of the job to another job
+        (its valid release records) as ``(old URL, new URL, sha256)``, so a store
+        holding the file at its old location re-points it; the new URL is
+        ``None`` until the receiving job has succeeded.
     """
 
     workflow_id: str
@@ -198,6 +204,7 @@ class CollectedJob:
     run_only: bool = False
     child_runs: tuple[tuple[str, str], ...] = ()
     inputs: Mapping[str, object] = field(default_factory=dict)
+    relocations: tuple[tuple[str, str | None, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1050,7 +1057,12 @@ def _workspace_file_record(
     index: int = 0,
     name: str | None = None,
 ) -> object:
-    """Resolve one workspace-confined path into a core ``FileRecord``."""
+    """Resolve one workspace-confined path into a core ``FileRecord``.
+
+    A file of the job's payload that is missing because it was moved to
+    another job (``job new --input-move-from-job``) is recorded by its valid
+    release record: at its new location, with the sealed digest, and a warning.
+    """
 
     from httk.core import FileRecord, reader_format_for
 
@@ -1058,6 +1070,8 @@ def _workspace_file_record(
     recorded_path = Path(recorded)
     actual: Path | None = None
     invalid_absolute = False
+    # Where the file would be in the job's payload, for a file that was moved to another job.
+    expected: list[Path] = []
     try:
         if recorded_path.is_absolute():
             resolved = recorded_path.resolve()
@@ -1065,11 +1079,15 @@ def _workspace_file_record(
                 invalid_absolute = True
             elif resolved.is_file():
                 actual = resolved
+            else:
+                expected.append(resolved)
         elif record.workdir is not None:
             workdir = record.workdir.resolve()
             candidate = (workdir / recorded_path).resolve()
             if candidate.is_relative_to(workdir) and candidate.is_relative_to(root) and candidate.is_file():
                 actual = candidate
+            elif candidate.is_relative_to(workdir):
+                expected.append(candidate)
         if (
             actual is None
             and not invalid_absolute
@@ -1083,8 +1101,19 @@ def _workspace_file_record(
                 candidate = (published / f"{index:04d}-{recorded_path.name}").resolve()
                 if candidate.is_relative_to(published) and candidate.is_relative_to(root) and candidate.is_file():
                     actual = candidate
+                elif candidate.is_relative_to(published):
+                    expected.append(candidate)
     except (OSError, RuntimeError):
         actual = None
+    payload = record.payload.resolve()
+    members = [path.relative_to(payload).as_posix() for path in expected if path.is_relative_to(payload)]
+    if actual is None and members:
+        seal = _usable_seal(record, f"{members[0]} is missing and no release record is consulted")
+        released = {} if seal is None else _valid_releases(record, seal, members)
+        for member in members:
+            if (release := released.get(member)) is not None:
+                file_name = recorded_path.name if name is None else name
+                return _released_file(record, release, file_name, member, logging.WARNING)
     if actual is None:
         raise ValueError(f"file path {recorded!r} is missing or outside the workspace/workdir/data roots")
     descriptor_path = actual.relative_to(root).as_posix()
@@ -1832,27 +1861,32 @@ def _staged_inputs(record: JobRecord, run: httk.core.Run, taken: Mapping[str, ob
             if staged_path not in destinations and staged_path not in skip:
                 wanted[staged_path] = (PurePosixPath(staged_path), None, False)
     staging = {label: digests.get(relative.as_posix()) for label, (relative, _, _) in wanted.items()}
-    sealed = _sealed_digests(record) if any(staging.values()) else None
+    seal = _usable_seal(record, "staged inputs are hashed") if any(staging.values()) else None
+    sealed = None if seal is None else _sealed_digests(seal)
+    released = (
+        {}
+        if seal is None
+        else _valid_releases(record, seal, [relative.as_posix() for relative, _, _ in wanted.values()])
+    )
     loaded: dict[str, object] = {}
     for label, (relative, entry_type, required) in wanted.items():
-        value = _staged_input(record, label, relative, entry_type, required, staging[label], sealed)
+        value = _staged_input(
+            record, label, relative, entry_type, required, staging[label], sealed, released.get(relative.as_posix())
+        )
         if value is not None:
             loaded[label] = value
     return loaded
 
 
-def _sealed_digests(record: JobRecord) -> dict[str, str] | None:
-    """Return the SHA-256 of every file the job's seal records, or ``None`` without a usable seal.
+def _usable_seal(record: JobRecord, consequence: str) -> Seal | None:
+    """Return the job's seal, or ``None`` when it has none or it is not usable (logged with *consequence*).
 
     The seal sits in the trust domain of ``job.json``, so it is usable when its
     recorded body digest matches its body; a signature adds nothing there, but
-    a signed seal whose signatures do not verify is not used. The payload is
-    not re-hashed.
+    a signed seal whose signatures do not verify is not used.
     """
 
-    from httk.core.project.sealing import INVALID, sign_seal_body, verify_signed_body
-
-    from .seals import _job_seal_bytes, _parse_job_seal, job_seal_path
+    from .seals import _job_seal_bytes, _parse_job_seal, _signed_body_problem, job_seal_path
 
     try:
         data = _job_seal_bytes(record.payload)
@@ -1860,19 +1894,92 @@ def _sealed_digests(record: JobRecord) -> dict[str, str] | None:
             return None
         seal = _parse_job_seal(data, job_seal_path(record.payload))
     except (ValueError, OSError) as exc:
-        _LOGGER.info("%s: staged inputs are hashed: the job seal is unreadable: %s", record.job_key, exc)
+        _LOGGER.info("%s: %s: the job seal is unreadable: %s", record.job_key, consequence, exc)
         return None
-    if seal.signatures:
-        # Checks the body digest too.
-        verification = verify_signed_body(seal.body_bytes, seal.body_sha256, seal.signatures)
-        reason = verification.reason if verification.verdict == INVALID else None
-    else:
-        # Signing with no keys is the seal's own (domain-separated) body digest.
-        unsigned = sign_seal_body(json.loads(seal.body_bytes), ())[0] == seal.body_sha256
-        reason = None if unsigned else "the seal body does not match its recorded digest"
+    reason = _signed_body_problem(json.loads(seal.body_bytes), seal.body_sha256, seal.signatures)
     if reason is not None:
-        _LOGGER.info("%s: staged inputs are hashed: the job seal is invalid: %s", record.job_key, reason)
+        _LOGGER.info("%s: %s: the job seal is invalid: %s", record.job_key, consequence, reason)
         return None
+    return seal
+
+
+def _valid_releases(record: JobRecord, seal: Seal, paths: Iterable[str]) -> dict[str, Release]:
+    """Return the job's valid release records of the missing files among *paths*, by released payload path."""
+
+    from .seals import valid_job_releases
+
+    return valid_job_releases(record.payload, seal, paths)
+
+
+def _released_file(record: JobRecord, release: Release, name: str, what: str, level: int) -> httk.core.FileRecord:
+    """Record a file moved out of *record*'s job by its release: the new location and the sealed digest.
+
+    The receiving job is in the same workspace, so the URL is the
+    workspace-relative path of the file in its payload (prefixed like any
+    other file URL). Only a stable location is recorded: while the receiving
+    job has not succeeded (it still moves between states), or when it cannot
+    be found, the file has no URL, and the receiving job's own collect
+    records the location (a store keeps the first non-null URL). The move is
+    logged at *level*, naming *what* moved.
+    """
+
+    from httk.core import FileRecord, reader_format_for
+
+    from .models import parse_job_key
+
+    url: str | None = None
+    try:
+        # ponytail: the release names the job, not its placement, so this walks every placement once per file.
+        ref = _kernel.locate(
+            Workspace(record.workspace_root), parse_job_key(release.to_job_key)[1], placement_hint=None, exhaustive=True
+        )
+    except (WorkflowError, OSError, ValueError) as exc:
+        _LOGGER.warning("%s: cannot locate job %s: %s", record.job_key, release.to_job_key, exc)
+        ref = None
+    if ref is not None and ref.state == "succeeded":
+        url = f"{ref.path.relative_to(record.workspace_root).as_posix()}/{release.to_path}"
+        _LOGGER.log(
+            level,
+            "%s: %s was moved to job %s; it is recorded at its new location",
+            record.job_key,
+            what,
+            release.to_job_key,
+        )
+    else:
+        _LOGGER.log(
+            level,
+            "%s: %s was moved to job %s, which has not succeeded; it is recorded without a location, which that "
+            "job's own collect records",
+            record.job_key,
+            what,
+            release.to_job_key,
+        )
+    return FileRecord(url, name, sha256=release.sha256, size=release.size, format=reader_format_for(name))
+
+
+def _relocations(record: JobRecord, url_prefix: str) -> tuple[tuple[str, str | None, str], ...]:
+    """Return ``(old URL, new URL, sha256)`` of every file moved out of the job, by its valid release records.
+
+    The new URL is ``None`` while the receiving job has not succeeded (see :func:`_released_file`).
+    """
+
+    from .seals import job_releases_path
+
+    if not os.path.lexists(job_releases_path(record.payload)):
+        return ()
+    seal = _usable_seal(record, "its released files are not relocated")
+    relocations: list[tuple[str, str | None, str]] = []
+    sealed = [str(entry["path"]) for entry in seal.records if entry.get("type") == "file"] if seal is not None else []
+    for path, release in ({} if seal is None else _valid_releases(record, seal, sealed)).items():
+        moved = _released_file(record, release, PurePosixPath(path).name, path, logging.DEBUG)
+        old = f"{url_prefix}/{record.payload_path.as_posix()}/{path}"
+        relocations.append((old, None if moved.url is None else f"{url_prefix}/{moved.url}", release.sha256))
+    return tuple(relocations)
+
+
+def _sealed_digests(seal: Seal) -> dict[str, str]:
+    """Return the SHA-256 of every file a usable job seal records; the payload is not re-hashed."""
+
     return {
         str(entry["path"]): str(entry["sha256"])
         for entry in seal.records
@@ -1888,6 +1995,7 @@ def _staged_input(
     required: bool,
     staging: tuple[int, str] | None = None,
     sealed: Mapping[str, str] | None = None,
+    release: Release | None = None,
 ) -> object | None:
     """Record one staged file: its ``FileRecord``, or a ``StructureInput`` when it reads as a structure.
 
@@ -1922,6 +2030,8 @@ def _staged_input(
     :param required: Whether an absent file is worth a warning.
     :param staging: The ``(size, sha256)`` ``job.json`` recorded at staging, if any.
     :param sealed: The digests of the files the usable job seal records, if there is one.
+    :param release: The valid release record of a file moved out of the job, if any: when the file is
+        absent, it is recorded at its new location with the sealed digest, without reading it.
     :return: The recorded value, or ``None`` when nothing is recorded.
     """
 
@@ -1949,6 +2059,8 @@ def _staged_input(
     url = f"{record.payload_path.as_posix()}/{path}"
     if staging is not None and sealed is not None and not confirmed:
         return lost("mutated or deleted")
+    if release is not None and not os.path.lexists(record.payload.joinpath(*relative.parts)):
+        return _released_file(record, release, name, f"input {label!r} ({path})", logging.INFO)
     data: bytes | None = None
     if confirmed and not load:
         assert staging is not None
@@ -2182,9 +2294,10 @@ def collect(
             raise ValueError("collector must return a mapping of output roles or a Collected")
         outputs, inputs = cast(Mapping[str, object], outputs), cast(Mapping[str, object], inputs)
         staged = _staged_inputs(record, run, inputs)
-        return _assemble_collected(
+        collected = _assemble_collected(
             identity, record, provider, run, outputs, inputs=inputs, staged=staged, url_prefix=url_prefix
         )
+        return replace(collected, relocations=_relocations(record, url_prefix))
 
     while window := list(islice(records, batch_size)):
         results: list[CollectedJob | None] = [None] * len(window)

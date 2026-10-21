@@ -16,7 +16,7 @@ from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
-from httk.core import DataRecord, Run, RunEdge
+from httk.core import DataRecord, FileRecord, Run, RunEdge
 from httk.core.storage import content_id, resolve_storage_record
 
 from .collecting import CollectedJob, StructureInput
@@ -688,6 +688,41 @@ def _ledger_entry_id(
     return entry_id
 
 
+def _relocate(store: Any, item: CollectedJob, old_url: str, new_url: str | None, sha256: str) -> None:
+    """Re-point the stored ``FileRecord`` of *sha256* from *old_url* to *new_url* (compare-and-swap).
+
+    A *new_url* of ``None`` (the receiving job has not succeeded) leaves the row without a location until the
+    receiving job's own collect fills it in. A store that cannot mutate rows in place is left as it is.
+    """
+
+    if not getattr(getattr(store, "backend_facts", None), "supports_incremental_save", True):
+        return
+    files = [
+        value
+        for value in (*item.outputs.values(), *item.inputs.values())
+        if isinstance(value, FileRecord) and value.sha256 == sha256
+    ]
+    try:
+        sid = next((sid for value in files if (sid := store.sid_of(value)) is not None), None)
+        if sid is None:
+            _LOGGER.debug("%s: no stored file %s to re-point", item.record.job_key, sha256)
+            return
+        if store.relocate_file(sid, new_url, expected=old_url):
+            return
+        # Not at the old location: already re-pointed by an earlier sweep (quietly), or by someone else.
+        if store.fetch(FileRecord, sid).url != new_url:
+            _LOGGER.info(
+                "%s: the stored file %s is not at %s; leaving its location as it is",
+                item.record.job_key,
+                sha256,
+                old_url,
+            )
+    except Exception as exc:
+        _LOGGER.warning(
+            "%s: could not re-point the stored file %s to %s: %s", item.record.job_key, sha256, new_url, exc
+        )
+
+
 def store_collected(
     items: list[CollectedJob],
     path: str,
@@ -1009,6 +1044,11 @@ def store_collected(
                 report["revised"] = revised
             except Exception as exc:
                 report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
+        # A file moved to another job since an earlier sweep stored it keeps its old location
+        # (first non-null wins): re-point that row, unless someone re-pointed it first.
+        for item in items:
+            for old_url, new_url, sha256 in item.relocations:
+                _relocate(store, item, old_url, new_url, sha256)
         # Pass two resolves all run and product references after every output
         # in the sweep has contributed to the shared remap. Children go first, so
         # a parent's run can name the runs of the children it spawned.

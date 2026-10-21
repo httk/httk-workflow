@@ -391,6 +391,11 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
     }
     files = _staged_files(arguments, context)
     inputs, items, input_tag = _load_inputs(arguments.inputs, arguments.input_from)
+    move_inputs = dict(_pairs(arguments.input_moves, "an input moved from a job"))
+    if len(move_inputs) != len(arguments.input_moves):
+        raise ValueError("--input-move-from-job names one input twice")
+    if move_inputs and items:
+        raise ValueError("--input-move-from-job moves one file into one job; it cannot be combined with --input-from")
     command_tag = _command_default_tag(parameters) if arguments.from_command is not None else None
     with tempfile.TemporaryDirectory(prefix="httk-command-") as directory:
         target = _workflow_target(arguments, Path(directory), parameters, files)
@@ -418,7 +423,8 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
                     item["tag"] = arguments.tag or derived or command_tag
             results = new_jobs(workspace, target, items, **shared)
         else:
-            results = iter([new_job(workspace, target, tag=arguments.tag or command_tag or input_tag, **shared)])
+            tag = arguments.tag or command_tag or input_tag
+            results = iter([new_job(workspace, target, tag=tag, move_inputs=move_inputs, **shared)])
         return _report_jobs(results, arguments, context, batch=len(items) if items else None)
 
 
@@ -1718,6 +1724,17 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
         dest="inputs",
         metavar="NAME=VALUE",
         help="one declared input value to stage (repeatable)",
+    )
+    new.add_argument(
+        "--input-move-from-job",
+        action="append",
+        default=[],
+        dest="input_moves",
+        metavar="NAME=PATH",
+        help=(
+            "move (not copy) PATH, a file inside a succeeded job of this workspace, to the declared input NAME's "
+            "destination; a sealed job's seal is amended by a release record (repeatable)"
+        ),
     )
     new.add_argument(
         "--input-from",

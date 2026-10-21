@@ -11,6 +11,11 @@ that workspace's seal. Each level therefore binds the level below it, so a
 project seal transitively pins whole payloads without re-hashing them, and a
 change to any covered byte becomes a discrepancy the moment the seal is verified.
 
+A job seal is never rewritten. A sealed file moved out to another job (``job
+new --input-move-from-job``) is recorded by a signed *release record* in the
+payload's ``.httk-job/releases/`` directory (one record per path), which amends the seal: verification
+accepts the file's absence while a valid record covers it.
+
 The signature is over a domain-separated digest of the document body, exactly as
 :mod:`httk.workflow.manifests` signs a manifest, so a digest signed as a seal can
 never be replayed as anything else. Verification answers the two independent
@@ -20,12 +25,15 @@ this tree, and was it made by a key this project trusts — and reports both.
 
 import errno
 import hashlib
+import json
 import logging
 import os
+import re
 import stat
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from itertools import islice
 from pathlib import Path, PurePosixPath
 
 from httk.core.project.sealing import (
@@ -51,8 +59,8 @@ from httk.core.project.sealing import (
 from . import _fs, _kernel
 from ._job import JobDefinition
 from ._kernel import JobRef
-from ._util import json_bytes
-from .errors import FormatError, SealedError, SealError
+from ._util import json_bytes, utc_now
+from .errors import FormatError, SealedError, SealError, WorkflowError
 from .manifests import payload_file_records
 from .models import JOB_STATE_DIRECTORY, WORKSPACE_DIRECTORY, placement_text
 from .projects import PROJECT_DIRECTORY, discover_project
@@ -63,6 +71,7 @@ __all__ = [
     "VALID_TRUSTED",
     "VALID_UNKNOWN_KEY",
     "Discrepancy",
+    "Release",
     "Seal",
     "SealKey",
     "SealKeys",
@@ -73,10 +82,14 @@ __all__ = [
     "is_job_sealed",
     "is_project_sealed",
     "is_workspace_sealed",
+    "job_releases_path",
     "job_seal_digest",
     "job_seal_path",
     "project_seal_path",
+    "read_job_release",
+    "read_job_releases",
     "read_seal",
+    "record_job_release",
     "recorded_job_path",
     "require_cli_modifiable",
     "resolve_seal_keys",
@@ -87,6 +100,7 @@ __all__ = [
     "unseal_job",
     "unseal_workspace",
     "unsealed_jobs",
+    "valid_job_releases",
     "verify_job_seal",
     "verify_seal",
     "verify_tree",
@@ -99,6 +113,13 @@ _LOGGER = logging.getLogger(__name__)
 _SEAL_NAME = "seal.json"
 #: The largest job seal read from a (job-written) payload.
 _SEAL_LIMIT = 16 * 1024 * 1024
+_RELEASES_DIRECTORY = "releases"
+_RELEASE_FORMAT = "httk-job-release"
+#: The largest release record, and the most records one job's release directory is read with.
+_RELEASE_LIMIT = 1024 * 1024
+_RELEASES_LIMIT = 65536
+_RELEASE_MEMBERS = frozenset({"kind", "amends", "path", "size", "sha256", "released_to", "at"})
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 
 # -- locations ---------------------------------------------------------------
 
@@ -231,6 +252,12 @@ def _job_seal_bytes(payload: str | os.PathLike[str]) -> bytes | None:
         or the seal is oversized.
     """
 
+    return _job_state_bytes(payload, _SEAL_NAME)
+
+
+def _job_state_bytes(payload: str | os.PathLike[str], name: str) -> bytes | None:
+    """Read one ``.httk-job`` document (the seal or the releases) without following a link or blocking."""
+
     try:
         state = _fs.open_dir_under(Path(payload), JOB_STATE_DIRECTORY)
     except FileNotFoundError:
@@ -238,12 +265,12 @@ def _job_seal_bytes(payload: str | os.PathLike[str]) -> bytes | None:
     except _fs.UnsafePath as exc:
         raise FormatError(str(exc)) from exc
     try:
-        return _fs.read_bounded(_fs.anchored(state, _SEAL_NAME), _SEAL_LIMIT, nonblock=True)
+        return _fs.read_bounded(_fs.anchored(state, name), _SEAL_LIMIT, nonblock=True)
     except _fs.UnsafePath as exc:
         raise FormatError(str(exc)) from exc
     except OSError as exc:
         if exc.errno == errno.ENXIO:  # a socket: opening one fails rather than reaching the regular-file check
-            raise FormatError(f"{job_seal_path(payload)} is not a regular file") from exc
+            raise FormatError(f"{Path(payload) / JOB_STATE_DIRECTORY / name} is not a regular file") from exc
         raise
     finally:
         os.close(state)
@@ -310,6 +337,355 @@ def seal_payload(
     data = json_bytes({**body, "body_sha256": body_sha256, "signatures": signatures}) + b"\n"
     _fs.write_file(_fs.loc(state / _SEAL_NAME), data, durable=durable)
     return hashlib.sha256(data).hexdigest(), bool(signatures)
+
+
+# -- release records ---------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Release:
+    """One release record: a sealed file moved out of its job, which amends the job seal without rewriting it.
+
+    The record is its own signed body (``kind`` ``"release"``), signed like a
+    seal, stored as one file per released path. It covers the file only while
+    it is valid against the seal it amends (see :func:`valid_job_releases`).
+
+    :param path: The payload-relative path the file had in the released job.
+    :param size: The file size in bytes, as the seal records it.
+    :param sha256: The file's SHA-256, as the seal records it.
+    :param to_job_key: The job key of the job the file was moved into.
+    :param to_path: The payload-relative path of the file in that job.
+    :param at: When the file was released (UTC ISO 8601).
+    :param amends: The ``body_sha256`` of the job seal the record amends.
+    :param body_sha256: The recorded digest of the signed body.
+    :param signatures: The detached signatures over the body digest; empty when unsigned.
+    :param body: The signed body.
+    """
+
+    path: str
+    size: int
+    sha256: str
+    to_job_key: str
+    to_path: str
+    at: str
+    amends: str
+    body_sha256: str
+    signatures: tuple[dict[str, object], ...]
+    body: Mapping[str, object]
+
+    def as_mapping(self) -> dict[str, object]:
+        """Return the record document as it is stored.
+
+        :return: ``{format, version, body, body_sha256, signatures}``.
+        """
+
+        return {
+            "format": _RELEASE_FORMAT,
+            "version": 1,
+            "body": dict(self.body),
+            "body_sha256": self.body_sha256,
+            "signatures": list(self.signatures),
+        }
+
+
+def job_releases_path(payload: str | os.PathLike[str]) -> Path:
+    """Return where one job's release records live: beside its seal, in the ``.httk-job/releases/`` directory.
+
+    Each released path has one record, ``<SHA-256 of the payload-relative path>.json``.
+
+    :param payload: The job payload directory.
+    :return: The release record directory.
+    """
+
+    return Path(payload) / JOB_STATE_DIRECTORY / _RELEASES_DIRECTORY
+
+
+def _release_name(path: str) -> str:
+    """Return the record file name of one released payload-relative path."""
+
+    return hashlib.sha256(path.encode("utf-8")).hexdigest() + ".json"
+
+
+def _parse_release(document: object) -> Release:
+    """Structurally validate one stored release record document."""
+
+    if (
+        not isinstance(document, dict)
+        or document.get("format") != _RELEASE_FORMAT
+        or document.get("version") != 1
+        or not isinstance(body := document.get("body"), dict)
+    ):
+        raise FormatError(f"a release record is not an {_RELEASE_FORMAT} version 1 document")
+    target = body.get("released_to")
+    body_sha256, signatures = document.get("body_sha256"), document.get("signatures")
+    fields = (body.get("path"), body.get("amends"), body.get("at"), body_sha256)
+    if (
+        set(body) != _RELEASE_MEMBERS
+        or body.get("kind") != "release"
+        or not all(isinstance(field, str) for field in fields)
+        or not isinstance(size := body.get("size"), int)
+        or isinstance(size, bool)
+        or not isinstance(sha256 := body.get("sha256"), str)
+        or not _HEX64.fullmatch(sha256)
+        or not isinstance(target, dict)
+        or set(target) != {"job_key", "path"}
+        or not all(isinstance(value, str) for value in target.values())
+        or not isinstance(signatures, list)
+        or not all(isinstance(signature, dict) for signature in signatures)
+    ):
+        raise FormatError("a release record has a malformed body")
+    return Release(
+        path=str(body["path"]),
+        size=size,
+        sha256=sha256,
+        to_job_key=str(target["job_key"]),
+        to_path=str(target["path"]),
+        at=str(body["at"]),
+        amends=str(body["amends"]),
+        body_sha256=str(body_sha256),
+        signatures=tuple(signatures),
+        body=body,
+    )
+
+
+def _read_release(directory: int, name: str, payload: str | os.PathLike[str]) -> Release | None:
+    """Read one record file below the open release directory; ``None`` when absent, unsafe or malformed (warned)."""
+
+    try:
+        data = _fs.read_bounded(_fs.anchored(directory, name), _RELEASE_LIMIT, nonblock=True)
+        if data is None:
+            return None
+        release = _parse_release(json.loads(data))
+        if _release_name(release.path) != name:
+            raise FormatError(f"it is not named for its path {release.path!r}")
+    except (WorkflowError, OSError, ValueError) as exc:
+        _LOGGER.warning("skipping the release record %s of %s: %s", name, payload, exc)
+        return None
+    return release
+
+
+def _open_releases_readonly(payload: str | os.PathLike[str]) -> int | None:
+    """Open a job's release directory without following a link; ``None`` when absent or not a real directory."""
+
+    try:
+        return _fs.open_dir_under(Path(payload), f"{JOB_STATE_DIRECTORY}/{_RELEASES_DIRECTORY}")
+    except (FileNotFoundError, NotADirectoryError, _fs.UnsafePath) as exc:
+        _LOGGER.debug("no usable release records below %s: %s", payload, exc)
+        return None
+
+
+def read_job_releases(payload: str | os.PathLike[str]) -> tuple[Release, ...]:
+    """List a job's release records (for diagnostics) without following a link or blocking.
+
+    Validation never lists the directory (see :func:`valid_job_releases`).
+    The listing is bounded; a dot-named temporary is skipped silently, and an
+    entry that is not a regular file named for its record, or that does not
+    parse, is skipped with a warning. A ``releases`` entry that is not a real
+    directory (a job could plant one) is no records.
+
+    :param payload: The job payload directory.
+    :return: The records, ordered by record file name.
+    :raises httk.workflow.errors.FormatError: If the directory holds more than the bounded number of entries.
+    """
+
+    directory = _open_releases_readonly(payload)
+    if directory is None:
+        return ()
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(entry.name for entry in islice(entries, _RELEASES_LIMIT + 1))
+        if len(names) > _RELEASES_LIMIT:
+            raise FormatError(f"{job_releases_path(payload)} holds more than {_RELEASES_LIMIT} entries")
+        releases = (_read_release(directory, name, payload) for name in names if not name.startswith("."))
+        return tuple(release for release in releases if release is not None)
+    finally:
+        os.close(directory)
+
+
+def read_job_release(payload: str | os.PathLike[str], path: str) -> Release | None:
+    """Read the release record of one payload-relative path, opening only its own record file.
+
+    :param payload: The job payload directory.
+    :param path: The payload-relative path of the released file.
+    :return: The record, or ``None`` when there is none (or it is unsafe or malformed, with a warning).
+    """
+
+    directory = _open_releases_readonly(payload)
+    if directory is None:
+        return None
+    try:
+        return _read_release(directory, _release_name(path), payload)
+    finally:
+        os.close(directory)
+
+
+def _release_document(
+    seal: Seal, *, path: str, size: int, sha256: str, released_to: Mapping[str, str], keys: Sequence[SealKey]
+) -> tuple[Release, bytes]:
+    """Sign one release body amending *seal* and return the record with its stored bytes."""
+
+    body: dict[str, object] = {
+        "kind": "release",
+        "amends": seal.body_sha256,
+        "path": path,
+        "size": size,
+        "sha256": sha256,
+        "released_to": {"job_key": released_to["job_key"], "path": released_to["path"]},
+        "at": utc_now(),
+    }
+    body_sha256, signatures = sign_seal_body(body, keys)
+    document = {
+        "format": _RELEASE_FORMAT,
+        "version": 1,
+        "body": body,
+        "body_sha256": body_sha256,
+        "signatures": signatures,
+    }
+    return _parse_release(document), json_bytes(document) + b"\n"
+
+
+def _open_releases(payload: str | os.PathLike[str], durable: bool) -> int:
+    """Open (creating) a job's release directory without following a link, as a ``FormatError`` when unsafe."""
+
+    try:
+        return _fs.open_dir_under(
+            Path(payload), f"{JOB_STATE_DIRECTORY}/{_RELEASES_DIRECTORY}", create=True, mode=0o755, durable=durable
+        )
+    except _fs.UnsafePath as exc:
+        raise FormatError(str(exc)) from exc
+
+
+def record_job_release(
+    workspace: Workspace,
+    payload: str | os.PathLike[str],
+    *,
+    path: str,
+    size: int,
+    sha256: str,
+    released_to: Mapping[str, str],
+    keys: Sequence[SealKey],
+    seal: Seal | None = None,
+    replace: bool = False,
+) -> Release:
+    """Create the release record of one file of a sealed job, amending its seal for a file moved out of it.
+
+    The record is created exclusively before the file moves (it is the intent
+    and the claim): a second mover of the same path finds it and is refused,
+    and a record whose file is still in place changes nothing. The seal itself
+    is never rewritten, so workspace and project seals binding its digest stay
+    valid.
+
+    :param workspace: The workspace holding the job (its durability setting is used).
+    :param payload: The sealed job's payload directory.
+    :param path: The payload-relative path of the released file.
+    :param size: The file size, as the seal records it.
+    :param sha256: The file's SHA-256, as the seal records it.
+    :param released_to: ``{"job_key", "path"}``: the receiving job and the file's payload-relative path there.
+    :param keys: The signing keys; empty for an unsigned record, exactly as for a seal.
+    :param seal: The job's seal, already validated by the caller; read from the payload when not given.
+    :param replace: Replace the path's record (a stale one, or one naming another key) in one rename.
+    :return: The created record.
+    :raises FileExistsError: If the path already has a release record (it is released or being moved).
+    :raises httk.workflow.errors.FormatError: If the job has no seal, or its seal or release directory is unusable.
+    """
+
+    if seal is None:
+        data = _job_seal_bytes(payload)
+        if data is None:
+            raise FormatError(f"{payload} has no seal to amend")
+        try:
+            seal = _parse_job_seal(data, job_seal_path(payload))
+        except ValueError as exc:
+            raise FormatError(str(exc)) from exc
+    release, data = _release_document(seal, path=path, size=size, sha256=sha256, released_to=released_to, keys=keys)
+    directory = _open_releases(payload, workspace.durable)
+    try:
+        target = _fs.anchored(directory, _release_name(path))
+        if replace:
+            _fs.write_file(target, data, durable=workspace.durable)
+        else:
+            os.close(_fs.create_exclusive(target, data, durable=workspace.durable))
+    finally:
+        os.close(directory)
+    return release
+
+
+def _withdraw_job_release(workspace: Workspace, payload: Path, release: Release) -> None:
+    """Remove one record again (a move rolled back): one unlink, only while the record is still *release*."""
+
+    directory = _open_releases(payload, workspace.durable)
+    try:
+        # ponytail: read-compare-unlink is not atomic; a mover replacing this record in between loses it.
+        current = _read_release(directory, _release_name(release.path), payload)
+        if current is not None and current.body_sha256 == release.body_sha256:
+            _fs.remove_file(_fs.anchored(directory, _release_name(release.path)), durable=workspace.durable)
+    finally:
+        os.close(directory)
+
+
+def _signed_body_problem(
+    body: Mapping[str, object], body_sha256: str, signatures: Sequence[Mapping[str, object]]
+) -> str | None:
+    """Return why a signed body is unusable, or ``None``: an unsigned body only needs its digest to match.
+
+    Any signature that is present must verify, as for a seal; trust in the signer is not required.
+    """
+
+    if signatures:
+        verification = verify_signed_body(json_bytes(body), body_sha256, signatures)
+        return None if verification.valid else verification.reason
+    # Signing with no keys is the body's own (domain-separated) digest.
+    return None if sign_seal_body(dict(body), ())[0] == body_sha256 else "the body does not match its recorded digest"
+
+
+def valid_job_releases(payload: str | os.PathLike[str], seal: Seal, paths: Iterable[str]) -> dict[str, Release]:
+    """Return the release records that validly cover the missing files *paths* of *seal*, by path.
+
+    Only the record files of *paths* are opened; the release directory is never
+    listed, so nothing else in it affects validation. A record is valid when
+    its body digest checks, it amends exactly *seal* (``amends`` is its
+    ``body_sha256``), and its ``sha256`` and ``size`` are those *seal* records
+    for the path. Against a signed seal it must carry a signature that
+    verifies and was made by a key that also signed the seal, and every other
+    signature it carries must verify; against an unsigned seal an unsigned
+    record is accepted. A record whose file is present in the payload covers
+    nothing, so a stale record (a move that never happened) changes nothing.
+
+    :param payload: The job payload directory.
+    :param seal: The job's seal.
+    :param paths: The payload-relative paths to look up, normally the sealed files that are missing.
+    :return: The valid records by released path.
+    """
+
+    recorded = {str(record.get("path")): record for record in seal.records if record.get("type") == "file"}
+    wanted = [
+        path
+        for path in dict.fromkeys(paths)
+        if path in recorded and not os.path.lexists(Path(payload).joinpath(*PurePosixPath(path).parts))
+    ]
+    if not wanted:
+        return {}
+    sealed_by = set(verify_signed_body(seal.body_bytes, seal.body_sha256, seal.signatures).signers)
+    valid: dict[str, Release] = {}
+    for path in wanted:
+        release = read_job_release(payload, path)
+        if release is None:
+            continue
+        record = recorded[path]
+        problem = _signed_body_problem(release.body, release.body_sha256, release.signatures)
+        if problem is None and seal.signatures:
+            signers = verify_signed_body(json_bytes(release.body), release.body_sha256, release.signatures).signers
+            if not set(signers) & sealed_by:
+                problem = "no key that signed the seal signed it"
+        if problem is None and release.amends != seal.body_sha256:
+            problem = "it amends another seal"
+        elif problem is None and (record.get("sha256"), record.get("size")) != (release.sha256, release.size):
+            problem = "it does not match the sealed file"
+        if problem is not None:
+            _LOGGER.info("%s: the release record of %s is not valid: %s", payload, path, problem)
+            continue
+        valid[path] = release
+    return valid
 
 
 def _request(workspace: Workspace, ref: JobRef, action: str) -> str | None:
@@ -477,7 +853,9 @@ def verify_job_seal(
     """Verify a job seal's signature and that it still describes the payload.
 
     Verification needs only the payload directory, so it works the same for a
-    job inside a workspace and for a free-standing job directory.
+    job inside a workspace and for a free-standing job directory. A sealed
+    file that is missing because it was moved to another job is not a
+    discrepancy while a valid release record covers it (:func:`valid_job_releases`).
 
     :param payload: The job payload directory.
     :param trusted_keys: Trust anchors to classify the signers against.
@@ -515,7 +893,13 @@ def verify_job_seal(
     base = verify_signed_body(
         seal.body_bytes, seal.body_sha256, seal.signatures, trusted_keys=trusted_keys, expected_roles=expected_roles
     )
-    return _combine(base, diff_records(list(seal.records), payload_file_records(payload)))
+    discrepancies = diff_records(list(seal.records), payload_file_records(payload))
+    if any(item.kind == "missing" for item in discrepancies):
+        # A file moved out to another job is covered by a valid release record, not missing.
+        missing = [item.path for item in discrepancies if item.kind == "missing"]
+        released = valid_job_releases(payload, seal, missing)
+        discrepancies = [item for item in discrepancies if not (item.kind == "missing" and item.path in released)]
+    return _combine(base, discrepancies)
 
 
 def verify_workspace_seal(

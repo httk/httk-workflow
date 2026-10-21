@@ -845,8 +845,8 @@ attempts/<A>/
 otherwise, no capabilities) with the workspace bound read-only and the job
 directory writable, both at their real paths, and read-only overlays of the
 trusted entries present at launch: `job.json`, `state.json`,
-`.httk-job/seal.json` and `logs/`. Each overlay binds the inode opened when the
-sandbox is built, so the `state.json` replaced before the gate opens stays
+`.httk-job/seal.json`, `.httk-job/releases/` and `logs/`. Each overlay
+binds the inode opened when the sandbox is built, so the `state.json` replaced before the gate opens stays
 read-only to the job. Installed workflows, the parent and the children are
 visible read-only through the workspace bind. The attempt context
 (`HTTK_WORKFLOW_CONTEXT`) and the `HTTK_WORKFLOW_*` variables are described in
@@ -1574,7 +1574,11 @@ unsigned. A succeeded job without a seal records `seal: {disabled: true}`.
 document, so a seal a job planted proves nothing. A succeeded job is never
 changed by the protocol until `job unseal` records `seal.released` and removes
 the seal document; only then does `delete` apply. `job seal` seals a succeeded
-job that has none. Both are requests applied by an owner.
+job that has none. Both are requests applied by an owner. The one exception is
+a file moved out to a new job by `job new --input-move-from-job`: the seal is
+not rewritten, and a signed release record created in
+`<payload>/.httk-job/releases/` (one file per released path) amends it (see
+{doc}`sealing`). A record amends only the seal it names.
 
 The workspace seal `.httk-workspace/seal.json` is a snapshot of every job's
 seal digest (`null` when unsealed). It blocks only modifying CLI commands;

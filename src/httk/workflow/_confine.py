@@ -73,7 +73,13 @@ _PROBE_TIMEOUT = 10.0
 _STDERR_EXCERPT = 400
 #: The trusted entries of a job directory, overlaid read-only on its writable bind when present (note §3.3),
 #: each with whether it is a directory.
-_TRUSTED_OVERLAYS = (("job.json", False), ("state.json", False), (".httk-job/seal.json", False), ("logs", True))
+_TRUSTED_OVERLAYS = (
+    ("job.json", False),
+    ("state.json", False),
+    (".httk-job/seal.json", False),
+    (".httk-job/releases", True),
+    ("logs", True),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,8 +433,8 @@ def prepare_attempt_sandbox(
     The sandbox starts from Bubblewrap's empty root with a private ``/tmp`` (and ``/tmp/home``), then binds
     ``settings.readonly_paths`` read-only, ``jobs/`` and ``workflows/`` read-only at their real paths and
     ``.httk-workspace/format.json`` as a read-only content copy, the job directory
-    writable at its real path and its trusted entries (``job.json``, ``state.json``, ``.httk-job/seal.json``
-    and ``logs/``, those present) read-only over it, in that order. Files are opened (inode-pinned) at
+    writable at its real path and its trusted entries (``job.json``, ``state.json``, ``.httk-job/seal.json``,
+    ``.httk-job/releases/`` and ``logs/``, those present) read-only over it, in that order. Files are opened (inode-pinned) at
     preparation time and copied by Bubblewrap when the sandbox starts, so an atomic manager replacement of
     ``state.json`` in between neither fails the launch nor reaches the job; ``logs/`` is a read-only directory
     bind. The workspace root is an empty tmpfs that receives only those three view binds, the job bind and

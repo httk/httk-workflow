@@ -50,11 +50,11 @@ the root directory's name. A hook that builds a `FileRecord` with the bare
 workspace-relative path is prefixed the same way. Only a normalized relative
 path is prefixed; one with an empty, `.` or `..` segment, or one that already
 starts with the prefix, is left as it is with a warning naming the job and the
-role. Because the URL is part of a file entry's identity, the same workspace
-collected under another registered name yields other file entries. The URL
-is entry content, so it is fixed at collect time, before the run's edges and
-the content ids `--into` remaps are derived. Mapping the leading `data` onto a
-real location is a serving-time option instead:
+role. The URL is metadata, not part of a file entry's identity (its media
+type, `format` and SHA-256), so the same workspace collected under another
+registered name yields the same file entries, and a store keeps the first
+non-null URL it was given. Mapping the leading `data` onto a real location is
+a serving-time option instead:
 `httk serve optimade serve --data-path PATH` of *httk-serve*.
 Recognized calculation trees keep their URLs as their collectors give them.
 
@@ -196,6 +196,43 @@ can read:
   it.
 
 The digest tells whether a copy is still the file the job received.
+
+### Files moved to another job
+
+A file moved out of a succeeded job into a new one (`job new
+--input-move-from-job`, see {doc}`sealing`) is gone from its first job, and a
+valid release record beside that job's seal says where it went. The framework
+records such a file by its release record instead of failing on it:
+
+- A `{"file": ...}` response of an executable collector (and a CWL output
+  file, or a published data file) that names the missing file becomes a
+  `files` entry at the new location, `data/<workspace name>/<the receiving
+  job's payload>/<path>`, with the size and digest the seal records, and a
+  warning naming the receiving job. The run's output edge names that entry.
+- A staged input that was moved on is recorded the same way, with an info
+  message, not as lost.
+
+Only a stable location is recorded. While the receiving job has not succeeded
+it still moves between state directories, so the entry has no URL yet; the
+receiving job's own collect records the location, and a store keeps the first
+non-null URL. The URL settles once the receiving job has succeeded. A release
+record whose file is present (a move that never happened) changes nothing.
+
+File entries are identified by content, so the receiving job's own input is
+the same entry. A package collector that reads an output file itself (with
+`record.payload / ...`), rather than returning `{"file": ...}`, cannot read a
+moved file, so its job collects as degraded.
+
+A crash between the move and the new job's submission keeps the file in a
+scratch directory under `.httk-workspace/tmp/`, and a warning names it. The
+operator then moves the file back to its job by hand.
+
+If the first job was stored before the move, its stored `files` row still
+holds the old URL, which a later save would keep. When the job is collected
+`--into` the store again, each released file is re-pointed to its new URL (or
+to no URL while the receiving job has not succeeded), but only while the row
+still holds the old one (a compare-and-swap); a row someone else re-pointed is
+left as it is, with an info message.
 
 ### Runs and product curation
 

@@ -48,8 +48,10 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import uuid
 from collections.abc import Callable, Generator, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -62,8 +64,11 @@ from httk.core.report import context_logger
 from httk.core.requirements import check_requirements, parse_requirements
 
 if TYPE_CHECKING:
+    from httk.core.project.sealing import Seal, SealKey
+
     from .collecting import JobRecord
     from .compat import LanguageRequest
+    from .seals import Release
 
 from . import _fs, _kernel
 from ._durations import cap_maxtime
@@ -76,6 +81,7 @@ from .models import (
     _reserved_payload_member,
     ensure_step_known,
     expand_runner_command,
+    make_job_key,
     normalize_placement,
     normalize_resources,
     placement_text,
@@ -538,7 +544,8 @@ class JobItem(TypedDict, total=False):
     :func:`new_jobs` was called with. ``inputs`` and ``files`` are merged over the
     shared mappings key by key; everything else, including ``provenance``, replaces
     the shared value — see :func:`new_job` for what a supplied ``provenance``
-    document does.
+    document does. ``move_inputs`` exists only per job (a file moves once):
+    see :func:`new_job`.
     """
 
     inputs: Mapping[str, object]
@@ -550,6 +557,7 @@ class JobItem(TypedDict, total=False):
     placement: str | PurePosixPath
     priority: int | None
     provenance: Mapping[str, object] | None
+    move_inputs: Mapping[str, str | os.PathLike[str]]
 
 
 @dataclass(frozen=True)
@@ -1348,6 +1356,7 @@ def new_job(
     name: str | None = None,
     provenance: Mapping[str, object] | None = None,
     install: bool = False,
+    move_inputs: Mapping[str, str | os.PathLike[str]] | None = None,
 ) -> ScaffoldedJob:
     """Scaffold, submit, and describe one job of an installed *workflow*.
 
@@ -1392,15 +1401,25 @@ def new_job(
         edge labelled ``entity`` naming the entity by its stable ledger key, e.g.
         ``{"inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}}}``.
     :param install: Install *workflow* into the workspace first when it is not installed.
+    :param move_inputs: Map declared inputs that have a ``destination`` to files that
+        are moved there, not copied, out of succeeded jobs of *workspace*. Each
+        must be a regular file in a job's payload (not ``job.json``, ``state.json``,
+        ``attempts/``, ``logs/`` or ``.httk-job/``) on the filesystem of the
+        workspace. A sealed origin keeps its seal: a signed release record in its
+        ``.httk-job/releases/`` amends it, and the file's ``staged_files``
+        digest is the seal's, so the file is never hashed. An unsealed origin's
+        file is hashed. If the job is not submitted, every file moves back and its
+        release record is withdrawn.
     :return: The submitted job description.
     :raises ValueError: If the workflow is not installed (and *install* is false), or workflow,
-        inputs, placement, or job settings are invalid.
+        inputs, placement, or job settings are invalid, or a file to move is not a regular file
+        inside a succeeded job of *workspace* on its filesystem.
     """
 
     [job] = new_jobs(
         workspace,
         workflow,
-        [{}],
+        [{"move_inputs": move_inputs} if move_inputs else {}],
         inputs=inputs,
         files=files,
         parameters=parameters,
@@ -1491,21 +1510,36 @@ def new_jobs(
             scratch = owner.scratch(_SUBMIT)
             staging = scratch / "build"
             staging.mkdir()
-            job = _build_payload(
-                workspace,
-                prepared,
-                staging,
-                inputs={**(inputs or {}), **item.get("inputs", {})},
-                files={**(files or {}), **item.get("files", {})},
-                parameters={**(parameters or {}), **item.get("parameters", {})},
-                environment={**(environment or {}), **item.get("environment", {})},
-                tag=item.get("tag", tag),
-                placement=item.get("placement", placement),
-                priority=item.get("priority", priority),
-                name=item.get("name", name),
-                provenance=item.get("provenance", provenance),
-            )
-            ref = _submit_staged(workspace, owner, scratch, staging)
+            moves: list[_InputMove] = []
+            try:
+                job = _build_payload(
+                    workspace,
+                    prepared,
+                    staging,
+                    inputs={**(inputs or {}), **item.get("inputs", {})},
+                    files={**(files or {}), **item.get("files", {})},
+                    parameters={**(parameters or {}), **item.get("parameters", {})},
+                    environment={**(environment or {}), **item.get("environment", {})},
+                    tag=item.get("tag", tag),
+                    placement=item.get("placement", placement),
+                    priority=item.get("priority", priority),
+                    name=item.get("name", name),
+                    provenance=item.get("provenance", provenance),
+                    move_inputs=item.get("move_inputs"),
+                    moves=moves,
+                )
+                ref = _submit_staged(workspace, owner, scratch, staging)
+            except BaseException:
+                # A file that cannot go back keeps the markers, so closing the owner keeps the scratch holding it.
+                if _undo_moves(workspace, moves):
+                    _drop_markers(workspace, moves)
+                raise
+            finally:
+                for move in moves:
+                    os.close(move.directory)
+            if moves:
+                _drop_markers(workspace, moves)
+                _fs.remove_empty_dir(_fs.loc(scratch))
             yield ScaffoldedJob(
                 job_id=job.id,
                 job_key=job.job_key,
@@ -1592,11 +1626,25 @@ def _finish_submit(owner: _kernel.Owner, scratch: Path) -> bool:
     or copied or built beside it and renamed), so publishing it after a crash is
     what the dead owner was doing; the fresh name makes a repeat harmless. A
     scratch without ``job/`` held an unfinished copy (its source is intact) or
-    build (rerun by resubmitting), and is discarded.
+    build (rerun by resubmitting), and is discarded, unless the build holds
+    files moved out of other jobs (``job new --input-move-from-job``): those
+    are their only copy, so the scratch is kept with a warning while a
+    ``moved-*.json`` marker names a file that landed. A marker whose file is
+    still home and never landed (a crash before the rename) is dropped.
     """
 
     staging = scratch / "job"
     if not _fs.exists(_fs.loc(staging)):
+        markers = [marker for marker in sorted(scratch.glob(f"{_MOVED_PREFIX}*.json")) if _moved(owner, marker)]
+        if _fs.exists(_fs.loc(scratch / "build")) and markers:
+            # ponytail: a build holding files moved out of other jobs is kept for the operator, never discarded;
+            # moving them back automatically would need their release records' rollback here too.
+            _LOGGER.warning(
+                "kept the unfinished payload %s: it holds files moved out of other jobs, listed in %s",
+                scratch / "build",
+                ", ".join(marker.name for marker in markers),
+            )
+            return False
         return True
     try:
         ref = _kernel.submit(owner.workspace, owner, staging)
@@ -1605,6 +1653,20 @@ def _finish_submit(owner: _kernel.Owner, scratch: Path) -> bool:
         return False
     _LOGGER.warning("submitted the payload a dead owner staged: %s", ref.path)
     return True
+
+
+def _moved(owner: _kernel.Owner, marker: Path) -> bool:
+    """Report whether a marker's move may have happened; one whose file is still home and never landed is dropped."""
+
+    try:
+        document = json.loads(_fs.read_bounded(_fs.loc(marker), 1 << 16) or b"{}")
+        source, target = Path(document["from"]), Path(document["to"])
+    except (WorkflowError, OSError, ValueError, KeyError, TypeError):
+        return True  # unreadable: keep the scratch for the operator
+    if _is_regular(_fs.loc(source)) and _fs.lstat(_fs.loc(target)) is None:
+        _fs.remove_file(_fs.loc(marker), durable=owner.workspace.durable)
+        return False
+    return _fs.lstat(_fs.loc(target)) is not None
 
 
 _kernel.register_reconciler(_SUBMIT, _finish_submit)
@@ -1949,6 +2011,324 @@ def scaffold_job(
     )
 
 
+@dataclass
+class _InputMove:
+    """One sealed or unsealed file moved into a payload being built, kept to roll the move back.
+
+    :param origin: The payload of the job the file came from.
+    :param directory: A descriptor of the file's directory there, open until the job is submitted, so the
+        file goes back to the same directory even when its job moves meanwhile.
+    :param name: The file's name in that directory.
+    :param moved_to: Where the file is in the payload being built.
+    :param entry: The ``staged_files`` entry ``{path, size, sha256}``.
+    :param release: The release record created for the origin's seal, or ``None`` for an unsealed origin.
+    :param seal: The origin's seal the record amends, or ``None`` for an unsealed origin.
+    :param marker: The scratch marker naming the move, which keeps the scratch from being discarded.
+    """
+
+    origin: Path
+    directory: int
+    name: str
+    moved_to: Path
+    entry: dict[str, object]
+    release: Release | None
+    seal: Seal | None = None
+    marker: Path | None = None
+
+
+_MOVE_REFUSAL = "{path} is not a regular file inside a succeeded job of this workspace"
+#: Beside a submit scratch's ``build/``: ``moved-<sha256 of "<origin job id>/<path>">.json`` per file moved into
+#: it, written before the release record, so the scratch is never discarded and other movers see the move in flight.
+_MOVED_PREFIX = "moved-"
+
+
+def _release_keys(workspace: Workspace) -> tuple[SealKey, ...]:
+    """Return the workspace's seal keys, or none for unsigned release records, exactly as seals resolve them."""
+
+    from .errors import SealError
+    from .seals import default_workspace_keys
+
+    try:
+        return default_workspace_keys(workspace).keys
+    except SealError:
+        return ()
+
+
+def _move_source(workspace: Workspace, path: str | os.PathLike[str]) -> tuple[_kernel.JobRef, PurePosixPath]:
+    """Return the succeeded job of *workspace* whose payload holds *path*, and the path below that payload."""
+
+    from .introspection._reading import iter_jobs
+
+    candidate = Path(os.path.abspath(Path(path).expanduser()))
+    jobs = {ref.path.resolve(): ref for ref in iter_jobs(workspace, ("succeeded",))}
+    for ancestor in candidate.parents:
+        ref = jobs.get(ancestor.resolve())
+        if ref is not None:
+            relative = PurePosixPath(candidate.relative_to(ancestor).as_posix())
+            if _reserved_payload_member(relative.parts[0]) or relative.parts[0] == "state.json":
+                raise ValueError(f"{path} is a reserved member of its job, which is never moved")
+            return ref, relative
+    raise ValueError(_MOVE_REFUSAL.format(path=path))
+
+
+def _move_input(
+    workspace: Workspace,
+    payload: Path,
+    relative: PurePosixPath,
+    source: str | os.PathLike[str],
+    *,
+    job_key: str,
+    keys: tuple[SealKey, ...],
+) -> _InputMove:
+    """Move one file out of a succeeded job into *payload* at *relative*, amending the origin's seal.
+
+    The digest comes from the origin's seal record and the file is never
+    hashed; an unsealed origin is hashed once, with a warning. The release
+    record is created exclusively before the rename: it is the intent, and the
+    claim that refuses a second mover of the same file. A crash in between
+    leaves a record whose file is still in place, which changes nothing. The
+    rename is verified by the file it landed.
+    """
+
+    from .introspection._reading import read_state
+    from .seals import _job_seal_bytes, _parse_job_seal, _signed_body_problem, job_seal_path
+
+    ref, member = _move_source(workspace, source)
+    origin = ref.path
+    try:
+        directory = _fs.open_dir_under(origin, member.parent) if member.parent.parts else _fs.open_dir(origin)
+    except (FileNotFoundError, _fs.UnsafePath) as exc:
+        raise ValueError(_MOVE_REFUSAL.format(path=source)) from exc
+    try:
+        try:
+            status = os.stat(member.name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            status = None
+        if status is None or not stat.S_ISREG(status.st_mode):
+            raise ValueError(_MOVE_REFUSAL.format(path=source))
+        moved_to = payload.joinpath(*relative.parts)
+        if os.path.lexists(moved_to):
+            raise ValueError(f"the moved input {relative.as_posix()!r} collides with an existing payload member")
+        moved_to.parent.mkdir(parents=True, exist_ok=True)
+        if os.stat(moved_to.parent).st_dev != status.st_dev:
+            raise ValueError(
+                f"{source} is on another filesystem than the workspace's staging directory; "
+                "a move must be a rename, and a cross-filesystem move is refused"
+            )
+        data = _job_seal_bytes(origin)
+        release: Release | None = None
+        seal: Seal | None = None
+        if data is None:
+            _LOGGER.warning("%s: its job is not sealed, so the moved file is hashed", source)
+            digested = _fs.digest_regular(_fs.anchored(directory, member.name), -1)
+            if digested is None:
+                raise ValueError(_MOVE_REFUSAL.format(path=source))
+            size, sha256, _ = digested
+        else:
+            # The authority is state.json: a seal document the job planted itself vouches for nothing.
+            doc, damage = read_state(ref)
+            authority = None if doc is None or doc.seal is None else doc.seal.get("sha256")
+            if authority != hashlib.sha256(data).hexdigest():
+                raise ValueError(
+                    f"{source}: the seal of its job is not the one its manager wrote ({damage or 'no match'})"
+                )
+            seal = _parse_job_seal(data, job_seal_path(origin))
+            problem = _signed_body_problem(json.loads(seal.body_bytes), seal.body_sha256, seal.signatures)
+            recorded = next(
+                (item for item in seal.records if item.get("path") == member.as_posix() and item.get("type") == "file"),
+                None,
+            )
+            if problem is not None or recorded is None or recorded.get("size") != status.st_size:
+                why = problem or ("it does not record the file" if recorded is None else "the file changed since")
+                raise ValueError(f"{source}: the seal of its job does not vouch for it ({why}); verify the job")
+            if seal.signatures:
+                # A release counts only when signed by a key that signed the seal (see valid_job_releases).
+                from httk.core.crypto import ed25519_public_key
+                from httk.core.project.sealing import verify_signed_body
+
+                from .projects import format_public_key, key_fingerprint
+
+                sealed_by = verify_signed_body(seal.body_bytes, seal.body_sha256, seal.signatures).signers
+                ours = {key_fingerprint(format_public_key(ed25519_public_key(seed))) for _role, seed in keys}
+                if not ours & set(sealed_by):
+                    raise ValueError(
+                        f"{source}: the seal of its job is signed by {', '.join(sealed_by) or 'no verifying key'}, "
+                        "and the workspace's seal.keys resolves none of those keys to sign its release record; "
+                        "configure seal.keys with a key that signed the seal"
+                    )
+            size, sha256 = int(cast(int, recorded["size"])), str(recorded["sha256"])
+        # The marker goes first: the scratch is then never discarded, and a mover finding this file's record sees
+        # the move in flight (see _claim_release).
+        name = f"{_MOVED_PREFIX}{hashlib.sha256(f'{ref.job_id}/{member.as_posix()}'.encode()).hexdigest()}.json"
+        marker = payload.parent / name
+        document = json.dumps({"from": str(origin / member), "to": str(moved_to)}).encode() + b"\n"
+        try:
+            os.close(_fs.create_exclusive(_fs.loc(marker), document, durable=workspace.durable))
+        except FileExistsError as exc:
+            raise ValueError(f"{source} is moved twice into one job") from exc
+        try:
+            if seal is not None:
+                release = _claim_release(
+                    workspace,
+                    ref,
+                    member,
+                    source,
+                    seal,
+                    marker,
+                    size=size,
+                    sha256=sha256,
+                    released_to={"job_key": job_key, "path": relative.as_posix()},
+                    keys=keys,
+                )
+        except BaseException:
+            _fs.remove_file(_fs.loc(marker), durable=workspace.durable)
+            raise
+        move = _InputMove(
+            origin,
+            directory,
+            member.name,
+            moved_to,
+            {"path": relative.as_posix(), "size": size, "sha256": sha256},
+            release,
+            seal,
+            marker,
+        )
+        try:
+            _fs.move_owned(_fs.anchored(directory, member.name), _fs.loc(moved_to), durable=workspace.durable)
+            # move_owned reports success once the source is gone, which another mover could also cause.
+            if not _is_regular(_fs.loc(moved_to)):
+                raise ValueError(_MOVE_REFUSAL.format(path=source))
+        except BaseException as exc:
+            # A source that vanished under us is not back: its marker (and so the scratch) is kept for the operator.
+            if _undo_moves(workspace, [move], moved=_is_regular(_fs.loc(moved_to))):
+                _drop_markers(workspace, [move])
+            if isinstance(exc, _fs.CrossDevice):
+                raise ValueError(f"{source} is on another filesystem; a cross-filesystem move is refused") from exc
+            raise
+        return move
+    except BaseException:
+        os.close(directory)
+        raise
+
+
+def _is_regular(target: _fs.Loc) -> bool:
+    """Report whether *target* is a regular file, without following a symlink."""
+
+    status = _fs.lstat(target)
+    return status is not None and stat.S_ISREG(status.st_mode)
+
+
+def _undo_moves(workspace: Workspace, moves: Iterable[_InputMove], *, moved: bool = True) -> bool:
+    """Roll moves back, newest first, and report whether every file is back.
+
+    Each file is renamed home, then its release record is withdrawn: only once
+    the file is seen back home as a regular file, so a file that cannot be
+    returned stays released (and the failure is logged). With *moved* false
+    nothing was moved by this call, and the records are withdrawn; a file that
+    is not home then vanished under the move, which is reported as not back.
+    """
+
+    from .seals import _withdraw_job_release
+
+    returned = True
+    for move in reversed(list(moves)):
+        if moved:
+            try:
+                _fs.move_owned(
+                    _fs.loc(move.moved_to),
+                    _fs.anchored(move.directory, move.name),
+                    durable=workspace.durable,
+                    create_parents=False,
+                )
+            except (OSError, WorkflowError) as exc:
+                _LOGGER.error("could not move %s back into %s as %s: %s", move.moved_to, move.origin, move.name, exc)
+                returned = False
+                continue
+            if not _is_regular(_fs.anchored(move.directory, move.name)):
+                _LOGGER.warning(
+                    "%s is not back in %s as %s; its release record is kept", move.moved_to, move.origin, move.name
+                )
+                returned = False
+                continue
+        if move.release is not None:
+            _withdraw_job_release(workspace, move.origin, move.release)
+        if not moved and not _is_regular(_fs.anchored(move.directory, move.name)):
+            returned = False
+    return returned
+
+
+def _drop_markers(workspace: Workspace, moves: Iterable[_InputMove]) -> None:
+    """Remove the scratch markers of moves that completed or were rolled back."""
+
+    for move in moves:
+        if move.marker is not None:
+            _fs.remove_file(_fs.loc(move.marker), durable=workspace.durable)
+
+
+def _claim_release(
+    workspace: Workspace,
+    ref: _kernel.JobRef,
+    member: PurePosixPath,
+    source: str | os.PathLike[str],
+    seal: Seal,
+    marker: Path,
+    *,
+    size: int,
+    sha256: str,
+    released_to: Mapping[str, str],
+    keys: tuple[SealKey, ...],
+) -> Release:
+    """Create the file's release record exclusively, replacing only a stale one; refuse otherwise.
+
+    A record left by a move that crashed before its rename is stale: its file
+    is still here, no job of the workspace has its key (an unreadable record
+    names none), and no other submit scratch holds a marker for the same file
+    (a move in flight).
+    """
+
+    from .models import parse_job_key
+    from .seals import _release_name, job_releases_path, read_job_release, record_job_release
+
+    def record(replace: bool) -> Release:
+        return record_job_release(
+            workspace,
+            ref.path,
+            path=member.as_posix(),
+            size=size,
+            sha256=sha256,
+            released_to=released_to,
+            keys=keys,
+            seal=seal,
+            replace=replace,
+        )
+
+    try:
+        return record(False)
+    except FileExistsError:
+        pass
+    except FormatError as exc:
+        raise ValueError(f"{source}: cannot record its release: {exc}") from exc
+    existing = read_job_release(ref.path, member.as_posix())
+    shown = job_releases_path(ref.path) / _release_name(member.as_posix())
+    named = existing.to_job_key if existing is not None else "an unreadable job key"
+    try:
+        receiver = None if existing is None else parse_job_key(existing.to_job_key)[1]
+        # An unreadable record names no job.
+        known = receiver is not None and _kernel.locate(workspace, receiver, placement_hint=None, exhaustive=True)
+    except WorkflowError:
+        known = False
+    # A kept scratch of a dead owner (a move that may have renamed the file) keeps the path refused here until the
+    # operator removes it; _finish_submit discards those whose file never moved.
+    in_flight = any(path.parent != marker.parent for path in (workspace.control / "tmp").glob(f"*/{marker.name}"))
+    if not known and not in_flight and _is_regular(_fs.loc(ref.path / member)):
+        _LOGGER.warning("%s: replacing the stale release record %s naming job %s", source, shown, named)
+        return record(True)
+    raise ValueError(
+        f"{source} is already released, or being moved, to job {named} (record {shown}); that record "
+        "is safe to delete only when the file is present and that job does not exist"
+    )
+
+
 def _build_payload(
     workspace: Workspace,
     prepared: _Prepared,
@@ -1964,13 +2344,18 @@ def _build_payload(
     placement: str | PurePosixPath = DEFAULT_PLACEMENT,
     provenance: Mapping[str, object] | None = None,
     maxtime_cap: int | None = None,
+    move_inputs: Mapping[str, str | os.PathLike[str]] | None = None,
+    moves: list[_InputMove] | None = None,
 ) -> JobDefinition:
     """Stage one job payload into *destination* and write its ``job.json``.
 
     This is the shared body of :func:`new_jobs` and :func:`scaffold_job`:
     everything between an installed workflow and a written ``job.json``, with
     no submission of its own. *destination* is an existing empty directory the
-    caller owns.
+    caller owns. *move_inputs* moves files out of succeeded jobs (only
+    :func:`new_jobs` passes it, with *destination* the ``build/`` of a submit
+    scratch); each move is appended to *moves* as it happens, so the caller can
+    roll them back when the job is not submitted.
     """
 
     workflow = prepared.workflow
@@ -1986,6 +2371,18 @@ def _build_payload(
         relative = payload_relative(member).as_posix()
         if relative in prepared_members:
             raise ValueError(f"prepared member {prepared_members[relative]!r} collides with user file {member!r}")
+    for input_name in move_inputs or {}:
+        if input_name not in workflow.inputs:
+            raise ValueError(
+                f"unknown workflow input {input_name!r}; declared inputs: {', '.join(workflow.inputs) or 'none'}"
+            )
+        if input_name in (inputs or {}):
+            raise ValueError(f"workflow input {input_name!r} is both supplied and moved from a job; choose one")
+        if workflow.inputs.get(input_name) is None:
+            names = ", ".join(name for name, member in workflow.inputs.items() if member is not None) or "none"
+            raise ValueError(
+                f"workflow input {input_name!r} has no destination to move a file to; inputs with one: {names}"
+            )
     _stage_files(destination, user_files)
     for member, text in prepared.documents.items():
         document_path = destination.joinpath(*payload_relative(member).parts)
@@ -2002,6 +2399,21 @@ def _build_payload(
         supplied_inputs,
         instantiate=prepared.instantiate is not None or prepared.instantiate_exec is not None,
     )
+    # The job id is chosen now, so a release record can name the receiving job before its file moves.
+    job_id = str(uuid.uuid4()) if move_inputs else None
+    keys = _release_keys(workspace) if move_inputs else ()
+    for input_name, source in (move_inputs or {}).items():
+        assert job_id is not None and moves is not None
+        moves.append(
+            _move_input(
+                workspace,
+                destination,
+                payload_relative(str(workflow.inputs[input_name])),
+                source,
+                job_key=make_job_key(job_id, tag),
+                keys=keys,
+            )
+        )
     supplied_parameters = dict(parameters or {})
     supplied_environment = dict(environment or {})
     declared_environment = workflow.environment
@@ -2134,8 +2546,11 @@ def _build_payload(
         declared=declared_member,
         seal_succeeded=installed.provider().seal_succeeded,
         staged_files=_staged_entries(
-            destination, [*user_files, *(member for member in workflow.inputs.values() if member is not None)]
+            destination,
+            [*user_files, *(member for member in workflow.inputs.values() if member is not None)],
+            known=[move.entry for move in moves or ()],
         ),
+        job_id=job_id,
     )
     if prepared.finalize is not None:
         spec = prepared.finalize(spec)
@@ -2144,7 +2559,26 @@ def _build_payload(
     if maxtime_cap is not None:
         resources, step_resources = cap_maxtime(spec.resources, spec.step_resources, maxtime_cap)
         spec = replace(spec, resources=resources, step_resources=step_resources)
-    return prepare_job_payload(destination, spec)
+    definition = prepare_job_payload(destination, spec)
+    for move in moves or ():
+        if move.release is not None and move.release.to_job_key != definition.job_key:
+            # A hook retagged the job after its files moved: the record is replaced, naming the final key.
+            from .seals import record_job_release
+
+            assert move.seal is not None
+            stale = move.release
+            move.release = record_job_release(
+                workspace,
+                move.origin,
+                path=stale.path,
+                size=stale.size,
+                sha256=stale.sha256,
+                released_to={"job_key": definition.job_key, "path": stale.to_path},
+                keys=keys,
+                seal=move.seal,
+                replace=True,
+            )
+    return definition
 
 
 def _check_parameter_types(values: Mapping[str, object], declared: Mapping[str, Mapping[str, object]]) -> None:
@@ -2392,13 +2826,16 @@ def _stage_files(payload: Path, files: Mapping[str, str | os.PathLike[str]]) -> 
         shutil.copyfile(path, destination)
 
 
-def _staged_entries(payload: Path, members: Iterable[str]) -> tuple[dict[str, object], ...]:
+def _staged_entries(
+    payload: Path, members: Iterable[str], *, known: Iterable[dict[str, object]] = ()
+) -> tuple[dict[str, object], ...]:
     """Describe every staged file present in the payload by its path, size and SHA-256.
 
     This runs in ``job new``, before the job does, so the just-written files are trusted.
+    A *known* entry (a moved file, described by its origin's seal) is taken as it is, never re-hashed.
     """
 
-    entries: dict[str, dict[str, object]] = {}
+    entries: dict[str, dict[str, object]] = {str(entry["path"]): entry for entry in known}
     for member in members:
         relative = payload_relative(member)
         path = payload.joinpath(*relative.parts)

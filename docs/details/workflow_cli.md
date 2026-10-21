@@ -277,7 +277,7 @@ manager's platform stays `ready` and unclaimed there.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--step`, `--json` |
+| `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--parameter`, `--environment`, `--format`, `--input`, `--input-move-from-job`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--step`, `--json` |
 | `job submit SOURCE...` | submit prepared payload directories | `--workspace`, `--move`, `--json` |
 | `job request ACTION JOB_ID...` | post one operator request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--operator`, required `--reason`, `--priority`, `--step`, `--destination`, `--max-attempts-per-activation`, `--max-total-attempts`, `--max-activations`, `--force`, `--wait`, `--timeout`, `--adapter-timeout`, daemon-only `--request-id` |
 | `job delete JOB...` | delete terminal or paused jobs (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
@@ -354,6 +354,16 @@ the job moves between states.
 ### Inputs, files, and batches
 
 - `--input NAME=PATH` stages one declared input.
+- `--input-move-from-job NAME=PATH` moves (renames, never copies) PATH into
+  the declared input NAME's destination. PATH must be a regular file (not a
+  symlink) inside the payload of a succeeded job of the same workspace, not
+  `job.json`, `state.json` or anything below `attempts/`, `logs/` or
+  `.httk-job/`, and on the workspace's filesystem; anything else is refused.
+  A sealed job keeps its seal: a signed release record amends it (see
+  {doc}`sealing`), and the file's `staged_files` digest is the one the seal
+  records, so the file is never hashed. An unsealed job's file is hashed, with
+  a warning. If the job is not created, the file moves back. Repeatable; not
+  for the same NAME as `--input`, and not with `--input-from`.
 - `--input-from NAME SOURCE...` loads a file or the readable files in a
   directory and creates one job per file for a batch. A directory file with no
   registered reader whose name follows a structure convention (`POSCAR*`,

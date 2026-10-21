@@ -47,6 +47,19 @@ copy a curated set of results into `data/` only with
 workflow declares before anything is created, and `httk workflow precheck`
 reports whether the workspace can run its jobs.
 
+A large output of a finished job, a trajectory too big to copy, is handed to
+the next job by moving it: `--input-move-from-job trajectory=PATH` renames
+the file at PATH, inside a succeeded job of the same workspace, to the declared
+input's destination in the new job (`new_job(..., move_inputs={"trajectory":
+PATH})` in Python). The succeeded job's seal stays valid: a signed release
+record beside it says where the file went, and collecting that job records the
+file at its new location ({doc}`details/sealing`); a package collector that
+reads the file itself, rather than returning `{"file": ...}`, cannot read a
+moved file, so its job collects as degraded. A crash between the move and the
+new job's submission keeps the file in a scratch directory under
+`.httk-workspace/tmp/`, and a warning names it. The operator then moves the
+file back to its job by hand.
+
 Many jobs at once come from a directory of inputs, one job per file:
 
 ```console
