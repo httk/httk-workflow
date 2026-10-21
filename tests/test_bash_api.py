@@ -45,7 +45,6 @@ def _draft(tmp_path: Path) -> OutcomeDraft:
         "is_restart": True,
         "is_unclean_restart": False,
         "attempt_reason": "requested_retry",
-        "join": None,
     }
     (tmp_path / "run").mkdir()
     return OutcomeDraft(AttemptContext.from_mapping(context), control)

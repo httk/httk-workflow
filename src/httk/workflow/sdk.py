@@ -107,6 +107,7 @@ type InstantiateHandler = Callable[[Any], object]
 type EnvironmentSource = Literal["override", "environment-variable", "workspace-setting", "default"]
 #: Inside an outcome draft: the six-digit sequence of the attempt's implicit transaction, for a resuming process.
 _IMPLICIT_TRANSACTION = ".implicit-transaction"
+_NESTED_PLACEMENT_BUDGET = 1024
 
 
 class _Missing:
@@ -1018,6 +1019,20 @@ class Attempt:
         self._implicit.put(source, target)
         return target
 
+    def _default_child_placement(self) -> str:
+        """Return the placement of a child spawned without one, per the ``children.placement`` setting."""
+
+        # The workspace setting alone decides: never through setting(), which parameters and env override.
+        mode = self.context.settings.get("children.placement", "nested")
+        here = self.context.placement
+        if mode == "flat":
+            return here
+        if mode != "nested":
+            raise ValueError(f"workspace setting children.placement must be 'nested' or 'flat', not {mode!r}")
+        nested = f"{self.context.job_key}.children" if not here else f"{here}/{self.context.job_key}.children"
+        # ponytail: past the byte budget the tree continues flat from this level; no shortening of components.
+        return here if len(nested.encode()) > _NESTED_PLACEMENT_BUDGET else nested
+
     def spawn(
         self,
         child: "ChildSpec | str | os.PathLike[str]",
@@ -1038,14 +1053,16 @@ class Attempt:
 
         :param child: The child specification or prepared payload directory.
         :param label: The unique label used to observe the child later.
-        :param placement: The workspace placement for the child, or this attempt's placement when omitted.
+        :param placement: The workspace placement for the child; when omitted, ``<this placement>/<this job key>.children``,
+            or this attempt's placement under the workspace setting ``children.placement = flat`` or when
+            the nested placement would exceed 1024 bytes.
         :return: The reference to the registered child.
         :raises ValueError: If the child or label is invalid, or the label is reused.
         """
 
         self._reject_published()
         entry_label = validate_label(label, "child label")
-        target = self.context.placement if placement is None else placement
+        target = self._default_child_placement() if placement is None else placement
         if not isinstance(child, ChildSpec):
             return self._require_draft().add_child(child, target, label=entry_label)
         # The child runs this very workflow, so its initial step is a step of
@@ -1132,7 +1149,9 @@ class Attempt:
         :param parameters: Supply opaque parameters for the child job.
         :param environment: Supply overrides for the child's declared environment values.
         :param tag: Set the child job tag, defaulting to *label* when omitted.
-        :param placement: The workspace placement for the child, or this attempt's placement when omitted.
+        :param placement: The workspace placement for the child; when omitted, ``<this placement>/<this job key>.children``,
+            or this attempt's placement under the workspace setting ``children.placement = flat`` or when
+            the nested placement would exceed 1024 bytes.
         :param priority: Set the child scheduling priority.
         :param step: Override the called workflow's initial step.
         :param name: Set the child job's display name.
@@ -1143,6 +1162,7 @@ class Attempt:
 
         self._reject_published()
         validate_label(label, "child label")
+        target = self._default_child_placement() if placement is None else placement
         installed = self._callee(workflow)
         from .scaffold import _build_payload, _prepare
 
@@ -1162,7 +1182,6 @@ class Attempt:
                 name=name,
                 maxtime_cap=self.context.resources.get("maxtime"),
             )
-            target = self.context.placement if placement is None else placement
             reference = self._require_draft().add_child(staging, target, label=label, move=True)
         finally:
             shutil.rmtree(staging, ignore_errors=True)

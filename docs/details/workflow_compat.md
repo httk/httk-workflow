@@ -339,7 +339,11 @@ in the job's own inputs, or in the output document of a job it references,
 whose job is not in the workspace fails the step with
 `jobflow.reference_unresolved`; elsewhere in the store it stays in place with a
 run-log warning. The parent's `jobflow-outputs.json` keeps the tokens: a stable
-reference to the job that produced each directory.
+reference to the job that produced each directory. Tokens resolve through the
+placements the driver recorded for each producer; a token minted by another
+driver stays unresolved (`jobflow.reference_unresolved`), and
+`children.placement=flat` is the remedy only when both drivers share a placement
+and `flat` was set before the producer was spawned.
 
 #### Outputs and failures
 

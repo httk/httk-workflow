@@ -118,6 +118,13 @@ imposes no scheme; common ones are a short hash prefix of the job key
 (`project/<date>/<run>`), or one per structure family. A manager started with
 `--placement-prefix` serves exactly one such subtree.
 
+Spawned children go, by default, to `<parent placement>/<parent job key>.children`,
+so a tree is visible as a tree within each state directory and a
+`--placement-prefix` manager serves a root's whole tree. The workspace setting
+`children.placement=flat` puts children at their parent's placement instead,
+for tools that need short absolute paths to other jobs' files; an explicit
+`placement=` always wins.
+
 ## Where to go next
 
 - {doc}`details/workflow_cli` for the `campaign` group in full.

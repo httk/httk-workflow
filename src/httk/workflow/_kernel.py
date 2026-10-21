@@ -1538,8 +1538,21 @@ def submit(
     return JobRef.from_path(target, state=state, placement=header.placement)
 
 
+def _prune_placement(workspace: KernelWorkspace, state: str, placement: PurePosixPath) -> None:
+    # Best effort, deepest first, never jobs/<state>/ itself: any actor may rmdir an empty placement directory, and
+    # a concurrent move into a pruned parent recreates it and retries (§4.4). Any failure just stops pruning.
+    for depth in range(len(placement.parts), 0, -1):
+        try:
+            if not _fs.remove_empty_dir(_fs.loc(_state_dir(workspace, state, PurePosixPath(*placement.parts[:depth])))):
+                return
+        except OSError:
+            return
+
+
 def claim(workspace: KernelWorkspace, owner: Owner, ref: JobRef) -> OwnedJob | None:
     """Try to take an unowned job into ``owned/<owner-id>/``.
+
+    A won claim from ``ready/`` then removes the placement directories it emptied, never ``jobs/ready/`` itself.
 
     :param workspace: The workspace.
     :param owner: The claiming owner.
@@ -1557,6 +1570,8 @@ def claim(workspace: KernelWorkspace, owner: Owner, ref: JobRef) -> OwnedJob | N
     # §5.3 settle=0: a win misjudged as lost stays in owned/<self>/, where self-healing finds it (§5.4).
     if _fs.move_once(_fs.loc(ref.path), _fs.loc(target), durable=workspace.durable) is _fs.Moved.LOST:
         return None
+    if ref.state == "ready" and ref.placement is not None:
+        _prune_placement(workspace, ref.state, ref.placement)
     # A job claimed from an unowned state has nothing running: recovery returns jobs only after DEAD.
     return owner.adopt_owned(JobRef.from_path(target, state=OWNED, owner_id=owner.owner_id))
 

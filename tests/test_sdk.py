@@ -1117,14 +1117,15 @@ def test_a_prepared_payload_child_can_be_spawned_by_path(tmp_path: Path) -> None
     )
 
     reference = attempt.spawn(child, label="prepared")
-    assert reference.placement_hint == attempt.context.placement
+    nested = f"{attempt.context.placement}/{attempt.context.job_key}.children"
+    assert reference.placement_hint == nested
     draft = next(iter(attempt.control.glob("outcome.tmp.*")))
     spawn = json.loads((draft / "children" / "spawn.json").read_text(encoding="utf-8"))
     assert [entry["label"] for entry in spawn["children"]] == ["prepared"]
     staged = draft / "children" / "jobs" / reference.job_key
     assert (staged / "files" / "input").is_file()
     registered = json.loads((staged / "job.json").read_text(encoding="utf-8"))
-    assert registered["placement"] == attempt.context.placement
+    assert registered["placement"] == nested
     assert registered["parent"]["job_id"] == attempt.context.job_id and registered["parent"]["spawn_id"]
 
 

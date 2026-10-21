@@ -53,6 +53,12 @@ The manager exports each scalar setting into the attempt environment under its
 environment variable is a deployment override and wins over the workspace
 setting; a job's own parameter of the same name wins over both.
 
+The SDK itself reads `children.placement` (`nested`, the default, or `flat`)
+from the attempt's settings snapshot to place spawned children; see
+{doc}`campaigns`. Unlike other settings it is not overridden by job parameters
+or `HTTK_CHILDREN_PLACEMENT`: only the workspace setting, or a manager's pinned
+setting override, counts.
+
 Engine tunables (the visibility deadline of a shared filesystem and the
 retention limits of `gc`) are *workspace policy*, kept apart from application
 settings and edited with `workspace policy show|set`; see

@@ -10,6 +10,7 @@ children, which validation would refuse.
 """
 
 import dataclasses
+import errno
 import json
 import os
 import stat
@@ -32,6 +33,8 @@ SPAWN_FORMAT = "httk-workflow-spawn"
 SPAWN_FORMAT_VERSION = 2
 #: The largest accepted ``spawn.json``, in bytes (the legacy control-document bound).
 MAX_SPAWN_BYTES = 16 << 20
+#: Path bytes kept free below a child's job directory: room for the protocol files read inside an unowned job.
+_PATH_HEADROOM = 256
 #: Names only owners write at a job's root; a proposed child may not carry them.
 TRUSTED_NAMES = frozenset({"state.json", "seal.json", "logs", "attempts"})
 
@@ -178,7 +181,8 @@ def validate_children(
     :param workspace_id: This workspace's id; children must name it.
     :return: The plans in ``spawn.json`` order; empty when the outcome spawns nothing.
     :raises httk.workflow.errors.FormatError: If ``spawn.json`` or a child payload is malformed or unsafe, a
-        child id names an existing job, or a child outside the exchange names an exchange pool.
+        child id names an existing job, a child outside the exchange names an exchange pool, or a child placement is
+        too long for the filesystem.
     :raises httk.workflow.errors.UnsupportedExtensionError: If a child names another workspace.
     :raises httk.workflow.errors.WorkflowError: If an attempt of *job* is still live.
     :raises ValueError: If *outcome_dir* is not an outcome directory of *job*.
@@ -277,10 +281,30 @@ def validate_children(
             )
         )
     if plans:
+        # A runner may name any placement: a child whose job directory the filesystem cannot name in any unowned
+        # state fails the outcome here, not the publication (which would retry the commit forever).
+        jobs = job.owner.workspace.jobs
+        try:
+            path_max = os.pathconf(jobs, "PC_PATH_MAX")
+        except (OSError, ValueError):
+            path_max = 4096
+        longest_state = max(_kernel.UNOWNED_STATES, key=len)
+        for plan in plans:
+            name = _kernel.format_job_name(plan.job_key, 999, _fs.fresh_token())
+            if (size := len(os.fsencode(jobs / longest_state / plan.placement / name))) + _PATH_HEADROOM >= path_max:
+                raise FormatError(
+                    f"spawned child placement is too long for the filesystem: {plan.job_key} needs a {size}-byte path"
+                )
         # The runner chose the ids: one already taken (owned jobs included) would give two jobs one id.
         placements = [normalize_placement(plan.placement) for plan in plans] + [parent.placement]
         ids = [plan.job_id for plan in plans]
-        taken = _kernel.locate_many(job.owner.workspace, ids, placements=placements, settle=False)
+        try:
+            taken = _kernel.locate_many(job.owner.workspace, ids, placements=placements, settle=False)
+        except OSError as exc:
+            # A runner may name any placement; one the filesystem cannot hold fails the outcome, not the manager.
+            if exc.errno != errno.ENAMETOOLONG:
+                raise
+            raise FormatError(f"spawned child placement is too long for the filesystem: {exc}") from exc
         if taken:
             ref = taken[min(taken)]
             raise FormatError(f"spawned child id {ref.job_id} is already the job {ref.job_key} ({ref.state})")

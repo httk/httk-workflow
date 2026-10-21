@@ -553,10 +553,11 @@ def test_cwl_file_list_output_stays_a_data_record_descriptor_list(tmp_path: Path
         input_entry_type="strings",
         extra_documents={"echo.cwl": _ECHO_TOOL},
     )
-    new_job(workspace, package, inputs={"messages": ["one", "two"]})
+    root = new_job(workspace, package, inputs={"messages": ["one", "two"]})
     _drive(workspace)
 
-    value = next(collect(workspace)).outputs["transcripts"]
+    # Descendants in nested placements list before the root.
+    value = next(item for item in collect(workspace) if item.record.job_id == root.job_id).outputs["transcripts"]
     assert isinstance(value, DataRecord)
     assert isinstance(value.value, list) and len(value.value) == 2
     assert all(set(descriptor) == {"kind", "path", "basename", "sha256", "size"} for descriptor in value.value)

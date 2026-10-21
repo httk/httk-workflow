@@ -67,11 +67,13 @@ class MonitorState:
         return self.rows[self.selected] if self.rows and 0 <= self.selected < len(self.rows) else None
 
 
-def _clip(value: object, width: int) -> str:
-    """Make one display cell fit its column."""
+def _clip(value: object, width: int, *, tail: bool = False) -> str:
+    """Make one display cell fit its column, keeping its start or, with *tail*, its end."""
 
     text = "-" if value is None else str(value)
-    return text if len(text) <= width else text[: max(0, width - 1)] + "…"
+    if len(text) <= width:
+        return text
+    return "…" + text[len(text) - max(0, width - 1) :] if tail else text[: max(0, width - 1)] + "…"
 
 
 def render_workspace_pane(state: MonitorState, *, width: int = 28, height: int | None = None) -> list[str]:
@@ -110,7 +112,7 @@ def render_job_pane(
             f"{prefix} {_clip(row.get('job_key'), 27):<27} "
             f"{_clip(row.get('state'), 10):<10} "
             f"{_clip(row.get('step'), 10):<10} "
-            f"{_clip(row.get('placement'), 15):<15} "
+            f"{_clip(row.get('placement'), 15, tail=True):<15} "
             f"{_clip(row.get('priority'), 8):>8}"
         )
     if len(lines) == 2:

@@ -266,14 +266,25 @@ reruns the spawning step, which creates new children. See
   writing only its own job directory. Other workspace paths, including the
   rest of `.httk-workspace/` and `exchange/`, are absent.
 - **Unrestricted nesting.** A called workflow is just another job, so it may
-  call further workflows; the depth is not capped.
-- **Workspace and placement are inherited.** Like every spawned child, a
-  called child is created in the calling job's workspace and placement (unless
-  you pass `placement=`), so the whole tree below a root stays where the root
-  was assigned, which {doc}`/campaigns` relies on. A `placement=` must not
+  call further workflows; the depth is not capped, but the default placement stops nesting once it
+  would exceed 1024 bytes (the tree continues at that level's placement).
+- **Workspace is inherited; placement is nested.** Like every spawned child, a
+  called child is created in the calling job's workspace. Unless you pass
+  `placement=`, its placement is `<parent placement>/<parent job key>.children`;
+  the workspace setting `children.placement=flat` gives it the parent's
+  placement instead. Either way the whole tree below a root stays under the
+  root's placement, so a `--placement-prefix` manager serves it, which
+  {doc}`/campaigns` relies on. A `placement=` must not
   contain a component that parses as a job key, since job directories never
   nest; see the
   [placement rules](workflow_filesystem_api.md#placement-rules).
+- **Deep trees lower the largest gather.** Each nesting level lengthens every
+  child's entry in a join activation's attempt context, which is limited to
+  100000 bytes: roughly 155 children flat, 120 one level nested with short
+  tags, fewer at each further level. `children.placement=flat` raises it again.
+- **Order is unspecified.** Listings and collect yield a tree's descendants
+  before its root (`.children` sorts before the job directory); do not rely on
+  order.
 
 ## Where to go next
 

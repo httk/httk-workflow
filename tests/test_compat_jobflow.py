@@ -22,6 +22,7 @@ from httk.workflow import Attempt, TaskManager, Workspace, collect, job_records
 from httk.workflow.collecting import JobRecord
 from httk.workflow.compat import LanguageRequest, available_languages, jobflow, match_document
 from httk.workflow.compat.jobflow import jobflow_runner
+from httk.workflow.models import placement_text
 from httk.workflow.scaffold import InstantiateContext, describe_runner, resolve_workflow
 
 # The optional language integration is in the [ci] extra; these tests skip without it.
@@ -1439,6 +1440,84 @@ class Maker:
     ]
 
 
+def _prev_dir_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings: dict[str, object], flip: str) -> str:
+    """Run a producer/consumer ``prev_dir`` flow; *flip* is a statement the producer runs; return the root id."""
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    package = _jobflow_package(
+        tmp_path / "prev-dir-package",
+        f"""import os
+from pathlib import Path
+from jobflow import Flow, job
+from httk.workflow import Workspace
+
+@job
+def first():
+    Path("marker.txt").write_text("produced", encoding="utf-8")
+    {flip}
+    return {{"dir_name": os.getcwd()}}
+
+@job
+def second(prev_dir):
+    return (Path(prev_dir) / "marker.txt").read_text(encoding="utf-8")
+
+class Maker:
+    def make(self):
+        one = first()
+        two = second(one.output["dir_name"])
+        return Flow([one, two], output={{"dir_name": one.output["dir_name"], "content": two.output}})
+""",
+    )
+    _set_pythonpath(monkeypatch, package)
+    if settings:
+        workspace.configure_settings(settings)
+    job = new_job(workspace, package)
+    _drive(workspace)
+    assert find(workspace, job.job_id).state == "succeeded"
+    return job.job_id
+
+
+def _flow_jobs(workspace: Workspace, root_id: str) -> tuple[Any, Any, Any]:
+    """Return the root, producer and consumer job directories of a ``_prev_dir_flow`` run."""
+    driver = find(workspace, root_id)
+    output = cast(dict[str, str], _collected_value(workspace, root_id))
+    assert output["content"] == "produced"
+    producer = find(workspace, output["dir_name"].removeprefix(jobflow_runner.EXEC_TOKEN))
+    (consumer,) = [ref for ref in every_job(workspace) if ref.job_id not in {root_id, producer.job_id}]
+    assert consumer.state == "succeeded"
+    assert (producer.path / "run" / "exec" / "marker.txt").read_text(encoding="utf-8") == "produced"
+    return driver, producer, consumer
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_directory_references_resolve_under_flat_child_placements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root_id = _prev_dir_flow(tmp_path, monkeypatch, {"children.placement": "flat"}, "pass")
+    driver, producer, consumer = _flow_jobs(Workspace(tmp_path / "workspace"), root_id)
+    assert producer.placement == consumer.placement == driver.placement
+
+
+@NEEDS_JOBFLOW
+def test_jobflow_directory_references_survive_a_placement_setting_flip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The producer flips the setting, so the driver's next activation spawns the consumer flat.
+    flip = f'Workspace({str(tmp_path / "workspace")!r}).configure_settings({{"children.placement": "flat"}})'
+    root_id = _prev_dir_flow(tmp_path, monkeypatch, {}, flip)
+    driver, producer, consumer = _flow_jobs(Workspace(tmp_path / "workspace"), root_id)
+    assert driver.placement is not None
+    assert producer.placement == driver.placement / f"{driver.job_key}.children"
+    assert consumer.placement == driver.placement
+    spool = driver.path / "run" / "jobflow"
+    recorded = json.loads((spool / jobflow_runner.PLACEMENTS_FILE).read_text(encoding="utf-8"))
+    texts = {ref.job_id: placement_text(ref.placement) for ref in (producer, consumer)}
+    assert recorded == texts
+    # Only the consumer names a producer directory, so only its map is non-empty.
+    jobs = [json.loads((ref.path / "job.json").read_text(encoding="utf-8")) for ref in (producer, consumer)]
+    maps = [job["parameters"]["jobflow_child_placements"] for job in jobs]
+    assert maps == [{}, {producer.job_id: texts[producer.job_id]}]
+
+
 def test_exec_directory_tokens(tmp_path: Path) -> None:
     exec_dir = tmp_path / "run" / "exec"
     exec_dir.mkdir(parents=True)
@@ -1500,14 +1579,14 @@ def test_enter_fails_on_an_unresolved_input_directory_and_warns_for_the_store(tm
         parameter=lambda name, default=None: {
             "jobflow_child_job": "job.json",
             "jobflow_child_snapshot": "store.json",
-        }[name],
+        }.get(name, default),
         parent=SimpleNamespace(workdir=parent_workdir, payload=parent_workdir.parent, placement=PurePosixPath(".")),
         workdir=tmp_path / "child",
         fail=lambda code, message: events.append((code, message)),
         succeed=lambda: events.append(("succeeded", "")),
         log=SimpleNamespace(append=lambda kind, message: events.append((kind, message))),
     )
-    assert jobflow_runner._locate_exec_directories(cast(Attempt, stub), PurePosixPath("."), {absent, "bad"}) == {}
+    assert jobflow_runner._locate_exec_directories(cast(Attempt, stub), [PurePosixPath(".")], {absent, "bad"}) == {}
     jobflow_runner.enter(cast(Attempt, stub))
     assert events == [
         (
@@ -1977,7 +2056,7 @@ def _spooled_child(tmp_path: Path, payload: Path, relocate: Any) -> tuple[Simple
         parameter=lambda name, default=None: {
             "jobflow_child_job": "jobflow/spool/key.json",
             "jobflow_child_snapshot": "jobflow/spool/key-store.json",
-        }[name],
+        }.get(name, default),
         parent=_parent_at(payload),
         _locate_parent=relocate,
         workdir=tmp_path / "child",
@@ -1986,6 +2065,22 @@ def _spooled_child(tmp_path: Path, payload: Path, relocate: Any) -> tuple[Simple
         log=SimpleNamespace(append=lambda kind, message: events.append((kind, message))),
     )
     return stub, events
+
+
+@NEEDS_JOBFLOW
+@pytest.mark.parametrize("recorded", [["."], {"00000000-0000-4000-8000-000000000004": "/absolute"}, {"x": 5}])
+def test_enter_fails_on_malformed_recorded_producer_placements(tmp_path: Path, recorded: object) -> None:
+    def relocate(attempts: int) -> None:
+        raise AssertionError("the parent is located once")
+
+    stub, events = _spooled_child(tmp_path, tmp_path / "parent", relocate)
+    spooled = stub.parameter
+    stub.parameter = lambda name, default=None: (
+        recorded if name == "jobflow_child_placements" else spooled(name, default)
+    )
+    jobflow_runner.enter(cast(Attempt, stub))
+    assert [code for code, _message in events] == ["jobflow.job_unloadable"]
+    assert "recorded producer placements" in events[0][1]
 
 
 def _parent_at(payload: Path) -> SimpleNamespace:

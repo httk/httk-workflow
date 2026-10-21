@@ -462,7 +462,7 @@ def test_symlinked_placement_is_refused(ws: FakeWorkspace, tmp_path: Path) -> No
     job = claim(ws, owner, new_job(ws, owner, placement="link/sub"))
     assert job is not None
     (tmp_path / "elsewhere" / "sub").mkdir(parents=True)
-    assert prune_empty_placements(ws, budget=10) == 2  # the claim emptied ready/link/sub
+    assert not (ws.jobs / "ready" / "link").exists()  # the claim pruned the ready/link/sub it emptied
     os.symlink(tmp_path / "elsewhere", ws.jobs / "ready" / "link")
     with pytest.raises(_fs.UnsafePath):
         job.release(StateDoc.empty(job.job_id), Release("ready", 500))

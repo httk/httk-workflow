@@ -1611,7 +1611,6 @@ class TaskManager:
                 resources=requirement,
                 deadline=deadline,
                 binding=binding,
-                join=children or None,
                 children=children,
             )
             environment = runner_environment(

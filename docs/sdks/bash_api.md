@@ -365,7 +365,7 @@ this attempt's.
 | `--step STEP` | the step the child starts at; required unless `--payload` is given |
 | `--parameter NAME=VALUE`, `--parameter NAME=@FILE.json` | one member of the child's `parameters` object |
 | `--payload DIRECTORY` | spawn a prepared payload directory (from `httk_workflow_job_prepare`) instead of synthesizing a job |
-| `--placement PATH` | where the child is created; the placement of this job by default |
+| `--placement PATH` | where the child is created; `<this job's placement>/<this job's key>.children` by default, or this job's placement with workspace setting `children.placement=flat` |
 | `--tag TAG`, `--name NAME` | override what the child is called |
 | `--priority N`, `--claim-pool POOL`, `--capability NAME` | override how the child is scheduled |
 | `--retry-on CODE`, `--max-attempts-per-activation N`, `--max-total-attempts N`, `--max-activations N` | the child's retry policy |
@@ -395,7 +395,7 @@ for a spawned child. The child's job tag defaults to the label, just as with
 | `--parameter NAME=VALUE`, `--parameter NAME=@FILE.json` | one member of the child's `parameters` object |
 | `--environment NAME=VALUE` | override one of the called workflow's declared environment values |
 | `--tag TAG`, `--name NAME` | what the child is called; the tag defaults to `LABEL` |
-| `--placement PATH` | where the child is created; the placement of this job by default |
+| `--placement PATH` | where the child is created; `<this job's placement>/<this job's key>.children` by default, or this job's placement with workspace setting `children.placement=flat` |
 | `--priority N` | the child's scheduling priority |
 | `--step STEP` | override the called workflow's initial step |
 

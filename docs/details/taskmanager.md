@@ -89,7 +89,11 @@ they attach, so restart long-running managers after a change.
 
 A workspace also holds *application settings*: a flat map of dotted names to
 small values that a runner resolves at run time, such as the VASP command or a
-pseudopotential library. The manager launch profile is also a workspace
+pseudopotential library. The SDK itself reads `children.placement` (`nested`
+by default, or `flat`) to place spawned children, from the attempt's settings
+snapshot only, so neither a job parameter nor the environment overrides it;
+a manager's [pinned settings](launchers.md#pinned-settings) do apply, since
+they enter that snapshot. The manager launch profile is also a workspace
 setting, so each workspace carries its own scheduler requirements.
 
 ```console
@@ -191,7 +195,8 @@ The placement comes from the payload's `job.json`. Submission copies by
 default; `--move` does a same-filesystem rename and consumes the source
 directory. Job directories never nest: no placement component may itself parse
 as a job key (`<tag>--<uuid>`). Submission, adoption and spawned children all
-refuse such a placement; a spawn that names one fails the parent attempt with
+refuse such a placement (spawned children default to a nested
+`<parent key>.children` placement; see {doc}`/campaigns`); a spawn that names one fails the parent attempt with
 `protocol_error`.
 
 ## Checking readiness

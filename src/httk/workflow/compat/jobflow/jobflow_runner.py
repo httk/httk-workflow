@@ -21,11 +21,13 @@ from httk.workflow import Attempt, ChildSpec, Runner, Workspace, _fs, _kernel
 from httk.workflow._durations import TIME_RESOURCES, format_duration
 from httk.workflow.codes import launch_command
 from httk.workflow.compat.jobflow import OUTPUTS_FILE, STAGED_DIRECTORY, _validate_overrides
-from httk.workflow.models import canonical_uuid, normalize_resources
+from httk.workflow.models import canonical_uuid, normalize_resources, parse_placement_text
 
 WORKFLOW = "jobflow.workflow"
 STATE_FILE = "state.json"
 STORE_FILE = "store.json"
+#: The driver's ``{job_id: placement}`` of every child it spawned, kept out of ``state.json``'s size cap.
+PLACEMENTS_FILE = "placements.json"
 SPOOL_DIRECTORY = "spool"
 CHILD_OUTPUTS_FILE = "child-outputs.json"
 #: Stands for a child job's ``run/exec`` directory in shipped documents: ``<token><job_id>[/suffix]``.
@@ -290,11 +292,11 @@ def _exec_token_ids(value: object) -> set[str]:
     return ids
 
 
-def _locate_exec_directories(a: Attempt, placement: PurePosixPath, job_ids: set[str]) -> dict[str, str]:
+def _locate_exec_directories(a: Attempt, placements: Iterable[PurePosixPath], job_ids: set[str]) -> dict[str, str]:
     """Return the current ``run/exec`` directory of each job found, from one settled listing pass.
 
     :param a: The attempt whose workspace is searched.
-    :param placement: The placement the jobs share (their parent's).
+    :param placements: The placements recorded for the producers, plus the parent's.
     :param job_ids: The job ids to find; malformed ones are never found.
     :return: The exec directory of each job found, by job id.
     """
@@ -305,7 +307,7 @@ def _locate_exec_directories(a: Attempt, placement: PurePosixPath, job_ids: set[
     if not wanted:
         return {}
     refs = _kernel.locate_many(
-        Workspace(a.workspace, durable=a.context.durable), sorted(wanted), placements=[placement], settle=True
+        Workspace(a.workspace, durable=a.context.durable), sorted(wanted), placements=list(placements), settle=True
     )
     return {job_id: str(ref.path / "run" / "exec") for job_id, ref in refs.items()}
 
@@ -812,6 +814,11 @@ def advance(a: Attempt) -> None:
     try:
         state = DriverState.from_mapping(json.loads((root / STATE_FILE).read_text(encoding="utf-8")))
         store = _open_store(root / STORE_FILE)
+        placements_path = root / PLACEMENTS_FILE
+        placements = json.loads(placements_path.read_text(encoding="utf-8")) if placements_path.exists() else {}
+        if not isinstance(placements, dict):
+            raise ValueError("the recorded child placements are not an object")
+        placements = cast(dict[str, str], placements)
     except Exception as exc:
         a.fail("jobflow.state_invalid", f"cannot load scheduler state: {exc}")
         return
@@ -874,14 +881,17 @@ def advance(a: Attempt) -> None:
         state.mark_running(key)
         spool_path = spool_root / f"{key}.json"
         snapshot_path = spool_root / f"{key}-store.json"
-        _write_json(spool_path, spool_job(job))
+        spooled = spool_job(job)
+        _write_json(spool_path, spooled)
         # Only what the job's references resolve through travels, unless the job reads the store itself.
-        _write_json(
-            snapshot_path,
-            snapshot_documents(store, None if getattr(job.config, "expose_store", False) else job.input_uuids),
-        )
+        snapshot = snapshot_documents(store, None if getattr(job.config, "expose_store", False) else job.input_uuids)
+        _write_json(snapshot_path, snapshot)
+        # The producers this job's exec tokens name, where they were spawned (any activation, any setting).
+        producers = {
+            job_id: placements[job_id] for job_id in _exec_token_ids([spooled, snapshot]) if job_id in placements
+        }
         label = f"j{ordinal:05d}"
-        a.spawn(
+        reference = a.spawn(
             ChildSpec(
                 step="enter",
                 parameters={
@@ -890,6 +900,7 @@ def advance(a: Attempt) -> None:
                     # child reads them through its parent accessor.
                     "jobflow_child_job": spool_path.relative_to(a.workdir).as_posix(),
                     "jobflow_child_snapshot": snapshot_path.relative_to(a.workdir).as_posix(),
+                    "jobflow_child_placements": producers,
                 },
                 # The jobflow job's own name (e.g. "tight relax 1"); empty falls back to the generated name.
                 name=job.name if isinstance(job.name, str) else None,
@@ -897,14 +908,17 @@ def advance(a: Attempt) -> None:
             ),
             label=label,
         )
+        placements[reference.job_id] = reference.placement_hint
         children[label] = key
         ordinal += 1
         live_labels.append(label)
     _write_json(root / STATE_FILE, state.to_mapping())
+    _write_json(root / PLACEMENTS_FILE, placements)
     bookkeeping = {"jobflow_children": children, "jobflow_processed": sorted(processed), "jobflow_ordinal": ordinal}
     # Crash order: durable driver state, then atomic a.state, then exactly one
     # published outcome. Reprocessing is guarded by processed labels and settled
     # keys; spool writes are deterministic overwrites and spawns publish together.
+    # A placement recorded for a spawn that never published names no job: harmless.
     a.state.merge(bookkeeping)
     if live_labels:
         a.gather("advance", when="any_terminal", rejoin=tuple(prior_live_labels))
@@ -1016,14 +1030,26 @@ def _enter(a: Attempt, parent: Any, anchor: int) -> None:
     except (OSError, ValueError, _fs.UnsafePath) as exc:
         a.fail("jobflow.snapshot_invalid", f"cannot load the jobflow store snapshot: {exc}")
         return
+    placements = {parent.placement}
+    # A spool from before the driver recorded placements has no map: its producers share the parent's.
+    recorded = a.parameter("jobflow_child_placements", None)
+    if recorded is not None:
+        try:
+            if not isinstance(recorded, Mapping):
+                raise ValueError("jobflow_child_placements is not an object")
+            for job_id, text in cast(Mapping[object, object], recorded).items():
+                placements.add(parse_placement_text(text, f"the recorded placement of {job_id}"))
+        except ValueError as exc:
+            a.fail("jobflow.job_unloadable", f"cannot load the recorded producer placements: {exc}")
+            return
     # Before any job module (atomate2, pymatgen) is imported, which read these at import.
     if not _apply_atomate2_environment(a, spooled):
         return
     from httk.workflow.compat.jobflow._driver import load_spooled_job, merge_documents
 
-    # Sibling jobs share the parent's placement; their exec tokens become current paths
-    # for this run only, in memory (the parent's files are never rewritten).
-    found = _locate_exec_directories(a, parent.placement, _exec_token_ids([spooled, snapshot]))
+    # Producers are where the driver spawned them (nested or flat); their exec tokens become
+    # current paths for this run only, in memory (the parent's files are never rewritten).
+    found = _locate_exec_directories(a, placements, _exec_token_ids([spooled, snapshot]))
     # Directory inputs this job's own arguments name are copied into its workdir; a
     # placeholder elsewhere in the store stays a placeholder.
     inputs_root = a.workdir / "inputs"

@@ -34,6 +34,7 @@ from attempt_fixtures import (
     submit_runner,
 )
 from httk.workflow import Workspace
+from httk.workflow._job import JobDefinition
 from httk.workflow.protocol import ReplayableWorkdirBatch
 from httk.workflow.supervision import ProcessSupervisor
 
@@ -622,7 +623,10 @@ step_relax() { httk_workflow_succeed; }""",
         "label": "alpha",
     }
     assert child["workflow"] == {"id": "local:tests.bash", "name": "tests.bash"}
-    assert child["placement"] == "project/fabricated" and child["initial_step"] == "relax"
+    # Nested under the spawning job's own children directory by default.
+    parent_key = JobDefinition.from_path(fixture.payload / "job.json").job_key
+    assert child["placement"] == f"project/fabricated/{parent_key}.children"
+    assert child["initial_step"] == "relax"
     assert child["tag"] == "defect" and child["priority"] == 700
     assert fixture.outcome()["join"]["condition"] == "any_succeeded"
     assert fixture.outcome()["priority"] == 900

@@ -178,6 +178,10 @@ states other than `owned` are the unowned states (`UNOWNED_STATES`).
   `rmdir`; a move that finds its parent pruned recreates it and retries.
 - Managers MAY restrict their scans to placement prefixes. Join children and
   requests carry the placement, so a lookup lists one placement per state.
+- Where an SDK places a child that names no placement (by default
+  `<parent placement>/<parent job key>.children`, or the parent's placement
+  with the workspace setting `children.placement=flat`) is a convention of the
+  SDK, not protocol.
 
 ## Names as tokens
 
@@ -1690,6 +1694,11 @@ Quarantine is removed only by hand.
 - **The join grace and stale-request quarantine use clocks.** They fail a job
   or move a request aside, never let a second writer in.
 
+- **Nested `.children` names can go stale.** A `.children` directory name is
+  fixed when the child is spawned and never rewritten: after exchange rekeying
+  it carries the client's pre-rekey key, and after `job detach` or a
+  single-child transfer it still names the former parent. Nothing derives
+  identity from a placement.
 - **Delivery destinations.** An empty directory created concurrently at a
   delivery destination is replaced by the rename.
 

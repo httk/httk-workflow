@@ -545,6 +545,7 @@ def test_concurrently_returned_job_leaves_no_quarantine(tmp_path: Path, monkeypa
         # A concurrent recoverer returns the job between this recoverer's listing and its header read.
         if directory == job.path and directory.exists():
             rival_target = ws.jobs / "ready" / placement / format_job_name(ref.job_key, ref.priority, _fs.fresh_token())
+            rival_target.parent.mkdir(parents=True, exist_ok=True)  # the claim pruned it; a real move recreates it
             os.rename(directory, rival_target)
         return real_read_header(directory, expect_key)
 

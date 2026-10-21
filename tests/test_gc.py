@@ -140,7 +140,7 @@ def test_each_category_collects_only_the_aged_entries(tmp_path: Path) -> None:
     assert {name: report.category(name).removed for name in GC_CATEGORIES} == {
         "dead_owners": 0,
         "attempt_control": 1,
-        "placement_directories": 4,  # ready/empty/mirror and ready/empty, and ready/p/1 and ready/p the job left
+        "placement_directories": 2,  # ready/empty/mirror and ready/empty; the claim itself pruned ready/p/1 and ready/p
         "requests": 2,
         "manager_logs": 1,
         "launcher_logs": 2,

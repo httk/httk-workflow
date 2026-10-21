@@ -47,7 +47,6 @@ class AttemptContext:
     :param durable: Record whether storage-crash durability was enabled.
     :param settings: Record workspace application settings at claim time.
     :param resources: Record the resources assigned to the attempt.
-    :param join: Record the job's join description.
     :param raw: Preserve the complete decoded context.
     :param deadline: Record the epoch second at which the manager stops the
         attempt, or ``None`` when it has no time limit.
@@ -82,7 +81,6 @@ class AttemptContext:
     #: :meth:`~httk.workflow.sdk.Attempt.setting`. The member is required.
     settings: Mapping[str, object]
     resources: Mapping[str, int]
-    join: object
     raw: Mapping[str, Any]
     #: The epoch second at which the manager stops this attempt, present exactly
     #: when the attempt runs under a ``maxtime``, otherwise ``None``. The member
@@ -178,7 +176,6 @@ class AttemptContext:
             durable=value["durable"],
             settings=dict(settings_raw),
             resources=resources,
-            join=value.get("join"),
             raw=value,
             deadline=optional_integer("deadline"),
             binding=binding,
