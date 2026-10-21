@@ -121,11 +121,31 @@ def test_definition_is_immutable_all_the_way_down() -> None:
         ("parameters", {"": 1}),
         ("parent", {"job_id": PARENT_ID}),
         ("seal_succeeded", "yes"),
+        ("staged_files", []),
+        ("staged_files", "files/INCAR"),
+        ("staged_files", ["INCAR"]),
+        ("staged_files", ["files/../INCAR"]),
+        ("staged_files", ["/files/INCAR"]),
+        ("staged_files", ["files/POSCAR", "files/INCAR"]),
+        ("staged_files", ["files/INCAR", "files/INCAR"]),
+        ("staged_files", ["attempts/1/x"]),
+        ("staged_files", [".httk-job/seal.json"]),
+        ("staged_files", ["logs/run.log"]),
+        ("staged_files", ["job.json/x"]),
     ],
 )
 def test_malformed_members_are_refused(member: str, value: object) -> None:
     with pytest.raises(FormatError):
         JobDefinition.from_mapping(_mapping(**{member: value}))
+
+
+def test_staged_files_is_optional_and_absent_when_empty() -> None:
+    job = JobDefinition.from_mapping(_mapping(staged_files=["files/INCAR", "inputs/POSCAR"]))
+    assert job.staged_files == ("files/INCAR", "inputs/POSCAR")
+    assert JobDefinition.from_mapping(job.as_mapping()) == job
+    # A job without staged files encodes exactly as before the member existed.
+    plain = JobDefinition.from_mapping(_mapping())
+    assert plain.staged_files == () and "staged_files" not in plain.as_mapping()
 
 
 def test_parent_must_be_consistent() -> None:

@@ -163,6 +163,7 @@ class JobSpec:
     :param declarations: Supply workflow declarations, keyed by name.
     :param declared: Supply the declared parameter and input metadata sections.
     :param seal_succeeded: Seal the job when it succeeds; ``None`` leaves it to the workspace setting.
+    :param staged_files: Name the payload-relative paths of the files staged with ``--file``/``--files``.
     """
 
     name: str
@@ -186,6 +187,7 @@ class JobSpec:
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declared: Mapping[str, object] = field(default_factory=dict)
     seal_succeeded: bool | None = None
+    staged_files: tuple[str, ...] = ()
 
     def as_mapping(self, *, parent: Mapping[str, object] | None = None) -> dict[str, object]:
         """Return the validated ``job.json`` mapping.
@@ -223,6 +225,7 @@ class JobSpec:
             "environment": dict(self.environment),
             "parent": None if parent is None else dict(parent),
             "seal_succeeded": self.seal_succeeded,
+            **({"staged_files": sorted(set(self.staged_files))} if self.staged_files else {}),
         }
         return JobDefinition.from_mapping(mapping).as_mapping()
 

@@ -13,6 +13,7 @@ untrusted party may write.
 import base64
 import enum
 import errno
+import hashlib
 import logging
 import os
 import stat
@@ -43,6 +44,7 @@ __all__ = [
     "copy_tree",
     "create_exclusive",
     "deliver",
+    "digest_regular",
     "discard",
     "exists",
     "fresh_token",
@@ -723,6 +725,53 @@ def read_bounded(src: Loc, limit: int, *, nonblock: bool = False) -> bytes | Non
     :raises TooLarge: For content longer than *limit*.
     """
 
+    descriptor = _open_regular(src, nonblock)
+    if descriptor is None:
+        return None
+    try:
+        data = bytearray()
+        while len(data) <= limit and (chunk := os.read(descriptor, min(1 << 20, limit + 1 - len(data)))):
+            data += chunk
+    finally:
+        os.close(descriptor)
+    if len(data) > limit:
+        raise TooLarge(f"{src.path} is larger than {limit} bytes")
+    return bytes(data)
+
+
+def digest_regular(src: Loc, keep: int, *, nonblock: bool = False) -> tuple[int, str, bytes | None] | None:
+    """Stream the SHA-256 of a regular file of any size without following a symlink.
+
+    The file is read once, so content returned is exactly the content hashed.
+
+    :param src: The file to hash.
+    :param keep: Also return the content when it is at most this many bytes.
+    :param nonblock: Open with ``O_NONBLOCK`` so a FIFO planted by an untrusted party cannot block.
+    :return: The size, the lowercase hex digest and the content (``None`` past *keep*),
+        or ``None`` when *src* does not exist.
+    :raises UnsafePath: For a symlink or anything but a regular file.
+    """
+
+    descriptor = _open_regular(src, nonblock)
+    if descriptor is None:
+        return None
+    digest, size, data = hashlib.sha256(), 0, bytearray()
+    try:
+        while chunk := os.read(descriptor, 1 << 20):
+            digest.update(chunk)
+            size += len(chunk)
+            if size <= keep:
+                data += chunk
+            else:
+                data.clear()
+    finally:
+        os.close(descriptor)
+    return size, digest.hexdigest(), bytes(data) if size <= keep else None
+
+
+def _open_regular(src: Loc, nonblock: bool) -> int | None:
+    """Open a regular file for reading without following a symlink, or return ``None`` when it does not exist."""
+
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_NONBLOCK if nonblock else 0)
     try:
         descriptor = os.open(src.path, flags, dir_fd=src.at)
@@ -732,17 +781,10 @@ def read_bounded(src: Loc, limit: int, *, nonblock: bool = False) -> bytes | Non
         if exc.errno == errno.ELOOP:
             raise UnsafePath(f"{src.path} is a symlink", "symlink") from exc
         raise
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise UnsafePath(f"{src.path} is not a regular file", "not_regular")
-        data = bytearray()
-        while len(data) <= limit and (chunk := os.read(descriptor, min(1 << 20, limit + 1 - len(data)))):
-            data += chunk
-    finally:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
         os.close(descriptor)
-    if len(data) > limit:
-        raise TooLarge(f"{src.path} is larger than {limit} bytes")
-    return bytes(data)
+        raise UnsafePath(f"{src.path} is not a regular file", "not_regular")
+    return descriptor
 
 
 def read_tail(anchor: Path, relative: str | PurePosixPath, size: int, offset: int | None = None) -> tuple[bytes, int]:

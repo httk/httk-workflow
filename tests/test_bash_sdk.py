@@ -665,6 +665,28 @@ def test_a_step_prepares_a_payload_and_spawns_the_directory(tmp_path: Path) -> N
     assert child["id"] == prepared["id"] and child["parameters"] == {"encut": 520}
 
 
+def test_job_prepare_takes_staged_files_only_as_an_array(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from argparse import Namespace
+
+    from httk.workflow import _shell_bridge
+    from httk.workflow._job import JobDefinition
+    from httk.workflow.errors import FormatError
+
+    spec = {"name": "Prepared", "workflow_id": "local:tests.bash", "workflow_name": "tests.bash"}
+    for index, staged in enumerate((["files/INCAR"], "files/INCAR")):
+        (tmp_path / "spec.json").write_text(json.dumps({**spec, "staged_files": staged}), encoding="utf-8")
+        destination = tmp_path / f"child{index}"
+        destination.mkdir()
+        arguments = Namespace(spec=str(tmp_path / "spec.json"), destination=str(destination))
+        if isinstance(staged, list):
+            _shell_bridge._job_prepare(arguments)
+            assert JobDefinition.from_path(destination / "job.json").staged_files == ("files/INCAR",)
+        else:
+            with pytest.raises(FormatError, match="staged_files must be an array"):
+                _shell_bridge._job_prepare(arguments)
+    capsys.readouterr()
+
+
 _CALL_SUB_RUNNER = CALL_SUB_RUNNER
 
 

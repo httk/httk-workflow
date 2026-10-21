@@ -631,8 +631,10 @@ def _job_prepare(arguments: argparse.Namespace) -> None:
     if unknown:
         raise _Refused(f"unknown job specification members: {', '.join(unknown)}")
     values = dict(raw)
-    for name in ("required_capabilities", "retry_on"):
+    for name in ("required_capabilities", "retry_on", "staged_files"):
         if name in values:
+            if not isinstance(values[name], list):
+                raise FormatError(f"job specification member {name} must be an array")
             values[name] = tuple(values[name])
     job = prepare_job_payload(arguments.destination, JobSpec(**values))
     _print(

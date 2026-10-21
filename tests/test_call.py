@@ -7,10 +7,13 @@ parent at its gather step. The other tests call from a fabricated attempt and
 inspect the child the call registered without running it.
 """
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
+from httk.core import FileRecord
+from httk.core.storage import content_id
 
 from attempt_fixtures import (
     assert_called,
@@ -21,7 +24,7 @@ from attempt_fixtures import (
     run_manager,
     sub_package,
 )
-from httk.workflow import Attempt, Workspace, _kernel, _store
+from httk.workflow import Attempt, Workspace, _kernel, _store, collect
 from httk.workflow._job import JobDefinition
 from httk.workflow.scaffold import new_job
 
@@ -115,6 +118,15 @@ def test_call_runs_another_installed_workflow_and_resumes_at_the_gather(tmp_path
     assert (child.path / "files" / "input.txt").read_text(encoding="utf-8") == "hello-from-parent\n"
     assert (child.path / "run" / "seen.txt").read_text(encoding="utf-8") == "sub-saw:hello-from-parent\n"
     assert len(every_job(workspace)) == 2
+    # A child's staged files are recorded exactly as a main job's: listed in job.json, collected as file inputs.
+    assert JobDefinition.from_path(child.path / "job.json").staged_files == ("files/input.txt",)
+    (collected,) = [item for item in collect(workspace, allow_job_collector=True) if item.record.job_id == child_id]
+    staged = collected.inputs["files/input.txt"]
+    assert isinstance(staged, FileRecord)
+    assert staged.sha256 == hashlib.sha256(b"hello-from-parent\n").hexdigest()
+    assert [(edge.label, edge.entry_type, edge.entry_id) for edge in collected.run.inputs] == [
+        ("files/input.txt", "files", content_id(staged))
+    ]
 
 
 _DISCARDING_RUNNER = """#!/usr/bin/env python3

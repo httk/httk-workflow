@@ -18,6 +18,7 @@ from httk.workflow._util import json_bytes, require_int, require_mapping, requir
 from httk.workflow.errors import FormatError
 from httk.workflow.models import (
     RetryPolicy,
+    _reserved_payload_member,
     _validate_step_resources,
     canonical_uuid,
     check_job_placement,
@@ -63,6 +64,7 @@ _MEMBERS = frozenset(
         "environment",
         "parent",
         "seal_succeeded",
+        "staged_files",
     }
 )
 _RETRY_MEMBERS = frozenset(
@@ -92,6 +94,24 @@ def _placement(value: object, name: str) -> PurePosixPath:
     if placement_text(placement) != value or "~" in placement_text(placement):
         raise FormatError(f"{name} is not canonical: {value!r}")
     return placement
+
+
+def _staged_files(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise FormatError("staged_files must be a non-empty array")
+    for path in value:
+        text = require_string(path, "staged_files[]")
+        parts = text.split("/")
+        if (
+            text.startswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+            or len(parts) < 2
+            or _reserved_payload_member(parts[0])
+        ):
+            raise FormatError(f"staged_files names a path that is not a normalized payload path: {text!r}")
+    if value != sorted(set(value)):
+        raise FormatError("staged_files must be sorted and without duplicates")
+    return tuple(value)
 
 
 def _parent(value: object) -> Mapping[str, Frozen] | None:
@@ -130,6 +150,8 @@ class JobDefinition:
     :param environment: The declared and overridden workflow environment.
     :param parent: ``{workspace_id, job_id, job_key, placement, activation_id, spawn_id}`` of the spawning job.
     :param seal_succeeded: Whether a succeeded job is sealed; ``None`` uses the workspace setting ``seal.succeeded``.
+    :param staged_files: The payload-relative paths of the files staged with ``--file``/``--files``, sorted;
+        the member is absent when there are none.
     :param stored_digest: The SHA-256 of the stored bytes this definition was read from, if any.
     """
 
@@ -152,6 +174,7 @@ class JobDefinition:
     environment: Mapping[str, Frozen]
     parent: Mapping[str, Frozen] | None
     seal_succeeded: bool | None
+    staged_files: tuple[str, ...] = ()
     stored_digest: str | None = field(default=None, compare=False, repr=False)
 
     @property
@@ -175,7 +198,7 @@ class JobDefinition:
         :raises httk.workflow.errors.FormatError: If the document is malformed.
         """
 
-        doc = _exact(value, "job.json", _MEMBERS)
+        doc = _exact(value, "job.json", _MEMBERS, optional=frozenset({"staged_files"}))
         if doc["format"] != JOB_FORMAT or doc["format_version"] != JOB_FORMAT_VERSION:
             raise FormatError("job.json is not httk-workflow-job version 3")
         workflow = _exact(doc["workflow"], "workflow", frozenset({"id", "name"}))
@@ -210,6 +233,7 @@ class JobDefinition:
             environment=_frozen(validate_environment(doc["environment"])),
             parent=_parent(doc["parent"]),
             seal_succeeded=seal_succeeded,
+            staged_files=_staged_files(doc["staged_files"]) if "staged_files" in doc else (),
         )
 
     @classmethod
@@ -284,6 +308,7 @@ class JobDefinition:
             "environment": _thaw(self.environment),
             "parent": _thaw(self.parent),
             "seal_succeeded": self.seal_succeeded,
+            **({"staged_files": list(self.staged_files)} if self.staged_files else {}),
         }
 
     def encode(self) -> bytes:

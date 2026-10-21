@@ -11,7 +11,9 @@ import hashlib
 import io
 import json
 import logging
+import sqlite3
 from collections.abc import Mapping
+from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,11 +26,11 @@ from httk.core.cli import CLIContext
 from conftest import register_ws
 from httk.workflow import Workspace, _store, collect
 from httk.workflow import scaffold as scaffold_module
-from httk.workflow.collecting import JobRecord, StructureInput, _prefixed_url
+from httk.workflow.collecting import StructureInput, _prefixed_url
 from httk.workflow.workflow_cli import command
 from test_collect_fallback import _DATA_MANIFEST
 from test_workflow_packages import _package
-from v3_helpers import RUNNER, cli_owner, run, submit, workspace
+from v3_helpers import RUNNER, cli_owner, job_mapping, run, submit_mapping, workspace
 
 _WORKFLOW = "tests.inputs.package"
 _MANIFEST = (
@@ -99,6 +101,7 @@ def _finished(
     manifest: str = _MANIFEST,
     declared: Mapping[str, object] = _DECLARED,
     members: Mapping[str, str] | None = None,
+    staged_files: list[str] | None = None,
 ) -> Workspace:
     """Install the package and run one job with a staged POSCAR and a report file to success."""
 
@@ -111,15 +114,16 @@ def _finished(
     with cli_owner(ws) as owner:
         installed = _store.install(ws, owner, package)
     declarations = {"workflow": installed.provider().declarations["workflow"]}
-    submit(
-        ws,
+    mapping = job_mapping(
         installed,
         {"start": "succeed"},
-        members={"files/POSCAR": _POSCAR} if members is None else members,
         declarations=declarations,
         declared=declared,
         parameters={"files": {"start": {"report.txt": "hello"}}},
     )
+    if staged_files is not None:
+        mapping["staged_files"] = staged_files
+    submit_mapping(ws, mapping, members={"files/POSCAR": _POSCAR} if members is None else members)
     run(ws)
     scaffold_module._WORKFLOW_PROVIDERS.pop(_WORKFLOW, None)
     return ws
@@ -193,35 +197,36 @@ def test_a_staged_input_that_is_a_symlink_is_not_loaded(tmp_path: Path, caplog: 
 
     item = next(collect(ws, allow_job_collector=True))
 
-    assert item.run.inputs == () and "cannot read files/POSCAR" in caplog.text
+    assert item.run.inputs == () and "cannot read files/POSCAR" in caplog.text and "is a symlink" in caplog.text
 
 
-def test_a_staged_input_is_loaded_from_the_bytes_read_file_returned(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_staged_input_is_loaded_from_the_bytes_it_hashed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from httk.core.loading import load_source
     from httk.core.storage import content_id
 
+    from httk.workflow.introspection import _reading
+
     ws = _finished(tmp_path)
-    germanium = _POSCAR.replace("Si", "Ge").replace("5.43", "5.66")
+    germanium = _POSCAR.replace("Si", "Ge").replace("5.43", "5.66").encode()
     read: list[str] = []
 
-    def patched(self: JobRecord, relative: str, *, limit: int = 0) -> bytes:
-        read.append(relative)
-        return germanium.encode()
+    def patched(job: Path, relative: Any, keep: int) -> tuple[int, str, bytes | None]:
+        read.append(str(relative))
+        return len(germanium), hashlib.sha256(germanium).hexdigest(), germanium
 
-    monkeypatch.setattr(JobRecord, "read_file", patched)
+    monkeypatch.setattr(_reading, "digest_job_file", patched)
     item = next(collect(ws, allow_job_collector=True))
 
     assert read == ["files/POSCAR"]
-    expected = load_source(io.BytesIO(germanium.encode()), "POSCAR")
+    expected = load_source(io.BytesIO(germanium), "POSCAR")
     assert content_id(expected) != content_id(load_source(io.BytesIO(_POSCAR.encode()), "POSCAR"))
     value = item.inputs["initial_structure"]
     assert isinstance(value, StructureInput) and content_id(value.main) == content_id(expected)
+    assert value.alternative.source_file.sha256 == hashlib.sha256(germanium).hexdigest()
     assert item.run.inputs[0].entry_id == content_id(value.alternative)
 
 
-def test_optional_unstaged_and_compressed_inputs_are_skipped(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_an_optional_unstaged_input_is_skipped_at_info(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     optional = {"inputs": {"structure": {**_DECLARED["inputs"]["structure"], "required": False}}}
     ws = _finished(tmp_path, declared=optional, members={})
     caplog.set_level(logging.INFO)
@@ -230,11 +235,73 @@ def test_optional_unstaged_and_compressed_inputs_are_skipped(tmp_path: Path, cap
     (message,) = [record for record in caplog.records if "is not staged" in record.getMessage()]
     assert message.levelno == logging.INFO
 
+
+def _file_edge(item: Any, label: str) -> FileRecord:
+    """Return the ``FileRecord`` input under *label*, asserting the run's edge names it as a file."""
+
+    from httk.core.storage import content_id
+
+    value = item.inputs[label]
+    assert isinstance(value, FileRecord)
+    assert [(edge.entry_type, edge.entry_id) for edge in item.run.inputs if edge.label == label] == [
+        ("files", content_id(value))
+    ]
+    return value
+
+
+def test_a_compressed_structure_input_is_recorded_as_its_stored_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     manifest = _MANIFEST.replace('destination = "POSCAR"', 'destination = "POSCAR.gz"')
     compressed = {"inputs": {"structure": {**_DECLARED["inputs"]["structure"], "destination": "POSCAR.gz"}}}
-    ws = _finished(tmp_path / "gz", manifest=manifest, declared=compressed, members={"files/POSCAR.gz": "x"})
+    ws = _finished(tmp_path, manifest=manifest, declared=compressed, members={"files/POSCAR.gz": "not gzip"})
+
     item = next(collect(ws, allow_job_collector=True))
-    assert item.run.inputs == () and "a compressed staged file (POSCAR.gz) is not loaded" in caplog.text
+
+    # Not decompressed: the digest is of the stored bytes, the format that of the uncompressed name.
+    value = _file_edge(item, "initial_structure")
+    assert (value.name, value.format, value.size) == ("POSCAR.gz", "vasp-poscar", 8)
+    assert value.sha256 == hashlib.sha256(b"not gzip").hexdigest()
+    assert "files/POSCAR.gz is recorded as a file only: it is compressed" in caplog.text
+
+
+def test_a_structure_input_over_the_read_limit_is_recorded_as_its_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from httk.workflow import collecting
+
+    ws = _finished(tmp_path)
+    monkeypatch.setattr(collecting, "READ_FILE_LIMIT", 16)
+
+    item = next(collect(ws, allow_job_collector=True))
+
+    # The hash streams without a bound; only loading is bounded.
+    value = _file_edge(item, "initial_structure")
+    assert value.size == len(_POSCAR) and value.sha256 == hashlib.sha256(_POSCAR.encode()).hexdigest()
+    assert "is recorded as a file only: it is larger than 16 bytes" in caplog.text
+
+
+def test_an_input_collect_does_not_read_is_recorded_as_its_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    declared = {
+        "inputs": {
+            "trajectory": {"destination": "XDATCAR", "entry_type": "trajectories", "required": True, "role": "frames"},
+            # Untyped, so optional: a file the runner reads, recorded under its role.
+            "topology": {"destination": "topol.top", "required": False, "role": "topology"},
+            # A port has no destination: a value handed to the job, not a staged file.
+            "born": {"port": "born", "required": False, "role": "born"},
+        }
+    }
+    caplog.set_level(logging.INFO)
+    ws = _finished(tmp_path, declared=declared, members={"files/XDATCAR": "frames\n", "files/topol.top": "top\n"})
+
+    item = next(collect(ws, allow_job_collector=True))
+
+    assert sorted(edge.label for edge in item.run.inputs) == ["frames", "topology"]
+    assert _file_edge(item, "frames").sha256 == hashlib.sha256(b"frames\n").hexdigest()
+    assert _file_edge(item, "topology").url.endswith("/files/topol.top")
+    assert "collect does not read 'trajectories' entries" in caplog.text
 
 
 def test_read_file_reads_job_files_safely(tmp_path: Path) -> None:
@@ -301,8 +368,13 @@ def test_a_python_hook_hands_over_its_inputs(tmp_path: Path) -> None:
     item = next(collect(ws, allow_job_collector=True))
 
     assert item.missing_collector is None and item.products_unlinked == ()
-    # The hook's input wins; the framework does not load the staged file a second time.
-    assert [edge.label for edge in item.run.inputs] == ["initial_structure"]
+    # The hook's input keeps the role; the staged file is still recorded, by its path, and not loaded.
+    assert [(edge.label, edge.entry_type) for edge in item.run.inputs] == [
+        ("initial_structure", "structures"),
+        ("files/POSCAR", "files"),
+    ]
+    assert not isinstance(item.inputs["initial_structure"], (FileRecord, StructureInput))
+    assert _file_edge(item, "files/POSCAR").sha256 == hashlib.sha256(_POSCAR.encode()).hexdigest()
     assert len(item.products) == 1
 
 
@@ -337,7 +409,10 @@ def test_an_executable_hook_hands_over_inputs_in_its_response(tmp_path: Path) ->
     value = item.inputs["initial_structure"]
     assert isinstance(value, FileRecord)
     assert value.url == f"data/workspace/{item.record.payload_path.as_posix()}/files/POSCAR"
-    assert [(edge.label, edge.entry_type) for edge in item.run.inputs] == [("initial_structure", "files")]
+    assert [(edge.label, edge.entry_type) for edge in item.run.inputs] == [
+        ("initial_structure", "files"),
+        ("files/POSCAR", "files"),
+    ]
     assert item.products_unlinked == () and len(item.products) == 1
 
 
@@ -667,3 +742,89 @@ def test_identical_staged_bytes_at_other_paths_store_one_alternative_and_one_fil
         # The first collected location is kept.
         assert staged.url == f"data/workspace/{items[0].record.payload_path.as_posix()}/files/POSCAR"
         assert _input_edge(store, reports[0]) == _input_edge(store, reports[1])
+
+
+def _staged_jobs(tmp_path: Path, *contents: str) -> tuple[Workspace, str]:
+    """Run one ``job new --from-command true --files DIR`` job per INCAR content, staging INCAR, KPOINTS, POTCAR."""
+
+    context = CLIContext("httk", tmp_path)
+    ws = workspace(tmp_path / "workspace")
+    name = register_ws(context, ws.root, "staged")
+    for index, incar in enumerate(contents):
+        directory = tmp_path / f"inputs{index}"
+        directory.mkdir()
+        for file_name, text in (("INCAR", incar), ("KPOINTS", f"kpoints {index}\n"), ("POTCAR", "potcar\n")):
+            (directory / file_name).write_text(text, encoding="utf-8")
+        argv = ["job", "new", "--workspace", name, "--from-command", "true", "--files", str(directory)]
+        assert command([*argv, "--tag", f"staged{index}"], context) == 0
+    run(ws)
+    return ws, name
+
+
+def test_files_staged_with_job_new_are_the_runs_file_inputs(tmp_path: Path) -> None:
+    from httk.workflow._job import JobDefinition
+
+    ws, _ = _staged_jobs(tmp_path, "ENCUT = 520\n")
+
+    (item,) = collect(ws, allow_job_collector=True)
+
+    assert item.run_only and item.missing_collector is None
+    job = JobDefinition.from_path(item.record.payload / "job.json")
+    assert job.staged_files == ("files/INCAR", "files/KPOINTS", "files/POTCAR")
+    assert sorted(edge.label for edge in item.run.inputs) == ["files/INCAR", "files/KPOINTS", "files/POTCAR"]
+    incar = _file_edge(item, "files/INCAR")
+    assert (incar.name, incar.sha256) == ("INCAR", hashlib.sha256(b"ENCUT = 520\n").hexdigest())
+    assert incar.url == f"data/staged/{item.record.payload_path.as_posix()}/files/INCAR"
+    assert _file_edge(item, "files/POTCAR").format == "vasp-potcar"
+
+
+def test_a_staged_file_missing_at_collect_is_skipped_at_info(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    ws, _ = _staged_jobs(tmp_path, "ENCUT = 520\n")
+    (item,) = collect(ws, allow_job_collector=True)
+    (item.record.payload / "files" / "KPOINTS").unlink()
+    caplog.set_level(logging.INFO)
+
+    (item,) = collect(ws, allow_job_collector=True)
+
+    assert sorted(edge.label for edge in item.run.inputs) == ["files/INCAR", "files/POTCAR"]
+    (message,) = [record for record in caplog.records if "files/KPOINTS is not staged" in record.getMessage()]
+    assert message.levelno == logging.INFO
+
+
+def test_identical_staged_files_of_two_jobs_store_one_file_row(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("httk.store")
+    from httk.core import Run
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+
+    _, name = _staged_jobs(tmp_path, "ENCUT = 520\n", "ENCUT = 520\n")
+    store_path = tmp_path / "results.sqlite"
+    argv = ["collect", "--workspace", name, "--allow-job-collector", "--into", str(store_path), "--id-base", "httk.t"]
+    capsys.readouterr()
+
+    assert command(argv, CLIContext("httk", tmp_path)) == 0
+
+    *reports, summary = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert summary["collected"] == 2 and all(report["stored"] for report in reports), reports
+    with closing(sqlite3.connect(store_path)) as connection:
+        rows = dict(connection.execute("SELECT sha256, id FROM core_file").fetchall())
+    # Six staged files, four contents: one row each for the shared INCAR and POTCAR, two differing KPOINTS.
+    incar, potcar = (hashlib.sha256(text.encode()).hexdigest() for text in ("ENCUT = 520\n", "potcar\n"))
+    kpoints = {hashlib.sha256(f"kpoints {index}\n".encode()).hexdigest() for index in (0, 1)}
+    assert set(rows) == {incar, potcar, *kpoints}
+    with Backend.sqlite(store_path) as database:
+        runs = [_stored(SqlStore(database), Run, report["stored"]["run"]) for report in reports]
+    for label, digest in (("files/INCAR", incar), ("files/POTCAR", potcar)):
+        assert [edge.entry_id for run in runs for edge in run.inputs if edge.label == label] == [rows[digest]] * 2
+
+
+def test_a_declared_inputs_destination_is_not_recorded_twice(tmp_path: Path) -> None:
+    # A file staged with --file at a declared input's destination is that input, recorded once under its role.
+    members = {"files/POSCAR": _POSCAR, "files/extra": "extra\n"}
+    ws = _finished(tmp_path, members=members, staged_files=["files/POSCAR", "files/extra"])
+
+    item = next(collect(ws, allow_job_collector=True))
+
+    assert sorted(edge.label for edge in item.run.inputs) == ["files/extra", "initial_structure"]
+    assert isinstance(item.inputs["initial_structure"], StructureInput)

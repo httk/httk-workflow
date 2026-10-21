@@ -40,7 +40,6 @@ record reads only that job's own directory.
 
 from __future__ import annotations
 
-import hashlib
 import importlib
 import io
 import json
@@ -179,9 +178,11 @@ class CollectedJob:
         this job's run to theirs.
     :param inputs: Map declared input roles to the entries the job consumed:
         those a recognized-calculation collector read from its directory, or,
-        for a workspace job, those its collect hook handed over plus the
-        declared inputs staged as files that the framework recorded (a staged
-        structure is a ``StructureInput``, whose alternative the run's edge names).
+        for a workspace job, those its collect hook handed over plus every
+        file staged into it that the framework recorded: a declared input under
+        its role, a ``--file``/``--files`` file under its payload-relative path,
+        each a ``FileRecord`` or, for a structure *httk₂* reads, a
+        ``StructureInput`` whose alternative the run's edge names.
     """
 
     workflow_id: str
@@ -373,6 +374,8 @@ def _job_mapping(job: JobDefinition) -> dict[str, object]:
     }
     if job.environment:
         result["environment"] = _thaw(job.environment)
+    if job.staged_files:
+        result["staged_files"] = list(job.staged_files)
     return result
 
 
@@ -1642,12 +1645,16 @@ def _assemble_collected(
     outputs: Mapping[str, object],
     inputs: Mapping[str, object] | None = None,
     url_prefix: str | None = None,
+    staged: Mapping[str, object] | None = None,
 ) -> CollectedJob:
     """Validate outputs and overlay their edges onto one collected run.
 
     A collector may also hand over the *inputs* it read; they become the run's
-    input edges before ``product_of`` curations resolve. With *url_prefix*, a
-    workspace-relative file-entry URL becomes ``<url_prefix>/<url>``.
+    input edges before ``product_of`` curations resolve. The framework's
+    *staged* files (:func:`_staged_inputs`) follow them, labelled by role or
+    payload-relative path without a declared-role check: the job's own
+    ``declared`` metadata named them. With *url_prefix*, a workspace-relative
+    file-entry URL becomes ``<url_prefix>/<url>``.
     """
 
     if url_prefix is not None:
@@ -1656,6 +1663,7 @@ def _assemble_collected(
         # can never be rewritten at store time.
         outputs = {role: _prefixed_url(identity, role, value, url_prefix) for role, value in outputs.items()}
         inputs = {role: _prefixed_url(identity, role, value, url_prefix) for role, value in (inputs or {}).items()}
+        staged = {label: _prefixed_url(identity, label, value, url_prefix) for label, value in (staged or {}).items()}
     workflow_id = record.job.get("workflow")
     workflow_id = workflow_id if isinstance(workflow_id, str) else ""
     document = _job_workflow_document(record, provider)
@@ -1672,6 +1680,12 @@ def _assemble_collected(
                 raise ValueError(f"{identity}: unknown input role {role!r}")
         read = tuple(_entry_edge(identity, role, value, input_roles[role]) for role, value in inputs.items())
         run = replace(run, inputs=(*run.inputs, *read))
+    if staged:
+        # Every staged value carries its entry type: "files", or "structures" for a StructureInput.
+        run = replace(
+            run, inputs=(*run.inputs, *(_entry_edge(identity, label, value, {}) for label, value in staged.items()))
+        )
+        inputs.update(staged)
     core = _core()
     outputs = _attach_product_of(identity, dict(outputs), roles, run, provider)
     owned = tuple(_entry_edge(identity, role, value, roles[role]) for role, value in outputs.items())
@@ -1761,144 +1775,191 @@ def _workspace_name(workspace: Workspace) -> str:
     return root.name
 
 
-def _staged_inputs(
-    record: JobRecord, provider: object | None, run: httk.core.Run, taken: Mapping[str, object]
-) -> dict[str, object]:
-    """Record the declared inputs staged as files that neither the collect hook nor the run names.
+def _staged_inputs(record: JobRecord, run: httk.core.Run, taken: Mapping[str, object]) -> dict[str, object]:
+    """Record every file staged into the job that neither the collect hook nor the run names.
 
-    An input of the job's ``declared`` metadata with a ``destination`` and an
-    ``entry_type`` was staged where the scaffold stages it
+    An input of the job's ``declared`` metadata with a ``destination`` was
+    staged where the scaffold stages it
     (:func:`~httk.workflow.scaffold.payload_relative`: a bare name below
-    ``files/``, a name with a directory as written). It is read once with
-    :meth:`JobRecord.read_file`, and those bytes are what is recorded: a
-    ``files`` input becomes the ``FileRecord`` of the staged file (not loaded).
-    A ``structures`` input becomes a ``StructureInput``: the default
-    reading (wrapped as a ``UnitcellStructureView`` when it loads as something
-    else) and an alternative holding the as-written reading with the staged file
-    as ``source_file``; when the as-written reading fails, the alternative holds
-    the default reading, with a warning. Any other entry type is loaded by the
-    reader its name selects. Anything unsafe, compressed or not loadable as its
-    entry type is skipped with a warning, and an unstaged input likewise (at
-    info level when it is not required).
+    ``files/``, a name with a directory as written) and is recorded under its
+    role, or under its payload-relative path when the hook handed that role
+    over; a file staged with ``--file``/``--files`` is listed in the job's
+    ``staged_files`` and is recorded under its payload-relative path, unless it
+    is a declared input's destination. Each becomes the ``FileRecord`` of one
+    streamed read without a size bound, compressed or not (see
+    :func:`_staged_input`). A ``structures`` input *httk₂* can read is a
+    ``StructureInput`` instead, whose alternative carries that file record.
     """
-
-    from httk.core import FileRecord, reader_format_for
 
     from .scaffold import payload_relative
 
     declared = record.job.get("declared")
     entries = declared.get("inputs") if isinstance(declared, Mapping) else None
-    if not isinstance(entries, Mapping) or not entries:
-        return {}
-    known = _input_roles(_job_workflow_document(record, provider))
-    edged = {edge.label for edge in run.inputs}
-    loaded: dict[str, object] = {}
-    for entry in entries.values():
+    staged = record.job.get("staged_files")
+    skip = {*taken, *(edge.label for edge in run.inputs)}
+    wanted: dict[str, tuple[PurePosixPath, str | None, bool]] = {}
+    destinations: set[str] = set()
+    for entry in entries.values() if isinstance(entries, Mapping) else ():
         if not isinstance(entry, Mapping):
             continue
         destination, entry_type, role = entry.get("destination"), entry.get("entry_type"), entry.get("role")
-        if (
-            not isinstance(destination, str)
-            or not isinstance(entry_type, str)
-            or not isinstance(role, str)
-            or role in taken
-            or role in edged
-            or role not in known
-        ):
+        # An input without a destination is a value the job was handed (a port), not a staged file.
+        if not isinstance(destination, str) or not isinstance(role, str):
             continue
         try:
             relative = payload_relative(destination)
         except (ValueError, WorkflowError) as exc:
             _LOGGER.warning("not collecting input %r of %s: %s", role, record.job_key, exc)
             continue
-        if split_compression_suffix(relative.name)[1] is not None:
-            # A compressed input could decompress past any bound; read_file only bounds the stored bytes.
-            _LOGGER.warning(
-                "not collecting input %r of %s: a compressed staged file (%s) is not loaded",
-                role,
-                record.job_key,
-                destination,
-            )
-            continue
-        if not os.path.lexists(record.payload.joinpath(*relative.parts)):
-            # Only chooses the log level; read_file below is what reads the file safely.
-            level = logging.INFO if entry.get("required") is False else logging.WARNING
-            _LOGGER.log(level, "not collecting input %r of %s: %s is not staged", role, record.job_key, destination)
-            continue
-        try:
-            # Job-writable content is read once, bounded and without following symlinks, and recorded
-            # and loaded from those bytes; the file name only selects the reader.
-            data = record.read_file(relative.as_posix())
-            file_record = FileRecord(
-                url=f"{record.payload_path.as_posix()}/{relative.as_posix()}",
-                name=relative.name,
-                size=len(data),
-                sha256=hashlib.sha256(data).hexdigest(),
-                format=reader_format_for(relative.name),
-            )
-            if entry_type == "files":
-                loaded[role] = file_record
-                continue
-            value = _loaded_input(data, relative.name, entry_type)
-            if entry_type == "structures":
-                from httk.atomistic import (  # pyright: ignore[reportMissingImports]
-                    UnitcellStructureRecord,
-                    UnitcellStructureView,
-                )
-
-                try:
-                    exact = _loaded_input(data, relative.name, entry_type, as_written=True)
-                    # As written, a CIF site off its special position is not merged onto it; that is
-                    # another crystal, not the exact numbers of this one.
-                    written, default = (
-                        len(UnitcellStructureView(cast(Any, s)).species_at_sites) for s in (exact, value)
-                    )
-                    if written != default:
-                        raise ValueError(f"it has {written} sites where the default reading has {default}")
-                except Exception as exc:
-                    _LOGGER.warning(
-                        "input %r of %s: %s cannot be read as written (%s); its exact alternative holds the default "
-                        "reading",
-                        role,
-                        record.job_key,
-                        destination,
-                        exc,
-                    )
-                    exact = value
-                alternative = replace(
-                    UnitcellStructureRecord.from_structure(UnitcellStructureView(cast(Any, exact))),
-                    source_file=file_record,
-                )
-                value = StructureInput(value, alternative, f"file_{content_id(file_record)[:16]}")
-        except Exception as exc:
-            _LOGGER.warning("not collecting input %r of %s from %s: %s", role, record.job_key, destination, exc)
-            continue
-        loaded[role] = value
+        path = relative.as_posix()
+        destinations.add(path)
+        if role not in skip:
+            typed = entry_type if isinstance(entry_type, str) else None
+            wanted[role] = (relative, typed, entry.get("required") is not False)
+        elif path not in skip:
+            # The hook (or the run) names the role's entry; the staged file is still recorded, by its path.
+            wanted[path] = (relative, None, False)
+    for path in staged if isinstance(staged, list) else ():
+        if isinstance(path, str) and path not in destinations and path not in skip:
+            wanted[path] = (PurePosixPath(path), None, False)
+    loaded: dict[str, object] = {}
+    for label, (relative, entry_type, required) in wanted.items():
+        value = _staged_input(record, label, relative, entry_type, required)
+        if value is not None:
+            loaded[label] = value
     return loaded
 
 
-def _loaded_input(data: bytes, name: str, entry_type: str, *, as_written: bool = False) -> object:
-    """Load staged-input bytes by the reader *name* selects, as a *entry_type* entry.
+def _staged_input(
+    record: JobRecord, label: str, relative: PurePosixPath, entry_type: str | None, required: bool
+) -> object | None:
+    """Record one staged file: its ``FileRecord``, or a ``StructureInput`` when it reads as a structure.
+
+    The file is read once, streamed without a size bound and without following
+    a symlink (:func:`~httk.workflow.introspection._reading.digest_job_file`),
+    and the ``FileRecord`` holds its size and SHA-256; a compressed file is
+    hashed as stored, its ``format`` the reader format of the uncompressed name.
+    A ``structures`` input that is not compressed and at most
+    :data:`READ_FILE_LIMIT` bytes is also loaded from exactly the bytes hashed:
+    the default reading (wrapped as a ``UnitcellStructureView`` when it loads as
+    something else) and an alternative holding the as-written reading with the
+    file record as ``source_file``; when the as-written reading fails, the
+    alternative holds the default reading, with a warning. A structure that is
+    compressed, too large or not loadable is recorded as its file, with a
+    warning naming why; any other entry type is recorded as its file. An
+    unsafe file is skipped with a warning, an absent one likewise (at info
+    level when it is not required).
+
+    :param record: The job.
+    :param label: The input edge label: the declared role, or the staged path.
+    :param relative: The payload-relative path of the staged file.
+    :param entry_type: The declared entry type, if any.
+    :param required: Whether an absent file is worth a warning.
+    :return: The recorded value, or ``None`` when nothing is recorded.
+    """
+
+    from httk.core import FileRecord, reader_format_for
+
+    from .introspection._reading import digest_job_file
+
+    name = relative.name
+    compressed = split_compression_suffix(name)[1] is not None
+    # A compressed file could decompress past any bound, so its bytes are never kept to load.
+    keep = READ_FILE_LIMIT if entry_type == "structures" and not compressed else -1
+    try:
+        digested = digest_job_file(record.payload, relative, keep)
+    except (WorkflowError, OSError, ValueError) as exc:
+        _LOGGER.warning("not collecting input %r of %s: cannot read %s: %s", label, record.job_key, relative, exc)
+        return None
+    if digested is None:
+        level = logging.WARNING if required else logging.INFO
+        _LOGGER.log(level, "not collecting input %r of %s: %s is not staged", label, record.job_key, relative)
+        return None
+    size, sha256, data = digested
+    file_record = FileRecord(
+        url=f"{record.payload_path.as_posix()}/{relative.as_posix()}",
+        name=name,
+        size=size,
+        sha256=sha256,
+        format=reader_format_for(name),
+    )
+    if entry_type in (None, "files"):
+        return file_record
+    if entry_type != "structures":
+        _LOGGER.info(
+            "input %r of %s: %s is recorded as a file; collect does not read %r entries",
+            label,
+            record.job_key,
+            relative,
+            entry_type,
+        )
+        return file_record
+    if compressed:
+        reason = "it is compressed"
+    elif data is None:
+        reason = f"it is larger than {READ_FILE_LIMIT} bytes"
+    else:
+        try:
+            return _structure_input(data, record, label, relative, file_record)
+        except Exception as exc:
+            reason = f"it does not load as a structure ({exc})"
+    _LOGGER.warning("input %r of %s: %s is recorded as a file only: %s", label, record.job_key, relative, reason)
+    return file_record
+
+
+def _structure_input(
+    data: bytes, record: JobRecord, label: str, relative: PurePosixPath, file_record: httk.core.FileRecord
+) -> StructureInput:
+    """Load a staged structure's bytes into its default reading and its as-written alternative."""
+
+    from httk.atomistic import (  # pyright: ignore[reportMissingImports]
+        UnitcellStructureRecord,
+        UnitcellStructureView,
+    )
+
+    value = _loaded_structure(data, relative.name)
+    try:
+        exact = _loaded_structure(data, relative.name, as_written=True)
+        # As written, a CIF site off its special position is not merged onto it; that is
+        # another crystal, not the exact numbers of this one.
+        written, default = (len(UnitcellStructureView(cast(Any, s)).species_at_sites) for s in (exact, value))
+        if written != default:
+            raise ValueError(f"it has {written} sites where the default reading has {default}")
+    except Exception as exc:
+        _LOGGER.warning(
+            "input %r of %s: %s cannot be read as written (%s); its exact alternative holds the default reading",
+            label,
+            record.job_key,
+            relative,
+            exc,
+        )
+        exact = value
+    alternative = replace(
+        UnitcellStructureRecord.from_structure(UnitcellStructureView(cast(Any, exact))),
+        source_file=file_record,
+    )
+    return StructureInput(value, alternative, f"file_{content_id(file_record)[:16]}")
+
+
+def _loaded_structure(data: bytes, name: str, *, as_written: bool = False) -> object:
+    """Load staged-input bytes by the reader *name* selects, as a ``structures`` entry.
 
     A structure that loads as something else is wrapped as a ``UnitcellStructureView``.
 
     :param data: The staged file's bytes.
     :param name: The staged file name, which selects the reader.
-    :param entry_type: The declared entry type.
-    :param as_written: Read the numbers exactly as written (structure readers only).
+    :param as_written: Read the numbers exactly as written.
     :return: The loaded entry.
-    :raises ValueError: If it does not load as *entry_type*, or a structure needs httk-atomistic.
+    :raises ValueError: If a structure needs httk-atomistic.
     """
 
     from httk.core.loading import load_source
 
-    # Only structure readers take ``as_written``, so other readers never see it.
+    # Only structure readers take ``as_written``, so it is passed only when asked for.
     options: dict[str, Any] = {"as_written": True} if as_written else {}
     value = load_source(io.BytesIO(data), name, **options)
-    if getattr(value, "type", None) == entry_type:
+    if getattr(value, "type", None) == "structures":
         return value
-    if entry_type != "structures":
-        raise ValueError(f"it loads as {type(value).__name__}, not as a {entry_type!r} entry")
     try:
         from httk.atomistic import UnitcellStructureView  # pyright: ignore[reportMissingImports]
     except ImportError as exc:
@@ -2031,8 +2092,10 @@ def collect(
         if not isinstance(outputs, Mapping) or not isinstance(inputs, Mapping):
             raise ValueError("collector must return a mapping of output roles or a Collected")
         outputs, inputs = cast(Mapping[str, object], outputs), cast(Mapping[str, object], inputs)
-        inputs = {**inputs, **_staged_inputs(record, provider, run, inputs)}
-        return _assemble_collected(identity, record, provider, run, outputs, inputs=inputs, url_prefix=url_prefix)
+        staged = _staged_inputs(record, run, inputs)
+        return _assemble_collected(
+            identity, record, provider, run, outputs, inputs=inputs, staged=staged, url_prefix=url_prefix
+        )
 
     while window := list(islice(records, batch_size)):
         results: list[CollectedJob | None] = [None] * len(window)
@@ -2129,8 +2192,8 @@ def collect(
             ):
                 # A workflow without a collector or declared outputs completes
                 # collection with its run as the only product. With the pinned
-                # fallback enabled, the job's own pinned tree decides instead.
-                results[index] = CollectedJob(workflow_id, {}, (), run, (), record, run_only=True)
+                # fallback enabled, the job's own pinned tree decides instead. Its staged files are its inputs.
+                results[index] = replace(assemble(identity, record, provider, run, {}), run_only=True)
                 continue
             if adapter is None:
                 if not allow_job_collector:
@@ -2153,7 +2216,7 @@ def collect(
                 # The verified installed tree decides; a refused one leaves it to the registered provider.
                 deciding = fallback_provider or provider
                 if adapter is None and deciding is not None and _nothing_to_collect(record, deciding):
-                    results[index] = CollectedJob(workflow_id, {}, (), run, (), record, run_only=True)
+                    results[index] = replace(assemble(identity, record, deciding, run, {}), run_only=True)
                     continue
                 if adapter is None or fallback_provider is None:
                     results[index] = _degraded_job(

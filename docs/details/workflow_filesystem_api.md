@@ -646,6 +646,7 @@ exchange bundle rewrites the client's ids and `claim.pool` before publication
 | `parameters`, `declarations`, `declared`, `environment` | objects | Workflow inputs and metadata, opaque to the protocol. |
 | `parent` | `{workspace_id, job_id, job_key, placement, activation_id, spawn_id}` or `null` | The spawning job. |
 | `seal_succeeded` | boolean or `null` | Whether a succeeded job is sealed; `null` defers to the `seal.succeeded` setting. |
+| `staged_files` (optional) | sorted array of payload-relative paths | The files `job new --file`/`--files` staged, which `collect` records as the run's file inputs; absent when there are none. |
 
 The **job digest** is the SHA-256 of the stored `job.json` bytes, exactly as
 read. The first reconcile of a job (its first activation) pins it in

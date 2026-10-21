@@ -72,9 +72,8 @@ from ._util import interpreter_first_path, validate_inputs
 from .codes import code_environment
 from .errors import FormatError, WorkflowError
 from .models import (
-    ATTEMPTS_DIRECTORY,
-    JOB_STATE_DIRECTORY,
     LOGS_DIRECTORY,
+    _reserved_payload_member,
     ensure_step_known,
     expand_runner_command,
     normalize_placement,
@@ -2134,6 +2133,7 @@ def _build_payload(
         declarations=_merge_provenance_declaration(workflow.declarations, provenance),
         declared=declared_member,
         seal_succeeded=installed.provider().seal_succeeded,
+        staged_files=tuple(payload_relative(member).as_posix() for member in user_files),
     )
     if prepared.finalize is not None:
         spec = prepared.finalize(spec)
@@ -2456,8 +2456,6 @@ def payload_relative(name: str) -> PurePosixPath:
     if len(relative.parts) == 1:
         relative = PurePosixPath(FILES_DIRECTORY) / relative
     for index, part in enumerate(relative.parts):
-        if part in {"", ".", ".."} or (
-            index == 0 and part in {"job.json", ATTEMPTS_DIRECTORY, LOGS_DIRECTORY, JOB_STATE_DIRECTORY}
-        ):
+        if part in {"", ".", ".."} or (index == 0 and _reserved_payload_member(part)):
             raise FormatError(f"a staged payload file name may not contain {part!r}: {name!r}")
     return relative

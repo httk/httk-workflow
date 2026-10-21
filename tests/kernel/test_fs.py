@@ -1134,3 +1134,40 @@ def test_fault_injector_crash_before_rename_leaves_src(tmp_path: Path) -> None:
         write_file(loc(tmp_path / "f"), b"x", durable=False)
     # A simulated crash leaves the temporary behind for its owner's reconcile, as a real crash would.
     assert [path.name.endswith(".tmp") for path in tmp_path.iterdir() if path.name != "src"] == [True]
+
+
+def test_digest_job_file_streams_any_size_and_keeps_content_only_up_to_keep(tmp_path: Path) -> None:
+    import hashlib
+
+    from httk.workflow.introspection._reading import digest_job_file
+
+    data = os.urandom(3 << 20) + b"tail"
+    (tmp_path / "files").mkdir()
+    (tmp_path / "files" / "big").write_bytes(data)
+    digest = hashlib.sha256(data).hexdigest()
+    assert digest_job_file(tmp_path, "files/big", len(data)) == (len(data), digest, data)
+    assert digest_job_file(tmp_path, "files/big", len(data) - 1) == (len(data), digest, None)
+    assert digest_job_file(tmp_path, "files/big", -1) == (len(data), digest, None)
+    assert digest_job_file(tmp_path, "files/absent", 0) is None
+    assert digest_job_file(tmp_path, "absent/big", 0) is None
+
+
+def test_digest_job_file_refuses_symlinks_fifos_and_escapes(tmp_path: Path) -> None:
+    from httk.workflow.introspection._reading import digest_job_file
+
+    job = tmp_path / "job"
+    (job / "files").mkdir(parents=True)
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "secret").write_text("secret\n", encoding="utf-8")
+    (job / "files" / "link").symlink_to(tmp_path / "outside" / "secret")
+    (job / "linked").symlink_to(tmp_path / "outside", target_is_directory=True)
+    # Opened with O_NONBLOCK, a FIFO without a writer never blocks the read.
+    os.mkfifo(job / "files" / "fifo")
+    for relative in ("files/link", "linked/secret", "files/fifo"):
+        with pytest.raises(UnsafePath):
+            digest_job_file(job, relative, 1 << 20)
+    for relative in ("../outside/secret", "files/../../outside/secret"):
+        with pytest.raises(ValueError, match="not a plain entry name"):
+            digest_job_file(job, relative, 1 << 20)
+    with pytest.raises(UnsafePath):
+        _fs.digest_regular(_fs.loc(job / "files" / "link"), 0)

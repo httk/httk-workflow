@@ -365,6 +365,11 @@ the job moves between states.
   name. Subdirectories and other non-file entries are skipped with one stderr
   warning.
 
+`job.json` lists the payload-relative paths of the `--file`/`--files` files
+under `staged_files`, and `collect` records each as a `files` input of the
+job's run, labelled by that path (see
+[Collecting results](collecting.md#staged-inputs-record-the-exact-file)).
+
 After a batch, one final stderr line reports `submitted N jobs`. If a batch
 fails partway, it instead reports `submitted N of M jobs before failing` and
 exits `2`. In a batch, `--tag` becomes a *prefix* combined with each item's

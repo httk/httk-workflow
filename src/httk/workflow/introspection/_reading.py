@@ -3,7 +3,7 @@
 import glob
 import json
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -192,13 +192,36 @@ def read_job_file(job: Path, relative: str | PurePosixPath, limit: int) -> bytes
     :raises httk.workflow._fs.TooLarge: If the file is larger than *limit*.
     """
 
+    return _at_job_file(job, relative, lambda src: _fs.read_bounded(src, limit, nonblock=True))
+
+
+def digest_job_file(job: Path, relative: str | PurePosixPath, keep: int) -> tuple[int, str, bytes | None] | None:
+    """Stream the SHA-256 of one file below a job directory, of any size, as job-writable content must be read.
+
+    No symlink below *job* is followed and a FIFO or other special file is
+    refused without blocking (:func:`httk.workflow._fs.digest_regular`).
+
+    :param job: The job directory (a trusted anchor).
+    :param relative: The file below it, such as ``files/POSCAR``.
+    :param keep: Also return the content when it is at most this many bytes.
+    :return: The size, the lowercase hex digest and the content (``None`` past *keep*),
+        or ``None`` when the file or a directory on its way is absent.
+    :raises httk.workflow._fs.UnsafePath: If a component is a symlink, or the file is not a regular file.
+    """
+
+    return _at_job_file(job, relative, lambda src: _fs.digest_regular(src, keep, nonblock=True))
+
+
+def _at_job_file[T](job: Path, relative: str | PurePosixPath, read: Callable[[_fs.Loc], T]) -> T | None:
+    """Apply *read* to one file below *job*, opening its directory without following a symlink."""
+
     path = PurePosixPath(relative)
     try:
         directory = _fs.open_dir_under(job, path.parent) if path.parent.parts else _fs.open_dir(job)
     except (FileNotFoundError, NotADirectoryError):
         return None
     try:
-        return _fs.read_bounded(_fs.anchored(directory, path.name), limit, nonblock=True)
+        return read(_fs.anchored(directory, path.name))
     finally:
         os.close(directory)
 

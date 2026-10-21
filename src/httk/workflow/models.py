@@ -71,6 +71,13 @@ MAXIMUM_ENVIRONMENT_BYTES = 262144
 # reason — it describes one job rather than carrying bulk content.
 MAXIMUM_DECLARED_BYTES = 262144
 
+
+def _reserved_payload_member(first: str) -> bool:
+    """Report whether *first*, the first segment of a payload path, is owned by the job or its runner."""
+
+    return first in {"job.json", ATTEMPTS_DIRECTORY, LOGS_DIRECTORY, JOB_STATE_DIRECTORY}
+
+
 _UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _TAG_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
 _LABEL_PATTERN = _TAG_PATTERN
