@@ -210,6 +210,7 @@ def _description(workflow: ResolvedWorkflow, source_document: Mapping[str, objec
         "postprocess": {
             name: {**script, "outputs": script.get("outputs")} for name, script in workflow.postprocess_scripts.items()
         },
+        "references": {label: dict(table) for label, table in workflow.references.items()},
         "declaration": _declaration_document(workflow),
         "recognize": (
             None
@@ -347,6 +348,15 @@ def _render_text(description: Mapping[str, object]) -> str:
         if value["outputs"] is not None:
             details += f" (outputs: {', '.join(value['outputs']) or '-'})"
         lines.append(f"  {details}")
+    lines.append("references:")
+    references = description["references"]
+    assert isinstance(references, Mapping)
+    if not references:
+        lines.append("  -")
+    for label, value in references.items():
+        assert isinstance(value, Mapping)
+        details = " — ".join(str(part) for part in (value.get("doi") or value.get("url"), value.get("title")) if part)
+        lines.append(f"  {label}: {details}")
     declaration = description["declaration"]
     assert isinstance(declaration, Mapping)
     lines.append(f"declaration: {declaration['origin']} ({declaration['id'] or 'no $id'})")

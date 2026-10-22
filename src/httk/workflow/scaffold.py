@@ -209,6 +209,7 @@ class WorkflowProvider:
     :param requires: Give the ``NAME>=VERSION`` distribution requirements a job of it must meet.
     :param calls: Declare the workflows a job of it may call, alias to workflow reference.
     :param recognize: Declare a recognized-calculation collector, a package that is collected but never run.
+    :param references: Declare the literature references stored results cite, label to OPTIMADE reference table.
     """
 
     workflow_id: str
@@ -246,6 +247,7 @@ class WorkflowProvider:
     requires: tuple[str, ...] = ()
     calls: Mapping[str, str] | None = None
     recognize: RecognizeSpec | None = None
+    references: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -304,6 +306,7 @@ class WorkflowProvider:
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
         object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
+        object.__setattr__(self, "references", MappingProxyType(dict(self.references)))
         object.__setattr__(self, "_input_metadata", MappingProxyType(dict(self._input_metadata)))
 
     def _requirements(self) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
@@ -606,6 +609,7 @@ class ResolvedWorkflow:
     :param requires: Give the ``NAME>=VERSION`` distribution requirements a job of it must meet.
     :param calls: Declare the workflows a job of it may call, alias to workflow reference.
     :param recognize: Preserve the recognize declaration of a collector-only package.
+    :param references: Preserve the declared literature references, label to OPTIMADE reference table.
     """
 
     source: Path
@@ -645,6 +649,7 @@ class ResolvedWorkflow:
     requires: tuple[str, ...] = ()
     calls: Mapping[str, str] | None = None
     recognize: RecognizeSpec | None = None
+    references: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -670,6 +675,7 @@ class ResolvedWorkflow:
                 raise ValueError("directory-only fields are not allowed on a packaged resolved workflow")
         object.__setattr__(self, "runner_options", MappingProxyType(dict(self.runner_options)))
         object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
+        object.__setattr__(self, "references", MappingProxyType(dict(self.references)))
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
         object.__setattr__(
             self, "resources", MappingProxyType(validate_resources(self.resources, "workflow.resources"))
@@ -1082,6 +1088,7 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
         requires=provider.requires,
         calls=provider.calls,
         recognize=provider.recognize,
+        references=provider.references,
         _input_metadata=provider._input_metadata,
     )
 
@@ -1173,6 +1180,7 @@ def resolve_workflow(
                 requires=provider.requires,
                 calls=provider.calls,
                 recognize=provider.recognize,
+                references=provider.references,
                 _input_metadata=provider._input_metadata,
             )
         elif path.exists():

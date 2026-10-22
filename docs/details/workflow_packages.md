@@ -421,6 +421,30 @@ product_of = "initial_structure"
 role = "relaxed_structure"
 ```
 
+### `[workflow.references.<LABEL>]`
+
+Each table declares one literature reference the workflow's method relies on,
+for runner and `[workflow.recognize]` packages alike. The keys are the OPTIMADE
+`references` fields (except `immutable_id` and `last_modified`); every scalar
+is a nonempty string, so quote numbers (`year = "1999"`), and `authors` and
+`editors` are nonempty lists of `{name, firstname?, lastname?}` tables. At least
+one of `doi`, `url` and `title` is required. `LABEL` is a local handle that
+`httk workflow describe` and the collect report show; it is not stored.
+
+```toml
+[workflow.references.paw]
+doi = "10.1103/PhysRevB.59.1758"
+title = "From ultrasoft pseudopotentials to the projector augmented-wave method"
+authors = [{name = "G. Kresse"}, {name = "D. Joubert"}]
+journal = "Physical Review B"
+volume = "59"
+pages = "1758"
+year = "1999"
+```
+
+`httk collect --into` stores each reference as a `references` entry cited by
+the job's stored entries and run; see {doc}`/details/collecting`.
+
 ### `[workflow.instantiate]` and `[workflow.collect]`
 
 The presence of either table declares that hook. Each has exactly one key,

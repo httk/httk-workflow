@@ -19,7 +19,7 @@ from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
-from httk.core import DataRecord, FileRecord, Run, RunEdge
+from httk.core import DataRecord, FileRecord, ReferenceRecord, Run, RunEdge
 from httk.core.storage import content_id, resolve_storage_record
 
 from .collecting import CollectedJob, JobRecord, StructureInput
@@ -255,6 +255,8 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
         mapping["identity_stable"] = item.identity_stable
     if item.run_only:
         mapping["run_only"] = True
+    if item.references:
+        mapping["references"] = sorted(item.references)
     if item.child_runs:
         mapping["children"] = [{"label": label, "run_source_id": source} for label, source in item.child_runs]
     # A recognized calculation's stand-in record is coordinated by its collector
@@ -289,6 +291,8 @@ def _storage_layout(
     required_types = {"records", "runs", *extra_types}
     failures: dict[int, str] = {}
     for index, item in enumerate(items):
+        if item.references:
+            required_types.add("references")
         for value in (*item.outputs.values(), *item.inputs.values()):
             entry_type = getattr(value, "type", None)
             if not isinstance(entry_type, str):
@@ -850,8 +854,16 @@ def store_collected(
     A dataclass entry that is not a registered record of its family is a
     storage error rather than a row in an unserved table.
 
+    The literature references the job's workflow package declares
+    (``CollectedJob.references``) are stored as ``references`` entries,
+    deduplicated by content, and weak-linked from every stored output entry
+    whose record declares the ``references`` link and from the job's run, so
+    they serve as ``relationships.references``. An output whose record declares
+    no such link is stored uncited, with a warning and its role in
+    ``"references_uncited"``.
+
     Each report is the job's collected summary plus ``"stored"`` (the stored
-    entry ids and run id, or ``None`` when nothing was stored, with
+    entry ids, run id, any reference ids and uncited output roles, or ``None`` when nothing was stored, with
     ``"skipped"`` saying why), ``"storage_error"`` when the job could not be
     stored, and ``"revised"``, which is true when this call replaced an
     existing entry of the job (its run, or one of its records) with a new
@@ -941,6 +953,8 @@ def store_collected(
                         "httk.core.register.register_entry_record, or return a registered record"
                     )
         stored_output_ids: dict[int, list[str]] = {}
+        # The stored outputs (never inputs or alternatives) each job's references are linked from.
+        cited_outputs: dict[int, list[tuple[str, Any]]] = {}
         deferred_outputs: dict[int, list[tuple[str, Any]]] = {}
         remap: dict[str, str] = {}
 
@@ -952,10 +966,12 @@ def store_collected(
             original_key: str,
             pending_remap: dict[str, str],
             entry_ids: list[str],
+            cited: list[tuple[str, Any]] | None = None,
         ) -> bool:
             """Store one output, recording its minted id under ``original_key`` and any prior id.
 
             Return whether the save replaced an earlier revision stored under the same ledger id.
+            With *cited*, ``(role, stored entry)`` is appended to it, to link the job's references from.
             A generic data record whose definition a typed record carries is stored as that
             typed record; ``original_key`` stays the generic record's content id, which is
             what run and ``product_of`` edges name, while ledger and alias lookups see the
@@ -1016,6 +1032,8 @@ def store_collected(
             # already-stored content rather than minting a colliding id,
             # so the store never deduplicates onto a different id here.
             entry_ids.append(fetched_id)
+            if cited is not None:
+                cited.append((role, fetched))
             pending_remap[original_key] = fetched_id
             if isinstance(original_id, str) and original_id != fetched_id:
                 pending_remap[original_id] = fetched_id
@@ -1046,6 +1064,7 @@ def store_collected(
                 with store.transaction():
                     pending_remap: dict[str, str] = {}
                     entry_ids: list[str] = []
+                    cited: list[tuple[str, Any]] = []
                     revised = False
                     for role, value in (*item.outputs.items(), *item.inputs.items()):
                         if getattr(value, "product_of", ()):
@@ -1079,9 +1098,11 @@ def store_collected(
                             original_key=content_id(value),
                             pending_remap=pending_remap,
                             entry_ids=entry_ids,
+                            cited=cited if _is_output(item, value) else None,
                         )
                 remap.update(pending_remap)
                 stored_output_ids[index] = entry_ids
+                cited_outputs[index] = cited
                 report["revised"] = revised
             except Exception as exc:
                 report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
@@ -1102,6 +1123,7 @@ def store_collected(
             if index not in stored_output_ids:
                 continue
             entry_ids = stored_output_ids[index]
+            cited = cited_outputs[index]
             try:
                 with store.transaction():
                     pending_remap = {}
@@ -1117,6 +1139,7 @@ def store_collected(
                             original_key=content_id(value),
                             pending_remap=pending_remap,
                             entry_ids=entry_ids,
+                            cited=cited if _is_output(item, value) else None,
                         )
                     # Resolve against the committed map plus this job's pending ids, but
                     # publish the pending ids only after the transaction commits (as in
@@ -1189,14 +1212,70 @@ def store_collected(
                         raise ValueError("stored run has no string entry id")
                     for product in rewritten_products:
                         store.save(product)
+                    reference_ids, uncited = _link_references(store, item, cited, fetched_run)
                 remap.update(pending_remap)
                 if item.run.source_id is not None:
                     run_ids_by_source[item.run.source_id] = run_id
-                report["stored"] = {"entries": entry_ids, "run": run_id}
+                stored: dict[str, object] = {"entries": entry_ids, "run": run_id}
+                if reference_ids:
+                    stored["references"] = reference_ids
+                if uncited:
+                    stored["references_uncited"] = uncited
+                report["stored"] = stored
                 report["revised"] = bool(report["revised"]) or revised
             except Exception as exc:
                 report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
     return reports
+
+
+def _is_output(item: CollectedJob, value: object) -> bool:
+    """Report whether *value* is one of the job's outputs (by identity), not one of its inputs."""
+
+    return any(value is output for output in item.outputs.values())
+
+
+def _link_references(
+    store: Any, item: CollectedJob, outputs: Sequence[tuple[str, Any]], run: Any
+) -> tuple[list[str], list[str]]:
+    """Store the job's references and link each from the stored run and every stored output that declares the link.
+
+    Saving is content-deduplicated and linking idempotent, so storing the same
+    job again adds nothing. An output whose record class declares no
+    ``references`` weak link (a third-party record) is stored uncited, with one
+    warning per job.
+
+    :param store: The open store, inside the job's transaction.
+    :param item: The collected job whose ``references`` are stored.
+    :param outputs: The job's stored outputs, as ``(role, stored entry)``.
+    :param run: The job's stored run.
+    :return: The sorted ids of the stored references and the sorted roles of the uncited outputs.
+    """
+
+    if not item.references:
+        return [], []
+    citing = [run]
+    uncited: dict[str, str] = {}
+    for role, stored in outputs:
+        record = resolve_storage_record(stored)
+        links = getattr(getattr(record, "__httk_storage__", None), "links", ())
+        if any(link.name == "references" for link in links):
+            citing.append(stored)
+        else:
+            uncited[role] = record.__name__
+    if uncited:
+        _LOGGER.warning(
+            "job %s: outputs %s are stored without citing the workflow's references: their record class declares "
+            "no 'references' weak link",
+            item.record.job_id,
+            ", ".join(f"{role!r} ({name})" for role, name in sorted(uncited.items())),
+        )
+    reference_ids: set[str] = set()
+    for reference in item.references.values():
+        stored_reference = store.fetch(ReferenceRecord, store.save(reference))
+        reference_ids.add(stored_reference.id)
+        for source in citing:
+            store.link(source, "references", stored_reference)
+    return sorted(reference_ids), sorted(uncited)
 
 
 class _StorageRefusal(ValueError):

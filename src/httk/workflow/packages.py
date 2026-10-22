@@ -10,11 +10,12 @@ import re
 import sys
 import tomllib
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType, ModuleType
 from typing import Any, cast
 
+from httk.core import Reference, ReferenceRecord
 from httk.core.building import BuildSpec, artifact_excluder, read_manifest_build_spec
 from httk.core.digests import tree_digest
 from httk.core.requirements import Requirement, parse_requirements
@@ -36,6 +37,10 @@ from .scaffold import RecognizeSpec, WorkflowProvider, payload_relative, registe
 
 MANIFEST_NAME = "httk_workflow.toml"
 _LOGGER = logging.getLogger(__name__)
+
+#: The ``[workflow.references.<LABEL>]`` keys: the OPTIMADE reference fields a manifest authors.
+_REFERENCE_KEYS = {item.name for item in fields(Reference)} - {"immutable_id", "last_modified"}
+_REFERENCE_PERSON_KEYS = {"name", "firstname", "lastname"}
 
 _PLUGIN_WORKFLOW_CACHE: (
     tuple[Mapping[str, WorkflowProvider], Mapping[str, str], Mapping[str, tuple[str, ...]]] | None
@@ -222,6 +227,48 @@ def _validate_name(name: object, path: str, directory: Path) -> str:
     if not isinstance(name, str) or not name:
         raise _error(directory, f"{path} must be a nonempty string")
     return name
+
+
+def _references(raw: object, root: Path) -> dict[str, dict[str, object]]:
+    """Validate ``[workflow.references]``: label to an OPTIMADE reference table.
+
+    :param raw: The authored ``[workflow.references]`` value.
+    :param root: The package directory, for error messages.
+    :return: The validated reference tables, keyed by label.
+    :raises ValueError: If a reference is malformed.
+    """
+
+    references: dict[str, dict[str, object]] = {}
+    for name, value in _table(raw, "[workflow.references]", root).items():
+        label = _validate_name(name, "[workflow.references] label", root)
+        path = f"[workflow.references.{label}]"
+        table = _table(value, path, root)
+        _unknown(table, _REFERENCE_KEYS, path, root)
+        for key, item in table.items():
+            if key in ("authors", "editors"):
+                if not isinstance(item, list) or not item:
+                    raise _error(root, f"{path}.{key} must be a nonempty list of tables")
+                for index, person in enumerate(cast(list[object], item)):
+                    person_path = f"{path}.{key}[{index}]"
+                    person_table = _table(person, person_path, root)
+                    _unknown(
+                        person_table, _REFERENCE_PERSON_KEYS, f"[workflow.references.{label}.{key}[{index}]]", root
+                    )
+                    _string(person_table, "name", person_path, root, required=True)
+                    _optional_string(person_table, "firstname", person_path, root)
+                    _optional_string(person_table, "lastname", person_path, root)
+            elif not isinstance(item, str) or not item:
+                number = isinstance(item, int | float) and not isinstance(item, bool)
+                hint = f' (quote numbers, e.g. "{item}")' if number else ""
+                raise _error(root, f"{path}.{key} must be a nonempty string{hint}")
+        if not any(key in table for key in ("doi", "url", "title")):
+            raise _error(root, f"{path} needs at least one of doi, url or title")
+        try:
+            ReferenceRecord(**cast(Mapping[str, Any], table))
+        except (TypeError, ValueError) as exc:
+            raise _error(root, f"{path}: {exc}") from exc
+        references[label] = dict(table)
+    return references
 
 
 def _validate_input_table(
@@ -673,6 +720,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             "steps",
             "requires",
             "calls",
+            "references",
         },
         "[workflow]",
         root,
@@ -1009,6 +1057,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         requires=requires,
         calls=calls,
         recognize=recognize,
+        references=_references(workflow.get("references", {}), root),
         _input_metadata=input_metadata,
         collector=(
             f"{lang.collect.__module__}:{lang.collect.__qualname__}"

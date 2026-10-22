@@ -189,6 +189,10 @@ class CollectedJob:
         (its valid release records) as ``(old URL, new URL, sha256)``, so a store
         holding the file at its old location re-points it; the new URL is
         ``None`` until the receiving job has succeeded.
+    :param references: Map the labels of the literature references the job's
+        workflow package declares (``[workflow.references.<LABEL>]``) to their
+        ``ReferenceRecord``; a store links them from the job's outputs and run.
+        A degraded job carries none.
     """
 
     workflow_id: str
@@ -205,6 +209,7 @@ class CollectedJob:
     child_runs: tuple[tuple[str, str], ...] = ()
     inputs: Mapping[str, object] = field(default_factory=dict)
     relocations: tuple[tuple[str, str | None, str], ...] = ()
+    references: Mapping[str, httk.core.ReferenceRecord] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1763,6 +1768,10 @@ def _assemble_collected(
         record,
         products_unlinked=tuple(products_unlinked),
         inputs=inputs,
+        references={
+            label: core.ReferenceRecord(**table)
+            for label, table in cast(Mapping[str, Mapping[str, Any]], getattr(provider, "references", {})).items()
+        },
     )
 
 

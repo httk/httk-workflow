@@ -603,6 +603,22 @@ whose entry-type layout does not match the sweep fails fast. The error names
 the store path, the entry types the sweep needs and the layout difference, and
 ends with `Collect into a new store file.`
 
+### Literature references
+
+A job whose workflow package declares `[workflow.references.<LABEL>]` (see
+{doc}`/details/workflow_packages`) lists the labels as `"references"` in its
+report. `--into` stores each reference as an OPTIMADE `references` entry and
+links it from every stored output entry and from the job's run, which then
+serve it as `relationships.references`; staged inputs do not cite. The stored
+ids appear as `"stored": {"references": [...]}`. References are deduplicated
+by content, so jobs of one package share one entry, and re-collecting adds no
+duplicate links. Links are never retracted: to drop a reference removed from
+the manifest, rebuild the store. An output whose record type declares no
+`references` weak link (a third-party record) is stored uncited, with a warning
+and its role listed in `"stored": {"references_uncited": [...]}`. Collecting
+a package with references into a store built without them refuses with an
+additive-layout message; rerun with `--upgrade` to add the `references` family.
+
 ## Postprocess output as runs
 
 `httk collect WS --postprocess NAME` stores what the curated script `NAME`
