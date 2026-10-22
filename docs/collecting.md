@@ -37,8 +37,9 @@ identity, so its content id depends on the workspace's registered name: collect
 into a store under the same registered workspace name every time, because
 another name changes the URLs and therefore the file entries and the links that
 name them. When the store is served,
-`httk serve optimade serve --data-path PATH` maps the leading `data` onto a
-real location (an option of *httk-serve*).
+`httk serve optimade serve STORE --data-path DIR` (or `NAME=DIR`) serves the
+bytes, or `--data-url URL` points at an external file server (options of
+*httk-serve*).
 
 A job's declared inputs become stored entries too, each named by an input
 edge of the job's run, so a `product_of` curation links a result to the input

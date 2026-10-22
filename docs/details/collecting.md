@@ -53,9 +53,9 @@ starts with the prefix, is left as it is with a warning naming the job and the
 role. The URL is metadata, not part of a file entry's identity (its media
 type, `format` and SHA-256), so the same workspace collected under another
 registered name yields the same file entries, and a store keeps the first
-non-null URL it was given. Mapping the leading `data` onto a real location is
-a serving-time option instead:
-`httk serve optimade serve --data-path PATH` of *httk-serve*.
+non-null URL it was given. Where the files are served from is a serving-time choice instead:
+`httk serve optimade serve STORE --data-path DIR` (or `NAME=DIR`) serves the
+bytes, `--data-url URL` points at an external file server (*httk-serve*).
 Recognized calculation trees keep their URLs as their collectors give them.
 
 ### Inputs
