@@ -105,11 +105,13 @@ directives it should use:
 ```console
 httk launcher add --template slurm --global cluster
 httk launcher check cluster
-httk workspace settings set --key manager.launch --value cluster default
-httk workspace settings set --key slurm.partition --value batch default
-httk workspace settings set --key slurm.time_limit --value 02:00:00 default
+httk workspace settings set --key manager.launch --value cluster \
+  --key slurm.partition --value batch --key slurm.time_limit --value 02:00:00 default
 httk workflow run --count 4 --workspace default
 ```
+
+`--key` and `--value` repeat in pairs, the i-th `--key` taking the i-th
+`--value`; every pair is validated before any is stored, in one write.
 
 `httk workflow run --count 4` now submits four managers through Slurm and
 prints their scheduler job ids. `--inline` runs one manager in the current

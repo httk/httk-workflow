@@ -65,8 +65,8 @@ live in `.httk-workspace/format.json`:
 
 ```console
 httk workspace policy show WORKSPACE
-httk workspace policy set --key visibility_deadline_seconds --value 30 WORKSPACE
-httk workspace policy set --key retention.attempt_control_days --value 14 WORKSPACE
+httk workspace policy set --key visibility_deadline_seconds --value 30 \
+  --key retention.attempt_control_days --value 14 WORKSPACE
 httk workspace policy unset --key retention.trash_days WORKSPACE
 ```
 

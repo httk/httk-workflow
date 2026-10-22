@@ -5,6 +5,7 @@ import errno
 import json
 import os
 import sys
+from collections.abc import Mapping
 from contextlib import redirect_stdout
 from copy import copy
 from datetime import UTC, datetime
@@ -81,6 +82,7 @@ from ._common import (
     add_durability_arguments,
     add_workspace_argument,
     confirm,
+    remote_workspace_read_output,
 )
 from ._seal import _default_trusted_keys
 
@@ -507,6 +509,15 @@ def handle_workspace_unseal(arguments: argparse.Namespace, context: CLIContext) 
     return 0
 
 
+def _key_value_pairs(arguments: argparse.Namespace) -> list[tuple[str, str]]:
+    """Pair the i-th ``--key`` with the i-th ``--value``, refusing unequal counts."""
+
+    keys, values = arguments.key, arguments.value
+    if len(keys) != len(values):
+        raise ValueError(f"--key and --value must come in pairs: got {len(keys)} --key and {len(values)} --value")
+    return list(zip(keys, values))
+
+
 def _policy_value(key: str, text: str) -> object:
     """Parse one command-line policy value as the JSON it denotes."""
 
@@ -539,23 +550,30 @@ def handle_workspace_policy_show(arguments: argparse.Namespace, context: CLICont
 
 
 def handle_workspace_policy_set(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Store one policy member of a workspace and print the result."""
+    """Store policy members of a workspace in one validated write and print the result."""
 
+    pairs = _key_value_pairs(arguments)
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_policy_set)
     root = _local_root(arguments, context, action="change its policy")
     # A retention member is addressed directly so that setting one limit does
-    # not require restating the whole object as JSON.
+    # not require restating the whole object as JSON; every such pair merges
+    # into one retention mapping seeded from the stored one.
     workspace = Workspace(root)
     require_cli_modifiable(workspace)
-    if arguments.key.startswith("retention."):
-        member = arguments.key.split(".", 1)[1]
-        retention = dict(workspace.policy.retention.as_mapping())
-        retention[member] = _policy_value(arguments.key, arguments.value)
-        policy = workspace.set_policy({"retention": retention})
-    else:
-        policy = workspace.set_policy({arguments.key: _policy_value(arguments.key, arguments.value)})
-    return _print_policy(policy, as_json=arguments.json)
+    changes: dict[str, object] = {}
+    for key, text in pairs:
+        value = _policy_value(key, text)
+        if not key.startswith("retention."):
+            changes[key] = value
+            continue
+        # Pairs apply in order: a member merges into a pending whole-object
+        # retention pair, and a later whole-object pair replaces earlier merges.
+        pending = changes.get("retention", workspace.policy.retention.as_mapping())
+        if not isinstance(pending, Mapping):
+            raise ValueError(f"policy retention must be a JSON object to merge {key}")
+        changes["retention"] = {**pending, key.split(".", 1)[1]: value}
+    return _print_policy(workspace.set_policy(changes), as_json=arguments.json)
 
 
 def handle_workspace_policy_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -572,7 +590,7 @@ def handle_workspace_policy_unset(arguments: argparse.Namespace, context: CLICon
     else:
         raise ValueError(f"unknown policy key: {key}")
     item = copy(arguments)
-    item.value = json.dumps(value)
+    item.key, item.value = [key], [json.dumps(value)]
     return handle_workspace_policy_set(item, context)
 
 
@@ -880,7 +898,7 @@ def handle_workspace_configure(arguments: argparse.Namespace, context: CLIContex
                 return code
         for key, value in pairs:
             item = copy(arguments)
-            item.key, item.value = key, value
+            item.key, item.value = [key], [value]
             item.json = False
             with redirect_stdout(StringIO()):
                 code = handle_workspace_settings_set(item, context)
@@ -896,26 +914,51 @@ def handle_workspace_configure(arguments: argparse.Namespace, context: CLIContex
 
 
 def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Store one application setting on a workspace."""
+    """Store application settings on a workspace in one write and print them as one JSON object.
 
+    A remote workspace receives every pair in one forwarded command, and its
+    answer must name every requested key, so an older remote that keeps only the
+    last pair is detected rather than silently trusted.
+    """
+
+    pairs = _key_value_pairs(arguments)
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_settings_set)
-    value = _json_value(arguments.value, f"setting {arguments.key}")
+    changes = {key: _json_value(text, f"setting {key}") for key, text in pairs}
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
-        return _remote_workspace_read(
+        returncode, stdout, stderr = remote_workspace_read_output(
             binding,
             context,
             (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "set"),
             arguments,
             flags=("--durable", "--no-durable"),
-            tail=("--key", arguments.key, "--value", arguments.value),
+            tail=[part for key, text in pairs for part in ("--key", key, "--value", text)],
         )
+        if stderr:
+            sys.stderr.write(stderr)
+        if returncode:
+            if stdout:
+                sys.stdout.write(stdout if stdout.endswith("\n") else stdout + "\n")
+            return returncode
+        try:
+            applied = json.loads(stdout)
+        except ValueError as exc:
+            raise ValueError(f"the remote did not answer settings set with JSON: {stdout[:200]!r}") from exc
+        # ponytail: keys only; an old remote's bare stored value that is itself an object naming the key passes.
+        complete = isinstance(applied, dict) and changes.keys() <= applied.keys()
+        if len(pairs) == 1 and not complete:
+            # An older remote prints the one stored value bare.
+            applied = {pairs[0][0]: applied}
+        elif not complete:
+            raise ValueError("the remote httk-workflow predates repeatable --key; set one pair per call or upgrade it")
+        print(json.dumps(applied, sort_keys=True))
+        return 0
     workspace = Workspace(root, durable=_durable(arguments))
     require_cli_modifiable(workspace)
-    settings = workspace.set_setting(arguments.key, value)
-    print(json.dumps(settings[arguments.key], sort_keys=True))
+    settings = workspace.configure_settings(changes)
+    print(json.dumps({key: settings[key] for key in changes}, sort_keys=True))
     return 0
 
 
@@ -1216,13 +1259,21 @@ def build_workspace_parser(
     store = _leaf(
         policy_actions,
         "set",
-        summary="store one policy member",
-        description="Store one member of the policy of an execution workspace",
+        summary="store policy members",
+        description="Store members of the policy of an execution workspace in one validated write",
         handler=handle_workspace_policy_set,
     )
     _add_workspace_targets(store, help_text="the workspace whose policy to change")
-    store.add_argument("--key", required=True, metavar="KEY", help="one of " + ", ".join(sorted(POLICY_KEYS)))
-    store.add_argument("--value", required=True, metavar="VALUE", help="the JSON value to store")
+    store.add_argument(
+        "--key",
+        action="append",
+        required=True,
+        metavar="KEY",
+        help="one of " + ", ".join(sorted(POLICY_KEYS)) + " (repeatable; the i-th --key pairs with the i-th --value)",
+    )
+    store.add_argument(
+        "--value", action="append", required=True, metavar="VALUE", help="the JSON value to store (repeatable)"
+    )
     store.add_argument(
         "--json",
         action="store_true",
@@ -1362,14 +1413,24 @@ def build_workspace_parser(
     settings_set = _leaf(
         settings_actions,
         "set",
-        summary="store one application setting",
-        description="Store one application setting on a workspace, e.g. vasp.command",
+        summary="store application settings",
+        description="Store application settings on a workspace in one write, e.g. vasp.command",
         handler=handle_workspace_settings_set,
     )
     _add_workspace_targets(settings_set, help_text="the workspace to change")
-    settings_set.add_argument("--key", required=True, metavar="KEY", help="the dotted setting name, e.g. vasp.command")
     settings_set.add_argument(
-        "--value", required=True, metavar="VALUE", help="the JSON value, or a bare string, to store"
+        "--key",
+        action="append",
+        required=True,
+        metavar="KEY",
+        help="the dotted setting name, e.g. vasp.command (repeatable; the i-th --key pairs with the i-th --value)",
+    )
+    settings_set.add_argument(
+        "--value",
+        action="append",
+        required=True,
+        metavar="VALUE",
+        help="the JSON value, or a bare string, to store (repeatable)",
     )
     _add_by_path_argument(settings_set)
     add_durability_arguments(settings_set)

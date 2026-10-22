@@ -59,7 +59,7 @@ configuration applies flags in argument order.
 | Configuration | Inspect | Modify | Remove the definition |
 | --- | --- | --- | --- |
 | Workspace application settings | `workspace show [NAME...]` | `workspace configure [NAME...] --set KEY=VALUE --unset KEY` | `workspace forget NAME` keeps files; `workspace delete --force NAME` deletes them |
-| Workspace policy | `workspace policy show` | `workspace policy set --key KEY --value JSON`; `workspace policy unset --key KEY` restores the default | Required format members cannot be deleted |
+| Workspace policy | `workspace policy show` | `workspace policy set --key KEY --value JSON` (pairs repeat; one write); `workspace policy unset --key KEY` restores the default | Required format members cannot be deleted |
 | Workflow preludes | `workspace workflow-prelude show` | `workspace workflow-prelude set` / `unset` | Unset a workflow's prelude |
 | Installed workflows | `workspace workflows`, `workflow list --workspace` | `workflow install --workspace` | `workflow uninstall --workspace` |
 | Launcher | `launcher show NAME` | `launcher configure NAME --set KEY=VALUE --unset KEY`; `--add` / `--remove` for confinement path lists | `launcher remove NAME` |
@@ -122,9 +122,9 @@ Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 | `workspace workflows [NAME...]` | list the workflows installed in a workspace | `--json` |
 | `workspace show [NAME...]` | print application settings | `--key KEY`, `--json` |
 | `workspace configure [NAME...]` | set and unset application settings | `--set KEY=VALUE`, `--unset KEY` (repeatable), `--json` |
-| `workspace settings show\|set\|unset` | print, store or remove one application setting | `--key KEY`, `--value VALUE` |
+| `workspace settings show\|set\|unset` | print, store or remove application settings; `set` takes repeated `--key`/`--value` pairs in one write | `--key KEY`, `--value VALUE` |
 | `workspace workflow-prelude show\|set\|unset` | print, store or remove one workflow's prelude | `--workflow WORKFLOW`, `--value VALUE` (`@FILE` reads a file) |
-| `workspace policy show\|set\|unset` | print, store or reset a policy member | `--key KEY`, `--value JSON`, `--json` |
+| `workspace policy show\|set\|unset` | print, store or reset policy members; `set` takes repeated `--key`/`--value` pairs in one write | `--key KEY`, `--value JSON`, `--json` |
 | `workspace fsck [NAME...]` | check the job tree for what the kernel cannot resolve; only while nothing else uses the workspace | `--repair` (quiescent workspace only, asks first), `--yes`, `--json` |
 | `workspace gc [NAME...]` | collect what the retention policy allows and recover dead owners (remote: over the adapter) | `--dry-run`, `--category CATEGORY` (repeatable), `--json` |
 | `workspace seal [NAME...]` | record every job's seal digest under one signed workspace seal, listing the unsealed jobs | `--keys REFS` |
@@ -174,8 +174,8 @@ are snapshotted into each attempt, so never store credentials there; see
 [application settings](taskmanager.md#application-settings).
 
 ```console
-httk workspace settings set --key vasp.command --value vasp_std my-workspace
-httk workspace settings set --key environment.prelude --value "module load httk" my-workspace
+httk workspace settings set --key vasp.command --value vasp_std \
+  --key environment.prelude --value "module load httk" my-workspace
 httk workspace workflow-prelude set --workflow relax-vasp --value @prelude.sh my-workspace
 httk workspace workflow-prelude show --json my-workspace
 ```
