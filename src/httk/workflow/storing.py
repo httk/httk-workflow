@@ -505,18 +505,6 @@ def _latest_stored_entry(store: Any, value: object, entry_id: str) -> Any:
     return None if row is None else row.entry
 
 
-def _latest_stored_alternative(store: Any, value: StructureInput, main_id: str) -> Any:
-    """Return the latest stored revision of *value*'s alternative ``<main_id>~<kind>``, if any."""
-
-    searcher = store.searcher(only_latest=True, only_main_alt=False)
-    variable = searcher.variable(resolve_storage_record(value.alternative))
-    searcher.add(variable.id == main_id)
-    # An alternative's immutable ids are <main id>~<kind>~<n>; the main's are <main id>~<n>.
-    prefix = f"{main_id}~{value.kind}~"
-    rows = searcher.results(entry=variable)
-    return next((row.entry for row in rows if str(row.entry.immutable_id).startswith(prefix)), None)
-
-
 def _id_settable(value: object) -> bool:
     """Report whether an output value can be handed an explicit entry id.
 
@@ -842,9 +830,9 @@ def store_collected(
     The entries a recognized calculation read (the ``inputs`` of
     :class:`~httk.workflow.collecting.CollectedJob`) are stored like its
     outputs, and the run's input edges name their stored ids. A staged
-    structure input stores its default reading as the main entry and the
-    reading of its exact file as the alternative ``<main id>~file_<hex>``,
-    which its input edge names.
+    structure input is read once and stored as the main entry, with that same
+    reading plus its staged file as ``source_file`` as the alternative
+    ``<main id>~file_<hex>``, which its input edge names.
     Collector outputs arrive carrying content ids; every edge, product link and
     ``product_of`` reference is rewritten to the id the store stored it under.
 
@@ -1076,14 +1064,11 @@ def store_collected(
                                 entry_ids=entry_ids,
                             )
                             main_id = pending_remap[main_key]
-                            # The same file read differently as written (a reader fix) revises its alternative.
-                            predecessor = _latest_stored_alternative(store, value, main_id)
-                            if predecessor is not None and content_id(predecessor) != content_id(value.alternative):
-                                before = store.sid_of(predecessor)
-                                sid = store.replace(predecessor, value.alternative)
-                                revised |= before is not None and sid > before
-                            else:
-                                store.save(value.alternative, alternative_of=main_id, alternative_kind=value.kind)
+                            # The alternative is the main's reading plus its file, so a main id and kind
+                            # name one content: saving it again is a no-op, and another reading has another main.
+                            # ponytail: assumes the main id follows content (readers return views, which the
+                            # ledger cannot pin); a ledger-pinned main would need its alternative revised too.
+                            store.save(value.alternative, alternative_of=main_id, alternative_kind=value.kind)
                             pending_remap[content_id(value.alternative)] = f"{main_id}~{value.kind}"
                             entry_ids.append(f"{main_id}~{value.kind}")
                             continue

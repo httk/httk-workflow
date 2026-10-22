@@ -173,21 +173,20 @@ can read:
 
 - A `structures` input that is not compressed and at most 64 MiB
   (`READ_FILE_LIMIT`) is also loaded, from exactly the bytes that were
-  hashed, and becomes two entries. The main entry is the structure
-  as *httk₂* reads it by default (any loaded structure wrapped as a
-  `UnitcellStructureView`, which needs *httk-atomistic*), so equal structures
-  share it. Its alternative of kind `file_<hex>` (the first 16 hex digits of
-  the staged file entry's content id) holds the structure read with
-  `as_written=True`, the numbers exactly as written, and the staged file as
-  its `source_file`. Different files of one structure are different
-  alternatives of the same main; the same bytes are one. When the file cannot
-  be read as written, the alternative holds the default reading, with a
-  warning. This happens for a CIF whose coordinates are not exactly on a
-  declared Wyckoff position, and for one that writes a special position as a
-  rounded decimal (`0.3333`): read exactly, its symmetry images become
-  separate sites, so the site count differs from the default reading. The
-  run's input edge, and any product link drawn from that role, names the
-  alternative as `<main id>~file_<hex>`.
+  hashed, and becomes two entries from that one reading, its numbers exactly
+  as written (a CIF site on a declared Wyckoff position takes that position's
+  exact coordinates). The main entry is the structure as *httk₂* reads it (any loaded
+  structure wrapped as a `UnitcellStructureView`, which needs
+  *httk-atomistic*), so equal structures share it. Its alternative of kind
+  `file_<hex>` (the first 16 hex digits of the staged file entry's content id)
+  is the same reading with the staged file as its `source_file`. Different
+  files of one structure are different alternatives of the same main; the
+  same bytes are one. Re-collecting a job into a store collected before
+  numbers were read as written by default gives its structure a new main
+  entry, with the file's alternative under it, and revises the job's run to
+  name it, leaving the earlier entries in place; rebuild such stores (collect
+  into a new file) instead. The run's input edge, and any product link drawn
+  from that role, names the alternative as `<main id>~file_<hex>`.
 - A `structures` input that is compressed, larger than 64 MiB or not loadable
   as a structure is recorded as its `files` entry only, with a warning naming
   the reason.

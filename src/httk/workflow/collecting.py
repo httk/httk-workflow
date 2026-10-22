@@ -209,10 +209,10 @@ class CollectedJob:
 
 @dataclass(frozen=True)
 class StructureInput:
-    """Pair a staged structure input's default reading with the alternative recording its file.
+    """Pair a staged structure input's reading with the alternative recording its file.
 
-    :param main: The structure as *httk₂* reads it by default.
-    :param alternative: The ``UnitcellStructureRecord`` of the as-written reading,
+    :param main: The structure as *httk₂* reads it (numbers as written).
+    :param alternative: The ``UnitcellStructureRecord`` of that same reading,
         with the staged file as ``source_file``.
     :param kind: The alternative kind, ``file_`` and the first 16 hex digits of
         the staged file record's content id.
@@ -2014,10 +2014,9 @@ def _staged_input(
     hashed as stored, its ``format`` the reader format of the uncompressed name.
     A ``structures`` input that is not compressed and at most
     :data:`READ_FILE_LIMIT` bytes is also loaded from exactly the bytes hashed:
-    the default reading (wrapped as a ``UnitcellStructureView`` when it loads as
-    something else) and an alternative holding the as-written reading with the
-    file record as ``source_file``; when the as-written reading fails, the
-    alternative holds the default reading, with a warning. A structure that is
+    its reading, numbers as written (wrapped as a ``UnitcellStructureView`` when
+    it loads as something else), and an alternative holding that same reading
+    with the file record as ``source_file``. A structure that is
     compressed, too large or not loadable is recorded as its file, with a
     warning naming why; any other entry type is recorded as its file. Without a
     staging digest, an unsafe file is skipped with a warning, an absent one
@@ -2101,17 +2100,15 @@ def _staged_input(
         reason = f"it is larger than {READ_FILE_LIMIT} bytes"
     else:
         try:
-            return _structure_input(data, record, label, relative, file_record)
+            return _structure_input(data, relative, file_record)
         except Exception as exc:
             reason = f"it does not load as a structure ({exc})"
     _LOGGER.warning("input %r of %s: %s is recorded as a file only: %s", label, record.job_key, relative, reason)
     return file_record
 
 
-def _structure_input(
-    data: bytes, record: JobRecord, label: str, relative: PurePosixPath, file_record: httk.core.FileRecord
-) -> StructureInput:
-    """Load a staged structure's bytes into its default reading and its as-written alternative."""
+def _structure_input(data: bytes, relative: PurePosixPath, file_record: httk.core.FileRecord) -> StructureInput:
+    """Load a staged structure's bytes once, into its reading and the alternative recording its file."""
 
     from httk.atomistic import (  # pyright: ignore[reportMissingImports]
         UnitcellStructureRecord,
@@ -2119,46 +2116,27 @@ def _structure_input(
     )
 
     value = _loaded_structure(data, relative.name)
-    try:
-        exact = _loaded_structure(data, relative.name, as_written=True)
-        # As written, a CIF site off its special position is not merged onto it; that is
-        # another crystal, not the exact numbers of this one.
-        written, default = (len(UnitcellStructureView(cast(Any, s)).species_at_sites) for s in (exact, value))
-        if written != default:
-            raise ValueError(f"it has {written} sites where the default reading has {default}")
-    except Exception as exc:
-        _LOGGER.warning(
-            "input %r of %s: %s cannot be read as written (%s); its exact alternative holds the default reading",
-            label,
-            record.job_key,
-            relative,
-            exc,
-        )
-        exact = value
     alternative = replace(
-        UnitcellStructureRecord.from_structure(UnitcellStructureView(cast(Any, exact))),
+        UnitcellStructureRecord.from_structure(UnitcellStructureView(cast(Any, value))),
         source_file=file_record,
     )
     return StructureInput(value, alternative, f"file_{content_id(file_record)[:16]}")
 
 
-def _loaded_structure(data: bytes, name: str, *, as_written: bool = False) -> object:
+def _loaded_structure(data: bytes, name: str) -> object:
     """Load staged-input bytes by the reader *name* selects, as a ``structures`` entry.
 
     A structure that loads as something else is wrapped as a ``UnitcellStructureView``.
 
     :param data: The staged file's bytes.
     :param name: The staged file name, which selects the reader.
-    :param as_written: Read the numbers exactly as written.
     :return: The loaded entry.
     :raises ValueError: If a structure needs httk-atomistic.
     """
 
     from httk.core.loading import load_source
 
-    # Only structure readers take ``as_written``, so it is passed only when asked for.
-    options: dict[str, Any] = {"as_written": True} if as_written else {}
-    value = load_source(io.BytesIO(data), name, **options)
+    value = load_source(io.BytesIO(data), name)
     if getattr(value, "type", None) == "structures":
         return value
     try:

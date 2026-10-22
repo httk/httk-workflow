@@ -497,21 +497,22 @@ def test_a_files_input_is_recorded_as_its_file_not_loaded(tmp_path: Path) -> Non
 def test_a_staged_structure_records_its_exact_file_as_an_alternative(tmp_path: Path) -> None:
     from fractions import Fraction
 
-    from httk.atomistic import UnitcellStructureView
+    from httk.atomistic import UnitcellStructureRecord, UnitcellStructureView
     from httk.core.storage import content_id
 
     item = next(collect(_finished(tmp_path, members={"files/POSCAR": _DIAMOND}), allow_job_collector=True))
 
     value = _structure_input(item)
-    # The default reading snaps the written scale 3.567 to 346/97; the alternative keeps it as written.
+    # One reading, the written scale 3.567 as written, in both the main and the alternative.
     main: Any = UnitcellStructureView(cast(Any, value.main))
     exact: Any = UnitcellStructureView(value.alternative)
-    assert main.cell.basis.fractions[0][1] == Fraction(173, 97)
-    assert exact.cell.basis.fractions[0][1] == Fraction(3567, 2000)
+    assert main.cell.basis.fractions[0][1] == exact.cell.basis.fractions[0][1] == Fraction(3567, 2000)
+    assert replace(value.alternative, source_file=None) == UnitcellStructureRecord.from_structure(main)
     source = value.alternative.source_file
     assert source.sha256 == hashlib.sha256(_DIAMOND.encode()).hexdigest() and source.format == "vasp-poscar"
     assert source.url == f"data/workspace/{item.record.payload_path.as_posix()}/files/POSCAR"
     assert value.kind == f"file_{content_id(source)[:16]}"
+    assert content_id(value.alternative) != content_id(UnitcellStructureRecord.from_structure(main))
     # The run's edge, and the product link drawn from it, name the alternative.
     assert [(edge.entry_type, edge.entry_id) for edge in item.run.inputs] == [
         ("structures", content_id(value.alternative))
@@ -520,7 +521,7 @@ def test_a_staged_structure_records_its_exact_file_as_an_alternative(tmp_path: P
     assert product.source_id == content_id(value.alternative)
 
 
-# P3 with one B site at {xy}; {wyckoff} may declare it on Wyckoff position 2b.
+# P3 with one B site at {xy}.
 _TRIGONAL_CIF = """data_test
 _cell_length_a 3.567
 _cell_length_b 3.567
@@ -536,11 +537,11 @@ x,y,z
 -x+y,-x,z
 loop_
 _atom_site_label
-_atom_site_type_symbol{wyckoff_tag}
+_atom_site_type_symbol
 _atom_site_fract_x
 _atom_site_fract_y
 _atom_site_fract_z
-B1 B{wyckoff} {xy} 0.25
+B1 B {xy} 0.25
 """
 
 
@@ -558,13 +559,13 @@ def test_a_staged_cif_records_its_coordinates_as_written(tmp_path: Path) -> None
 
     from httk.atomistic import UnitcellStructureView
 
-    # A general position: its orbit is the same three sites in both readings.
-    cif = _TRIGONAL_CIF.format(wyckoff_tag="", wyckoff="", xy="0.1234 0.5678")
+    # A general position, its orbit three sites, each coordinate as written in the main and the alternative.
+    cif = _TRIGONAL_CIF.format(xy="0.1234 0.5678")
     value = _structure_input(_cif_job(tmp_path, cif))
 
     main: Any = UnitcellStructureView(cast(Any, value.main))
     exact: Any = UnitcellStructureView(value.alternative)
-    assert len(main.species_at_sites) == len(exact.species_at_sites) == 3
+    assert main.sites.reduced_coords.to_fractions() == exact.sites.reduced_coords.to_fractions()
     assert exact.sites.reduced_coords.to_fractions() == [
         [Fraction(1234, 10000), Fraction(5678, 10000), Fraction(1, 4)],
         [Fraction(4322, 10000), Fraction(5556, 10000), Fraction(1, 4)],
@@ -575,41 +576,12 @@ def test_a_staged_cif_records_its_coordinates_as_written(tmp_path: Path) -> None
     assert source.format == "cif" and source.sha256 == hashlib.sha256(cif.encode()).hexdigest()
 
 
-@pytest.mark.parametrize(
-    ("wyckoff_tag", "wyckoff", "reason"),
-    [
-        # Declared on 2b but written 2e-4 off it: as written, the declaration is refused.
-        ("\n_atom_site_Wyckoff_symbol", " b", "does not lie on its declared Wyckoff position"),
-        # Undeclared: as written, the site is not merged onto 2b and its orbit has three sites, not one.
-        ("", "", "it has 3 sites where the default reading has 1"),
-    ],
-)
-def test_an_input_that_cannot_be_read_as_written_keeps_the_default_reading(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, wyckoff_tag: str, wyckoff: str, reason: str
-) -> None:
-    from fractions import Fraction
-
-    from httk.atomistic import UnitcellStructureRecord, UnitcellStructureView
-    from httk.core.storage import content_id
-
-    cif = _TRIGONAL_CIF.format(wyckoff_tag=wyckoff_tag, wyckoff=wyckoff, xy="0.3333 0.6667")
-    value = _structure_input(_cif_job(tmp_path, cif))
-
-    main: Any = UnitcellStructureView(cast(Any, value.main))
-    assert main.sites.reduced_coords.to_fractions() == [[Fraction(1, 3), Fraction(2, 3), Fraction(1, 4)]]
-    assert len(UnitcellStructureView(value.alternative).species_at_sites) == 1
-    default = UnitcellStructureRecord.from_structure(main)
-    assert content_id(replace(value.alternative, source_file=None)) == content_id(default)
-    assert value.alternative.source_file is not None and value.alternative.source_file.format == "cif"
-    assert "input 'initial_structure'" in caplog.text and "cannot be read as written" in caplog.text
-    assert reason in caplog.text
-
-
-def test_a_changed_reading_of_the_same_file_revises_its_alternative(
+def test_a_changed_reading_of_the_same_file_records_a_new_main_and_alternative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("httk.store")
     import httk.core.loading
+    from httk.core import Run
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     from httk.workflow import store_collected
@@ -620,29 +592,35 @@ def test_a_changed_reading_of_the_same_file_revises_its_alternative(
     (report,) = store_collected([first], path, id_base="httk.t")
     main_id, alternative_id = _structure_ids(report)
 
-    # The same file read differently as written, as after a reader fix: here, as by default.
+    # The same file read differently, as after a reader fix: here, with the scale 3.567 read as 3.5671.
     load_source = httk.core.loading.load_source
 
     def reread(source: Any, name: str, **options: Any) -> Any:
-        options.pop("as_written", None)
-        return load_source(source, name, **options)
+        return load_source(io.BytesIO(source.read().replace(b"3.567", b"3.5671")), name, **options)
 
     monkeypatch.setattr(httk.core.loading, "load_source", reread)
     second = next(collect(ws, allow_job_collector=True))
-    assert _structure_input(second).kind == _structure_input(first).kind
+    kind = _structure_input(first).kind
+    assert _structure_input(second).kind == kind
     assert _structure_input(second).alternative != _structure_input(first).alternative
     (again,) = store_collected([second], path, id_base="httk.t")
 
+    # Another reading is another structure: a new main, with the same file's alternative under it.
     assert "storage_error" not in again, again["storage_error"]
-    assert again["revised"] is True and _structure_ids(again) == (main_id, alternative_id)
+    new_main_id, new_alternative_id = _structure_ids(again)
+    assert again["revised"] is True and new_main_id != main_id
+    assert new_alternative_id == f"{new_main_id}~{kind}"
+    run_id = cast(Any, again["stored"])["run"]
+    assert run_id == cast(Any, report["stored"])["run"]
     with Backend.sqlite(path) as database:
         store = SqlStore(database)
-        assert _input_edge(store, again) == alternative_id
-        latest = _rows(store, main_id)[alternative_id]
-        assert [revision.immutable_id for revision in store.history(latest)] == [
-            f"{alternative_id}~1",
-            f"{alternative_id}~2",
-        ]
+        # The job's run is revised: its new revision's edge names the new alternative.
+        run = _stored(store, Run, run_id)
+        assert [revision.inputs[0].entry_id for revision in store.history(run)] == [alternative_id, new_alternative_id]
+        # The earlier reading stays as it was stored.
+        old = _rows(store, main_id)
+        assert set(old) == {main_id, alternative_id}
+        assert [revision.immutable_id for revision in store.history(old[alternative_id])] == [f"{alternative_id}~1"]
 
 
 def _rows(store: Any, main_id: str) -> dict[str, Any]:
@@ -678,6 +656,7 @@ def _input_edge(store: Any, report: Mapping[str, Any]) -> str:
 
 def test_into_stores_the_main_and_the_file_alternative_the_run_names(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
+    from httk.atomistic import UnitcellStructureRecord
     from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     from httk.workflow import store_collected
@@ -697,10 +676,18 @@ def test_into_stores_the_main_and_the_file_alternative_the_run_names(tmp_path: P
         assert rows[alternative_id].source_file.sha256 == hashlib.sha256(_DIAMOND.encode()).hexdigest()
         assert _input_edge(store, report) == alternative_id
 
-    # Collecting the same job again changes nothing.
+    # Collecting the same job again changes nothing: no new row, no new revision.
     (again,) = store_collected([first], path, id_base="httk.t")
     assert "storage_error" not in again and again["revised"] is False
     assert again["stored"] == report["stored"]
+    with Backend.sqlite(path) as database:
+        store = SqlStore(database)
+        searcher = store.searcher(only_latest=False, only_main_alt=False)
+        variable = searcher.variable(UnitcellStructureRecord)
+        assert sorted(row.entry.immutable_id for row in searcher.results(entry=variable)) == [
+            f"{main_id}~1",
+            f"{alternative_id}~1",
+        ]
 
     # Other bytes of the same structure: the same main, a second alternative, each run naming its own.
     padded = _DIAMOND.replace("3.567", "3.5670")
