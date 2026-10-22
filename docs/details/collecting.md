@@ -604,6 +604,50 @@ whose entry-type layout does not match the sweep fails fast. The error names
 the store path, the entry types the sweep needs and the layout difference, and
 ends with `Collect into a new store file.`
 
+## Postprocess output as runs
+
+`httk collect WS --postprocess NAME` stores what the curated script `NAME`
+([`outputs`](workflow_packages.md)) wrote for each job. Order matters: collect
+the jobs first, so each job's run is in the store, then collect with
+`--postprocess`; the script itself may run before or after the job collect.
+Without `--into` it previews. Collection reads each job's
+`.httk-postprocess.json` receipt, so it needs no installed provider.
+
+Per job and script one run is stored with `source_id`
+`<workspace_id>:<job_id>:postprocess:<script>`. Its inputs are all of the job
+run's outputs plus an input edge `job` to the job's run; its outputs are
+`files` entries labelled by their output-relative path, with urls
+`data/<workspace name>/postprocess/<placement>/<job_key>/<script>/<path>`. The
+run id is ledger-keyed; the files are not: they are store-minted and
+content-deduplicated, so identical bytes share one file entry and its first
+stored url. Recollecting unchanged output stores nothing; changed output
+revises the same run under the same id. Output equal to an earlier
+revision's content (A, then B, then A again) cannot be made current again and
+is reported as an error: "postprocess output equals an earlier revision
+(`<immutable id>`) of run `<id>`; the store cannot make an earlier revision
+current again".
+
+The first postprocess collect into a store whose layout has no `files` family
+(no job stored a file yet) needs `--upgrade`; a store that declares `files`
+with zero rows needs none (the upgrade is an additive layout upgrade; back the store up first). The
+command ends with one `httk-workflow-postprocess-collect-summary` line and
+exits 1 on any error or unreadable `job.json`; jobs with no receipt, a failed
+script, no declared outputs or no matching files are skipped (exit 0).
+`httk serve optimade serve STORE` serves the runs and files, and the job's
+run shows the postprocess run through the reverse `_httk_is_input`
+relationship.
+
+Accepted limits:
+
+- Only the workspace's own `postprocess/` directory is collected, not a
+  `postprocess.directory` elsewhere or `--output-dir` runs.
+- Bytes are not copied and the output directory is reused. A rerun changes
+  the bytes behind already-stored urls until you recollect (served checksums
+  and `fsck` reveal it), and stale files from an earlier run still match
+  globs.
+- A moved job's earlier postprocess output is orphaned.
+- Concurrent runs of one script on one job are last-writer-wins.
+
 ## Workflow collect hooks
 
 `collect()` is the workflow-owned collection layer, and the collect hook a

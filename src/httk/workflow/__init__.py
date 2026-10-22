@@ -44,6 +44,7 @@ __all__ = [
     "ChildrenView",
     "Claim",
     "CollectedJob",
+    "CollectedPostprocess",
     "DirectoryClaim",
     "FormatError",
     "IdentityCollisionError",
@@ -72,6 +73,7 @@ __all__ = [
     "WorkspaceUnavailableError",
     "claims",
     "collect",
+    "collect_postprocess",
     "collect_tree",
     "job_records",
     "ledger_key",
@@ -79,6 +81,7 @@ __all__ = [
     "new_jobs",
     "scaffold_job",
     "store_collected",
+    "store_postprocess",
 ]
 
 _LAZY_EXPORTS = {
@@ -107,6 +110,8 @@ _LAZY_EXPORTS = {
     "NotIdleError": "manager",
     "TaskManager": "manager",
     "WorkCensus": "manager",
+    "CollectedPostprocess": "postprocessing",
+    "collect_postprocess": "postprocessing",
     "JobState": "runtime_builders",
     "ScaffoldedJob": "scaffold",
     "new_job": "scaffold",
@@ -120,6 +125,7 @@ _LAZY_EXPORTS = {
     "ParentJob": "sdk",
     "Runner": "sdk",
     "store_collected": "storing",
+    "store_postprocess": "storing",
     "Workspace": "workspace",
 }
 

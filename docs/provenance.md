@@ -49,7 +49,9 @@ when there is one. Each child job collects to its own run, and
 name the entries a job consumed: a declared input staged as a file is loaded by
 the framework at collect time, and an input given another way, such as a
 jobflow port, is named when the collect hook hands it over. See
-{doc}`details/provenance`.
+{doc}`details/provenance`. A postprocess script's declared output files are stored
+as a separate run per job and script, with the job's run as an input; see
+{doc}`collecting`.
 
 ## Stable ids
 

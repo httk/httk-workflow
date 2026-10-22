@@ -42,6 +42,7 @@ from .errors import (
 from .hookapi import Claim, Unclaimed
 from .id_keys import UnstableIdentityError, ledger_key
 from .manager import NotIdleError, TaskManager, WorkCensus
+from .postprocessing import CollectedPostprocess, collect_postprocess
 from .runtime_builders import JobState
 from .scaffold import ScaffoldedJob, new_job, new_jobs, scaffold_job
 from .sdk import (
@@ -53,7 +54,7 @@ from .sdk import (
     ParentJob,
     Runner,
 )
-from .storing import store_collected
+from .storing import store_collected, store_postprocess
 from .workspace import Workspace
 
 __all__ = [
@@ -64,6 +65,7 @@ __all__ = [
     "ChildrenView",
     "Claim",
     "CollectedJob",
+    "CollectedPostprocess",
     "DirectoryClaim",
     "FormatError",
     "IdentityCollisionError",
@@ -92,6 +94,7 @@ __all__ = [
     "WorkspaceUnavailableError",
     "claims",
     "collect",
+    "collect_postprocess",
     "collect_tree",
     "job_records",
     "ledger_key",
@@ -99,4 +102,5 @@ __all__ = [
     "new_jobs",
     "scaffold_job",
     "store_collected",
+    "store_postprocess",
 ]

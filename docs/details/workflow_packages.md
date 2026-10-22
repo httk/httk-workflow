@@ -457,6 +457,16 @@ description = "copy selected results to an archive"
 | `<NAME>` | required | The name selected by `httk workflow postprocess --script`. |
 | `file` | required | A relative executable regular file inside the registered package. |
 | `description` | optional | Human-readable text shown by `workflow describe`. |
+| `outputs` | optional | List of file patterns the script writes, relative to its output directory, making its results collectable ({doc}`collecting`). |
+
+`outputs` entries are unique relative POSIX paths (no `..`, no empty
+segments). A literal such as `"report.json"` names a required file; a pattern
+with a glob character (`*?[`, or `**`) matches zero or more files, as in
+`"figures/*.png"`. Dot-prefixed components, backslashes and control characters
+in a declared pattern, and an empty list, are refused at load time. Glob
+matches of dot-prefixed files or directories, and anything reached through a
+symlink, are never collected. A script without
+`outputs` keeps working but cannot be collected.
 
 `describe` lists them under `postprocess scripts:`, separately from the
 collect hook, which is the provider's output adapter returning role-keyed data

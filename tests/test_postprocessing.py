@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ from httk.core.digests import tree_digest
 import v3_helpers as v3
 from conftest import configure_identity, register_ws
 from httk.workflow import _store, job_records
-from httk.workflow.packages import load_workflow_package
+from httk.workflow.packages import MANIFEST_NAME, load_workflow_package
 from httk.workflow.postprocessing import postprocess_root, run_postprocess_script
 from httk.workflow.seals import job_seal_path
 from httk.workflow.workflow_cli import command
@@ -386,3 +387,126 @@ def test_postprocess_cli_selector_with_state_is_a_usage_error(tmp_path: Path, ca
         == 2
     )
     assert "state" in capsys.readouterr().err
+
+
+# -- declared outputs and the postprocess receipt -----------------------------
+
+_RECEIPT_KEYS = {
+    "format",
+    "format_version",
+    "script",
+    "workflow_id",
+    "workspace_id",
+    "job_id",
+    "started_at",
+    "finished_at",
+    "returncode",
+    "outputs",
+}
+
+
+def _declaring(tmp_path: Path, outputs: str) -> Path:
+    """Return the CLI package with ``outputs = <outputs>`` appended to its (last) postprocess table."""
+
+    package = _cli_package(tmp_path / "package")
+    manifest = package / MANIFEST_NAME
+    manifest.write_text(manifest.read_text(encoding="utf-8") + f"outputs = {outputs}\n", encoding="utf-8")
+    return package
+
+
+def test_postprocess_outputs_are_validated_and_carried_by_the_provider(tmp_path: Path) -> None:
+    package = _declaring(tmp_path, '["summary.json", "figures/**/*.png", "data/*.csv"]')
+    provider = load_workflow_package(package, register=False)
+    assert provider.postprocess_scripts["report"]["outputs"] == ("summary.json", "figures/**/*.png", "data/*.csv")
+    assert (
+        load_workflow_package(_cli_package(tmp_path / "plain"), register=False).postprocess_scripts["report"]["outputs"]
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        '"summary.json"',
+        "[]",
+        '["a\\tb.json"]',
+        '["a\\u0000b.json"]',
+        "[1]",
+        '[""]',
+        '["a.json", "a.json"]',
+        '["/abs.json"]',
+        '["a\\\\b.json"]',
+        '["a//b.json"]',
+        '["./a.json"]',
+        '["../a.json"]',
+        '["a/../b.json"]',
+        '[".hidden"]',
+        '["a/.git/x"]',
+        '["a/"]',
+        '["a**/b"]',
+    ],
+)
+def test_postprocess_outputs_reject_malformed_patterns(tmp_path: Path, outputs: str) -> None:
+    with pytest.raises(ValueError, match=r"\[workflow\.postprocess\.report\]\.outputs"):
+        load_workflow_package(_declaring(tmp_path, outputs), register=False)
+
+
+def test_postprocess_tables_still_reject_unknown_keys(tmp_path: Path) -> None:
+    package = _cli_package(tmp_path / "package")
+    manifest = package / MANIFEST_NAME
+    manifest.write_text(manifest.read_text(encoding="utf-8") + 'inputs = ["energy"]\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"unknown key \[workflow\.postprocess\.report\.inputs\]"):
+        load_workflow_package(package, register=False)
+
+
+def test_describe_shows_declared_outputs(tmp_path: Path, capsys) -> None:
+    context = CLIContext("httk", tmp_path)
+    package = _declaring(tmp_path, '["summary.json", "*.png"]')
+    assert command(["describe", str(package)], context) == 0
+    assert "report: scripts/report.sh — write a report (outputs: summary.json, *.png)" in capsys.readouterr().out
+    assert command(["describe", "--json", str(package)], context) == 0
+    assert json.loads(capsys.readouterr().out)[0]["postprocess"]["report"]["outputs"] == ["summary.json", "*.png"]
+
+
+def test_postprocess_writes_a_receipt_on_success_and_on_failure(tmp_path: Path) -> None:
+    package, provider, workspace, job, record = _finished(tmp_path)
+    declared = replace(
+        provider, postprocess_scripts={"report": {**provider.postprocess_scripts["report"], "outputs": ("a.json",)}}
+    )
+
+    result = run_postprocess_script(declared, "report", record)
+
+    assert result.receipt == result.output_dir / ".httk-postprocess.json"
+    receipt = json.loads(result.receipt.read_text(encoding="utf-8"))
+    assert set(receipt) == _RECEIPT_KEYS
+    assert receipt["format"] == "httk-workflow-postprocess-receipt" and receipt["format_version"] == 1
+    assert receipt["script"] == "report"
+    assert receipt["workflow_id"] == provider.workflow_id
+    assert (receipt["workspace_id"], receipt["job_id"]) == (workspace.workspace_id, job.job_id)
+    assert receipt["returncode"] == 0 and receipt["outputs"] == ["a.json"]
+    started = datetime.fromisoformat(receipt["started_at"])
+    finished = datetime.fromisoformat(receipt["finished_at"])
+    assert receipt["started_at"].endswith("Z") and receipt["finished_at"].endswith("Z")
+    assert started.tzinfo is not None and started <= finished
+
+    script = package / "scripts" / "report.sh"
+    script.write_text("#!/bin/sh\nexit 4\n", encoding="utf-8")
+    script.chmod(0o755)
+    failed = run_postprocess_script(provider, "report", record)
+    receipt = json.loads(failed.receipt.read_text(encoding="utf-8"))
+    assert set(receipt) == _RECEIPT_KEYS
+    assert receipt["returncode"] == 4 and receipt["outputs"] is None
+
+
+@pytest.mark.timing
+def test_postprocess_removes_a_stale_receipt_and_leaves_none_on_timeout(tmp_path: Path) -> None:
+    package, provider, _workspace, _job, record = _finished(tmp_path)
+    stale = run_postprocess_script(provider, "report", record).receipt
+    assert stale.is_file()
+    script = package / "scripts" / "report.sh"
+    script.write_text("#!/bin/sh\nsleep 1\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    with pytest.raises(ValueError, match="report.*job"):
+        run_postprocess_script(provider, "report", record, timeout=0.05)
+    assert not stale.exists()

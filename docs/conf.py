@@ -211,6 +211,7 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.collecting",
         "httk.workflow.calculations",
         "httk.workflow.storing",
+        "httk.workflow.postprocessing",
         "httk.workflow.provenance",
         "httk.workflow.supervision",
         "httk.workflow.manifests",

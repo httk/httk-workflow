@@ -227,6 +227,20 @@ httk workflow postprocess --script relaxation-plot silicon
 Output lands under `<workspace>/postprocess/`, never in the payload, so a
 sealed job can still be postprocessed.
 
+### Storing postprocess results
+
+A script that declares `outputs` in its manifest can have its files stored as
+a provenance run. Collect the job first, run the script, then collect its
+output into the same store:
+
+```console
+httk collect WS --into results.sqlite --id-base mydb
+httk workflow postprocess --workspace WS --script relaxation-plot
+httk collect WS --postprocess relaxation-plot --into results.sqlite --id-base mydb
+```
+
+Without `--into` the last command previews. See {doc}`collecting`.
+
 ## Sealing
 
 A seal is a signed statement of what a job, workspace or project contained, so

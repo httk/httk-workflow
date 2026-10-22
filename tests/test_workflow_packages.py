@@ -633,8 +633,12 @@ file = "scripts/plot_dos.sh"
 
     assert list(provider.postprocess_scripts) == ["relaxation-report", "dos-plot"]
     assert provider.postprocess_scripts == {
-        "relaxation-report": {"file": "scripts/relaxation_report", "description": "write a relaxation report"},
-        "dos-plot": {"file": "scripts/plot_dos.sh", "description": None},
+        "relaxation-report": {
+            "file": "scripts/relaxation_report",
+            "description": "write a relaxation report",
+            "outputs": None,
+        },
+        "dos-plot": {"file": "scripts/plot_dos.sh", "description": None, "outputs": None},
     }
 
 

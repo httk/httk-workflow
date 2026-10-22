@@ -121,6 +121,14 @@ the generated or external workflow declaration in `job.json` anchor this
 provenance chain to the exact installed package; see
 {doc}`/details/workflow_packages`.
 
+## Postprocess runs
+
+A curated postprocess script's output is stored as a separate run per job and
+script: it takes the job run and all of its outputs as inputs and the
+script's `files` as outputs, under `source_id`
+`<workspace_id>:<job_id>:postprocess:<script>`. See
+{doc}`collecting`.
+
 ## Provenance and sealing
 
 Provenance records where a result came from; a **seal** proves it has not

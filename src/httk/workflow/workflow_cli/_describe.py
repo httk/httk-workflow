@@ -207,7 +207,9 @@ def _description(workflow: ResolvedWorkflow, source_document: Mapping[str, objec
         "parameters": {name: dict(metadata) for name, metadata in workflow.parameters.items()},
         "environment": {name: dict(metadata) for name, metadata in workflow.environment.items()},
         "outputs": _output_document(workflow),
-        "postprocess": {name: dict(script) for name, script in workflow.postprocess_scripts.items()},
+        "postprocess": {
+            name: {**script, "outputs": script.get("outputs")} for name, script in workflow.postprocess_scripts.items()
+        },
         "declaration": _declaration_document(workflow),
         "recognize": (
             None
@@ -342,6 +344,8 @@ def _render_text(description: Mapping[str, object]) -> str:
         details = f"{name}: {value['file']}"
         if value["description"]:
             details += f" — {value['description']}"
+        if value["outputs"] is not None:
+            details += f" (outputs: {', '.join(value['outputs']) or '-'})"
         lines.append(f"  {details}")
     declaration = description["declaration"]
     assert isinstance(declaration, Mapping)

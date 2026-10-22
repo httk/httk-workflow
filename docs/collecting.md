@@ -86,6 +86,19 @@ for item in collect(workspace, states=("succeeded",)):
     print(item.record.job_key, item.outputs)
 ```
 
+## Postprocess output
+
+Files a postprocess script wrote can be stored as their own provenance run,
+once the script declares `outputs` ({doc}`details/workflow_packages`):
+
+```console
+httk collect WS --into results.sqlite --id-base mydb
+httk workflow postprocess --workspace WS --script NAME
+httk collect WS --postprocess NAME --into results.sqlite --id-base mydb
+```
+
+See {doc}`details/collecting`.
+
 ## Recognized calculations
 
 A directory tree of finished calculations that were never run through a

@@ -5,13 +5,16 @@
 :func:`~httk.workflow.calculations.collect_tree`: it saves each collected job's
 entries, its run and its product links, rewriting the content ids the
 collectors produced into the ids the store mints (or an id ledger allocates).
+:func:`store_postprocess` is the counterpart of
+:func:`~httk.workflow.postprocessing.collect_postprocess`: it stores each
+postprocess execution as its own run, fed by the stored run of its job.
 """
 
 import contextlib
 import json
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, cast
@@ -19,10 +22,11 @@ from typing import Any, cast
 from httk.core import DataRecord, FileRecord, Run, RunEdge
 from httk.core.storage import content_id, resolve_storage_record
 
-from .collecting import CollectedJob, StructureInput
+from .collecting import CollectedJob, JobRecord, StructureInput
 from .id_keys import UnstableIdentityError, ledger_key
+from .postprocessing import CollectedPostprocess
 
-__all__ = ["store_collected"]
+__all__ = ["store_collected", "store_postprocess"]
 
 _LOGGER = logging.getLogger(__name__)
 _CONTENT_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -266,7 +270,9 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
 
 
 def _storage_layout(
-    items: list[CollectedJob], persisted: Mapping[str, Sequence[str]] | None = None
+    items: list[CollectedJob],
+    persisted: Mapping[str, Sequence[str]] | None = None,
+    extra_types: Sequence[str] = (),
 ) -> tuple[dict[type, tuple[type, ...]], dict[int, str]]:
     """Resolve the lazy core entry registry for the values this sweep stores.
 
@@ -274,12 +280,13 @@ def _storage_layout(
     order, with newly registered records appended after it, because a record's
     position is part of the store's id numbering and a reorder is never an
     additive upgrade. A new family (and a new store) uses the pinned core order
-    for ``records`` and name order otherwise.
+    for ``records`` and name order otherwise. *extra_types* names the entry
+    types needed beyond ``records``, ``runs`` and those of *items*.
     """
 
     from httk.core.register import known_entry_families, known_entry_records, resolve_entry_family, resolve_entry_record
 
-    required_types = {"records", "runs"}
+    required_types = {"records", "runs", *extra_types}
     failures: dict[int, str] = {}
     for index, item in enumerate(items):
         for value in (*item.outputs.values(), *item.inputs.values()):
@@ -525,8 +532,22 @@ def _id_settable(value: object) -> bool:
     return is_dataclass(value) and any(field.name == "id" for field in fields(value))
 
 
+def _sweep_ledger_families(items: list[CollectedJob]) -> list[str]:
+    """Return the sorted entry types of the id-settable values a collected sweep stores."""
+
+    values = [
+        value
+        for item in items
+        if item.missing_collector is None
+        for value in (*item.outputs.values(), *item.inputs.values(), item.run)
+    ]
+    return sorted(
+        {str(getattr(value, "type", "")) for value in values if getattr(value, "type", None) and _id_settable(value)}
+    )
+
+
 def _open_id_ledger(
-    ledger_path: str, keys: Sequence[tuple[str, bytes]], id_base: str, id_series: str, items: list[CollectedJob]
+    ledger_path: str, keys: Sequence[tuple[str, bytes]], id_base: str, id_series: str, families: Sequence[str]
 ) -> Any:
     """Create or open the sweep's id ledger, deriving its per-family bases.
 
@@ -539,22 +560,13 @@ def _open_id_ledger(
     :param keys: The signing keys used to seal the ledger.
     :param id_base: The entry-id namespace base minted ids carry.
     :param id_series: The entry-id series minted ids carry.
-    :param items: The collected sweep, read for the families to configure.
+    :param families: The entry types a newly created ledger gets bases for.
     :return: The open, locked ledger, or ``None`` when nothing in the sweep can
-        be allocated through it (no id-settable output).
+        be allocated through it (no family).
     """
 
     from httk.store import IdLedger  # pyright: ignore[reportMissingImports]
 
-    values = [
-        value
-        for item in items
-        if item.missing_collector is None
-        for value in (*item.outputs.values(), *item.inputs.values(), item.run)
-    ]
-    families = sorted(
-        {str(getattr(value, "type", "")) for value in values if getattr(value, "type", None) and _id_settable(value)}
-    )
     if not families:
         _LOGGER.info("no id-settable entries in this sweep; not creating an id ledger at %s", ledger_path)
         return None
@@ -602,7 +614,7 @@ def _ledger_entry_id(
     ledger: Any,
     store: Any,
     type_to_family: dict[str, type],
-    item: CollectedJob,
+    item: CollectedJob | JobRecord,
     role: str | None,
     value: object,
     original_id: object,
@@ -621,7 +633,7 @@ def _ledger_entry_id(
     :param ledger: The open id ledger.
     :param store: The destination store, consulted for already-stored content.
     :param type_to_family: Entry type to its registered family class.
-    :param item: The collected job the output belongs to.
+    :param item: The collected job the output belongs to, or its record.
     :param role: The declared output role, or ``None`` for the job's run.
     :param value: The output value.
     :param original_id: The value's own ``id`` before storing, if any.
@@ -645,7 +657,8 @@ def _ledger_entry_id(
     try:
         key = ledger_key(item, role=role)
     except UnstableIdentityError:
-        coordinate = f"{item.record.workspace_id}:{item.record.job_id}"
+        record = item.record if isinstance(item, CollectedJob) else item
+        coordinate = f"{record.workspace_id}:{record.job_id}"
         if coordinate not in warned_unstable:
             warned_unstable.add(coordinate)
             _LOGGER.warning(
@@ -723,6 +736,89 @@ def _relocate(store: Any, item: CollectedJob, old_url: str, new_url: str | None,
         )
 
 
+def _require_store() -> None:
+    """Refuse storing when *httk-store* or its database dependencies are not installed."""
+
+    try:
+        import httk.store.backend.sql  # noqa: F401  # pyright: ignore[reportMissingImports]
+        from httk.store import EntryIdScheme, SqliteStore  # noqa: F401  # pyright: ignore[reportMissingImports]
+    except ImportError as exc:
+        raise ValueError("--into requires httk-store with its database dependencies") from exc
+
+
+def _open_store(
+    stack: contextlib.ExitStack,
+    target: Path,
+    layout: dict[type, tuple[type, ...]],
+    typed: Mapping[str, type],
+    requested: Sequence[str],
+    *,
+    id_base: str,
+    id_series: str,
+    upgrade: bool,
+) -> Any:
+    """Open the SQLite store at *target* in *layout* on *stack*, applying an additive upgrade only when asked.
+
+    :param stack: The exit stack the open store is entered on.
+    :param target: The store file.
+    :param layout: The entry families and their record order.
+    :param typed: The typed records of the ``records`` family, by property definition.
+    :param requested: The entry types the caller stores, named in a layout refusal.
+    :param id_base: The entry-id namespace base.
+    :param id_series: The entry-id campaign series.
+    :param upgrade: Apply an additive layout upgrade instead of refusing it.
+    :return: The open store.
+    :raises ValueError: If the store's layout is refused, needs an upgrade that
+        *upgrade* does not allow, or holds generic rows of now-typed definitions.
+    """
+
+    from httk.store import EntryIdScheme, SqliteStore  # pyright: ignore[reportMissingImports]
+    from httk.store.backend.sql import StorageLayoutUpgradeRequiredError  # pyright: ignore[reportMissingImports]
+
+    def refusal(exc: Any) -> ValueError:
+        """Turn a layout refusal into the collect error its remedy calls for."""
+        if exc.remedy == "upgrade":
+            additions = _layout_additions(exc.diff) or exc.hint or "an additive layout change"
+            return ValueError(
+                f"{target} needs an additive layout upgrade ({additions}); rerun with --upgrade "
+                "(upgrade=True), keeping a backup of the store first"
+            )
+        if exc.remedy in ("reopen", "retry"):
+            return ValueError(f"{target}: {exc}")
+        if _predates_typed_records(exc.diff):
+            return ValueError(_PREDATES_TYPED.format(target=target))
+        needs = ", ".join(requested) or "no entry types"
+        return ValueError(
+            f"{target} was created for a different set of entry types than this sweep needs ({needs}); "
+            f"its stored layout differs in {json.dumps(exc.diff, sort_keys=True, default=str)}. "
+            "Collect into a new store file."
+        )
+
+    try:
+        store = stack.enter_context(
+            SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series))
+        )
+    except StorageLayoutUpgradeRequiredError as exc:
+        if exc.remedy != "upgrade" or not upgrade:
+            if exc.remedy == "upgrade" and (ids := _holds_generic_typed(target, typed)):
+                raise ValueError(_REBUILD_TYPED.format(target=target, ids=", ".join(ids))) from exc
+            raise refusal(exc) from exc
+        # Checked before anything is upgraded: generic rows of a definition that is
+        # now typed cannot move to the typed backing under their ids, so appending
+        # the typed record would leave them stranded. Only a rebuild fixes that.
+        if ids := _holds_generic_typed(target, typed):
+            raise ValueError(_REBUILD_TYPED.format(target=target, ids=", ".join(ids))) from exc
+        try:
+            store = stack.enter_context(
+                SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series), upgrade=True)
+            )
+        except StorageLayoutUpgradeRequiredError as again:
+            raise refusal(again) from again
+    if ids := _stored_generic_typed(store, typed):
+        raise ValueError(_REBUILD_TYPED.format(target=target, ids=", ".join(ids)))
+    return store
+
+
 def store_collected(
     items: list[CollectedJob],
     path: str,
@@ -790,13 +886,9 @@ def store_collected(
         needs an additive upgrade and *upgrade* is false.
     """
 
-    try:
-        from httk.store import EntryIdScheme, SqliteStore  # pyright: ignore[reportMissingImports]
-        from httk.store.backend.schema import SchemaError  # pyright: ignore[reportMissingImports]
-        from httk.store.backend.sql import StorageLayoutUpgradeRequiredError  # pyright: ignore[reportMissingImports]
-        from httk.store.store_common import EntryMetadataConflictError  # pyright: ignore[reportMissingImports]
-    except ImportError as exc:
-        raise ValueError("--into requires httk-store with its database dependencies") from exc
+    _require_store()
+    from httk.store.backend.schema import SchemaError  # pyright: ignore[reportMissingImports]
+    from httk.store.store_common import EntryMetadataConflictError  # pyright: ignore[reportMissingImports]
 
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -818,7 +910,9 @@ def store_collected(
     reports = [{**_collected_mapping(item), "revised": False} for item in items]
     with contextlib.ExitStack() as stack:
         ledger = (
-            _open_id_ledger(ledger_path, ledger_keys, id_base, id_series, items) if ledger_path is not None else None
+            _open_id_ledger(ledger_path, ledger_keys, id_base, id_series, _sweep_ledger_families(items))
+            if ledger_path is not None
+            else None
         )
         if ledger is not None:
             stack.enter_context(ledger)
@@ -836,47 +930,9 @@ def store_collected(
         )
         typed = _typed_record_classes(records_family)
 
-        def refusal(exc: Any) -> ValueError:
-            """Turn a layout refusal into the collect error its remedy calls for."""
-            if exc.remedy == "upgrade":
-                additions = _layout_additions(exc.diff) or exc.hint or "an additive layout change"
-                return ValueError(
-                    f"{target} needs an additive layout upgrade ({additions}); rerun with --upgrade "
-                    "(upgrade=True), keeping a backup of the store first"
-                )
-            if exc.remedy in ("reopen", "retry"):
-                return ValueError(f"{target}: {exc}")
-            if _predates_typed_records(exc.diff):
-                return ValueError(_PREDATES_TYPED.format(target=target))
-            needs = ", ".join(requested) or "no entry types"
-            return ValueError(
-                f"{target} was created for a different set of entry types than this sweep needs ({needs}); "
-                f"its stored layout differs in {json.dumps(exc.diff, sort_keys=True, default=str)}. "
-                "Collect into a new store file."
-            )
-
-        try:
-            store = stack.enter_context(
-                SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series))
-            )
-        except StorageLayoutUpgradeRequiredError as exc:
-            if exc.remedy != "upgrade" or not upgrade:
-                if exc.remedy == "upgrade" and (ids := _holds_generic_typed(target, typed)):
-                    raise ValueError(_REBUILD_TYPED.format(target=target, ids=", ".join(ids))) from exc
-                raise refusal(exc) from exc
-            # Checked before anything is upgraded: generic rows of a definition that is
-            # now typed cannot move to the typed backing under their ids, so appending
-            # the typed record would leave them stranded. Only a rebuild fixes that.
-            if ids := _holds_generic_typed(target, typed):
-                raise ValueError(_REBUILD_TYPED.format(target=target, ids=", ".join(ids))) from exc
-            try:
-                store = stack.enter_context(
-                    SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series), upgrade=True)
-                )
-            except StorageLayoutUpgradeRequiredError as again:
-                raise refusal(again) from again
-        if ids := _stored_generic_typed(store, typed):
-            raise ValueError(_REBUILD_TYPED.format(target=target, ids=", ".join(ids)))
+        store = _open_store(
+            stack, target, layout, typed, requested, id_base=id_base, id_series=id_series, upgrade=upgrade
+        )
         # A dataclass entry is stored only as a record of its family; anything else
         # would land in a private table no provider serves.
         members = {record for records in layout.values() for record in records}
@@ -1155,4 +1211,214 @@ def store_collected(
                 report["revised"] = bool(report["revised"]) or revised
             except Exception as exc:
                 report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
+    return reports
+
+
+class _StorageRefusal(ValueError):
+    """A postprocess execution the store refuses, reported with exactly this message."""
+
+
+class _LedgerUnavailable(ValueError):
+    """The id ledger cannot be opened; it aborts the whole call, not one item."""
+
+
+def _postprocess_mapping(item: CollectedPostprocess) -> dict[str, object]:
+    """Return the report mapping of one collected postprocess execution, before any storage."""
+
+    mapping: dict[str, object] = {
+        "format": "httk-workflow-postprocess-collected",
+        "format_version": 1,
+        "job": f"{item.record.workspace_id}:{item.record.job_id}",
+        "job_key": item.record.job_key,
+        "script": item.script,
+        "workflow_id": item.workflow_id,
+        "files": [
+            {"path": path, "url": file.url, "size": file.size, "sha256": file.sha256} for path, file in item.files
+        ],
+    }
+    if item.skipped is not None:
+        mapping["skipped"] = item.skipped
+    if item.error is not None:
+        mapping["error"] = item.error
+    return mapping
+
+
+def store_postprocess(
+    items: Iterable[CollectedPostprocess],
+    path: str,
+    *,
+    id_base: str,
+    id_series: str = "1",
+    ledger_path: str | None = None,
+    ledger_keys: Sequence[tuple[str, bytes]] = (),
+    upgrade: bool = False,
+) -> list[dict[str, object]]:
+    """Store each collected postprocess execution as a run of an existing SQLite store.
+
+    The store must already hold the run of every job (``httk collect --into``).
+    The postprocess run's inputs are that job run's output edges plus one
+    ``job`` edge to the job run itself (labeled by the job run's source id when
+    an output already takes the label ``job``); its outputs are the collected
+    files, labeled by their output-relative paths. Files are store-minted and
+    deduplicated by content, so identical bytes share the first stored row and
+    its URL. The run's source id is ``<workspace id>:<job id>:postprocess:<script>``:
+    an unchanged execution stores nothing, a changed one becomes a revision of
+    the same run id, and a new one takes its id from the id ledger, keyed by
+    ``ledger_key(record, role="postprocess:<script>")``, or from the store. The
+    ledger is opened only when a new run needs an id (created, when it does not
+    exist, with a base for every family of the store). Content equal to an earlier, superseded
+    revision of the run is a storage error: the store cannot make an earlier
+    revision current again. The store keeps its persisted layout plus the
+    ``files`` and ``runs`` families.
+
+    Each report is the item's mapping plus ``"stored"`` (``{"run", "files"}``,
+    or ``None``), ``"unchanged"`` and ``"revised"``, and ``"storage_error"``
+    when the execution could not be stored. Items carrying ``skipped`` or
+    ``error`` are reported and not stored.
+
+    :param items: The collected postprocess executions to store.
+    :param path: The SQLite store file path.
+    :param id_base: The entry-id namespace base.
+    :param id_series: The entry-id campaign series.
+    :param ledger_path: An id-ledger database to allocate stable run ids
+        through, or ``None`` to let the store mint ids directly.
+    :param ledger_keys: The signing keys each appended ledger segment is signed with.
+    :param upgrade: Apply an additive layout upgrade the store needs instead of
+        refusing. Keep a backup of the store first.
+    :return: One report mapping per item.
+    :raises ValueError: If *httk-store* is unavailable, the store does not
+        exist, or its layout is refused.
+    """
+
+    _require_store()
+    target = Path(path).expanduser()
+    if not target.is_file():
+        raise ValueError(f"{target} does not exist: collect the jobs into this store first (httk collect --into)")
+    items = list(items)
+    try:
+        layout, _failures = _storage_layout([], _persisted_record_order(target), extra_types=("files",))
+    except (ImportError, ModuleNotFoundError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{target} cannot resolve its stored entry layout: {exc}. Restore the missing entry registration and "
+            "package, or collect into a new store file."
+        ) from exc
+    type_to_family: dict[str, type] = {
+        str(getattr(family, "type", "")): family for family in layout if getattr(family, "type", None)
+    }
+    records_family = next(
+        (records for family, records in layout.items() if family is type_to_family.get("records")), ()
+    )
+    typed = _typed_record_classes(records_family)
+    reports: list[dict[str, object]] = [
+        {**_postprocess_mapping(item), "stored": None, "unchanged": False, "revised": False} for item in items
+    ]
+    with contextlib.ExitStack() as stack:
+        ledger: Any = None
+
+        def id_ledger() -> Any:
+            """Open the id ledger on first use, so a sweep storing no new run never creates one."""
+            nonlocal ledger
+            if ledger is None and ledger_path is not None:
+                # A ledger created here gets a base for every family of the store, so the job
+                # collects that later share it allocate ledger ids rather than falling back.
+                try:
+                    ledger = _open_id_ledger(ledger_path, ledger_keys, id_base, id_series, sorted(type_to_family))
+                except Exception as exc:
+                    raise _LedgerUnavailable(str(exc)) from exc
+                if ledger is not None:
+                    stack.enter_context(ledger)
+            return ledger
+
+        store = _open_store(
+            stack, target, layout, typed, ("files", "runs"), id_base=id_base, id_series=id_series, upgrade=upgrade
+        )
+        for item, report in zip(items, reports):
+            if item.skipped is not None or item.error is not None:
+                continue
+            record = item.record
+            job = f"{record.workspace_id}:{record.job_id}"
+            try:
+                with store.transaction():
+                    job_run = _latest_stored_run(store, job)
+                    if job_run is None or job_run.id is None:
+                        raise _StorageRefusal(
+                            f"job {job} has no run in this store (not collected, or collected with --no-bare-runs)"
+                        )
+                    labels = {edge.label for edge in job_run.outputs}
+                    job_label = "job" if "job" not in labels else job_run.source_id or job
+                    file_ids: list[str] = []
+                    for _path, file in item.files:
+                        stored_id = getattr(store.fetch(FileRecord, store.save(file)), "id", None)
+                        if not isinstance(stored_id, str):
+                            raise ValueError("stored file has no string entry id")
+                        file_ids.append(stored_id)
+                    run = Run(
+                        workflow_declaration_uri=job_run.workflow_declaration_uri,
+                        workflow_definition_uri=job_run.workflow_definition_uri,
+                        inputs=(*job_run.outputs, RunEdge(job_label, "runs", job_run.id)),
+                        outputs=tuple(
+                            RunEdge(relative, "files", file_id)
+                            for (relative, _file), file_id in zip(item.files, file_ids)
+                        ),
+                        source_id=f"{job}:postprocess:{item.script}",
+                        name=f"{item.script} ({job_run.name or record.job_key})",
+                        started_at=item.started_at,
+                        finished_at=item.finished_at,
+                        last_modified=item.finished_at,
+                    )
+                    predecessor = _latest_stored_run(store, cast(str, run.source_id))
+                    if predecessor is not None:
+                        run = replace(run, id=predecessor.id)
+                        if content_id(predecessor) == content_id(run):
+                            # Equal content: the stored run stands; its metadata is never rewritten.
+                            report["unchanged"] = True
+                            report["stored"] = {"run": predecessor.id, "files": file_ids}
+                            continue
+                        before = store.sid_of(predecessor)
+                        try:
+                            same = store.fetch_entry(type_to_family["runs"], content_id(run), eager=False)
+                        except Exception:
+                            same = None  # the normal miss: no stored row has this content
+                        if same is not None and same.id == predecessor.id and store.sid_of(same) != before:
+                            raise _StorageRefusal(
+                                f"postprocess output equals an earlier revision ({same.immutable_id}) of run "
+                                f"{predecessor.id}; the store cannot make an earlier revision current again"
+                            )
+                        run_sid = store.replace(predecessor, run)
+                        if before is None or run_sid <= before:  # a no-op replace stored nothing new
+                            raise _StorageRefusal(f"run {predecessor.id} was not revised: the store kept an older row")
+                        report["revised"] = True
+                    else:
+                        ledger = id_ledger()
+                        chosen = (
+                            _ledger_entry_id(
+                                ledger,
+                                store,
+                                type_to_family,
+                                record,
+                                f"postprocess:{item.script}",
+                                run,
+                                None,
+                                {},
+                                set(),
+                                set(),
+                            )
+                            if ledger is not None
+                            else None
+                        )
+                        run_sid = store.save(run if chosen is None else replace(run, id=chosen))
+                    run_id = getattr(store.fetch(Run, run_sid), "id", None)
+                    if not isinstance(run_id, str):
+                        raise ValueError("stored run has no string entry id")
+                report["stored"] = {"run": run_id, "files": file_ids}
+            except _LedgerUnavailable:
+                raise
+            except _StorageRefusal as exc:
+                report["unchanged"] = report["revised"] = False
+                report["stored"] = None
+                report["storage_error"] = str(exc)
+            except Exception as exc:
+                report["unchanged"] = report["revised"] = False
+                report["stored"] = None
+                report["storage_error"] = f"could not store postprocess {item.script} of job {job}: {exc}"
     return reports

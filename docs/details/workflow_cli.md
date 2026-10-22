@@ -762,6 +762,16 @@ additive layout change. Every form ends with one
 job was degraded, failed to store, or had an unreadable `job.json`. See
 {doc}`/details/collecting`.
 
+`--postprocess SCRIPT` (workspace only) collects the declared output files of
+that postprocess script's last run on each selected job instead of the job
+itself: `httk collect WS --postprocess NAME [--job JOB]... [--state S]
+[--placement P] [--into STORE --id-base BASE [--upgrade]]`. The job must
+already be collected into the store. It is refused together with `--raw`,
+`--allow-job-collector`, `--no-bare-runs`, `--fail-fast`, `--batch-size`,
+`--degraded`, tree-only options and tree targets, and ends with one
+`httk-workflow-postprocess-collect-summary` line. See
+{doc}`/details/collecting`.
+
 ### `postprocess`: run a curated script
 
 | Command | What it does | Notable options |
@@ -781,7 +791,10 @@ one invocation; each job's directory below it is
 `--state` or `--placement`. With `--json`, each result is one
 `httk-workflow-postprocess` object (version 2); without it, one
 `job_key<TAB>script<TAB>returncode<TAB>output_dir` line. The command exits `0`
-only when every selected script ran and returned `0`.
+only when every selected script ran and returned `0`. Every completed run also
+leaves a receipt `.httk-postprocess.json` in its output directory (script,
+workflow, job, times, exit status and the declared `outputs`), which
+`httk collect --postprocess` reads.
 
 ### `v1 collect`: harvesting finished *httk* v1 trees
 

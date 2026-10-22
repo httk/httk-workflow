@@ -11,8 +11,9 @@ from ..calculations import DirectoryClaim, claims, collect_tree
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, CollectedJob, collect, job_records
 from ..errors import ResolutionMiss, SealError
 from ..introspection import selector_is_path
+from ..postprocessing import collect_postprocess
 from ..seals import default_workspace_keys, tree_ledger_keys
-from ..storing import _collected_mapping, store_collected
+from ..storing import _collected_mapping, _postprocess_mapping, store_collected, store_postprocess
 from ..workspace import Workspace
 from ._common import _LOGGER, _leaf, _local_root
 
@@ -26,6 +27,16 @@ _WORKSPACE_ONLY = (
     ("job", "--job"),
     ("raw", "--raw"),
     ("allow_job_collector", "--allow-job-collector"),
+)
+#: Options that do not apply to ``--postprocess`` collection, with their flags.
+_NOT_POSTPROCESS = (
+    ("raw", "--raw"),
+    ("allow_job_collector", "--allow-job-collector"),
+    ("no_bare_runs", "--no-bare-runs"),
+    ("fail_fast", "--fail-fast"),
+    ("batch_size", "--batch-size"),
+    ("degraded", "--degraded"),
+    *_TREE_ONLY,
 )
 
 
@@ -127,6 +138,60 @@ def _ledger_settings(
     return arguments.id_ledger or f"{arguments.into}.ids.sqlite", keys
 
 
+def _collect_postprocess(arguments: argparse.Namespace, workspace: Workspace, jobs: Sequence[str] | None) -> int:
+    """Print (or store, with ``--into``) the declared outputs of one postprocess script per job, then a summary.
+
+    The exit code is ``1`` when any job's outputs could not be collected or
+    stored, or a ``job.json`` was unreadable, and ``0`` otherwise; skipped jobs
+    (never postprocessed, a failed script, no declared outputs or no matching
+    file) do not fail the sweep.
+    """
+
+    unreadable = 0
+
+    def _skip(_job_key: str) -> None:
+        nonlocal unreadable
+        unreadable += 1
+
+    items = collect_postprocess(
+        workspace,
+        arguments.postprocess,
+        states=arguments.state or DEFAULT_COLLECT_STATES,
+        placement=arguments.placement,
+        jobs=jobs,
+        on_skipped=_skip,
+    )
+    summary: dict[str, object] = {"format": "httk-workflow-postprocess-collect-summary", "format_version": 1}
+    if arguments.into is not None:
+        ledger_path, ledger_keys = _ledger_settings(arguments, lambda: default_workspace_keys(workspace).keys)
+        reports = store_postprocess(
+            items,
+            arguments.into,
+            id_base=arguments.id_base,
+            id_series=arguments.id_series,
+            ledger_path=ledger_path,
+            ledger_keys=ledger_keys,
+            upgrade=arguments.upgrade,
+        )
+    else:
+        reports = [_postprocess_mapping(item) for item in items]
+    for report in reports:
+        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+    # The stored, revised and unchanged counts are disjoint; stored counts runs stored for the first time.
+    errors = sum("error" in report or "storage_error" in report for report in reports)
+    if arguments.into is not None:
+        summary["stored"] = sum(
+            report["stored"] is not None and not report["unchanged"] and not report["revised"] for report in reports
+        )
+        summary["revised"] = sum(bool(report["revised"]) for report in reports)
+        summary["unchanged"] = sum(bool(report["unchanged"]) for report in reports)
+    else:
+        summary["collected"] = sum("skipped" not in report and "error" not in report for report in reports)
+    summary.update(skipped=sum("skipped" in report for report in reports), errors=errors, unreadable=unreadable)
+    print(json.dumps(summary, sort_keys=True, separators=(",", ":")))
+    return 1 if errors or unreadable else 0
+
+
 def _collect_target(arguments: argparse.Namespace, context: CLIContext) -> tuple[bool, Path]:
     """Resolve what ``httk collect`` collects: ``(is_tree, path)``.
 
@@ -180,6 +245,12 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Stream collected summaries of a workspace or a calculation tree, or raw job records."""
 
     tree, root = _collect_target(arguments, context)
+    if arguments.postprocess is not None:
+        if tree:
+            raise ValueError("--postprocess only applies to a workspace, not a calculation tree")
+        for name, flag in _NOT_POSTPROCESS:
+            if getattr(arguments, name) not in (None, False):
+                raise ValueError(f"--postprocess cannot be combined with {flag}")
     refused = _WORKSPACE_ONLY if tree else _TREE_ONLY
     for name, flag in refused:
         if getattr(arguments, name):
@@ -244,6 +315,8 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             if arguments.job is None
             else [str(cwd / selector) if selector_is_path(cwd, selector) else selector for selector in arguments.job]
         )
+        if arguments.postprocess is not None:
+            return _collect_postprocess(arguments, workspace, jobs)
         if arguments.raw:
             records = job_records(
                 workspace,
@@ -373,6 +446,14 @@ def build_collect_parser(
         help="print only the degraded per-job lines; the summary still counts the whole sweep",
     )
     parser.add_argument("--raw", action="store_true", help="print raw collect records instead of summaries")
+    parser.add_argument(
+        "--postprocess",
+        metavar="SCRIPT",
+        help=(
+            "collect the declared output files of this postprocess script's last run on each job instead of the "
+            "jobs; with --into, store each run as a provenance run fed by the job's stored run"
+        ),
+    )
     parser.add_argument(
         "--allow-job-collector",
         action="store_true",

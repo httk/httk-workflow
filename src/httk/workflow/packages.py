@@ -31,6 +31,7 @@ from .models import (
     validate_declarations,
     validate_runner_command,
 )
+from .postprocessing import _valid_output_pattern
 from .scaffold import RecognizeSpec, WorkflowProvider, payload_relative, register_workflow
 
 MANIFEST_NAME = "httk_workflow.toml"
@@ -887,10 +888,33 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             script_name = _validate_name(name, "[workflow.postprocess] name", root)
             table = _table(value, f"[workflow.postprocess.{script_name}]", root)
             path = f"[workflow.postprocess.{script_name}]"
-            _unknown(table, {"file", "description"}, path, root)
+            _unknown(table, {"file", "description", "outputs"}, path, root)
             member = _member(root, table.get("file"), f"{path}.file", python=False)
             description_value = _string(table, "description", path, root)
-            postprocess_scripts[script_name] = {"file": member, "description": description_value}
+            declared_outputs = table.get("outputs")
+            if declared_outputs is not None:
+                if (
+                    not isinstance(declared_outputs, list)
+                    or not all(isinstance(pattern, str) and pattern for pattern in declared_outputs)
+                    or len(set(declared_outputs)) != len(declared_outputs)
+                ):
+                    raise _error(root, f"{path}.outputs must be a list of unique nonempty strings")
+                if not declared_outputs:
+                    raise _error(root, f"{path}.outputs must name at least one pattern")
+                for pattern in declared_outputs:
+                    if not _valid_output_pattern(pattern):
+                        raise _error(
+                            root,
+                            f"{path}.outputs entries must be relative POSIX patterns without '\\', control "
+                            "characters, empty, "
+                            f"dot-prefixed ('.', '..', '.name') or partial '**' segments: {pattern!r}",
+                        )
+                declared_outputs = tuple(declared_outputs)
+            postprocess_scripts[script_name] = {
+                "file": member,
+                "description": description_value,
+                "outputs": declared_outputs,
+            }
 
     parameters = _validate_parameters(_table(workflow.get("parameters", {}), "[workflow.parameters]", root), root)
     manifest_environment = _validate_environment(

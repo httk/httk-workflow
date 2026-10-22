@@ -361,7 +361,9 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
         "instantiate": {"present": True, "file": "instantiate.py", "kind": "python", "packaged": False},
         "collect": {"present": True, "file": "collect.py", "kind": "python", "packaged": False},
     }
-    assert directory["postprocess"] == {"report": {"file": "scripts/report.sh", "description": "write a report"}}
+    assert directory["postprocess"] == {
+        "report": {"file": "scripts/report.sh", "description": "write a report", "outputs": None}
+    }
 
     provider = load_workflow_package(package)
     try:
@@ -425,7 +427,9 @@ def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path:
     assert packaged["hooks"]["instantiate"] == {"present": False, "file": None, "kind": None, "packaged": True}
     assert packaged["inputs"]["structure"]["role"] == "initial_structure"
     assert packaged["inputs"]["structure"]["entry_type"] == "structures"
-    assert packaged["postprocess"] == {"report": {"file": "scripts/report", "description": "write a report"}}
+    assert packaged["postprocess"] == {
+        "report": {"file": "scripts/report", "description": "write a report", "outputs": None}
+    }
     assert command(["describe", "test-relax"], context) == 0
     described = capsys.readouterr().out
     assert "report: scripts/report" in described
