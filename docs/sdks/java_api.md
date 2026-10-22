@@ -91,6 +91,7 @@ removed; stderr and stdin remain inherited.
 | `log` | local stderr helper |
 | `put` | `put` |
 | `children`, `child`, `spawn`, `call` | `children`, `child`, `spawn`, `call` |
+| `spawned`, `spawnedChild` | `children --spawned`, `child --spawned` |
 | `advance`, `gather` | `advance`, `gather` |
 | `succeed`, `fail`, `retry`, `pause` | same-named commands |
 | `batch`, `jobPrepare`, `workdirApply` | same-named commands |

@@ -115,7 +115,8 @@ if context["step"] == "only":
     os.rename(temporary, control / "outcome.ready")
 else:
     if context["step"] == "gather":
-        Path("seen.json").write_text(json.dumps([child["placement"] for child in context["children"]]))
+        state = json.loads((Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]) / "state.json").read_text())
+        Path("seen.json").write_text(json.dumps([child["placement"] for child in state["observations"]]))
     publish("succeed")
 """
 

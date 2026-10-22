@@ -205,7 +205,7 @@ def bands(a):
 ```
 
 `a.parent` is a read-only lookup by the parent's recorded placement, as the
-children's paths in `a.children` are located by the manager at launch; a
+children's paths in `a.children` are located when it is first read; a
 confined attempt sees both read-only. Reading in
 place gives up the guarantees of a copy, so it comes with rules:
 
@@ -278,10 +278,9 @@ reruns the spawning step, which creates new children. See
   contain a component that parses as a job key, since job directories never
   nest; see the
   [placement rules](workflow_filesystem_api.md#placement-rules).
-- **Deep trees lower the largest gather.** Each nesting level lengthens every
-  child's entry in a join activation's attempt context, which is limited to
-  100000 bytes: roughly 155 children flat, 120 one level nested with short
-  tags, fewer at each further level. `children.placement=flat` raises it again.
+- **Gather size is bounded only by `state.json`** (100 MiB). Up to about
+  10 000 children per parent stays cheap; beyond that, fan out through
+  intermediate parents.
 - **Order is unspecified.** Listings and collect yield a tree's descendants
   before its root (`.children` sorts before the job directory); do not rely on
   order.

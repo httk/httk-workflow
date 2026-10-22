@@ -10,7 +10,8 @@ from httk.workflow import Workspace, _kernel, _store
 from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
 
 #: One SDK-free runner for parent and children: ``branch`` spawns the children ``parameters.labels`` lists
-#: (label, mode) with a join that names no labels, ``gather`` records its context children, ``run`` is a
+#: (label, mode) with a join that names no labels, ``gather`` records the observations of the join that started
+#: its activation (from its own ``state.json``), ``run`` is a
 #: child that succeeds or declares a failure, and ``only`` declares a retryable failure.
 _RUNNER = """#!/usr/bin/env python3
 import json
@@ -28,7 +29,9 @@ temporary.mkdir()
 outcome = {key: context[key] for key in ("job_id", "activation_id", "attempt_id")}
 outcome.update(format="httk-workflow-outcome", format_version=2)
 if step == "gather":
-    (workdir / "children.json").write_text(json.dumps(context["children"], sort_keys=True))
+    state = json.loads((Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]) / "state.json").read_text())
+    assert state["activation"]["id"] == context["activation_id"] and state["activation"]["reason"] == "join"
+    (workdir / "children.json").write_text(json.dumps(state["observations"], sort_keys=True))
     outcome.update(action="succeed")
 elif step == "run":
     if job["parameters"]["mode"] == "succeed":
@@ -149,7 +152,7 @@ def test_duplicate_spawn_labels_are_a_protocol_error(workspace: Workspace) -> No
     assert "not unique" in str(failure["message"])
 
 
-def test_gather_step_reads_labeled_child_observations_from_its_context(workspace: Workspace) -> None:
+def test_gather_step_reads_labeled_child_observations_from_its_state(workspace: Workspace) -> None:
     job_id = _submit(workspace, labels=(("alpha", "succeed"), ("beta", "fail")))
     run_manager(workspace, timeout=60.0)
 
@@ -161,16 +164,13 @@ def test_gather_step_reads_labeled_child_observations_from_its_context(workspace
 
     succeeded = by_label["alpha"]
     child = find(workspace, str(succeeded["job_id"]))
-    assert succeeded["kind"] == "succeeded"
+    assert succeeded["state"] == "succeeded"
     assert succeeded["failure"] is None
-    # The manager located the child when it launched the gathering attempt.
-    assert succeeded["payload_path"] == child.path.relative_to(workspace.root).as_posix()
-    assert succeeded["workdir_path"] == f"{succeeded['payload_path']}/run"
-    assert succeeded["data_path"] == f"{succeeded['payload_path']}/data"
-    assert (workspace.root / str(succeeded["workdir_path"])).is_dir()
+    assert succeeded["placement"] == "project/children"
+    assert succeeded["job_key"] == child.job_key
 
     failed = by_label["beta"]
-    assert failed["kind"] == "failed"
+    assert failed["state"] == "failed"
     assert failed["failure"]["code"] == "child.broken"
     assert failed["failure"]["message"] == "the child declared a failure"
 

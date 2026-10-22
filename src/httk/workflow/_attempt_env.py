@@ -47,7 +47,6 @@ def attempt_context(
     resources: Mapping[str, int],
     deadline: int | None,
     binding: Mapping[str, Any] | None,
-    children: list[dict[str, object]],
 ) -> dict[str, object]:
     """Return the attempt context document a runner reads from ``HTTK_WORKFLOW_CONTEXT``.
 
@@ -71,7 +70,6 @@ def attempt_context(
     :param resources: The attempt's resource reservation.
     :param deadline: The epoch second the attempt must finish by, or ``None``.
     :param binding: The context binding, or ``None`` for an attempt without a placement.
-    :param children: The labeled observations of the activation's join.
     :return: The context mapping.
     """
 
@@ -106,9 +104,6 @@ def attempt_context(
         "resources": dict(resources),
         "deadline": deadline,
         **({} if binding is None else {"binding": binding}),
-        # The enriched, labeled observations of this activation's join, or an
-        # empty array when the activation follows no join.
-        "children": children,
     }
 
 

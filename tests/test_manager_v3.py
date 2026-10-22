@@ -32,10 +32,10 @@ job = json.loads((pathlib.Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]) / "job.json"
 step = context["step"]
 behavior = job["parameters"]["script"][step]
 record = {key: context[key] for key in ("step", "attempt_ordinal", "is_restart", "attempt_reason")}
-workspace = pathlib.Path(os.environ["HTTK_WORKFLOW_WORKSPACE_DIR"])
+from httk.workflow import Attempt
 record["children"] = sorted(
-    (child["label"], child["kind"], (workspace / child["payload_path"] / "job.json").is_file())
-    for child in context["children"]
+    (child.label, child.kind, child.payload is not None and (child.payload / "job.json").is_file())
+    for child in Attempt.initialize().children
 )
 with open("attempts.jsonl", "a") as stream:
     stream.write(json.dumps(record) + "\\n")

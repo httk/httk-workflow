@@ -408,6 +408,21 @@ public final class HttkWorkflow {
             return read("child", label, field);
         }
 
+        /** Every child this job has published, across activations, as tab-separated rows (label, current state or missing, job key, workdir, data). */
+        public Optional<String> spawned() {
+            return read("children", "--spawned");
+        }
+
+        /** As {@link #spawned()}; {@code selection} as for children. */
+        public Optional<String> spawned(String selection) {
+            return read("children", "--spawned", selection);
+        }
+
+        /** One field of the most recently published child with this label. */
+        public Optional<String> spawnedChild(String label, String field) {
+            return read("child", "--spawned", label, field);
+        }
+
         public int advance(String nextStep, String... args) {
             return commandWithTail("advance", nextStep, args);
         }

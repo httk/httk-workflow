@@ -117,7 +117,6 @@ def _fabricate(tmp_path: Path, *, step: str, declarations: dict[str, Any] | None
             "step": step,
             "activation_id": str(uuid.uuid4()),
             "attempt_id": str(uuid.uuid4()),
-            "children": [],
         }
     )
     return {

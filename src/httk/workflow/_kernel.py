@@ -1492,20 +1492,22 @@ def locate_many(
     placements: Sequence[PurePosixPath],
     settle: bool,
     cache: ListingCache | None = None,
+    include_owned: bool = True,
 ) -> dict[str, JobRef]:
-    """Find many jobs with one listing pass, settled once for all misses (owned jobs included).
+    """Find many jobs with one listing pass, settled once for all misses.
 
     :param workspace: The workspace.
     :param job_ids: The job UUIDs.
     :param placements: The placements to list in each unowned state.
     :param settle: Repeat the misses across one visibility deadline.
     :param cache: Listings shared by one pass.
+    :param include_owned: Also list each ``owned/<owner-id>/``.
     :return: The references found, by job UUID.
     """
 
     wanted = {canonical_uuid(job_id, "job_id") for job_id in job_ids}
     normalized = sorted({normalize_placement(item) for item in placements}, key=lambda item: item.parts)
-    return _settled(workspace, wanted, normalized, include_owned=True, settle=settle, cache=cache)
+    return _settled(workspace, wanted, normalized, include_owned=include_owned, settle=settle, cache=cache)
 
 
 def submit(

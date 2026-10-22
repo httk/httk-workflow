@@ -90,6 +90,7 @@ read default means the bridge's absent convention applies.
 | `state_get`, `state_set`, `state_delete`, `state_merge` | same-named methods | same-named bridge functions |
 | `declaration`, `declare` | same-named methods | same-named bridge functions |
 | `children`, `child`, `spawn`, `call` | same-named methods | same-named bridge functions |
+| `spawned`, `spawned_child` | same-named methods | `children --spawned`, `child --spawned` |
 | `runlog_note`, `runlog_headline`, `runlog_append` | `log.append` | same-named bridge functions |
 | `log` | logging | `httk_workflow_log` |
 | `put` | same-named method | same-named bridge function |

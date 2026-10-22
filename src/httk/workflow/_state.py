@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Self
+from typing import Any, NoReturn, Self
 
 from httk.workflow import _fs
 from httk.workflow.errors import FormatError, WorkflowError
@@ -38,7 +38,7 @@ __all__ = [
 STATE_FORMAT = "httk-workflow-state"
 STATE_FORMAT_VERSION = 1
 #: The largest accepted ``state.json``, in encoded bytes.
-MAX_STATE_BYTES = 1 << 20
+MAX_STATE_BYTES = 100 << 20
 #: The six states a job directory can rest in outside ``owned/``.
 UNOWNED_STATES = ("ready", "waiting", "paused", "failed", "succeeded", "cancelled")
 TERMINAL_STATES = ("succeeded", "failed", "cancelled")
@@ -256,13 +256,11 @@ class StateDoc:
 
         :param value: The decoded document.
         :return: The frozen document.
-        :raises httk.workflow.errors.FormatError: If the document is malformed or too large.
+        :raises httk.workflow.errors.FormatError: If the document is malformed.
         """
 
         if not isinstance(value, Mapping):
             raise FormatError("state.json must be an object")
-        if len(_encode(value)) > MAX_STATE_BYTES:
-            raise FormatError(f"state.json is larger than {MAX_STATE_BYTES} bytes")
         expected = {"format", "format_version"} | {field.name for field in dataclasses.fields(cls)}
         if not expected - _OPTIONAL_MEMBERS <= set(value) <= expected:
             raise FormatError(f"state.json members differ: {sorted((set(value) ^ expected) - _OPTIONAL_MEMBERS)}")
@@ -492,20 +490,26 @@ def encode_state(doc: StateDoc) -> bytes:
     return data
 
 
+def _refuse_constant(name: str) -> NoReturn:
+    raise ValueError(f"{name} is not allowed")
+
+
 def decode_state(data: bytes) -> StateDoc:
     """Decode and validate the bytes of a ``state.json``.
 
     :param data: The file content.
     :return: The document.
-    :raises httk.workflow.errors.FormatError: If the content is not a valid document.
+    :raises httk.workflow.errors.FormatError: If the content is not a valid document, is too large, or is nested too deeply.
     """
 
     if len(data) > MAX_STATE_BYTES:
         raise FormatError(f"state.json is larger than {MAX_STATE_BYTES} bytes")
     try:
-        value = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        value = json.loads(data.decode("utf-8"), parse_constant=_refuse_constant)
+    except ValueError as exc:
         raise FormatError(f"state.json is not JSON: {exc}") from exc
+    except RecursionError as exc:
+        raise FormatError("state.json is nested too deeply") from exc
     return StateDoc.from_mapping(value)
 
 
@@ -547,7 +551,7 @@ def salvage_state(path: Path) -> dict[str, Any]:
     try:
         data = _fs.read_bounded(_fs.loc(path), MAX_STATE_BYTES, nonblock=True)
         value = None if data is None else json.loads(data)
-    except (OSError, ValueError, WorkflowError):
+    except (OSError, ValueError, RecursionError, WorkflowError):
         return {}
     if not isinstance(value, dict):
         return {}

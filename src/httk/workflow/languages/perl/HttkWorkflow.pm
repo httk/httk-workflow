@@ -289,6 +289,16 @@ sub children {
     return $self->_read('children', $selection);
 }
 sub child { my ($self, $label, $field) = @_; return $self->_read('child', $label, $field); }
+# Every child this job has published, across activations, as tab-separated rows
+# (label, current state or `missing`, job key, workdir, data); selection as for children.
+sub spawned {
+    my ($self, $selection) = @_;
+    return $self->_read('children', '--spawned') unless defined($selection);
+    $selection = "--$selection" unless $selection =~ /^--/;
+    return $self->_read('children', '--spawned', $selection);
+}
+# One field of the most recently published child with this label.
+sub spawned_child { my ($self, $label, $field) = @_; return $self->_read('child', '--spawned', $label, $field); }
 
 sub advance {
     my ($self, $next_step, $args) = @_;

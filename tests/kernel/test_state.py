@@ -15,6 +15,7 @@ from httk.workflow._state import (
     decode_state,
     encode_state,
     read_state_unowned,
+    salvage_state,
 )
 from httk.workflow.errors import FormatError
 from httk.workflow.models import RetryPolicy, validate_budget_override
@@ -162,7 +163,7 @@ def test_non_json_values_are_refused() -> None:
         StateDoc.from_mapping(mapping)
     mapping["resources"] = {"x": float("nan")}
     with pytest.raises(FormatError):
-        StateDoc.from_mapping(mapping)
+        encode_state(StateDoc.from_mapping(mapping))
     with pytest.raises(FormatError):
         decode_state(b"[1, 2]")
     with pytest.raises(FormatError):
@@ -184,12 +185,31 @@ def test_document_size_is_bounded() -> None:
     mapping = _full_mapping()
     mapping["resources"] = {"blob": "x" * MAX_STATE_BYTES}
     with pytest.raises(FormatError, match="larger"):
-        StateDoc.from_mapping(mapping)
+        encode_state(StateDoc.from_mapping(mapping))
     with pytest.raises(FormatError, match="larger"):
         decode_state(b" " * (MAX_STATE_BYTES + 1))
     # Just under the bound passes.
     mapping["resources"] = {"blob": "x" * (MAX_STATE_BYTES - 4096)}
     assert len(encode_state(StateDoc.from_mapping(mapping))) <= MAX_STATE_BYTES
+
+
+def test_deep_nesting_is_a_format_error() -> None:
+    with pytest.raises(FormatError, match="nested too deeply"):
+        decode_state(b"[" * 200_000)
+
+
+def test_nan_literals_are_refused_on_decode() -> None:
+    mapping = _full_mapping()
+    mapping["resources"] = {"x": 0}
+    data = encode_state(StateDoc.from_mapping(mapping))
+    for literal in (b"NaN", b"Infinity", b"-Infinity"):
+        with pytest.raises(FormatError):
+            decode_state(data.replace(b'"x":0', b'"x":' + literal))
+
+
+def test_salvage_of_deeply_nested_file_is_empty(tmp_path: Path) -> None:
+    (tmp_path / "state.json").write_bytes(b"[" * 200_000)
+    assert salvage_state(tmp_path / "state.json") == {}
 
 
 def test_with_release_records_release_unions_requests_and_clears_commit() -> None:

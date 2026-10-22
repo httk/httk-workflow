@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from httk.workflow import Workspace, _kernel, _store, scaffold
-from httk.workflow._state import StateDoc, read_state_unowned
+from httk.workflow._state import StateDoc, encode_state, read_state_unowned
 from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
 
 BASH_API = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "languages" / "bash" / "httk-workflow.sh"
@@ -156,7 +156,8 @@ def fabricate(
     :param parameters: The job parameters.
     :param environment: The job's ``environment`` member.
     :param settings: The context settings.
-    :param children: The context ``children`` observations.
+    :param children: The join observations (from :func:`child_observation`); recorded in the job's
+        ``state.json`` under a ``join`` activation, each child given its directory in the workspace.
     :param parent: Give the job a parent job, waiting in the workspace.
     :param calls: Install *workflow* declaring these calls, alias to callee package directory.
     :return: The attempt.
@@ -195,6 +196,14 @@ def fabricate(
     control.mkdir(parents=True)
     workdir = payload / "run"
     workdir.mkdir()
+    activation_id = str(uuid.uuid4())
+    members = ("label", "job_id", "job_key", "placement", "state", "failure")
+    observations = [{**{name: item[name] for name in members}, "token": "aaaaaaaaaaaaaaaa"} for item in children]
+    for item in children:
+        (workspace.root / str(item["payload_path"])).mkdir(parents=True)
+    activation = {"id": activation_id, "step": step, "ordinal": 1, "reason": "join" if children else "initial"}
+    doc = StateDoc.empty(job.id).updated(activation=activation, observations=observations)
+    (payload / "state.json").write_bytes(encode_state(doc))
     context = {
         "format": "httk-workflow-attempt-context",
         "format_version": 2,
@@ -204,9 +213,8 @@ def fabricate(
         "placement": "project/fabricated",
         "payload": str(payload),
         "step": step,
-        "activation_id": str(uuid.uuid4()),
+        "activation_id": activation_id,
         "attempt_id": control.name,
-        "children": list(children),
         "settings": dict(settings or {}),
         "durable": False,
         "deadline": None,
@@ -231,7 +239,7 @@ def fabricate(
 
 
 def child_observation(label: str, kind: str, *, failure: Mapping[str, object] | None = None) -> dict[str, object]:
-    """One join observation as the manager writes it into the context, located at ``project/children``."""
+    """One join observation with the directory :func:`fabricate` gives the child at ``project/children``."""
 
     job_key = f"{label}--{uuid.uuid4()}"
     path = f"jobs/{kind}/project/children/{job_key}~p500~aaaaaaaaaaaaaaaa"

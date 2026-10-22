@@ -68,7 +68,7 @@ from .runtime_utils import (
     evaluate_expression,
     render_template,
 )
-from .sdk import _IMPLICIT_TRANSACTION, RUNNER_ERROR_FORMAT, Attempt, ChildSpec, Runner
+from .sdk import _IMPLICIT_TRANSACTION, RUNNER_ERROR_FORMAT, Attempt, ChildrenView, ChildSpec, Runner
 from .supervision import CheckerSpec, ProcessSupervisor
 
 ABSENT = BRIDGE_ABSENT
@@ -213,7 +213,9 @@ def _parser() -> argparse.ArgumentParser:
     selection.add_argument("--succeeded", dest="selection", action="store_const", const="succeeded")
     selection.add_argument("--failed", dest="selection", action="store_const", const="failed")
     children.set_defaults(selection="all")
+    children.add_argument("--spawned", action="store_true")
     child = commands.add_parser("child")
+    child.add_argument("--spawned", action="store_true")
     child.add_argument("label")
     child.add_argument("field", choices=_CHILD_FIELDS)
 
@@ -538,9 +540,9 @@ def _spawn(arguments: argparse.Namespace) -> None:
 
 
 def _children(arguments: argparse.Namespace) -> None:
-    """Print one tab-separated row per observed child."""
+    """Print one tab-separated row per observed child, or per published child with ``--spawned``."""
 
-    view = _attempt().children
+    view = _view(arguments)
     selected = {"all": view.all, "succeeded": view.succeeded, "failed": view.failed}[arguments.selection]
     for child in selected:
         print(
@@ -556,8 +558,13 @@ def _children(arguments: argparse.Namespace) -> None:
         )
 
 
+def _view(arguments: argparse.Namespace) -> ChildrenView:
+    attempt = _attempt()
+    return attempt.spawned if arguments.spawned else attempt.children
+
+
 def _child(arguments: argparse.Namespace) -> None:
-    view = _attempt().children
+    view = _view(arguments)
     child = view.get(arguments.label)
     if child is None:
         raise _Absent(

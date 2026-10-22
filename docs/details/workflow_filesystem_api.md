@@ -664,7 +664,7 @@ read. The first reconcile of a job (its first activation) pins it in
 job's owner, through `write_file`, and is absent until an owner first writes it
 (a published child and an adopted exchange job carry one without an
 activation). It is strict except that an absent `job_digest` or `budget_override` reads as
-`null`, and at most 1 MiB.
+`null`, and at most 100 MiB.
 
 | Member | Value | Meaning |
 | --- | --- | --- |
@@ -682,7 +682,7 @@ activation). It is strict except that an absent `job_digest` or `budget_override
 | `failure_history` | list, at most 16 | The last failures. |
 | `join` | object or `null` | The pending join (§Waiting and joins). Kept when the parent fails at its wait with `dependency_failure` (impossible without `on_impossible`, or an unresolvable child) or `budget_exhausted` (the advance would pass the effective `maximum_activations`), so the wait can be reopened. |
 | `observations` | list | The children as the decided join saw them. |
-| `children` | list | Published children: `{job_id, job_key, label, placement, spawn_id, attempt_id}`; for an adopted exchange tree `{job_id, job_key, placement}`. |
+| `children` | list | Published children: `{job_id, job_key, label, placement, spawn_id, attempt_id, activation_id}`; for an adopted exchange tree `{job_id, job_key, placement}`. |
 | `commit` | object or `null` | The commit intent (§The commit). |
 | `release_to` | `{state, priority}` or `null` | The release intent (§The release rule). |
 | `applied_requests` | list of request ids | Requests applied by this job's owners whose files may still exist. |

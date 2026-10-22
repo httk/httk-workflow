@@ -46,7 +46,7 @@ from . import _kernel
 from ._data import Transaction
 from ._durations import cap_maxtime
 from ._job import JobDefinition
-from ._state import _thaw, read_state_unowned
+from ._state import StateDoc, _thaw, read_state_unowned
 from ._util import json_bytes, read_json, require_string, validate_inputs, write_json_atomic
 from .errors import FormatError
 from .models import (
@@ -346,14 +346,15 @@ class ChildSpec:
 
 @dataclass(frozen=True)
 class ChildResult:
-    """What one gathering step may know about one child it spawned.
+    """What a step may know about one child its job spawned.
 
-    Every member is derived from authoritative state by the manager before the
-    gathering activation starts: it located each child when it launched this
-    attempt, so reading a child is a pure read of the attempt context and never
-    a scan of the workspace. Paths are absolute, and ``None`` when the manager
-    could not find the child. A child's directory moves when it is claimed, so
-    a path read here is valid while the child stays terminal.
+    Every member is derived from this job's own ``state.json``: the join's
+    observations for :attr:`Attempt.children`, the published children for
+    :attr:`Attempt.spawned`. The children are located in the workspace
+    (read-only, one listing of their placements) when the view is first read.
+    Paths are absolute, and ``None`` when the child was not found. A child's
+    directory moves when it is claimed, so a path read here is valid while the
+    child stays terminal.
     """
 
     label: str | None
@@ -379,27 +380,23 @@ class ChildResult:
 
         return self.kind in {"failed", "cancelled"}
 
-    @classmethod
-    def from_mapping(cls, raw: Mapping[str, object], workspace: Path) -> "ChildResult":
-        label = raw.get("label")
-        failure_raw = raw.get("failure")
 
-        def located(name: str) -> Path | None:
-            value = raw.get(name)
-            return None if not isinstance(value, str) else workspace.joinpath(*PurePosixPath(value).parts)
+def _child_result(raw: Mapping[str, object], kind: str, failure: object, ref: _kernel.JobRef | None) -> ChildResult:
+    """Build one :class:`ChildResult` from a ``state.json`` record and where the child was located."""
 
-        return cls(
-            label=None if label is None else validate_label(label, "child label"),
-            job_id=require_string(raw.get("job_id"), "child job_id"),
-            job_key=require_string(raw.get("job_key"), "child job_key"),
-            kind=require_string(raw.get("kind"), "child kind"),
-            failure=None if not isinstance(failure_raw, Mapping) else validate_failure(failure_raw, "child failure"),
-            placement=parse_placement_text(raw.get("placement"), "child placement"),
-            payload=located("payload_path"),
-            workdir=located("workdir_path"),
-            data=located("data_path"),
-            raw=dict(raw),
-        )
+    label = raw.get("label")
+    return ChildResult(
+        label=None if label is None else validate_label(label, "child label"),
+        job_id=require_string(raw.get("job_id"), "child job_id"),
+        job_key=require_string(raw.get("job_key"), "child job_key"),
+        kind=kind,
+        failure=None if not isinstance(failure, Mapping) else validate_failure(failure, "child failure"),
+        placement=parse_placement_text(raw.get("placement"), "child placement"),
+        payload=None if ref is None else ref.path,
+        workdir=None if ref is None else ref.path / "run",
+        data=None if ref is None else ref.path / "data",
+        raw=raw,
+    )
 
 
 @dataclass(frozen=True)
@@ -433,10 +430,10 @@ class ParentJob:
 
 @dataclass(frozen=True)
 class ChildrenView:
-    """The children observed by the join that started this activation.
+    """A sequence of children: those observed by a join, or every child a job published.
 
-    The view is empty for an activation that follows no join, so a step can read
-    it unconditionally.
+    :attr:`Attempt.children` is empty for an activation that follows no join, so
+    a step can read it unconditionally.
     """
 
     all: tuple[ChildResult, ...] = ()
@@ -462,12 +459,15 @@ class ChildrenView:
     def get(self, label: str, default: ChildResult | None = None) -> ChildResult | None:
         """Return the child spawned under *label*, or *default*.
 
-        :param label: The unique spawn label to find.
+        A label is unique within one attempt; across activations it can be reused, and then the most
+        recently published child under it (the last in the view) is returned.
+
+        :param label: The spawn label to find.
         :param default: The value to return when no child has that label.
         :return: The matching child, or the default value.
         """
 
-        for child in self.all:
+        for child in reversed(self.all):
             if child.label == label:
                 return child
         return default
@@ -610,18 +610,90 @@ class Attempt:
 
     @property
     def children(self) -> ChildrenView:
-        """The children observed by the join that started this activation."""
+        """The children observed by the join that started this activation.
+
+        Read from this job's ``state.json`` observations on first access, and
+        located then; empty when this activation follows no join.
+
+        :raises httk.workflow.errors.FormatError: If this job's ``state.json`` is absent, damaged or
+            names another job, or does not record the join that started this activation.
+        """
 
         if self._children is None:
-            observations = self.context.raw.get("children")
-            if not isinstance(observations, Sequence) or isinstance(observations, (str, bytes)):
-                observations = ()
-            self._children = ChildrenView(
-                tuple(
-                    ChildResult.from_mapping(item, self.workspace) for item in observations if isinstance(item, Mapping)
+            doc = self._own_state()
+            activation = doc.activation
+            if (
+                activation is None
+                or activation.get("id") != self.context.activation_id
+                or activation.get("reason") != "join"
+            ):
+                if self.context.activation_reason == "join":
+                    # An aggregate step must never be handed zero children by a state that is not its join's.
+                    raise FormatError("this job's state.json does not record the join that started this activation")
+                self._children = ChildrenView()
+            else:
+                observations = [cast(dict[str, object], _thaw(item)) for item in doc.observations]
+                refs = self._locate_children(observations)
+                self._children = ChildrenView(
+                    tuple(
+                        _child_result(item, str(item.get("state")), item.get("failure"), refs.get(str(item["job_id"])))
+                        for item in observations
+                    )
                 )
-            )
         return self._children
+
+    @property
+    def spawned(self) -> ChildrenView:
+        """Every child this job published, across all its activations, in publication order.
+
+        A live snapshot, re-read from this job's ``state.json`` and re-located
+        on every access: ``kind`` is the child's current state (``owned`` while a
+        manager holds it), or ``missing`` when it is not found at its placement.
+        ``failure`` is read from a failed or cancelled child's own
+        ``state.json``. ``raw`` is the published entry (with ``activation_id``
+        and ``attempt_id`` when recorded), plus ``from_state`` for an owned child.
+
+        :raises httk.workflow.errors.FormatError: If this job's ``state.json`` is absent, damaged or
+            names another job.
+        """
+
+        entries = [cast(dict[str, object], _thaw(item)) for item in self._own_state().children]
+        refs = self._locate_children(entries)
+        results: list[ChildResult] = []
+        for entry in entries:
+            ref = refs.get(str(entry["job_id"]))
+            failure: object = None
+            if ref is not None and ref.state in {"failed", "cancelled"}:
+                child_state, _damaged = read_state_unowned(ref.path / "state.json")
+                failure = None if child_state is None else _thaw(child_state.failure)
+            raw = entry if ref is None or ref.from_state is None else {**entry, "from_state": ref.from_state}
+            results.append(_child_result(raw, "missing" if ref is None else ref.state, failure, ref))
+        return ChildrenView(tuple(results))
+
+    def _own_state(self) -> StateDoc:
+        """Read this job's own ``state.json`` without owning it, refusing an absent, damaged or foreign one."""
+
+        path = self.payload / "state.json"
+        doc, damaged = read_state_unowned(path)
+        if doc is None:
+            if damaged:
+                raise FormatError(f"this job's state.json is damaged: {path}")
+            raise FormatError("this job's state.json is gone: the job was taken away from this attempt")
+        if doc.job_id != self.context.job_id:
+            raise FormatError(f"this job's state.json names job {doc.job_id}, not {self.context.job_id}")
+        return doc
+
+    def _locate_children(self, records: Sequence[Mapping[str, object]]) -> dict[str, _kernel.JobRef]:
+        """Locate the children *records* name with one read-only listing of their placements (owned included)."""
+
+        if not records:
+            return {}
+        return _kernel.locate_many(
+            self._workspace(),
+            [require_string(item.get("job_id"), "child job_id") for item in records],
+            placements=[parse_placement_text(item.get("placement"), "child placement") for item in records],
+            settle=False,
+        )
 
     @property
     def parent(self) -> ParentJob | None:
@@ -1253,7 +1325,6 @@ class Attempt:
         if on_impossible is not None:
             self._check_step(on_impossible, "on_impossible target")
         rejoin_children: list[dict[str, object]] = []
-        known_labels = ", ".join(self.children.labels) or "none"
         draft = self._draft
         children = () if draft is None else draft.children
         labels: set[str] = set()
@@ -1273,6 +1344,7 @@ class Attempt:
         for label in rejoin:
             observed = self.children.get(label)
             if observed is None:
+                known_labels = ", ".join(self.children.labels) or "none"
                 raise ValueError(f"unknown rejoin child label {label!r}; known labels: {known_labels}")
             if label in labels:
                 raise ValueError(f"duplicate join child label: {label}")

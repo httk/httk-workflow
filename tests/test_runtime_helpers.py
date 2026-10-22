@@ -2,11 +2,13 @@ import json
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import pytest
 
 from httk.workflow import Attempt
+from httk.workflow._state import StateDoc, encode_state
 from httk.workflow.compat.v1 import bundled_v1_root
 from httk.workflow.runtime import run_command
 
@@ -34,7 +36,11 @@ def _context(path: Path) -> dict[str, object]:
 def test_an_attempt_reads_its_context_and_publishes_one_outcome(tmp_path: Path) -> None:
     control = tmp_path / "control"
     control.mkdir()
-    context = _context(control)
+    context = {**_context(control), "job_id": str(uuid.uuid4())}
+    # The job's own state.json, at an initial activation: its join view is empty.
+    (tmp_path / "job").mkdir()
+    doc = StateDoc.empty(str(context["job_id"])).next_activation("relax", "initial")
+    (tmp_path / "job" / "state.json").write_bytes(encode_state(doc))
     environment = {
         "HTTK_WORKFLOW_CONTEXT": json.dumps(context),
         "HTTK_WORKFLOW_CONTROL_DIR": str(control),

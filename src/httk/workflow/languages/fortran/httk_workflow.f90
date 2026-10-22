@@ -83,6 +83,7 @@ module httk_workflow
   public :: httk_workflow_environment, httk_workflow_state_get
   public :: httk_workflow_stage_input, httk_copy_file, httk_getenv
   public :: httk_workflow_declaration, httk_workflow_children, httk_workflow_child
+  public :: httk_workflow_spawned, httk_workflow_spawned_child
   public :: httk_workflow_state_set, httk_workflow_state_delete, httk_workflow_state_merge
   public :: httk_workflow_declare, httk_workflow_runlog_note, httk_workflow_runlog_headline
   public :: httk_workflow_runlog_append, httk_workflow_log
@@ -204,6 +205,20 @@ module httk_workflow
     end function
 
     function c_child(label, field, status) bind(c, name="httk_workflow_child") result(p)
+      import :: c_ptr, c_int
+      type(c_ptr), value :: label, field
+      integer(c_int), intent(out) :: status
+      type(c_ptr) :: p
+    end function
+
+    function c_spawned(selection, status) bind(c, name="httk_workflow_spawned") result(p)
+      import :: c_ptr, c_int
+      type(c_ptr), value :: selection
+      integer(c_int), intent(out) :: status
+      type(c_ptr) :: p
+    end function
+
+    function c_spawned_child(label, field, status) bind(c, name="httk_workflow_spawned_child") result(p)
       import :: c_ptr, c_int
       type(c_ptr), value :: label, field
       integer(c_int), intent(out) :: status
@@ -787,6 +802,38 @@ contains
     blabel = cstr(label)
     bfield = cstr(field)
     call take(c_child(c_loc(blabel), c_loc(bfield), st), value)
+    if (present(status)) status = int(st)
+  end subroutine
+
+  ! Every child this job has published, across activations, as tab-separated rows
+  ! (label, current state or `missing`, job key, workdir, data); `selection` as for children.
+  subroutine httk_workflow_spawned(value, selection, status)
+    character(len=:), allocatable, intent(out) :: value
+    character(len=*), intent(in), optional :: selection
+    integer, intent(out), optional :: status
+    character(kind=c_char), allocatable, target :: bsel(:)
+    type(c_ptr) :: psel
+    integer(c_int) :: st
+    if (present(selection)) then
+      bsel = cstr(selection)
+      psel = c_loc(bsel)
+    else
+      psel = c_null_ptr
+    end if
+    call take(c_spawned(psel, st), value)
+    if (present(status)) status = int(st)
+  end subroutine
+
+  ! One field of the most recently published child with this label.
+  subroutine httk_workflow_spawned_child(label, field, value, status)
+    character(len=*), intent(in) :: label, field
+    character(len=:), allocatable, intent(out) :: value
+    integer, intent(out), optional :: status
+    character(kind=c_char), allocatable, target :: blabel(:), bfield(:)
+    integer(c_int) :: st
+    blabel = cstr(label)
+    bfield = cstr(field)
+    call take(c_spawned_child(c_loc(blabel), c_loc(bfield), st), value)
     if (present(status)) status = int(st)
   end subroutine
 

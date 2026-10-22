@@ -198,7 +198,8 @@ rules.
 | `a.stage_input(name, destination[, default])` | copies the payload file parameter `name` names into the workdir at `destination`; `None` when the payload has no such file |
 | `a.state` | dict-like JSON state that belongs to the **job** |
 | `a.log` | the runner's append-only structured evidence log (`.httk-job/runlog.jsonl`); the owner-written timeline is `logs/runlog.jsonl` |
-| `a.children` | the typed children of the join that started this activation |
+| `a.children` | the typed children of the join that started this activation, read from `state.json` and located on first read |
+| `a.spawned` | every child this job has published, across activations, with its current state |
 | `a.parent` | the job that spawned this one, located for reading its files in place; `None` for a root job |
 | `a.declaration(name)` | one workflow declaration: the observed document, else the declared one, else `None` |
 
@@ -240,8 +241,10 @@ collect reports.
 is a frozen `ChildResult` with its `label`, `job_id`, `job_key`, terminal
 `kind`, its published `failure` as the canonical `Failure`, and absolute
 `payload`, `workdir`, and `data` paths, so reading a child's results is a
-plain file read. The manager locates each child when it launches the attempt;
-under confinement the children are visible read-only:
+plain file read. The children are derived on first read from the job's own
+`state.json` (the join's `observations`) and located then, read-only; under
+confinement they are visible read-only. A missing, damaged or foreign
+`state.json` raises `FormatError`:
 
 ```python
 for child in a.children.succeeded:
@@ -253,6 +256,19 @@ codes = [child.failure.code for child in a.children.failed]
 
 An activation reached by `advance` observes no children, which is why
 `aggregate` above hands what it learned to `triage` through `a.state`.
+
+`a.spawned` lists every child the job has published, across activations, in
+publication order. It is a live snapshot on each access: `kind` is the child's
+current state (`ready`, `waiting`, `paused`, `owned`, `failed`, `succeeded`,
+`cancelled`) or `missing`, paths are located now, and `failure` is read from
+the child's `state.json` for `failed` and `cancelled`. `ChildrenView.get` and
+`[]` return the most recently published child under a label; this matters for
+`a.spawned`, since labels are unique per attempt, not across activations:
+
+```python
+# after an any_succeeded join, some siblings may still be running
+still_open = [c.label for c in a.spawned if c.kind in ("ready", "waiting", "owned")]
+```
 
 ### Parent
 

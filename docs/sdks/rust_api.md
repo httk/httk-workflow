@@ -218,6 +218,8 @@ are `&[&str]` option arrays; a `fallback` is an `Option<&str>` default.
 | `Attempt::call(label, workflow, args)` | `httk_workflow_call` |
 | `Attempt::children(selection)` | `httk_workflow_children` |
 | `Attempt::child(label, field)` | `httk_workflow_child` |
+| `Attempt::spawned(selection)` | `httk_workflow_spawned` |
+| `Attempt::spawned_child(label, field)` | `httk_workflow_spawned_child` |
 | `Attempt::advance(next_step, args)` | `httk_workflow_advance` |
 | `Attempt::gather(next_step, options)` | `httk_workflow_gather` |
 | `Attempt::succeed()` | `httk_workflow_succeed` |

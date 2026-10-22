@@ -358,7 +358,7 @@ httk_workflow_children() {
 }
 
 httk_workflow_child() {
-    _httk_workflow_bridge child "$1" "$2"
+    _httk_workflow_bridge child "$@"
 }
 
 httk_workflow_advance() {

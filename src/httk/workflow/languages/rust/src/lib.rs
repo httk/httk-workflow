@@ -544,6 +544,21 @@ impl Attempt {
         self.read(&["child", label, field])
     }
 
+    /// Every child this job has published, across activations, as tab-separated
+    /// rows (`label`, current state or `missing`, job key, workdir, data);
+    /// `selection` as for children.
+    pub fn spawned(&self, selection: Option<&str>) -> Result<Option<String>, BridgeError> {
+        match selection {
+            Some(selection) => self.read(&["children", "--spawned", selection]),
+            None => self.read(&["children", "--spawned"]),
+        }
+    }
+
+    /// One `field` of the most recently published child with this `label`.
+    pub fn spawned_child(&self, label: &str, field: &str) -> Result<Option<String>, BridgeError> {
+        self.read(&["child", "--spawned", label, field])
+    }
+
     // --- Job state ----------------------------------------------------------
 
     /// Store one JSON value (a bare scalar, valid JSON, or `@file.json`) in one

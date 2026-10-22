@@ -100,7 +100,6 @@ def _attempt_environment(
             "step": "only",
             "activation_id": str(uuid.uuid4()),
             "attempt_id": str(uuid.uuid4()),
-            "children": [],
             "settings": settings,
         }
     )

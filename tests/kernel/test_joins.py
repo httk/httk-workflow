@@ -331,3 +331,47 @@ def test_decide_join_keeps_a_join_whose_next_activation_exceeds_maximum_activati
     )
     assert target == "ready" and decided.join is None
     assert decided.activation is not None and decided.activation["step"] == "gather"
+
+
+def test_a_wide_join_is_evaluated_with_one_listing_pass(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 300 children sharing one placement: a lookup per child would parse the 300-entry listing 300 times.
+    size = 300
+    children = []
+    for index in range(size):
+        child = JobDefinition.from_mapping(job_mapping(str(uuid.uuid4()), f"c{index}", "proj/kids"))
+        world.put(child, "failed" if index == 0 else "succeeded", StateDoc.empty(child.id).with_failure(FAILURE))
+        children.append(child)
+    parent = world.parent(children, "all_terminal")
+    calls = 0
+    original = JobRef.from_path
+
+    def counted(*args: object, **kwargs: object) -> JobRef:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(JobRef, "from_path", staticmethod(counted))
+    decision = world.evaluate(parent)
+
+    assert decision is not None and decision.kind == "satisfied"
+    assert [observation.job_id for observation in decision.observations] == [child.id for child in children]
+    assert decision.observations[0].failure is not None and decision.observations[1].failure is None
+    assert calls < 3 * size
+
+
+def test_an_overdue_child_is_found_only_at_its_own_placement_or_owned(world: World) -> None:
+    # first and second sit at each other's recorded placement; moving is claimed (in motion), all overdue.
+    first, second, moving = world.child(0, "succeeded"), world.child(1, "succeeded"), world.child(2, "owned")
+    hints = {first.id: second.placement, second.id: first.placement, moving.id: moving.placement}
+    parent = JobDefinition.from_mapping(job_mapping(str(uuid.uuid4()), "parent", "proj"))
+    references = [
+        {"job_id": child.id, "job_key": child.job_key, "placement_hint": str(hints[child.id]), "label": f"l{index}"}
+        for index, child in enumerate((first, second, moving))
+    ]
+    join = {"children": references, "condition": "all_succeeded", "on_impossible": None, "next_step": "next"}
+    ref = world.put(parent, "waiting", StateDoc.empty(parent.id).updated(join=join))
+    since = {first.id: 0.0, second.id: 0.0, moving.id: 0.0}
+    decision = world.evaluate(ref, since, now=50.0)
+    assert decision is not None and decision.kind == "unresolvable"
+    assert decision.unresolved == (first.id, second.id)
+    assert since[moving.id] == 50.0

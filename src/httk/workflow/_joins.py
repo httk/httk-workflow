@@ -15,7 +15,7 @@ from pathlib import PurePosixPath
 from typing import Literal
 
 from httk.workflow._job import JobDefinition
-from httk.workflow._kernel import JobRef, KernelWorkspace, ListingCache, locate
+from httk.workflow._kernel import OWNED, JobRef, KernelWorkspace, ListingCache, locate, locate_many
 from httk.workflow._state import TERMINAL_STATES, _thaw, read_state_unowned
 from httk.workflow._util import require_string
 from httk.workflow.errors import FormatError
@@ -188,8 +188,19 @@ def evaluate(
     references = _join_children(join)
     observations: list[Observation] = []
     missing: list[tuple[str, PurePosixPath]] = []
+    # One listing pass for the whole join: a lookup per child re-parses the shared placement listing each time.
+    found = locate_many(
+        workspace,
+        [job_id for _, job_id, _, _ in references],
+        placements=[placement for _, _, _, placement in references],
+        settle=False,
+        cache=cache,
+        include_owned=False,
+    )
     for label, job_id, job_key, placement in references:
-        ref = locate(workspace, job_id, placement_hint=placement, include_owned=False, settle=False, cache=cache)
+        ref = found.get(job_id)
+        if ref is not None and ref.placement != placement:
+            ref = None  # found only at another child's placement: not where this join looks for it
         if ref is None:
             unresolved_since.setdefault(job_id, now)
             missing.append((job_id, placement))
@@ -215,17 +226,23 @@ def evaluate(
         for _, job_id, _, _ in references:
             unresolved_since.pop(job_id, None)
         return JoinDecision(decided, tuple(observations), tuple(job_id for job_id, _ in missing))
+    overdue = [(job_id, placement) for job_id, placement in missing if now - unresolved_since[job_id] > grace]
     vanished = []
-    for job_id, placement in missing:
-        if now - unresolved_since[job_id] <= grace:
-            continue
-        # The rare vanished-child check: owned directories too, settled, so a child in motion is found.
-        # ponytail: one settle per overdue child blocks this pass up to the visibility deadline each;
-        # batch them through locate_many if many children of one tick ever go overdue together.
-        if locate(workspace, job_id, placement_hint=placement, include_owned=True, settle=True) is None:
-            vanished.append(job_id)
-        else:
-            unresolved_since[job_id] = now
+    if overdue:
+        # The rare vanished-child check: owned directories too, settled once for all, so a child in motion is found.
+        located = locate_many(
+            workspace,
+            [job_id for job_id, _ in overdue],
+            placements=[placement for _, placement in overdue],
+            settle=True,
+        )
+        for job_id, placement in overdue:
+            ref = located.get(job_id)
+            # As above, an unowned child counts only at its own placement, not at another overdue child's.
+            if ref is not None and (ref.state == OWNED or ref.placement == placement):
+                unresolved_since[job_id] = now
+            else:
+                vanished.append(job_id)
     if vanished:
         return JoinDecision("unresolvable", tuple(observations), tuple(vanished))
     return None

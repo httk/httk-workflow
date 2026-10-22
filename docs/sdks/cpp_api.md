@@ -90,6 +90,7 @@ protocol state; the current attempt is selected by the manager's environment.
 | `Attempt::runlog_note`, `runlog_headline`, `runlog_append`, `log` | corresponding `httk_workflow_*` functions |
 | `Attempt::put`, `spawn`, `call` | `httk_workflow_put`, `httk_workflow_spawn`, `httk_workflow_call` |
 | `Attempt::children`, `child` | `httk_workflow_children`, `httk_workflow_child` |
+| `Attempt::spawned`, `spawned_child` | `httk_workflow_spawned`, `httk_workflow_spawned_child` |
 | `Attempt::advance`, `gather`, `succeed`, `fail`, `retry`, `pause` | corresponding outcome C functions |
 | `Attempt::batch`, `job_prepare`, `workdir_apply` | corresponding C functions |
 | `Attempt::run`, `calc`, `template_render` | `httk_workflow_run`, `httk_calc`, `httk_template_render` |

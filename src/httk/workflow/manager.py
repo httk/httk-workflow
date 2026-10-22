@@ -1084,7 +1084,16 @@ class TaskManager:
         plans = [_children.ChildPlan.from_mapping(entry) for entry in intent.get("children") or ()]
         _children.publish_children(owned, plans)
         members = ("job_id", "job_key", "label", "placement", "spawn_id")
-        entries = [{**{name: getattr(plan, name) for name in members}, "attempt_id": attempt_id} for plan in plans]
+        # The doc still holds the publishing attempt's activation: settle() below opens any next one.
+        activation_id = None if doc.activation is None else doc.activation.get("id")
+        entries = [
+            {
+                **{name: getattr(plan, name) for name in members},
+                "attempt_id": attempt_id,
+                "activation_id": activation_id,
+            }
+            for plan in plans
+        ]
         # Step 5: the seal. What the job planted (a FIFO, a symlinked .httk-job) fails it for good, recorded in
         # the intent so a replay decides the same; an I/O error leaves the intent, and the commit is retried.
         seal: dict[str, object] | None = None
@@ -1177,40 +1186,6 @@ class TaskManager:
             return seals.default_workspace_keys(self.workspace).keys
         except SealError:
             return ()
-
-    def _context_children(self, doc: StateDoc) -> list[dict[str, object]]:
-        """Return the context ``children`` of an activation that follows a join: its observations, located now.
-
-        Each child's ``payload_path``, ``workdir_path`` and ``data_path`` are workspace-relative paths of its
-        current directory (plan §13.3), or ``None`` when it cannot be found at its placement.
-        """
-
-        if doc.activation is None or doc.activation.get("reason") != "join":
-            return []
-        children: list[dict[str, object]] = []
-        observations = doc.as_mapping()["observations"]
-        assert isinstance(observations, list)
-        for observation in observations:
-            assert isinstance(observation, dict)
-            ref = _kernel.locate(
-                self.workspace,
-                str(observation["job_id"]),
-                placement_hint=PurePosixPath(str(observation["placement"])),
-            )
-            path = None if ref is None else ref.path.relative_to(self.workspace.root)
-            located = {
-                name: None if path is None else (path / suffix).as_posix()
-                for name, suffix in (("payload_path", "."), ("workdir_path", "run"), ("data_path", "data"))
-            }
-            children.append(
-                {
-                    **observation,
-                    "workspace_id": self.workspace.workspace_id,
-                    "kind": observation["state"],
-                    **located,
-                }
-            )
-        return children
 
     # -- requests and joins -------------------------------------------------------------------------------------------
 
@@ -1589,7 +1564,6 @@ class TaskManager:
                     confinement=checked.launch,
                 )
                 binding_environment["HTTK_WORKFLOW_LAUNCH"] = _manager_launches.client_prefix()
-            children = self._context_children(doc)
             context = attempt_context(
                 workspace_id=self.workspace.workspace_id,
                 job_id=job.id,
@@ -1611,7 +1585,6 @@ class TaskManager:
                 resources=requirement,
                 deadline=deadline,
                 binding=binding,
-                children=children,
             )
             environment = runner_environment(
                 base=os.environ.copy(),

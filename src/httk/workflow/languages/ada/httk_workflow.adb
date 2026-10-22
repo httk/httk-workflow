@@ -54,6 +54,10 @@ package body Httk_Workflow is
      with Import, Convention => C, External_Name => "httk_workflow_children";
    function C_Child (Label, Field : CS.chars_ptr; Status : access C.int) return CS.chars_ptr
      with Import, Convention => C, External_Name => "httk_workflow_child";
+   function C_Spawned (Selection : CS.chars_ptr; Status : access C.int) return CS.chars_ptr
+     with Import, Convention => C, External_Name => "httk_workflow_spawned";
+   function C_Spawned_Child (Label, Field : CS.chars_ptr; Status : access C.int) return CS.chars_ptr
+     with Import, Convention => C, External_Name => "httk_workflow_spawned_child";
    function C_State_Set (Name, Value : CS.chars_ptr) return C.int
      with Import, Convention => C, External_Name => "httk_workflow_state_set";
    function C_State_Delete (Name : CS.chars_ptr) return C.int
@@ -379,6 +383,39 @@ package body Httk_Workflow is
       Release (B_Label); Release (B_Field);
       Status := Read_With_Pointer (Pointer, C_Status, Value, Present);
    end Httk_Workflow_Child;
+
+   procedure Httk_Workflow_Spawned
+     (Value : out U.Unbounded_String; Present : out Boolean; Status : out C.int) is
+      C_Status : aliased C.int;
+      Pointer : CS.chars_ptr;
+   begin
+      Pointer := C_Spawned (CS.Null_Ptr, C_Status'Access);
+      Status := Read_With_Pointer (Pointer, C_Status, Value, Present);
+   end Httk_Workflow_Spawned;
+
+   procedure Httk_Workflow_Spawned
+     (Value : out U.Unbounded_String; Present : out Boolean; Status : out C.int;
+      Selection : String) is
+      Input : CS.chars_ptr := New_Input (Selection);
+      C_Status : aliased C.int;
+      Pointer : CS.chars_ptr;
+   begin
+      Pointer := C_Spawned (Input, C_Status'Access); Release (Input);
+      Status := Read_With_Pointer (Pointer, C_Status, Value, Present);
+   end Httk_Workflow_Spawned;
+
+   procedure Httk_Workflow_Spawned_Child
+     (Label : String; Field : String; Value : out U.Unbounded_String;
+      Present : out Boolean; Status : out C.int) is
+      B_Label : CS.chars_ptr := New_Input (Label);
+      B_Field : CS.chars_ptr := New_Input (Field);
+      C_Status : aliased C.int;
+      Pointer : CS.chars_ptr;
+   begin
+      Pointer := C_Spawned_Child (B_Label, B_Field, C_Status'Access);
+      Release (B_Label); Release (B_Field);
+      Status := Read_With_Pointer (Pointer, C_Status, Value, Present);
+   end Httk_Workflow_Spawned_Child;
 
    function Httk_Workflow_State_Set (Name : String; Value : String) return C.int is
       B_Name : CS.chars_ptr := New_Input (Name); B_Value : CS.chars_ptr := New_Input (Value);

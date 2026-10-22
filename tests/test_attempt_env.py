@@ -32,7 +32,6 @@ def _context(**overrides: Any) -> dict[str, object]:
         "resources": {"cores": 1},
         "deadline": None,
         "binding": None,
-        "children": [],
         **overrides,
     }
     return attempt_context(**arguments)

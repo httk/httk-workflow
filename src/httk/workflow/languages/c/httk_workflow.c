@@ -480,6 +480,17 @@ char *httk_workflow_child(const char *label, const char *field, int *status) {
     return read_value(prefix, NULL, status);
 }
 
+char *httk_workflow_spawned(const char *selection, int *status) {
+    const char *prefix[] = {"children", "--spawned", NULL};
+    const char *tail[] = {selection, NULL};
+    return read_value(prefix, selection != NULL ? tail : NULL, status);
+}
+
+char *httk_workflow_spawned_child(const char *label, const char *field, int *status) {
+    const char *prefix[] = {"child", "--spawned", label, field, NULL};
+    return read_value(prefix, NULL, status);
+}
+
 /* ------------------------------------------------------------------------- */
 /* Job state.                                                                 */
 /* ------------------------------------------------------------------------- */

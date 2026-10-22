@@ -183,6 +183,14 @@ char *httk_workflow_declaration(const char *name, int *status);
 char *httk_workflow_children(const char *selection, int *status);
 /* One field of one observed child by label. */
 char *httk_workflow_child(const char *label, const char *field, int *status);
+/*
+ * Every child this job has published, across activations, as tab-separated rows
+ * (`label`, current state or `missing`, job key, workdir, data); `selection` as
+ * for children.
+ */
+char *httk_workflow_spawned(const char *selection, int *status);
+/* One field of the most recently published child with this label. */
+char *httk_workflow_spawned_child(const char *label, const char *field, int *status);
 
 /* --- Job state -------------------------------------------------------------- */
 

@@ -11,7 +11,6 @@ from attempt_fixtures import every_job, find, run_manager, state, submit_runner
 from httk.workflow import TaskManager, Workspace, _fs
 from httk.workflow._children import _PATH_HEADROOM
 from httk.workflow._kernel import claim, format_job_name
-from httk.workflow._util import json_bytes
 from httk.workflow.monitor.ui import render_job_pane
 from kernel.test_kernel import FakeWorkspace, make_workspace, new_job, new_owner
 
@@ -51,7 +50,13 @@ def leaf(a):
 def collect(a):
     context = os.environ["HTTK_WORKFLOW_CONTEXT"]
     (a.workdir / "seen.json").write_text(
-        json.dumps({{"labels": [child.label for child in a.children.all], "context": json.loads(context)}}),
+        json.dumps(
+            {{
+                "labels": [child.label for child in a.children.all],
+                "placements": sorted({{str(child.placement) for child in a.children.all}}),
+                "context": json.loads(context),
+            }}
+        ),
         encoding="utf-8",
     )
     a.succeed()
@@ -78,7 +83,8 @@ def _fan(workspace: Workspace, root: Path, parameters: dict[str, object]) -> str
 
 @pytest.mark.slow
 def test_a_wide_nested_gather_fits_the_attempt_context(tmp_path: Path) -> None:
-    # 120 nested observations exceeded the 100000-byte context while each was carried twice.
+    # 120 nested observations exceeded the 100000-byte context while each was carried twice; the join's children
+    # are now read from the job's own state.json, so the context carries neither.
     workspace = Workspace.initialize(tmp_path / "workspace")
     job_id = _fan(workspace, tmp_path / "source", {"children": 120})
     with TaskManager(workspace, maximum_workers=8, heartbeat_interval=0.01) as manager:
@@ -89,11 +95,8 @@ def test_a_wide_nested_gather_fits_the_attempt_context(tmp_path: Path) -> None:
     seen = json.loads((parent.path / "run" / "seen.json").read_text(encoding="utf-8"))
     assert seen["labels"] == [f"c-{index:03d}" for index in range(120)]
     context = seen["context"]
-    assert "join" not in context and len(context["children"]) == 120
-    # The context the join activation got fits; the same context carrying the duplicate would not.
-    assert len(json_bytes(context)) < 100_000 <= len(json_bytes({**context, "join": context["children"]}))
-    nested = f"project/campaign/{parent.job_key}.children"
-    assert {child["placement"] for child in context["children"]} == {nested}
+    assert "join" not in context and "children" not in context
+    assert seen["placements"] == [f"project/campaign/{parent.job_key}.children"]
 
 
 def test_a_child_placement_too_long_for_the_filesystem_fails_the_outcome(tmp_path: Path) -> None:

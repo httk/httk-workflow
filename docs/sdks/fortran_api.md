@@ -218,6 +218,8 @@ status.
 | *`sub`* `httk_workflow_call(label, workflow, job_key, args, status)` | `httk_workflow_call` |
 | *`sub`* `httk_workflow_children(value, selection, status)` | `httk_workflow_children` |
 | *`sub`* `httk_workflow_child(label, field, value, status)` | `httk_workflow_child` |
+| *`sub`* `httk_workflow_spawned(value, selection, status)` | `httk_workflow_spawned` |
+| *`sub`* `httk_workflow_spawned_child(label, field, value, status)` | `httk_workflow_spawned_child` |
 | `httk_workflow_advance(next_step, args)` | `httk_workflow_advance` |
 | `httk_workflow_gather(next_step, args)` | `httk_workflow_gather` |
 | `httk_workflow_succeed()` | `httk_workflow_succeed` |

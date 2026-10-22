@@ -18,6 +18,7 @@ import pytest
 
 import v3_helpers as h
 from httk.workflow import Attempt, FormatError, Workspace, _kernel, _requests, _store
+from httk.workflow._state import StateDoc, encode_state
 from httk.workflow.protocol import Failure, validate_failure
 from httk.workflow.removal import serve_requests
 from httk.workflow.runtime_builders import ChildReference
@@ -25,7 +26,7 @@ from test_crash_injection import _all_jobs
 
 #: A scriptable join runner. A job with ``parameters.child`` is a child: it succeeds, or fails with
 #: ``child.broken`` for ``"fail"`` (and for ``"flaky"`` on its first attempt only). Any other job runs ``parameters.steps[<step>]``: it records the children its
-#: context names (into ``run/events.json``), spawns ``spawn`` children (``{label, child, placement?}``), and then
+#: join activation observed (its ``state.json`` observations, into ``run/events.json``), spawns ``spawn`` children (``{label, child, placement?}``), and then
 #: waits with ``wait`` (``{condition, count?, next_step, on_impossible?, rejoin?: [labels]}``) over the new
 #: children plus the rejoined ones, or else succeeds.
 _JOIN_RUNNER = """#!/usr/bin/env python3
@@ -44,9 +45,13 @@ if "child" in parameters:
         outcome.update(action="fail", failure={"code": "child.broken", "message": "the child declared a failure"})
 else:
     plan = parameters["steps"][context["step"]]
+    state = json.loads((pathlib.Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]) / "state.json").read_text())
+    activation = state["activation"] or {}
+    joined = activation.get("id") == context["activation_id"] and activation.get("reason") == "join"
+    observed = state["observations"] if joined else []
     events = json.loads(pathlib.Path("events.json").read_text()) if pathlib.Path("events.json").exists() else []
     events.append({"step": context["step"],
-                   "children": sorted(({"label": c["label"], "kind": c["kind"]} for c in context["children"]),
+                   "children": sorted(({"label": c["label"], "kind": c["state"]} for c in observed),
                                       key=lambda c: c["label"])})
     pathlib.Path("events.json").write_text(json.dumps(events))
     entries, references = [], []
@@ -71,7 +76,7 @@ else:
     wait = plan.get("wait")
     if wait:
         for label in wait.get("rejoin", []):
-            (known,) = [c for c in context["children"] if c["label"] == label]
+            (known,) = [c for c in observed if c["label"] == label]
             references.append({"workspace_id": context["workspace_id"], "job_id": known["job_id"],
                                "job_key": known["job_key"], "placement_hint": known["placement"], "label": label})
         join = {"children": references, "condition": wait["condition"]}
@@ -231,23 +236,30 @@ def _in_process_attempt(tmp_path: Path, *, label: str | None = None) -> Attempt:
         "placement": "project/a",
         "payload": str(tmp_path / "job"),
         "step": "branch",
-        "activation_id": str(uuid.uuid4()),
+        "activation_id": (activation_id := str(uuid.uuid4())),
         "attempt_id": str(uuid.uuid4()),
-        "children": []
+    }
+    for directory in ("run", "job", "job/data"):
+        (tmp_path / directory).mkdir()
+    Workspace.initialize(tmp_path / "workspace", durable=False)
+    observations = (
+        []
         if label is None
         else [
             {
                 "label": label,
                 "job_id": child_id,
                 "job_key": f"child--{child_id}",
-                "kind": "succeeded",
+                "state": "succeeded",
+                "token": None,
+                "failure": None,
                 "placement": "project/a",
-                "payload_path": f"project/a/child--{child_id}",
             }
-        ],
-    }
-    for directory in ("run", "job", "job/data"):
-        (tmp_path / directory).mkdir()
+        ]
+    )
+    activation = {"id": activation_id, "step": "branch", "ordinal": 1, "reason": "join"}
+    doc = StateDoc.empty(job_id).updated(activation=activation, observations=observations)
+    (tmp_path / "job" / "state.json").write_bytes(encode_state(doc))
     return Attempt.initialize(
         {
             "HTTK_WORKFLOW_CONTEXT": json.dumps(context),

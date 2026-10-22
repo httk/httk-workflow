@@ -169,6 +169,8 @@ bridge exit status out-parameter.
 | `httk_workflow_call(label, workflow, args, status)` | `httk_workflow_call` | `Attempt.call` |
 | `httk_workflow_children(selection, status)` | `httk_workflow_children` | `Attempt.children` |
 | `httk_workflow_child(label, field, status)` | `httk_workflow_child` | `ChildResult` |
+| `httk_workflow_spawned(selection, status)` | `httk_workflow_spawned` | `Attempt.spawned` (every child this job has published, with its live state or `missing`) |
+| `httk_workflow_spawned_child(label, field, status)` | `httk_workflow_spawned_child` | one field of the most recently published child with this label |
 | `httk_workflow_advance(next_step, args)` | `httk_workflow_advance` | `Attempt.advance` |
 | `httk_workflow_gather(next_step, args)` | `httk_workflow_gather` | `Attempt.gather` |
 | `httk_workflow_succeed()` | `httk_workflow_succeed` | `Attempt.succeed` |

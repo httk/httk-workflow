@@ -144,7 +144,9 @@ if context["step"] == "start":
     draft.add_child_job(spec.as_mapping(), "project/children", label="kid")
     draft.publish("wait", next_step="aggregate")
 elif context["step"] == "aggregate":
-    (run / "children.json").write_text(json.dumps(context["children"]))
+    from httk.workflow import Attempt
+    children = [{"label": c.label, "kind": c.kind, "payload": str(c.payload)} for c in Attempt.initialize().children]
+    (run / "children.json").write_text(json.dumps(children))
     publish(context, control, action="succeed")
 else:
     publish(context, control, action="succeed")
@@ -163,7 +165,7 @@ else:
     assert document["parent"]["job_id"] == parent.job_id and document["parent"]["placement"] == "project"
     (observed,) = json.loads((done[parent.job_id].path / "run" / "children.json").read_text(encoding="utf-8"))
     assert observed["label"] == "kid" and observed["kind"] == "succeeded"
-    assert observed["payload_path"] == child.path.relative_to(ws.root).as_posix()
+    assert observed["payload"] == str(child.path)
 
 
 def test_a_workdir_batch_replays_idempotently(tmp_path: Path) -> None:

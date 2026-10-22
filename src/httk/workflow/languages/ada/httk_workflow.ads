@@ -65,6 +65,18 @@ package Httk_Workflow is
    procedure Httk_Workflow_Child
      (Label : String; Field : String; Value : out U.Unbounded_String;
       Present : out Boolean; Status : out C.int);
+   --  Every child this job has published, across activations, as tab-separated
+   --  rows (label, current state or `missing`, job key, workdir, data);
+   --  Selection as for children.
+   procedure Httk_Workflow_Spawned
+     (Value : out U.Unbounded_String; Present : out Boolean; Status : out C.int);
+   procedure Httk_Workflow_Spawned
+     (Value : out U.Unbounded_String; Present : out Boolean; Status : out C.int;
+      Selection : String);
+   --  One field of the most recently published child with this label.
+   procedure Httk_Workflow_Spawned_Child
+     (Label : String; Field : String; Value : out U.Unbounded_String;
+      Present : out Boolean; Status : out C.int);
 
    function Httk_Workflow_State_Set (Name : String; Value : String) return C.int;
    function Httk_Workflow_State_Delete (Name : String) return C.int;

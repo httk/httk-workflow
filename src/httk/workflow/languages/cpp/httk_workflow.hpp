@@ -152,6 +152,19 @@ public:
         return read_result(output, status);
     }
 
+    /// Every child this job has published, across activations, as tab-separated rows
+    /// (`label`, current state or `missing`, job key, workdir, data); `selection` as for children.
+    static std::optional<std::string> spawned() { return read(httk_workflow_spawned, nullptr); }
+    static std::optional<std::string> spawned(const std::string& selection) {
+        return read(httk_workflow_spawned, selection.c_str());
+    }
+    /// One field of the most recently published child with this label.
+    static std::optional<std::string> spawned_child(const std::string& label, const std::string& field) {
+        int status = HTTK_WORKFLOW_OK;
+        char* output = httk_workflow_spawned_child(label.c_str(), field.c_str(), &status);
+        return read_result(output, status);
+    }
+
     static int state_set(const std::string& name, const std::string& value) {
         return httk_workflow_state_set(name.c_str(), value.c_str());
     }

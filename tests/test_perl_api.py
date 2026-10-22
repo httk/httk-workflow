@@ -227,6 +227,13 @@ def test_a_missing_read_is_absent_but_a_refused_read_dies(tmp_path: Path) -> Non
     assert not (refused.control / "outcome.ready").exists()
     assert refused.breadcrumb()["exception"] == "PerlError"
 
+    spawned_runner = _runner(tmp_path / "spawned", steps=("read",), handlers={"read": "$attempt->spawned('--bogus');"})
+    spawned = _attempt(tmp_path / "spawned", step="read")
+    completed = spawned.run(spawned_runner)
+    assert completed.returncode == 2
+    assert not (spawned.control / "outcome.ready").exists()
+    assert spawned.breadcrumb()["exception"] == "PerlError"
+
 
 def test_a_handler_can_publish_a_structured_failure(tmp_path: Path) -> None:
     runner = _runner(

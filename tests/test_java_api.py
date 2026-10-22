@@ -219,6 +219,15 @@ def test_absent_read_refused_read_and_java_error_abort(tmp_path: Path) -> None:
     assert not (refused.control / "outcome.ready").exists()
     assert refused.breadcrumb()["exception"] == "JavaError"
 
+    spawned_classes = _write_runner(
+        tmp_path / "spawned", "tests.java", {"read": 'attempt.spawned("--bogus"); return 0;'}
+    )
+    spawned = _attempt(tmp_path / "spawned", step="read")
+    completed = spawned.run(spawned_classes)
+    assert completed.returncode == 2
+    assert not (spawned.control / "outcome.ready").exists()
+    assert spawned.breadcrumb()["exception"] == "JavaError"
+
     error_classes = _write_runner(tmp_path / "error", "tests.java", {"explode": 'throw new RuntimeException("boom");'})
     error = _attempt(tmp_path / "error", step="explode")
     completed = error.run(error_classes)
