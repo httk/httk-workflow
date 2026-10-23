@@ -53,7 +53,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import MISSING, dataclass, field, fields, is_dataclass, replace
 from itertools import islice
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from httk.core.datastream.compression import known_compressions, split_compression_suffix
 from httk.core.digests import sha256_file, tree_digest
@@ -62,6 +62,7 @@ from httk.core.storage import content_id
 from . import _fs, _kernel, _store, compat
 from ._job import JobDefinition
 from ._kernel import JobRef
+from ._manager_scheduling import current_step
 from ._state import TERMINAL_STATES, UNOWNED_STATES, StateDoc, _thaw
 from ._util import require_mapping, require_string
 from .errors import FormatError, WorkflowError
@@ -91,7 +92,7 @@ class _Missing:
 _MISSING = _Missing()
 
 __all__ = [
-    "COLLECTABLE_KINDS",
+    "COLLECTABLE_STATES",
     "COLLECT_FORMAT",
     "COLLECT_FORMAT_VERSION",
     "DEFAULT_COLLECT_STATES",
@@ -100,7 +101,7 @@ __all__ = [
     "StructureInput",
     "children_of",
     "collect",
-    "collect_kinds",
+    "collect_states",
     "declarations_of",
     "existing_file",
     "job_records",
@@ -113,7 +114,7 @@ COLLECT_FORMAT_VERSION = 3
 #: The states job_records may read: a job that stopped. The terminal states are
 #: final, and ``paused`` is included because a paused job published a real outcome
 #: and produced real results before an operator was asked to look at it.
-COLLECTABLE_KINDS = tuple(state for state in UNOWNED_STATES if state in TERMINAL_STATES or state == "paused")
+COLLECTABLE_STATES = tuple(state for state in UNOWNED_STATES if state in TERMINAL_STATES or state == "paused")
 #: The default selection: the jobs that finished the way they were meant to.
 DEFAULT_COLLECT_STATES = ("succeeded",)
 _FILE_URL_PREFIX = "file://"
@@ -791,6 +792,17 @@ def record_of(workspace: Workspace, ref: JobRef) -> JobRecord | None:
     :return: The validated job record, or ``None`` when its payload is unreadable.
     """
 
+    record = _record_at(workspace, ref, None)
+    assert record is not False
+    return record
+
+
+def _record_at(workspace: Workspace, ref: JobRef, steps: frozenset[str] | None) -> JobRecord | None | Literal[False]:
+    """Return :func:`record_of`'s record, or ``False`` when the job is not at one of *steps* (``None``: any).
+
+    With *steps*, a job whose damaged ``state.json`` hides its step is unreadable (``None``).
+    """
+
     job, job_error = read_job(ref)
     if job is None:
         _LOGGER.error(
@@ -801,6 +813,12 @@ def record_of(workspace: Workspace, ref: JobRef) -> JobRecord | None:
         )
         return None
     doc, state_error = read_state(ref)
+    if state_error is not None and steps is not None:
+        # A damaged state.json hides the step: unknown, not the initial step.
+        _LOGGER.error("not collecting %s: its step is unknown: %s", ref.job_key, state_error)
+        return None
+    if steps is not None and current_step(job, doc) not in steps:
+        return False
     if state_error is not None:
         _LOGGER.warning("collecting %s without its state.json: %s", ref.job_key, state_error)
     provenance = timeline(job_events(ref), doc)
@@ -829,24 +847,24 @@ def record_of(workspace: Workspace, ref: JobRef) -> JobRecord | None:
     )
 
 
-def collect_kinds(states: Iterable[str]) -> tuple[str, ...]:
-    """Validate the requested state kinds against what collect may read.
+def collect_states(states: Iterable[str]) -> tuple[str, ...]:
+    """Validate the requested states against what collect may read.
 
-    :param states: Select the stopped state kinds to collect.
-    :return: The distinct validated state kinds in request order.
+    :param states: Select the stopped states to collect.
+    :return: The distinct validated states in request order.
     :raises ValueError: If no state or an uncollectable state is requested.
     """
 
-    kinds = tuple(dict.fromkeys(states))
-    if not kinds:
-        raise ValueError("collect needs at least one state kind")
-    unknown = [kind for kind in kinds if kind not in COLLECTABLE_KINDS]
+    selected = tuple(dict.fromkeys(states))
+    if not selected:
+        raise ValueError("collect needs at least one state")
+    unknown = [state for state in selected if state not in COLLECTABLE_STATES]
     if unknown:
         raise ValueError(
             f"collect only reads jobs that stopped, so {', '.join(unknown)} cannot be collected; "
-            f"collectable kinds: {', '.join(COLLECTABLE_KINDS)}"
+            f"collectable states: {', '.join(COLLECTABLE_STATES)}"
         )
-    return kinds
+    return selected
 
 
 def job_records(
@@ -856,12 +874,13 @@ def job_records(
     placement: str | PurePosixPath | None = None,
     on_skipped: Callable[[str], None] | None = None,
     jobs: Iterable[str] | None = None,
+    steps: Iterable[str] | None = None,
 ) -> Iterator[JobRecord]:
     """Yield one :class:`~httk.workflow.collecting.JobRecord` per finished job of *workspace*.
 
     *states* selects which stopped jobs are reported and defaults to the
-    successful ones; every requested kind is validated against
-    ``COLLECTABLE_KINDS`` before anything is read. *placement* restricts the
+    successful ones; every requested state is validated against
+    ``COLLECTABLE_STATES`` before anything is read. *placement* restricts the
     job_records to the jobs at or below one placement, exactly as
     ``httk job list --placement`` does.
 
@@ -877,6 +896,12 @@ def job_records(
     descendant whose directory cannot be found, and a job whose ``state.json``
     is damaged so its children cannot be followed, are passed to *on_skipped*.
 
+    *steps* reports only the jobs at one of these steps: the step of the
+    current activation, or ``job.json``'s initial step before the first. With
+    *jobs* it filters the reported jobs, not the walk. A job left out for its
+    step is not passed to *on_skipped*; one whose damaged ``state.json``
+    hides its step is, as unreadable.
+
     The result is a lazy iterator over one listing of the requested state
     directories. Nothing is materialized, and building a record reads only that
     job's own ``job.json``, ``state.json`` and run log, so collecting is a single
@@ -884,33 +909,45 @@ def job_records(
     reading is skipped like an unreadable one.
 
     :param workspace: Read jobs from this workspace.
-    :param states: Select the stopped state kinds to report.
+    :param states: Select the stopped states to report.
     :param placement: Restrict results to this placement and its descendants.
     :param on_skipped: Receive the job key of every selected job dropped for an
         unreadable ``job.json`` or a missing directory, so a caller can count
         skips it never sees.
     :param jobs: Select these jobs and their descendants instead of scanning
         the requested states.
+    :param steps: Report only the jobs at one of these steps.
     :yields: Mechanical job records, one for each readable selected job.
     :raises ValueError: If ``states`` contains no collectable state, a *jobs*
         selector names no single job or an unfinished job outside *states*, or *jobs* is
         combined with *placement*.
     """
 
-    kinds = collect_kinds(states)
+    wanted = collect_states(states)
     if jobs is not None and placement is not None:
         raise ValueError("select jobs either by placement or by job, not both")
-    refs = _job_trees(workspace, jobs, kinds, on_skipped) if jobs is not None else None
+    reported: set[str] = set()
+
+    def skip(job_key: str) -> None:
+        """Pass *job_key* to *on_skipped* once: a tree walk and the record read may both find it damaged."""
+
+        if on_skipped is not None and job_key not in reported:
+            reported.add(job_key)
+            on_skipped(job_key)
+
+    refs = _job_trees(workspace, jobs, wanted, skip) if jobs is not None else None
     if refs is None:
         prefixes = () if placement is None else (normalize_placement(placement),)
-        refs = (ref for state in kinds for ref in _kernel.list_jobs(workspace, state, prefixes=prefixes))
+        refs = (ref for state in wanted for ref in _kernel.list_jobs(workspace, state, prefixes=prefixes))
+    at = None if steps is None else frozenset(steps)
     for ref in refs:
-        if ref.state not in kinds:
+        if ref.state not in wanted:
             continue
-        record = record_of(workspace, ref)
+        record = _record_at(workspace, ref, at)
+        if record is False:
+            continue
         if record is None:
-            if on_skipped is not None:
-                on_skipped(ref.job_key)
+            skip(ref.job_key)
             continue
         yield record
 
@@ -918,13 +955,13 @@ def job_records(
 def _job_trees(
     workspace: Workspace,
     selectors: Iterable[str],
-    kinds: tuple[str, ...],
+    wanted: tuple[str, ...],
     on_skipped: Callable[[str], None] | None,
 ) -> Iterator[JobRef]:
     """Yield the jobs *selectors* name and their descendants, depth-first and each once.
 
-    A selected job neither in *kinds* nor finished is refused; any other job
-    outside *kinds* is yielded for the caller to skip, and its descendants are walked. A job whose ``state.json`` cannot be read is
+    A selected job neither in *wanted* nor finished is refused; any other job
+    outside *wanted* is yielded for the caller to skip, and its descendants are walked. A job whose ``state.json`` cannot be read is
     yielded and also passed to *on_skipped*, since its children cannot be followed.
     """
 
@@ -932,9 +969,9 @@ def _job_trees(
     selected = [ref for selector in selectors for ref in resolver.resolve_one(selector)]
     for ref in selected:
         # A finished job outside the states is walked, not yielded, as a sweep would treat it.
-        if ref.state not in kinds and ref.state not in TERMINAL_STATES:
+        if ref.state not in wanted and ref.state not in TERMINAL_STATES:
             raise ValueError(
-                f"job {ref.job_key} is {ref.state}; collect reads only stopped jobs in --state {', '.join(kinds)}"
+                f"job {ref.job_key} is {ref.state}; collect reads only stopped jobs in --state {', '.join(wanted)}"
             )
     by_id: dict[str, JobRef] | None = None
     seen: set[str] = set()
@@ -2234,6 +2271,7 @@ def collect(
     fail_fast: bool = False,
     batch_size: int = 64,
     jobs: Iterable[str] | None = None,
+    steps: Iterable[str] | None = None,
 ) -> Iterator[CollectedJob]:
     """Collect records through registered or explicitly allowed job collectors.
 
@@ -2247,7 +2285,7 @@ def collect(
     each window, and yielded results retain scan order.
 
     :param workspace: Read jobs from this workspace.
-    :param states: Select the stopped state kinds to report.
+    :param states: Select the stopped states to report.
     :param placement: Restrict results to this placement and its descendants.
     :param allow_job_collector: Permit digest-verified collectors from the
         job's installed workflow package in the workspace store.
@@ -2258,6 +2296,8 @@ def collect(
     :param batch_size: Limit records retained and executable requests grouped at
         once; must be a positive integer.
     :param jobs: Collect only these jobs and their descendants, selected as
+        :func:`job_records` selects them.
+    :param steps: Collect only the jobs at one of these steps, as
         :func:`job_records` selects them.
     :yields: Framework-assembled collected jobs, including degraded jobs.
     :raises ValueError: If ``batch_size`` is invalid, or
@@ -2270,7 +2310,7 @@ def collect(
     # Fail-fast must not execute later collectors after observing a failed job.
     if fail_fast:
         batch_size = 1
-    records = job_records(workspace, states=states, placement=placement, on_skipped=on_skipped, jobs=jobs)
+    records = job_records(workspace, states=states, placement=placement, on_skipped=on_skipped, jobs=jobs, steps=steps)
     url_prefix = f"data/{_workspace_name(workspace)}"
 
     def assemble(

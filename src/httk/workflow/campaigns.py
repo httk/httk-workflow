@@ -308,6 +308,7 @@ def campaign_collect(
     placement: str | None = None,
     partitions: Sequence[str] | None = None,
     project: str | os.PathLike[str] | None = None,
+    steps: Iterable[str] | None = None,
 ) -> Iterator[JobRecord]:
     """Collect the finished jobs of every partition, one workspace after another.
 
@@ -317,10 +318,12 @@ def campaign_collect(
     and must be fetched home beforehand; collection crosses only local
     partitions.
 
-    :param states: Select the stopped state kinds to collect.
+    :param states: Select the stopped states to collect.
     :param placement: Restrict collection to this placement and descendants.
     :param partitions: Select partitions, or use all partitions.
     :param project: Locate the project whose campaign to collect.
+    :param steps: Collect only the jobs at one of these steps, as
+        :func:`~httk.workflow.collecting.job_records` selects them.
     :yields: Job records from the selected local partitions.
     :raises ValueError: If a selected partition is remote or unknown.
     """
@@ -335,7 +338,7 @@ def campaign_collect(
                 "fetch it home with `httk job transfer` before collecting the campaign"
             )
         assert binding.path is not None
-        yield from job_records(Workspace(binding.path), states=states, placement=placement)
+        yield from job_records(Workspace(binding.path), states=states, placement=placement, steps=steps)
 
 
 def campaign_managers(

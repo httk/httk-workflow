@@ -78,7 +78,7 @@ def test_paging_cursor_mixes_empty_and_nested_placements(tmp_path: Path) -> None
     seen: list[str] = []
     cursor = None
     while True:
-        page = list_jobs(workspace, kinds=("ready",), limit=1, after=cursor)
+        page = list_jobs(workspace, states=("ready",), limit=1, after=cursor)
         seen += [row["job_id"] for row in page.jobs]
         cursor = page.next_after
         if cursor is None:

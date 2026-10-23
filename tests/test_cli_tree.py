@@ -367,12 +367,18 @@ def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
         parser.parse_args(["job", "transfer", "send", "c", "J"])
     parsed = parser.parse_args(["job", "eject", "--hold", "J"])
     assert (parsed.hold, parsed.destination) == (True, None)
-    # Selection by state, as `job list --kind`, optionally under a placement prefix; owned jobs cannot be held.
-    argv = ["job", "transfer", "--kind", "succeeded", "--kind", "failed", "--placement", "c1", "a", "b"]
+    # Selection by state, as `job list --state`, optionally under a placement prefix; owned jobs cannot be held.
+    argv = ["job", "transfer", "--state", "succeeded", "--state", "failed", "--placement", "c1", "a", "b"]
     parsed = parser.parse_args(argv)
-    assert (parsed.kind, parsed.placement, parsed.jobs) == (["succeeded", "failed"], "c1", [])
+    assert (parsed.state, parsed.placement, parsed.jobs) == (["succeeded", "failed"], "c1", [])
     with pytest.raises(SystemExit):
-        parser.parse_args(["job", "transfer", "--kind", "owned", "a", "b"])
+        parser.parse_args(["job", "transfer", "--state", "owned", "a", "b"])
+    # Selection by step repeats; a value that is no step name is refused while parsing.
+    parsed = parser.parse_args(["job", "transfer", "--step", "relax", "--step", "scf", "a", "b"])
+    assert parsed.step == ["relax", "scf"]
+    for invalid in ("a/b", ""):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["job", "transfer", "--step", invalid, "a", "b"])
 
 
 # ---------------------------------------------------------------------------

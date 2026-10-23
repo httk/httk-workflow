@@ -862,18 +862,18 @@ def test_an_older_destination_s_flat_adoption_report_is_explained(
 # -- selecting by state -----------------------------------------------------------------------------------------
 
 
-def test_kind_selects_every_job_in_a_state_under_a_placement(
+def test_state_selects_every_job_in_a_state_under_a_placement(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     source, source_name = registered(tmp_path, "a")
     target, target_name = registered(tmp_path, "b")
     done, failed, ready = jobs(source, 3), single(source, "failed"), single(source, "ready")
-    assert run(tmp_path, "--json", "--kind", "succeeded", source_name, target_name) == 0
+    assert run(tmp_path, "--json", "--state", "succeeded", source_name, target_name) == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 3
     assert_in(target, done)
     assert_in(source, [failed, ready])
     again = jobs(source, 3)
-    assert run(tmp_path, "--json", "--kind", "succeeded", "--kind", "failed", source_name, target_name) == 0
+    assert run(tmp_path, "--json", "--state", "succeeded", "--state", "failed", source_name, target_name) == 0
     assert len(outcomes(capsys)["transfers"]) == 4
     assert_in(target, [*again, failed])
     assert_in(source, [ready])
@@ -883,18 +883,18 @@ def test_kind_selects_every_job_in_a_state_under_a_placement(
         place(source, {**elsewhere[0], "id": str(uuid.uuid4()), "placement": placement}, "succeeded")
         for placement in ("c1", "c1/deeper")
     ]
-    argv = ["--json", "--kind", "succeeded", "--placement", "c1", source_name, target_name]
+    argv = ["--json", "--state", "succeeded", "--placement", "c1", source_name, target_name]
     assert run(tmp_path, *argv) == 0
     assert len(outcomes(capsys)["transfers"]) == 2
     assert all(find(target, ref.job_id) is not None for ref in campaign)
     assert_in(source, [elsewhere, ready])
 
 
-def test_kind_and_job_naming_the_same_job_hold_it_once(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_state_and_job_naming_the_same_job_hold_it_once(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     source, source_name = registered(tmp_path, "a")
     target, target_name = registered(tmp_path, "b")
     plan = jobs(source, 2)
-    argv = ["--json", "--kind", "succeeded", "--job", str(plan[1][0]["id"]), source_name, target_name]
+    argv = ["--json", "--state", "succeeded", "--job", str(plan[1][0]["id"]), source_name, target_name]
     assert run(tmp_path, *argv) == 0
     captured = capsys.readouterr()
     document = json.loads(captured.out)
@@ -903,17 +903,80 @@ def test_kind_and_job_naming_the_same_job_hold_it_once(tmp_path: Path, capsys: p
     assert_in(target, plan)
 
 
-def test_placement_needs_kind(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_step_narrows_the_selection_and_alone_selects_every_unowned_state(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from test_moving import WORKFLOW
+    from v3_helpers import job_mapping, submit_mapping
+
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    done, failed = single(source), single(source, "failed")  # activated at step start
+    relax = job_mapping(WORKFLOW, {"relax": "succeed"}, tag="relax", placement="proj/relax", initial_step="relax")
+    submit_mapping(source, relax, members={"input.txt": f"payload of {relax['id']}"})  # never activated
+    assert run(tmp_path, "--json", "--step", "relax", source_name, target_name) == 0
+    assert len(outcomes(capsys)["transfers"]) == 1
+    assert_in(target, [(relax, "ready", 500)])
+    # --state and --step intersect.
+    assert run(tmp_path, "--state", "succeeded", "--step", "relax", source_name, target_name) == 0
+    assert f"no succeeded job at step relax to move in {source.root}" in capsys.readouterr().out
+    # A --job not at the step is left out and reported.
+    assert run(tmp_path, "--job", str(done[0]["id"]), "--step", "finish", source_name, target_name) == 0
+    assert "is at step start, not --step finish: left out" in capsys.readouterr().err
+    argv = ["--json", "--state", "succeeded", "--state", "failed", "--step", "start", source_name, target_name]
+    assert run(tmp_path, *argv) == 0
+    assert len(outcomes(capsys)["transfers"]) == 2
+    assert_in(target, [done, failed])
+    # Like --state, --step selects roots only and moves their trees whole.
+    plan = tree(source)
+    assert run(tmp_path, "--json", "--step", "start", "--tree", source_name, target_name) == 0
+    assert [len(outcome["members"]) for outcome in outcomes(capsys)["transfers"]] == [4]
+    assert_in(target, plan)
+
+
+def test_a_job_whose_step_cannot_be_read_is_an_error_with_step(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, source_name = registered(tmp_path, "a")
+    _, target_name = registered(tmp_path, "b")
+    damaged, broken = single(source), single(source)
+    damaged_ref, broken_ref = find(source, damaged[0]["id"]), find(source, broken[0]["id"])
+    assert damaged_ref is not None and broken_ref is not None
+    (damaged_ref.path / "state.json").write_text("{", encoding="utf-8")
+    (broken_ref.path / "job.json").write_text("{", encoding="utf-8")
+    for selection in (["--step", "start"], [*selected([damaged, broken]), "--step", "start"]):
+        assert run(tmp_path, "--json", *selection, source_name, target_name) == 1
+        errors = outcomes(capsys)["errors"]
+        assert len(errors) == 2 and f"{damaged_ref.job_key}: its step is unknown" in errors[0] + errors[1]
+        assert any(error.startswith(f"{broken_ref.job_key}: ") for error in errors)
+    assert find(source, damaged[0]["id"]) is not None and find(source, broken[0]["id"]) is not None
+
+
+def test_placement_narrows_a_step_selection(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    elsewhere = single(source)
+    inside = place(source, {**elsewhere[0], "id": str(uuid.uuid4()), "placement": "c1/x"}, "succeeded")
+    assert run(tmp_path, "--json", "--step", "start", "--placement", "c1", source_name, target_name) == 0
+    assert len(outcomes(capsys)["transfers"]) == 1
+    assert find(target, inside.job_id) is not None and find(source, elsewhere[0]["id"]) is not None
+    # With --job, --step selects no listing for --placement to narrow.
+    argv = ["--job", str(elsewhere[0]["id"]), "--step", "start", "--placement", "c1", source_name, target_name]
+    assert run(tmp_path, *argv) == 2
+    assert "--placement narrows --state, or --step without --job" in capsys.readouterr().err
+
+
+def test_placement_needs_state(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     source, source_name = registered(tmp_path, "a")
     _, target_name = registered(tmp_path, "b")
     mapping, _, _ = single(source)
     assert run(tmp_path, "--placement", "proj", "--job", str(mapping["id"]), source_name, target_name) == 2
-    assert "needs --kind" in capsys.readouterr().err
-    assert run(tmp_path, "--resume", "--kind", "succeeded", source_name) == 2
+    assert "--placement narrows --state" in capsys.readouterr().err
+    assert run(tmp_path, "--resume", "--state", "succeeded", source_name) == 2
     assert find(source, mapping["id"]) is not None
 
 
-def test_kind_with_tree_moves_finished_roots_with_their_children(
+def test_state_with_tree_moves_finished_roots_with_their_children(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from test_moving import WORKFLOW, parent_link
@@ -930,7 +993,7 @@ def test_kind_with_tree_moves_finished_roots_with_their_children(
         place(source, child, "succeeded", 300)
         place(source, parent, "succeeded", 300, (child,))
         plan += [(parent, "succeeded", 300), (child, "succeeded", 300)]
-    assert run(tmp_path, "--json", "--kind", "succeeded", "--tree", source_name, target_name) == 0
+    assert run(tmp_path, "--json", "--state", "succeeded", "--tree", source_name, target_name) == 0
     document = outcomes(capsys)
     # Each root's tree carried its child, whichever the listing named first.
     assert document["errors"] == [] and [len(outcome["members"]) for outcome in document["transfers"]] == [2, 2]
@@ -938,17 +1001,17 @@ def test_kind_with_tree_moves_finished_roots_with_their_children(
     assert outgoing(source) == []
 
 
-def test_hold_mode_by_kind_holds_only_that_state(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_hold_mode_by_state_holds_only_that_state(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     source, source_name = registered(tmp_path, "a")
     plan, failed = jobs(source, 2), single(source, "failed")
-    assert run(tmp_path, "--hold", "--json", "--kind", "succeeded", source_name, "far:somewhere") == 0
+    assert run(tmp_path, "--hold", "--json", "--state", "succeeded", source_name, "far:somewhere") == 0
     document = outcomes(capsys)
     assert document["errors"] == [] and len(document["holds"]) == 2
     assert all(find(source, mapping["id"]) is None for mapping, _, _ in plan)
     assert_in(source, [failed])
 
 
-def test_a_remote_kind_selection_is_one_hold_call(
+def test_a_remote_state_selection_is_one_hold_call(
     tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     project = tmp_path / "project"
@@ -958,16 +1021,16 @@ def test_a_remote_kind_selection_is_one_hold_call(
     far, far_name = registered(remote.root, "far")
     plan, failed = jobs(far, 3), single(far, "failed")
     calls = adapter_calls(monkeypatch)
-    assert run(project, "--json", "--kind", "succeeded", f"cluster:{far_name}", near_name) == 0
+    assert run(project, "--json", "--state", "succeeded", f"cluster:{far_name}", near_name) == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 3
     assert calls == ["job transfer", "transfer status", "pull", "job transfer"]
     (hold,) = [item for item in remote.commands() if "job transfer --hold" in item]
-    assert "--kind succeeded" in hold and "--job" not in hold
+    assert "--state succeeded" in hold and "--job" not in hold
     assert_in(near, plan)
     assert_in(far, [failed])
 
 
-def test_remote_kind_goes_in_the_last_hold_call_only(
+def test_remote_state_goes_in_the_last_hold_call_only_and_step_in_every_one(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, far, far_name = _remote_pair(tmp_path)
@@ -982,12 +1045,37 @@ def test_remote_kind_goes_in_the_last_hold_call_only(
 
     monkeypatch.setattr(transfer_cli, "_remote", recording)
     plan, failed = jobs(near, 3), single(near, "failed")
-    argv = ["--json", "--kind", "failed", "--kind", "succeeded", *selected(plan), f"cluster:{near_name}", far_name]
-    assert run(project, *argv) == 0
+    argv = ["--json", "--state", "failed", "--state", "succeeded", "--step", "start", *selected(plan)]
+    assert run(project, *argv, f"cluster:{near_name}", far_name) == 0
     document = outcomes(capsys)
     assert document["errors"] == [] and len(document["transfers"]) == 4
-    assert [hold.count("--kind") for hold in holds] == [0, 2]
+    assert [hold.count("--state") for hold in holds] == [0, 2]
+    # --step narrows the --job ids too, so every call carries it.
+    assert [hold.count("--step") for hold in holds] == [1, 1]
     assert_in(far, [*plan, failed])
+
+
+def test_a_remote_step_selection_carries_its_placement(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    near, near_name, far, far_name = _remote_pair(tmp_path)
+    real = transfer_cli._remote
+    holds: list[list[str]] = []
+
+    def recording(end: Any, context: Any, arguments: Any, argv: list[str], cwd: str | None = None) -> Any:
+        if "--hold" in argv:
+            holds.append(argv)
+        return real(end, context, arguments, argv, cwd)
+
+    monkeypatch.setattr(transfer_cli, "_remote", recording)
+    elsewhere = single(near)
+    inside = place(near, {**elsewhere[0], "id": str(uuid.uuid4()), "placement": "c1/x"}, "succeeded")
+    argv = ["--json", "--step", "start", "--placement", "c1", f"cluster:{near_name}", far_name]
+    assert run(project, *argv) == 0
+    assert len(outcomes(capsys)["transfers"]) == 1
+    ((hold),) = holds
+    assert hold[hold.index("--step") : hold.index("--step") + 4] == ["--step", "start", "--placement", "c1"]
+    assert find(far, inside.job_id) is not None and find(near, elsewhere[0]["id"]) is not None
 
 
 def test_a_batch_adoption_settles_once(
@@ -1028,7 +1116,7 @@ def test_a_hold_call_that_times_out_is_reported_and_its_holds_driven(
         return result
 
     monkeypatch.setattr(transfer_cli, "_remote", slow)
-    assert run(project, "--json", "-q", "--kind", "succeeded", f"cluster:{near_name}", far_name) == 1
+    assert run(project, "--json", "-q", "--state", "succeeded", f"cluster:{near_name}", far_name) == 1
     document = outcomes(capsys)
     (error,) = document["errors"]
     assert "timed out" in error and "--resume" in error
@@ -1046,15 +1134,15 @@ def test_an_older_source_s_refusal_of_the_hold_is_explained(
 
     def older(end: Any, context: Any, arguments: Any, argv: list[str], cwd: str | None = None) -> tuple[int, str, str]:
         if "--hold" in argv:
-            return 2, "", "httk: error: unrecognized arguments: --kind succeeded"
+            return 2, "", "httk: error: unrecognized arguments: --state succeeded"
         return real(end, context, arguments, argv, cwd)
 
     monkeypatch.setattr(transfer_cli, "_remote", older)
     single(near)
-    assert run(project, "--json", "-q", "--kind", "succeeded", f"cluster:{near_name}", far_name) == 1
+    assert run(project, "--json", "-q", "--state", "succeeded", f"cluster:{near_name}", far_name) == 1
     (error,) = outcomes(capsys)["errors"]
     hint = f"(cluster:{near_name} may run an older httk-workflow; upgrade it)"
-    assert error.endswith(f"unrecognized arguments: --kind succeeded {hint}") and "''" not in error
+    assert error.endswith(f"unrecognized arguments: --state succeeded {hint}") and "''" not in error
 
 
 def _family(workspace: Workspace, parent_at: str, children: dict[str, tuple[str, str]]) -> dict[str, Any]:
@@ -1074,11 +1162,11 @@ def _family(workspace: Workspace, parent_at: str, children: dict[str, tuple[str,
     return family
 
 
-def test_kind_never_splits_a_tree_whose_root_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_state_never_splits_a_tree_whose_root_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     source, source_name = registered(tmp_path, "a")
     _, target_name = registered(tmp_path, "b")
     family = _family(source, "camp/p", {"c1": ("succeeded", "camp/p/c1"), "c2": ("ready", "camp/p/c2")})
-    assert run(tmp_path, "--json", "-q", "--kind", "succeeded", "--tree", source_name, target_name) == 1
+    assert run(tmp_path, "--json", "-q", "--state", "succeeded", "--tree", source_name, target_name) == 1
     captured = capsys.readouterr()
     document = json.loads(captured.out)
     (error,) = document["errors"]
@@ -1089,13 +1177,13 @@ def test_kind_never_splits_a_tree_whose_root_is_refused(tmp_path: Path, capsys: 
     assert outgoing(source) == []
 
 
-def test_kind_without_tree_leaves_a_child_listed_before_its_parent(
+def test_state_without_tree_leaves_a_child_listed_before_its_parent(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     source, source_name = registered(tmp_path, "a")
     target, target_name = registered(tmp_path, "b")
     family = _family(source, "camp/p", {"c1": ("succeeded", "aaa/c1")})  # listed before its parent
-    assert run(tmp_path, "--json", "--kind", "succeeded", source_name, target_name) == 1
+    assert run(tmp_path, "--json", "--state", "succeeded", source_name, target_name) == 1
     captured = capsys.readouterr()
     (error,) = json.loads(captured.out)["errors"]
     assert "eject the whole tree" in error and "move only with their root (use --tree" in captured.err
@@ -1108,15 +1196,15 @@ def test_placement_is_validated_before_anything_runs(
     _near, near_name, _far, far_name = _remote_pair(tmp_path)
     for source in (near_name, f"cluster:{near_name}"):
         for placement, message in (("../x", "invalid placement component"), ("", "needs a placement prefix")):
-            assert run(project, "--kind", "succeeded", "--placement", placement, source, far_name) == 2
+            assert run(project, "--state", "succeeded", "--placement", placement, source, far_name) == 2
             assert message in capsys.readouterr().err
 
 
-def test_kind_selecting_nothing_says_so(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_state_selecting_nothing_says_so(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     source, source_name = registered(tmp_path, "a")
     _, target_name = registered(tmp_path, "b")
     single(source, "ready")
-    assert run(tmp_path, "-q", "--kind", "succeeded", "--kind", "failed", source_name, target_name) == 0
+    assert run(tmp_path, "-q", "--state", "succeeded", "--state", "failed", source_name, target_name) == 0
     assert capsys.readouterr().out == f"no succeeded or failed job to move in {source.root}\n"
 
 
@@ -1133,14 +1221,14 @@ def test_a_listed_job_claimed_before_its_hold_is_one_error(
     real = transfer_cli.iter_jobs
     taken: list[Any] = []
 
-    def racing(workspace: Any, kinds: Any = None, *, placement_prefix: Any = None) -> Any:
-        listed = list(real(workspace, kinds, placement_prefix=placement_prefix))
-        if kinds is not None and not taken:  # a manager claims the second listed job right after the listing
+    def racing(workspace: Any, states: Any = None, *, placement_prefix: Any = None) -> Any:
+        listed = list(real(workspace, states, placement_prefix=placement_prefix))
+        if states is not None and not taken:  # a manager claims the second listed job right after the listing
             taken.append(_kernel.claim(workspace, other, listed[1]))
         return iter(listed)
 
     monkeypatch.setattr(transfer_cli, "iter_jobs", racing)
-    assert run(tmp_path, "--json", "-q", "--kind", "ready", source_name, target_name) == 1
+    assert run(tmp_path, "--json", "-q", "--state", "ready", source_name, target_name) == 1
     document = outcomes(capsys)
     assert len(document["errors"]) == 1 and [outcome["status"] for outcome in document["transfers"]] == ["adopted"] * 2
     assert sum(find(target, mapping["id"]) is not None for mapping, _, _ in plan) == 2

@@ -177,7 +177,7 @@ of every succeeded job brings them home:
 httk workflow install --workspace kappa:runs 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 httk job transfer --job silicon default kappa:runs
 httk workflow run --workspace kappa:runs --count 4
-httk job transfer --kind succeeded kappa:runs default
+httk job transfer --state succeeded kappa:runs default
 ```
 
 A transfer holds the jobs on the source, copies them to the destination,
@@ -185,7 +185,7 @@ adopts them there and only then releases the hold; an interrupted transfer is
 finished by running it again or with `httk job transfer --resume`, and
 `httk transfer status` lists the holds. With `--tree` a job moves together with
 its descendants, as a campaign whose finished jobs have children needs
-(`--kind succeeded --tree`); `--job JOB` selects single jobs.
+(`--state succeeded --tree`); `--job JOB` selects single jobs.
 
 Without a registered workspace at either end, `job eject` and `job adopt` move
 jobs through a plain directory:

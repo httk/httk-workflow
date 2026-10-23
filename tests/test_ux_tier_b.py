@@ -206,7 +206,7 @@ def test_job_show_list_and_why_read_the_kernel_state(tmp_path: Path, context: CL
     assert command(["job", "show", "--workspace", name, "shown"], context) == 0
     text = capsys.readouterr().out
     assert f"job {ref.job_key} (ready)" in text and "700" in text
-    assert command(["job", "list", "--workspace", name, "--json", "--counts", "--kind", "ready"], context) == 0
+    assert command(["job", "list", "--workspace", name, "--json", "--counts", "--state", "ready"], context) == 0
     document = json.loads(capsys.readouterr().out)
     assert document["counts"] == {"ready": 1} and document["jobs"][0]["priority"] == 700
     assert document["jobs"][0]["token"] == ref.token

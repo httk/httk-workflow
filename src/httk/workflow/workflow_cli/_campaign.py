@@ -16,12 +16,13 @@ from ..campaigns import (
     remove_campaign,
     write_campaign,
 )
-from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES
+from ..collecting import COLLECTABLE_STATES, DEFAULT_COLLECT_STATES
 from ..registry import LOCAL_REMOTE, resolve_workspace
 from ..scaffold import DEFAULT_PLACEMENT
 from ..workspace import Workspace
 from ._common import (
     _add_adapter_timeout,
+    _add_step_option,
     _group,
     _json_value,
     _leaf,
@@ -189,7 +190,11 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
         collected = 0
         for partition in selected:
             for record in job_records(
-                _workspace(partition), states=states, placement=arguments.placement, on_skipped=_skip
+                _workspace(partition),
+                states=states,
+                placement=arguments.placement,
+                on_skipped=_skip,
+                steps=arguments.step,
             ):
                 print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
                 collected += 1
@@ -212,6 +217,7 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
                     on_skipped=_skip,
                     fail_fast=arguments.fail_fast,
                     batch_size=arguments.batch_size,
+                    steps=arguments.step,
                 )
             )
         reports = store_collected(
@@ -238,6 +244,7 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
                 on_skipped=_skip,
                 fail_fast=arguments.fail_fast,
                 batch_size=arguments.batch_size,
+                steps=arguments.step,
             ):
                 degraded += item.missing_collector is not None
                 collected += item.missing_collector is None
@@ -452,8 +459,12 @@ def build_campaign_parser(
         "--state",
         action="append",
         metavar="STATE",
-        choices=COLLECTABLE_KINDS,
-        help=f"state kind to collect (repeatable, default: {', '.join(DEFAULT_COLLECT_STATES)})",
+        choices=COLLECTABLE_STATES,
+        help=f"job state to collect (repeatable, default: {', '.join(DEFAULT_COLLECT_STATES)})",
+    )
+    _add_step_option(
+        collect_parser,
+        help_text="collect only jobs at this step: the current activation's, else the initial step (repeatable)",
     )
     collect_parser.add_argument(
         "--placement",

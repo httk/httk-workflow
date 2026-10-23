@@ -10,6 +10,7 @@ whose runner exits without an outcome — is driven to completion by a real
 import json
 from collections.abc import Iterator
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, cast
 
 import httk.core
@@ -201,7 +202,7 @@ def test_a_collect_refuses_a_state_no_finished_job_can_be_in(campaign: tuple[Wor
     ws, _ = campaign
     with pytest.raises(ValueError, match="cannot be collected"):
         list(job_records(ws, states=("ready",)))
-    with pytest.raises(ValueError, match="at least one state kind"):
+    with pytest.raises(ValueError, match="at least one state"):
         list(job_records(ws, states=()))
 
 
@@ -456,6 +457,42 @@ def test_the_command_selects_states_and_placements(
     # An unusable state is refused by the parser rather than silently ignored.
     assert command(["collect", "--workspace", name, "--state", "ready"], context) == 2
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_the_step_filter_leaves_jobs_out_without_counting_them_skipped(
+    campaign: tuple[Workspace, dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ws, identifiers = campaign
+    skipped: list[str] = []
+    # The parent spawned at start and finished at gather; its children and the single job finished at start.
+    assert sorted(_by_label(list(job_records(ws, steps=("gather",), on_skipped=skipped.append)))) == ["campaign"]
+    assert sorted(_by_label(list(job_records(ws, steps=("start",))))) == ["alpha", "single"]
+    assert skipped == []
+    # With --job, --step filters the reported jobs while the whole tree is still walked.
+    tree = job_records(ws, states=("succeeded", "failed"), jobs=[identifiers["parent"]], steps=("start",))
+    assert [record.job_key.split("--")[0] for record in tree] == ["alpha", "beta"]
+    context = CLIContext("httk", ws.root)
+    name = register_ws(context, ws.root)
+    assert command(["collect", "--workspace", name, "--raw", "--step", "gather"], context) == 0
+    *lines, summary = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [line["job_id"] for line in lines] == [identifiers["parent"]]
+    assert summary["collected"] == 1 and summary["skipped_unreadable"] == 0
+    assert command(["collect", "--workspace", name, "--step", "no/step"], context) == 2
+    assert "not a step name" in capsys.readouterr().err
+
+
+def test_a_selected_job_whose_state_is_damaged_is_skipped_once_with_step(tmp_path: Path) -> None:
+    ws = workspace(tmp_path / "workspace")
+    installed = install(ws, tmp_path / "package")
+    job = submit(ws, installed, {"start": "succeed"}, tag="damaged", placement="project/damaged")
+    run(ws)
+    ref = find(ws, job.job_id)
+    assert ref is not None
+    (ref.path / "state.json").write_text("{", encoding="utf-8")
+    skipped: list[str] = []
+    assert list(job_records(ws, jobs=[job.job_id], steps=("start",), on_skipped=skipped.append)) == []
+    assert skipped == [ref.job_key]
 
 
 def test_collect_assembles_overlay_edges_and_products(

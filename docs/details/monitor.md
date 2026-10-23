@@ -26,7 +26,7 @@ and worker errors appear in the status line.
 | `j`/`k` or arrows | move |
 | `n`/`p` | page forward/back |
 | `Tab` | change pane |
-| `f` | filter by kind, placement prefix, or tag substring (enter space-separated `KIND path=PREFIX tag=TEXT`) |
+| `f` | filter by state, placement prefix, or tag substring (enter space-separated `STATE path=PREFIX tag=TEXT`) |
 | `Enter` | load bounded detail |
 | `w` | load the full diagnosis |
 | `l` | load full history |

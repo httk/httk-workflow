@@ -422,6 +422,13 @@ def test_postprocess_collect_selects_jobs_and_counts_unreadable_ones(
     (report, summary) = _lines(capsys)
     assert report["job"] == f"{chosen.workspace_id}:{chosen.job_id}" and summary["collected"] == 1
     assert report["workflow_id"] == provider.workflow_id
+    # --step narrows the selection; a job left out for its step is not counted.
+    step = str(chosen.job["initial_step"])
+    assert collect_command([str(ws.root), "--postprocess", "report", "--step", step], context) == 0
+    assert _lines(capsys)[-1]["collected"] == 2
+    assert collect_command([str(ws.root), "--postprocess", "report", "--step", "elsewhere"], context) == 0
+    (summary,) = _lines(capsys)
+    assert summary["collected"] == 0 and summary["unreadable"] == 0
 
     other = next(record for record in job_records(ws) if record.job_id != chosen.job_id)
     (other.payload / "job.json").write_text("{", encoding="utf-8")

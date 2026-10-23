@@ -454,6 +454,7 @@ def collect_postprocess(
     placement: str | PurePosixPath | None = None,
     jobs: Iterable[str] | None = None,
     on_skipped: Callable[[str], None] | None = None,
+    steps: Iterable[str] | None = None,
 ) -> Iterator[CollectedPostprocess]:
     """Describe the declared output files of *script*'s last run on each selected job.
 
@@ -469,11 +470,12 @@ def collect_postprocess(
 
     :param workspace: Read jobs and their postprocess output from this workspace.
     :param script: Name the postprocess script whose output to collect.
-    :param states: Select the stopped state kinds to report.
+    :param states: Select the stopped states to report.
     :param placement: Restrict results to this placement and its descendants.
     :param jobs: Collect only these jobs and their descendants.
     :param on_skipped: Receive the job key of every selected job dropped for an
         unreadable ``job.json``, forwarded to ``job_records``.
+    :param steps: Collect only the jobs at one of these steps, as ``job_records`` selects them.
     :return: A lazy iterator with one item per selected readable job.
     :raises ValueError: If *script* is not a single path component, or the
         postprocess root is not inside the workspace (a ``postprocess.directory``
@@ -491,7 +493,7 @@ def collect_postprocess(
             f"directory, not {root}: unset postprocess.directory and rerun the script"
         )
     url_prefix = f"data/{_workspace_name(workspace)}"
-    records = job_records(workspace, states=states, placement=placement, on_skipped=on_skipped, jobs=jobs)
+    records = job_records(workspace, states=states, placement=placement, on_skipped=on_skipped, jobs=jobs, steps=steps)
     return (_collect_one(record, script, root, workspace_root, url_prefix) for record in records)
 
 

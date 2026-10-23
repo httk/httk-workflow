@@ -120,7 +120,7 @@ def test_exact_limit_has_no_cursor_without_a_following_job(tmp_path: Path, monke
         _job(workspace, "ready", "jobs", tag=f"job{index:02d}")
     _no_state(monkeypatch)
 
-    page = list_jobs(workspace, kinds=("ready",), limit=50)
+    page = list_jobs(workspace, states=("ready",), limit=50)
 
     assert len(page.jobs) == 50
     assert page.next_after is None
@@ -130,11 +130,11 @@ def test_cursor_state_must_be_selected_and_well_formed(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
 
     with pytest.raises(ValueError, match="not among the selected states"):
-        list_jobs(workspace, kinds=("ready",), after="waiting:jobs/x")
+        list_jobs(workspace, states=("ready",), after="waiting:jobs/x")
     with pytest.raises(ValueError, match="job list cursor must be"):
-        list_jobs(workspace, kinds=("ready",), after="submitted:jobs/x")
+        list_jobs(workspace, states=("ready",), after="submitted:jobs/x")
     with pytest.raises(ValueError, match="unknown job state submitted"):
-        list_jobs(workspace, kinds=("submitted",))
+        list_jobs(workspace, states=("submitted",))
 
 
 def test_owned_jobs_are_listed_and_paged_after_the_unowned_states(
@@ -173,7 +173,7 @@ def test_placement_prefix_prunes_unrelated_state_directories(tmp_path: Path, mon
 
     monkeypatch.setattr(os, "scandir", spy)
     _no_state(monkeypatch)
-    page = list_jobs(workspace, kinds=("ready",), placement_prefix="jobs")
+    page = list_jobs(workspace, states=("ready",), placement_prefix="jobs")
 
     assert len(page.jobs) == 1
     assert all("jobs2" not in path for path in opened)
@@ -187,7 +187,7 @@ def test_tag_contains_filters_before_state_reads(tmp_path: Path, monkeypatch: py
     reads: list[str] = []
     _no_state(monkeypatch, reads)
 
-    page = list_jobs(workspace, kinds=("ready",), tag_contains="sil")
+    page = list_jobs(workspace, states=("ready",), tag_contains="sil")
 
     assert len(page.jobs) == 1
     assert page.jobs[0]["job_key"].startswith("silicon--")
@@ -214,10 +214,10 @@ def test_tag_filter_budget_cursor_does_not_skip_matches(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(_reading, "_stream_after", counted)
     examined: list[int] = []
-    first = list_jobs(workspace, kinds=("ready",), limit=50, tag_contains="needle")
+    first = list_jobs(workspace, states=("ready",), limit=50, tag_contains="needle")
     examined.append(current)
     current = 0
-    second = list_jobs(workspace, kinds=("ready",), limit=50, tag_contains="needle", after=first.next_after)
+    second = list_jobs(workspace, states=("ready",), limit=50, tag_contains="needle", after=first.next_after)
     examined.append(current)
 
     assert len(first.jobs) == 1
@@ -226,10 +226,26 @@ def test_tag_filter_budget_cursor_does_not_skip_matches(tmp_path: Path, monkeypa
     assert examined == [10_000, 50]
 
     current = 0
-    exact = list_jobs(workspace, kinds=("ready",), limit=1, tag_contains="needle")
+    exact = list_jobs(workspace, states=("ready",), limit=1, tag_contains="needle")
     assert len(exact.jobs) == 1
     assert current == 10_000
 
-    all_matches = list_jobs(workspace, kinds=("ready",), limit=None, tag_contains="needle")
+    all_matches = list_jobs(workspace, states=("ready",), limit=None, tag_contains="needle")
     assert len(all_matches.jobs) == 51
     assert all_matches.next_after is None
+
+
+def test_a_step_filter_page_ends_at_the_scan_bound_without_a_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``steps`` pages like ``tag_contains``: a page without a match still ends, with a resumable cursor."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    for index in range(10_001):
+        _job(workspace, "ready", "jobs", tag=f"a{index:05d}")
+    _no_state(monkeypatch)  # and no job.json: no job is at any step
+
+    first = list_jobs(workspace, states=("ready",), limit=1, steps=("relax",))
+    assert first.jobs == [] and first.next_after is not None
+    second = list_jobs(workspace, states=("ready",), limit=1, steps=("relax",), after=first.next_after)
+    assert second.jobs == [] and second.next_after is None

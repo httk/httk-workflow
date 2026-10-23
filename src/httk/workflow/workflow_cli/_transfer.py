@@ -24,6 +24,7 @@ from httk.core.cli import CLIContext
 
 from .. import _fs, _kernel, _moving
 from .._bundles import BundleError
+from .._manager_scheduling import current_step
 from .._util import write_json_atomic
 from ..adapters import (
     REMOTE_JOB_ADOPT_COMMAND,
@@ -51,6 +52,7 @@ from ..workspace import Workspace
 from ._common import (
     _ERRORS,
     _add_adapter_timeout,
+    _add_step_option,
     _durable,
     _field,
     _group,
@@ -606,14 +608,23 @@ def _holds(src: _End, context: CLIContext, arguments: argparse.Namespace) -> lis
     return [_moving.Hold.from_mapping(hold) for hold in document["holds"]]
 
 
-def _parent_here(ref: _kernel.JobRef, present: set[str]) -> bool:
-    """Whether *ref* is a non-detached child of a job in *present*: a member of its root's tree, as ejection rules."""
+def _parent_here(ref: _kernel.JobRef, present: set[str], *, step: bool) -> tuple[bool, str | None, str | None]:
+    """Return whether *ref* moves only with its root, and (with *step*) its step or why that is unknown.
 
-    job, _ = read_job(ref)
-    if job is None or job.parent is None or str(job.parent.get("job_id")) not in present:
-        return False
-    doc, _ = read_state(ref)
-    return doc is None or doc.detached is None
+    A job moves only in its root's tree when it is a non-detached child of a job
+    in *present*. ``state.json`` is read only for such a child or for the step.
+    """
+
+    job, job_error = read_job(ref)
+    if job is None:
+        return False, None, f"{ref.job_key}: {job_error}" if step else None
+    child = job.parent is not None and str(job.parent.get("job_id")) in present
+    if not (child or step):
+        return False, None, None
+    doc, state_error = read_state(ref)
+    if step and state_error is not None:
+        return False, None, f"{ref.job_key}: its step is unknown: {state_error}"
+    return child and (doc is None or doc.detached is None), current_step(job, doc) if step else None, None
 
 
 def _hold_jobs(
@@ -626,17 +637,38 @@ def _hold_jobs(
         workspace = src.workspace
         require_cli_modifiable(workspace)
         refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+        steps = None if arguments.step is None else frozenset(arguments.step)
+        if steps is not None:
+            named, refs = refs, []
+            for ref in named:
+                _, step, damage = _parent_here(ref, set(), step=True)
+                if damage is not None:
+                    errors.append(damage)
+                elif step in steps:
+                    refs.append(ref)
+                else:
+                    print(
+                        f"{ref.job_key} is at step {step}, not --step {', '.join(sorted(steps))}: left out",
+                        file=sys.stderr,
+                    )
         children: list[_kernel.JobRef] = []
-        if arguments.kind:
+        if arguments.state or (steps is not None and not arguments.jobs):
             seen = {ref.job_id for ref in refs}
             # Listed in full first: holding moves jobs out of the directories the listing walks.
-            listed = list(iter_jobs(workspace, arguments.kind, placement_prefix=arguments.placement))
+            states = arguments.state or _kernel.UNOWNED_STATES
+            listed = list(iter_jobs(workspace, states, placement_prefix=arguments.placement))
             present = {ref.job_id for ref in iter_jobs(workspace)}
             for ref in listed:
                 if ref.job_id not in seen:
                     seen.add(ref.job_id)
+                    parent_here, step, damage = _parent_here(ref, present, step=steps is not None)
+                    if damage is not None:
+                        errors.append(damage)
+                        continue
+                    if steps is not None and step not in steps:
+                        continue
                     # A child whose parent is here moves only in its root's tree, never on its own.
-                    (children if _parent_here(ref, present) else refs).append(ref)
+                    (children if parent_here else refs).append(ref)
         moving: set[str] = set()
         with _owner(workspace, "job transfer") as owner:
             for ref in refs:
@@ -674,14 +706,15 @@ def _hold_jobs(
             raise ValueError(f"a remote source requires canonical job ids: {selector!r}") from exc
     argv = [*REMOTE_JOB_TRANSFER_COMMAND, "--hold", "--json", *(["--tree"] if arguments.tree else [])]
     argv += [*(["--destination-id", dst.workspace_id] if dst.workspace_id is not None else [])]
-    # --kind names no ids, so it goes in one call: the last, as a --job of a later call that --kind already held
-    # would no longer resolve there.
-    kinds = [item for state in arguments.kind for item in ("--kind", state)]
-    kinds += ["--placement", arguments.placement] if arguments.placement is not None else []
+    # --step narrows every selection, the --job ids too, so every call carries it. --state names no ids, so it
+    # goes in one call: the last, as a --job of a later call that --state already held would no longer resolve there.
+    step_items = [item for step in arguments.step or [] for item in ("--step", step)]
+    states = [item for state in arguments.state for item in ("--state", state)]
+    states += ["--placement", arguments.placement] if arguments.placement is not None else []
     chunks = _chunks(arguments.jobs, flag="--job") or [[]]
     for index, chunk in enumerate(chunks):
-        selected = [item for selector in chunk for item in ("--job", selector)]
-        selected += kinds if index == len(chunks) - 1 else []
+        selected = [item for selector in chunk for item in ("--job", selector)] + step_items
+        selected += states if index == len(chunks) - 1 else []
         # Holds may exist after any failure here: the pass over the source's holds, or a later --resume, drives them.
         try:
             code, out, err = _remote(src, context, arguments, [*argv, *selected, "--", src.plain, dst.locator])
@@ -702,7 +735,7 @@ def _hold_jobs(
             message = f"job transfer --hold on {src.locator} printed no hold document"
             message += f": {err.strip()}" if code and err.strip() else ""
             message += f": {out[:200]!r}" if out else ""
-            if "unrecognized arguments" in err:
+            if "unrecognized arguments" in err or "invalid choice" in err:
                 message += f" ({src.locator} may run an older httk-workflow; upgrade it)"
             errors.append(message)
             continue
@@ -924,7 +957,9 @@ def _report(
 
 
 def _handle_release(arguments: argparse.Namespace, context: CLIContext) -> int:
-    if arguments.destination is not None or arguments.jobs or arguments.kind or arguments.resume or arguments.hold:
+    if arguments.destination is not None or any(
+        (arguments.jobs, arguments.state, arguments.step, arguments.resume, arguments.hold)
+    ):
         raise ValueError("--release takes transfer ids and at most the workspace holding them")
     for transfer_id in arguments.release:
         if not _TRANSFER_ID.fullmatch(transfer_id):
@@ -949,9 +984,9 @@ def _handle_release(arguments: argparse.Namespace, context: CLIContext) -> int:
 def _handle_hold(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Hold the selected jobs of a local SRC for a transfer to the DST locator, recorded as given."""
 
-    selected = arguments.jobs or arguments.kind
+    selected = arguments.jobs or arguments.state or arguments.step
     if arguments.resume or arguments.source is None or arguments.destination is None or not selected:
-        raise ValueError("--hold takes --job or --kind, SRC and the destination to record")
+        raise ValueError("--hold takes --job, --state or --step, SRC and the destination to record")
     src = _end(arguments.source, context, arguments)
     if src.workspace is None:
         raise ValueError(f"--hold holds jobs in a workspace on this machine, not in {src.locator}")
@@ -980,8 +1015,8 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     """
 
     if arguments.placement is not None:
-        if not arguments.kind:
-            raise ValueError("--placement narrows --kind; it needs --kind")
+        if not (arguments.state or (arguments.step and not arguments.jobs)):
+            raise ValueError("--placement narrows --state, or --step without --job; it needs one of them")
         if not normalize_placement(arguments.placement).parts:
             raise ValueError("--placement needs a placement prefix; leave it out to select under every placement")
     if arguments.release:
@@ -990,11 +1025,13 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
         return _handle_hold(arguments, context)
     if arguments.destination_id is not None:
         raise ValueError("--destination-id is recorded by --hold; it needs --hold")
-    selected = arguments.jobs or arguments.kind
+    selected = arguments.jobs or arguments.state or arguments.step
     if not arguments.resume and (arguments.source is None or arguments.destination is None or not selected):
-        raise ValueError("name jobs with --job or --kind, and SRC and DST; or re-drive held transfers with --resume")
+        raise ValueError(
+            "name jobs with --job, --state or --step, and SRC and DST; or re-drive held transfers with --resume"
+        )
     if arguments.resume and selected:
-        raise ValueError("--resume re-drives held transfers and takes no --job or --kind")
+        raise ValueError("--resume re-drives held transfers and takes no --job, --state or --step")
     src = _end(arguments.source, context, arguments)
     ends: dict[str, _End] = {}
     dst = None
@@ -1010,8 +1047,9 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
             # Before anything is held: a destination that cannot take the jobs would only leave them held.
             require_cli_modifiable(dst.workspace)
         what = [f"{len(arguments.jobs)} job(s)"] if arguments.jobs else []
-        what += [f"every {state} job" for state in arguments.kind]
-        _say(arguments, f"holding {', '.join(what)} on {src.locator}")
+        what += [f"every {state} job" for state in arguments.state]
+        at = f" at step {' or '.join(arguments.step)}" if arguments.step else ""
+        _say(arguments, f"holding {', '.join(what or ['every job'])}{at} on {src.locator}")
         _hold_jobs(src, dst, context, arguments, errors)
     # Every run re-drives the holds bound for its destination (with --resume and no DST: every hold), each
     # destination's holds as one batch.
@@ -1033,9 +1071,11 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     outcomes = []
     for locator, holds in batches.items():
         outcomes.extend(_drive(src, ends[locator], holds, context, arguments))
-    if arguments.kind:
+    if arguments.state or arguments.step:
         under = f" under {arguments.placement}" if arguments.placement is not None else ""
-        empty = f"no {' or '.join(arguments.kind)} job to move in {src.locator}{under}"
+        which = f"{' or '.join(arguments.state)} " if arguments.state else ""
+        at = f" at step {' or '.join(arguments.step)}" if arguments.step else ""
+        empty = f"no {which}job{at} to move in {src.locator}{under}"
         return _report(outcomes, errors, json_output=arguments.json, empty=empty)
     return _report(outcomes, errors, json_output=arguments.json)
 
@@ -1075,10 +1115,12 @@ def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -
 
 _TRANSFER_DESCRIPTION = """\
 Move jobs between two workspaces: `job transfer --job JOB [--tree] SRC DST`,
-or every job in a state: `job transfer --kind succeeded [--placement PREFIX]
-[--tree] SRC DST` (--kind and --job combine; both repeat). --kind never
-splits a tree: it leaves out jobs whose parent is in SRC, which move only in
-their root's tree. Without --tree a selected job that has children present is
+or every job in a state: `job transfer --state succeeded [--placement PREFIX]
+[--tree] SRC DST` (--state and --job combine; both repeat). `--step STEP`
+(repeatable) narrows the selection to jobs at that step (the current
+activation's, else the initial step); alone it selects from every state but
+owned. --state and --step never split a tree: they leave out jobs whose
+parent is in SRC, which move only in their root's tree. Without --tree a selected job that has children present is
 refused: --tree moves a finished campaign's roots with their children (failed,
 cancelled or paused ones too).
 
@@ -1103,7 +1145,7 @@ a bundle it already has, and the hold is released. `transfer status` and
 SRC with `job adopt SRC/.httk-workspace/transfers/outgoing/<transfer id>`,
 which is safe only after checking that DST does not have the jobs.
 `job transfer --release T [--release T ...] [WS]` discards holds whose jobs
-DST has; `job transfer --hold (--job JOB | --kind STATE) ... SRC DST` only
+DST has; `job transfer --hold (--job JOB | --state STATE | --step STEP) ... SRC DST` only
 holds, recording DST as given (the first leg a client runs on a remote SRC)."""
 
 
@@ -1132,14 +1174,25 @@ def build_transfer_parser(
         help="a job UUID, key, unique prefix or path in SRC; a remote SRC requires canonical job UUIDs (repeatable)",
     )
     transfer.add_argument(
-        "--kind",
+        "--state",
         action="append",
         default=[],
         metavar="STATE",
         choices=_kernel.UNOWNED_STATES,
         help="select every job of SRC in this state (repeatable; combinable with --job)",
     )
-    transfer.add_argument("--placement", metavar="PREFIX", help="with --kind: only jobs under this placement prefix")
+    _add_step_option(
+        transfer,
+        help_text=(
+            "select only jobs at this step: the current activation's, else the initial step (repeatable; "
+            "narrows --job and --state, alone selects from every state but owned)"
+        ),
+    )
+    transfer.add_argument(
+        "--placement",
+        metavar="PREFIX",
+        help="with --state, or --step without --job: only jobs under this placement prefix",
+    )
     transfer.add_argument("--tree", action="store_true", help="move each job's descendants with it")
     transfer.add_argument("--resume", action="store_true", help="re-drive the held transfers of SRC (to DST)")
     transfer.add_argument(

@@ -46,7 +46,7 @@ class MonitorState:
     detail: dict[str, Any] | None = None
     detail_job: str | None = None
     follow: bool = False
-    kind_filter: tuple[str, ...] = ()
+    state_filter: tuple[str, ...] = ()
     placement_prefix: str | None = None
     tag_contains: str | None = None
     status: str = ""
@@ -214,7 +214,7 @@ def handle_key(state: MonitorState, key: str) -> MonitorState:
             state.detail = None
             state.status = "loading detail"
     elif key == "f":
-        state.status = "filter prompt: kind, placement prefix, tag substring"
+        state.status = "filter prompt: state, placement prefix, tag substring"
     elif key == "m":
         state.status = "manager prompt: count and launcher"
     elif key == "D":
@@ -260,7 +260,7 @@ class MonitorApp:
         self,
         generation: int,
         view: WorkspaceView,
-        kinds: tuple[str, ...],
+        states: tuple[str, ...],
         prefix: str | None,
         tag: str | None,
         cursor: str | None,
@@ -268,13 +268,13 @@ class MonitorApp:
         """Read only the selected view's counts, page, and managers."""
 
         page = view.page(
-            kinds,
+            states,
             prefix,
             tag,
             cursor,
             50,
         )
-        counts = page.counts if page.counts is not None else view.counts(kinds, prefix)
+        counts = page.counts if page.counts is not None else view.counts(states, prefix)
         return generation, view, counts, page, [dict(item) for item in view.managers()]
 
     def _schedule_load(self, *, force: bool = False) -> None:
@@ -291,12 +291,12 @@ class MonitorApp:
                 self.state.detail = None
             generation = self.state.generation
             view = self.state.view
-            kinds = self.state.kind_filter or tuple(JOB_STATES)
+            states = self.state.state_filter or tuple(JOB_STATES)
             self.future = self.executor.submit(
                 self._load,
                 generation,
                 view,
-                kinds,
+                states,
                 self.state.placement_prefix,
                 self.state.tag_contains,
                 self.state.page_cursor,
@@ -538,9 +538,9 @@ class MonitorApp:
                     self._handle_confirmation(normalized)
                     continue
                 if normalized == "f":
-                    value = self._prompt("filter kind placement tag (blank clears): ")
+                    value = self._prompt("filter state placement tag (blank clears): ")
                     parts = value.split()
-                    self.state.kind_filter = tuple(part for part in parts if part in JOB_STATES)
+                    self.state.state_filter = tuple(part for part in parts if part in JOB_STATES)
                     self.state.placement_prefix = next((part[5:] for part in parts if part.startswith("path=")), None)
                     self.state.tag_contains = next((part[4:] for part in parts if part.startswith("tag=")), None)
                     self.state.page_cursor = None

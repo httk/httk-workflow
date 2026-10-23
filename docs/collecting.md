@@ -18,6 +18,8 @@ or through its children, instead of the whole workspace. JOB is anything
 the workspace. Only jobs in the collected states (`--state`, default
 `succeeded`) are collected, so a failed parent yields its succeeded
 descendants; a selected job that has not finished yet is refused. It cannot be combined with `--placement`.
+`--step STEP` (repeatable) collects only the jobs at that step: the step of
+their current activation, or the initial step of one never activated.
 
 Each collected job prints one JSON summary line, and the sweep ends with one
 summary line of counts. The command exits non-zero only when a job could not be

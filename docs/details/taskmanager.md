@@ -758,14 +758,16 @@ see {doc}`monitor`.
 
 For large workspaces, list jobs a page at a time with
 `job list --json --limit N`, passing its `next_after` value back as `--after`.
-`--kind` selects states, `--placement` prunes to a placement prefix, and
-`--tag-contains` narrows the stream before state is read.
+`--state` selects states, `--placement` prunes to a placement prefix,
+`--tag-contains` narrows the stream before state is read, and `--step` keeps
+the jobs at a step (the current activation's, or the initial step before the
+first activation).
 
 These commands find a job by listing its placement in each state and read its
 `job.json`, `state.json` and run logs; none writes anything:
 
 ```console
-httk job list --workspace WORKSPACE --kind ready --placement project-a
+httk job list --workspace WORKSPACE --state ready --placement project-a
 httk job show --workspace WORKSPACE JOB
 httk job log --workspace WORKSPACE --limit 20 JOB
 httk job why --workspace WORKSPACE JOB

@@ -164,7 +164,7 @@ def test_monitor_remote_page_forwards_counts_and_filters(monkeypatch: pytest.Mon
         "--counts",
         "--limit",
         "7",
-        "--kind",
+        "--state",
         "ready",
         "--placement",
         "jobs/sub",
@@ -214,8 +214,8 @@ def test_monitor_page_does_not_select_the_counts_filter(tmp_path: Path, monkeypa
     view.page(("failed",), "stale", limit=1)
     calls: list[tuple[str, str | None]] = []
 
-    def fake_count(_workspace: Workspace, kind: str, prefix: str | None) -> int:
-        calls.append((kind, prefix))
+    def fake_count(_workspace: Workspace, state: str, prefix: str | None) -> int:
+        calls.append((state, prefix))
         return 1
 
     monkeypatch.setattr(monitor_data, "count_jobs", fake_count)

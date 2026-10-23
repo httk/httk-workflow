@@ -29,8 +29,10 @@ def test_remote_job_list_forwards_every_flag_and_json_is_optional(tmp_path: Path
         "list",
         "--workspace",
         "cluster:station",
-        "--kind",
+        "--state",
         "ready",
+        "--step",
+        "start",
         "--placement",
         "jobs",
         "--after",
@@ -51,8 +53,10 @@ def test_remote_job_list_forwards_every_flag_and_json_is_optional(tmp_path: Path
         "job",
         "list",
         "--counts",
-        "--kind",
+        "--state",
         "ready",
+        "--step",
+        "start",
         "--placement",
         "jobs",
         "--after",
@@ -77,8 +81,10 @@ def test_remote_job_list_forwards_every_flag_and_json_is_optional(tmp_path: Path
         "list",
         "--json",
         "--counts",
-        "--kind",
+        "--state",
         "ready",
+        "--step",
+        "start",
         "--placement",
         "jobs",
         "--after",
@@ -140,3 +146,19 @@ def test_remote_job_detail_commands_relay_and_forward_canonical_ids(tmp_path: Pa
         args = ["job", action, "--workspace", "cluster:station", "remote--" + job_id]
         assert command(args, context) == 2
         assert "canonical job ids" in capsys.readouterr().err
+
+
+def test_a_remote_usage_error_suggests_upgrading_the_remote(tmp_path: Path, remote, capsys, monkeypatch) -> None:
+    from httk.workflow.workflow_cli import _common
+
+    project = tmp_path / "project"
+    initialize_project(project, name="paged-remote-older")
+    fake_remote(project)
+    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
+    context = CLIContext("httk", project)
+    register_ws(context, workspace.root, "station")
+    hint = "the remote may run an older httk-workflow; upgrade it\n"
+    for status, stderr in ((2, "httk: error: unrecognized arguments: --state ready\n"), (1, "no such workspace\n")):
+        monkeypatch.setattr(_common, "remote_workspace_output", lambda *_a, _s=status, _e=stderr, **_k: (_s, "", _e))
+        assert command(["job", "list", "--workspace", "cluster:station", "--state", "ready"], context) == status
+        assert capsys.readouterr().err == stderr + (hint if status == 2 else "")

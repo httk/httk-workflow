@@ -155,7 +155,7 @@ finished jobs back with the reverse transfer, selecting them by state (add
 `--job JOB_UUID`):
 
 ```console
-$ httk job transfer --kind succeeded kappa:runs default
+$ httk job transfer --state succeeded kappa:runs default
 ```
 
 A transfer holds the jobs on the source, copies them, adopts them at the
@@ -190,7 +190,7 @@ first. A child that should leave alone is detached first, because a child may
 read its parent's files in place (see {doc}`composing_workflows`):
 
 ```console
-$ httk job transfer --kind succeeded --tree kappa:runs default
+$ httk job transfer --state succeeded --tree kappa:runs default
 $ httk job detach CHILD
 $ httk job transfer --job CHILD default kappa:runs
 ```

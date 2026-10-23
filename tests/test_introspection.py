@@ -229,9 +229,63 @@ def test_list_reports_one_row_per_job_and_filters_by_state(ws: Workspace, instal
     assert {str(row["state"]) for row in rows} == {"succeeded", "ready"}
     by_id = {str(row["job_id"]): row for row in rows}
     assert by_id[finished]["step"] == "gather" and by_id[finished]["phase"] == "idle"
-    assert by_id[fresh]["step"] is None and by_id[fresh]["phase"] is None
-    assert [row["job_id"] for row in list_jobs(ws, kinds=("ready",))] == [fresh]
+    # A job not yet activated is at its initial step.
+    assert by_id[fresh]["step"] == "start" and by_id[fresh]["phase"] is None
+    assert [row["job_id"] for row in list_jobs(ws, states=("ready",))] == [fresh]
     assert [row["job_id"] for row in list_jobs(ws, placement_prefix="project/list/done")] == [finished]
+
+
+def test_list_selects_by_step_never_activated_and_owned_jobs_too(
+    ws: Workspace, installed: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    finished = _submit(ws, installed, _THREE_STEPS, placement="project/step/done").job_id
+    v3.run(ws)
+    fresh = _submit(ws, installed, _THREE_STEPS, placement="project/step/new").job_id
+    held = _submit(ws, installed, _THREE_STEPS, placement="project/step/owned")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, ws.root)
+
+    def listed(*argv: str) -> list[str]:
+        assert command(["job", "list", "--workspace", name, "--json", *argv], context) == 0
+        return [row["job_id"] for row in json.loads(capsys.readouterr().out)["jobs"]]
+
+    with v3.cli_owner(ws) as owner:
+        owned = _kernel.claim(ws, owner, held)
+        assert owned is not None
+        assert [row["job_id"] for row in list_jobs(ws, steps=("start",))] == [fresh, held.job_id]
+        assert listed("--step", "gather") == [finished]
+        # Repeated steps union; --state intersects with them.
+        assert listed("--step", "start", "--step", "gather") == [fresh, finished, held.job_id]
+        assert listed("--state", "succeeded", "--state", "owned", "--step", "start") == [held.job_id]
+        assert listed("--step", "finish") == []
+        # --counts stays per state and ignores --step.
+        assert command(["job", "list", "--workspace", name, "--json", "--counts", "--step", "finish"], context) == 0
+        assert json.loads(capsys.readouterr().out)["counts"]["succeeded"] == 1
+        owned.give_back()
+    # A step that is no valid step name is refused while parsing.
+    assert command(["job", "list", "--workspace", name, "--step", "a/b"], context) == 2
+    assert "not a step name: 'a/b'" in capsys.readouterr().err
+
+
+def test_a_job_whose_step_cannot_be_read_matches_no_step_and_is_reported(
+    ws: Workspace, installed: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    damaged = _submit(ws, installed, _THREE_STEPS, placement="project/damaged/state").job_id
+    broken = _submit(ws, installed, _THREE_STEPS, placement="project/damaged/job").job_id
+    v3.run(ws)
+    refs = {ref.job_id: ref for ref in _kernel.list_jobs(ws, "succeeded")}
+    (refs[damaged].path / "state.json").write_text("{", encoding="utf-8")
+    (refs[broken].path / "job.json").write_text("{", encoding="utf-8")
+    # Neither the initial step (no false match) nor the real one (no silent drop): the step is unknown.
+    for step in ("start", "gather"):
+        caplog.clear()
+        assert list_jobs(ws, steps=(step,)).jobs == []
+        warned = " ".join(record.getMessage() for record in caplog.records)
+        assert refs[damaged].job_key in warned and refs[broken].job_key in warned
+        skipped: list[str] = []
+        assert list(job_records(ws, steps=(step,), on_skipped=skipped.append)) == []
+        assert sorted(skipped) == sorted(refs[key].job_key for key in (damaged, broken))
+    assert {row["job_id"]: row["step"] for row in list_jobs(ws)} == {damaged: None, broken: None}
 
 
 # ---------------------------------------------------------------------------

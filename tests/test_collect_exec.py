@@ -522,8 +522,9 @@ def test_in_process_and_executable_collectors_have_identical_results(
         placement: str | PurePosixPath | None,
         on_skipped: Callable[[str], None] | None = None,
         jobs: Iterable[str] | None = None,
+        steps: Iterable[str] | None = None,
     ) -> Iterator[JobRecord]:
-        del states, placement, on_skipped, jobs
+        del states, placement, on_skipped, jobs, steps
         yield record
 
     provider = WorkflowProvider(
@@ -888,8 +889,9 @@ def test_a_malformed_served_entry_degrades_only_its_job(
         placement: str | PurePosixPath | None,
         on_skipped: Callable[[str], None] | None = None,
         jobs: Iterable[str] | None = None,
+        steps: Iterable[str] | None = None,
     ) -> Iterator[JobRecord]:
-        del states, placement, on_skipped, jobs
+        del states, placement, on_skipped, jobs, steps
         yield from records
 
     provider = WorkflowProvider(

@@ -2,6 +2,7 @@
 
 import glob
 import json
+import logging
 import os
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -11,10 +12,13 @@ from typing import Any
 from .. import _fs, _kernel
 from .._job import JobDefinition
 from .._kernel import OWNED, JobRef
+from .._manager_scheduling import current_step
 from .._state import UNOWNED_STATES, StateDoc, read_state_unowned
 from ..errors import FormatError, WorkflowError
 from ..models import ATTEMPTS_DIRECTORY, JOB_STATE_DIRECTORY, normalize_placement, parse_job_key, placement_text
 from ..workspace import Workspace
+
+_LOGGER = logging.getLogger(__name__)
 
 JOB_HISTORY_FORMAT = "httk-workflow-job-history"
 JOB_LIST_FORMAT = "httk-workflow-job-list"
@@ -35,10 +39,10 @@ class JobListPage:
 
     Enumeration is weakly consistent while owners move jobs: a job can appear
     twice or be missed if it changes state between page requests. Clients
-    should deduplicate pages by ``job_id``. When ``tag_contains`` is active with
-    a finite ``limit``, a page may be partial: at most ``max(limit * 100,
-    10_000)`` jobs are examined before the returned cursor resumes the filter
-    scan.
+    should deduplicate pages by ``job_id``. When ``tag_contains`` or ``steps``
+    is active with a finite ``limit``, a page may be partial: at most
+    ``max(limit * 100, 10_000)`` jobs are examined before the returned cursor
+    resumes the filter scan.
 
     :param jobs: The rows in state, placement and directory-name order.
     :param next_after: The cursor of the last row when more matching rows exist.
@@ -513,20 +517,23 @@ def _tag_matches(ref: JobRef, tag_contains: str | None) -> bool:
 def list_jobs(
     workspace: Workspace,
     *,
-    kinds: Iterable[str] | None = None,
+    states: Iterable[str] | None = None,
     placement_prefix: str | None = None,
     after: str | None = None,
     limit: int | None = None,
     tag_contains: str | None = None,
+    steps: Iterable[str] | None = None,
 ) -> JobListPage:
-    """Return one page of rows, reading ``state.json`` only for the rows of that page.
+    """Return one page of rows, reading job documents only for its rows (with *steps*, for every examined job).
 
     :param workspace: The workspace.
-    :param kinds: The states to list; every state when ``None``.
+    :param states: The states to list; every state when ``None``.
     :param placement_prefix: Restrict the listing to this placement subtree.
     :param after: The ``next_after`` cursor of the previous page.
     :param limit: The most rows on the page.
     :param tag_contains: Only list jobs whose tag contains this text.
+    :param steps: Only list jobs at one of these steps: the current activation's, or ``job.json``'s initial step
+        before the first; this reads every examined job.
     :return: The page.
     :raises ValueError: For a nonpositive limit, an unknown state or a malformed cursor.
     """
@@ -534,8 +541,27 @@ def list_jobs(
     if limit is not None and limit < 1:
         raise ValueError("--limit must be positive")
     prefix = None if placement_prefix is None else normalize_placement(placement_prefix)
-    stream = _stream_after(workspace, _check_states(kinds), prefix, after)
-    scan_limit = max(limit * 100, 10_000) if tag_contains is not None and limit is not None else None
+    stream = _stream_after(workspace, _check_states(states), prefix, after)
+    wanted_steps = None if steps is None else frozenset(steps)
+    filtered = tag_contains is not None or wanted_steps is not None
+    scan_limit = max(limit * 100, 10_000) if filtered and limit is not None else None
+
+    def matching(ref: JobRef) -> tuple[StateDoc | None, str | None] | None:
+        """The job's state document and step when it passes the filters, else ``None``."""
+
+        if not _tag_matches(ref, tag_contains):
+            return None
+        doc, state_error = read_state(ref)
+        job, job_error = read_job(ref)
+        if wanted_steps is None:
+            return doc, None if job is None or state_error is not None else current_step(job, doc)
+        if job is None or state_error is not None:
+            # Its step is unknown: a damaged state.json is not the initial step.
+            _LOGGER.warning("%s: %s; left out of the --step listing", ref.job_key, job_error or state_error)
+            return None
+        step = current_step(job, doc)
+        return (doc, step) if step in wanted_steps else None
+
     rows: list[dict[str, Any]] = []
     examined = 0
     last: JobRef | None = None
@@ -543,7 +569,7 @@ def list_jobs(
     for ref in stream:
         if limit is not None and len(rows) >= limit:
             # The page is full; it has a next page only if another matching job follows.
-            if _tag_matches(ref, tag_contains):
+            if _tag_matches(ref, tag_contains) if wanted_steps is None else matching(ref) is not None:
                 next_after = _ref_cursor(last) if last is not None else None
                 break
             examined += 1
@@ -552,15 +578,15 @@ def list_jobs(
                 break
             continue
         examined += 1
-        if _tag_matches(ref, tag_contains):
-            doc, _ = read_state(ref)
+        if (found := matching(ref)) is not None:
+            doc, step = found
             placement = job_placement(ref)
             rows.append(
                 {
                     "job_key": ref.job_key,
                     "job_id": ref.job_id,
                     "state": ref.state,
-                    "step": None if doc is None or doc.activation is None else doc.activation.get("step"),
+                    "step": step,
                     "phase": None if doc is None else doc.phase.get("kind"),
                     "placement": None if placement is None else placement_text(placement),
                     "priority": ref.priority,

@@ -127,7 +127,7 @@ def test_children_stay_in_their_parents_workspace(tmp_path: Path) -> None:
     assert list(iter_jobs(workspaces["south"])) == []
 
 
-def test_collect_crosses_the_partitions_lazily_in_stable_order(tmp_path: Path) -> None:
+def test_collect_crosses_the_partitions_lazily_in_stable_order(tmp_path: Path, capsys) -> None:
     """A campaign spread over many workspaces collects as one stream, visiting the
     partitions in stable order."""
 
@@ -142,6 +142,14 @@ def test_collect_crosses_the_partitions_lazily_in_stable_order(tmp_path: Path) -
     # A subset selection collects only the named partition.
     south_only = list(campaign_collect(states=["succeeded"], partitions=["south"], project=root))
     assert [record.workspace_id for record in south_only] == [workspaces["south"].workspace_id]
+
+    # --step narrows every partition's selection; a job at another step is left out, not skipped.
+    assert len(list(campaign_collect(steps=["start"], project=root))) == 2
+    assert list(campaign_collect(steps=["relax"], project=root)) == []
+    for step, collected in (("start", 2), ("relax", 0)):
+        assert command(["campaign", "collect", "--raw", "--step", step], CLIContext("httk", root)) == 0
+        summary = json.loads(capsys.readouterr().out.splitlines()[-1])
+        assert (summary["collected"], summary["skipped_unreadable"]) == (collected, 0)
 
 
 def test_campaign_collect_into_skips_degraded_jobs_and_exits_nonzero(tmp_path: Path, capsys) -> None:

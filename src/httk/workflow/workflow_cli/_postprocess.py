@@ -7,7 +7,7 @@ import json
 import sys
 from typing import Any
 
-from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, job_records
+from ..collecting import COLLECTABLE_STATES, DEFAULT_COLLECT_STATES, job_records
 from ..errors import WorkflowError
 from ..introspection import resolve_job_selectors
 from ..packages import load_workflow_package
@@ -19,7 +19,7 @@ from ..postprocessing import (
 )
 from ..scaffold import registered_workflow
 from ..workspace import Workspace
-from ._common import _leaf, _local_root
+from ._common import _add_step_option, _leaf, _local_root
 
 #: How much of a failing script's stderr to keep in a report, from its tail.
 _STDERR_TAIL_LIMIT = 2000
@@ -81,8 +81,8 @@ def handle_postprocess(arguments: argparse.Namespace, context: Any) -> int:
 
     wanted: set[str] | None = None
     if arguments.jobs:
-        if arguments.state or arguments.placement is not None:
-            print("job selectors cannot be combined with --state or --placement", file=sys.stderr)
+        if arguments.state or arguments.step or arguments.placement is not None:
+            print("job selectors cannot be combined with --state, --step or --placement", file=sys.stderr)
             return 2
         try:
             refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
@@ -91,18 +91,18 @@ def handle_postprocess(arguments: argparse.Namespace, context: Any) -> int:
             return 1
         wanted = set()
         for ref in refs:
-            if ref.state not in COLLECTABLE_KINDS:
+            if ref.state not in COLLECTABLE_STATES:
                 failed = True
                 print(f"{ref.job_key}\t{arguments.script}\tERROR\tjob is {ref.state}; not a postprocessable state")
                 continue
             wanted.add(ref.job_id)
-        states: tuple[str, ...] = COLLECTABLE_KINDS
+        states: tuple[str, ...] = COLLECTABLE_STATES
         placement = None
     else:
         states = tuple(arguments.state or DEFAULT_COLLECT_STATES)
         placement = arguments.placement
 
-    for record in job_records(workspace, states=states, placement=placement):
+    for record in job_records(workspace, states=states, placement=placement, steps=arguments.step):
         if wanted is not None:
             if record.job_id not in wanted:
                 continue
@@ -161,8 +161,12 @@ def build_postprocess_parser(subparsers: argparse._SubParsersAction[argparse.Arg
         "--state",
         action="append",
         metavar="STATE",
-        choices=COLLECTABLE_KINDS,
+        choices=COLLECTABLE_STATES,
         help=f"job state to postprocess (repeatable, default: {', '.join(DEFAULT_COLLECT_STATES)})",
+    )
+    _add_step_option(
+        parser,
+        help_text="postprocess only jobs at this step: the current activation's, else the initial step (repeatable)",
     )
     parser.add_argument("--placement", metavar="PREFIX", help="postprocess only jobs at or below this placement")
     parser.add_argument(
@@ -184,7 +188,7 @@ def build_postprocess_parser(subparsers: argparse._SubParsersAction[argparse.Arg
         nargs="*",
         metavar="JOB",
         help="postprocess only these jobs (UUID, key, unique prefix, or a path inside the "
-        "workspace); mutually exclusive with --state/--placement",
+        "workspace); mutually exclusive with --state/--step/--placement",
     )
 
 

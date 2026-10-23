@@ -82,6 +82,7 @@ from ._common import (
     _ERRORS,
     _add_adapter_timeout,
     _add_by_path_argument,
+    _add_step_option,
     _group,
     _json_value,
     _leaf,
@@ -1155,8 +1156,10 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     if root is None:
         assert binding is not None
         tail: list[str] = []
-        for state in arguments.kind or []:
-            tail.extend(("--kind", state))
+        for state in arguments.state or []:
+            tail.extend(("--state", state))
+        for step in arguments.step or []:
+            tail.extend(("--step", step))
         for option in ("placement", "after", "limit", "tag_contains"):
             value = getattr(arguments, option)
             if value is not None:
@@ -1174,11 +1177,12 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     workspace = Workspace(root)
     page = list_jobs(
         workspace,
-        kinds=arguments.kind,
+        states=arguments.state,
         placement_prefix=arguments.placement,
         after=arguments.after,
         limit=arguments.limit,
         tag_contains=arguments.tag_contains,
+        steps=arguments.step,
     )
     if not arguments.json:
         print(render_rows(page.jobs))
@@ -1191,7 +1195,7 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     }
     if arguments.counts:
         document["counts"] = {
-            state: count_jobs(workspace, state, arguments.placement) for state in arguments.kind or JOB_STATES
+            state: count_jobs(workspace, state, arguments.placement) for state in arguments.state or JOB_STATES
         }
     print(json.dumps(document, indent=2))
     return 0
@@ -1923,7 +1927,7 @@ def build_job_parser(
     )
     _add_workspace_option(listing, help_text="the workspace to list")
     listing.add_argument(
-        "--kind",
+        "--state",
         action="append",
         metavar="STATE",
         choices=JOB_STATES,
@@ -1933,6 +1937,10 @@ def build_job_parser(
     listing.add_argument("--limit", type=int, metavar="COUNT", help="return at most this many jobs")
     listing.add_argument("--after", metavar="CURSOR", help="resume after a <state>:<cursor> from next_after")
     listing.add_argument("--tag-contains", metavar="TEXT", help="list only jobs whose tag contains TEXT")
+    _add_step_option(
+        listing,
+        help_text="list only jobs at this step: the current activation's, else the initial step (repeatable)",
+    )
     listing.add_argument("--counts", action="store_true", help="include the per-state job counts in JSON output")
     listing.add_argument("--json", action="store_true", help="print the rows as one JSON document")
     _add_adapter_timeout(listing)

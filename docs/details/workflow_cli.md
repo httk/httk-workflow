@@ -286,12 +286,12 @@ manager's platform stays `ready` and unclaimed there.
 | `job detach JOB...` | make spawned jobs independent of their parents, permanently | `--workspace` |
 | `job eject JOB [DEST]` | move a quiescent job out into the bundle `DEST/<job-key>` | `--workspace`, `--tree`, `--wait`, `--timeout`, `--hold`, `--destination-id`, `--operator`, `--json` |
 | `job adopt BUNDLE...` | move ejected bundles into the workspace, in turn | `--workspace`, `--move`, `--json` |
-| `job list` | list jobs a page at a time (remote: over the adapter) | `--workspace`, `--kind`, `--placement`, `--limit`, `--after`, `--tag-contains`, `--counts`, `--json` |
+| `job list` | list jobs a page at a time (remote: over the adapter) | `--workspace`, `--state`, `--step`, `--placement`, `--limit`, `--after`, `--tag-contains`, `--counts`, `--json` |
 | `job show JOB...` | describe jobs from their documents (remote: over the adapter) | `--workspace`, `--no-children`, `--json` |
 | `job log JOB...` | print run logs (remote: over the adapter) | `--workspace`, `--limit`, `--json` |
 | `job why JOB...` | explain why jobs are not progressing (remote: over the adapter) | `--workspace`, `--json` |
 | `job debug JOB` | drive one job to a terminal state in the foreground | `--workspace`, `--step`, `--placement`, `--follow-children`, `--timeout`, `--log-level` |
-| `job transfer SRC DST` | move jobs between two workspaces | `--job`, `--kind`, `--placement`, `--tree`, `--resume`, `--release`, `--hold`, `--destination-id`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
+| `job transfer SRC DST` | move jobs between two workspaces | `--job`, `--state`, `--step`, `--placement`, `--tree`, `--resume`, `--release`, `--hold`, `--destination-id`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
 
 When giving more than one `JOB_ID`, name the workspace explicitly.
 
@@ -490,7 +490,7 @@ writing anything, and `job debug` drives a single job to a terminal state in the
 foreground. See {doc}`taskmanager` for what each reports.
 
 ```console
-httk job list --workspace WORKSPACE --kind ready
+httk job list --workspace WORKSPACE --state ready
 httk job show --workspace WORKSPACE JOB
 httk job log --workspace WORKSPACE --limit 20 JOB
 httk job why --workspace WORKSPACE JOB
@@ -502,11 +502,27 @@ without finishing.
 
 `job list --json` returns `format`, `format_version`, `jobs`, and `next_after`.
 Each row has `job_key`, `job_id`, `state`, `step`, `phase`, `placement`,
-`priority`, `token` and `owner_id`. To page a large workspace, use `--limit N`
-and pass the returned `next_after` (`<state>:<cursor>`) to `--after`; it is
-null when the listing is exhausted. Paging is weakly consistent: a job that
-moves between pages can appear twice or be missed, so deduplicate by `job_id`.
-`--counts` adds per-state totals, which need a full directory walk.
+`priority`, `token` and `owner_id`. `step` is the step the job is at: its
+current activation's, or the initial step of its `job.json` before the first
+activation (earlier releases reported null there). To page a large workspace,
+use `--limit N` and pass the returned `next_after` (`<state>:<cursor>`) to
+`--after`; it is null when the listing is exhausted. Paging is weakly
+consistent: a job that moves between pages can appear twice or be missed, so
+deduplicate by `job_id`. `--counts` adds per-state totals, which need a full
+directory walk and ignore `--step`.
+
+`--state STATE` and `--step STEP` select jobs in the same way across `job
+list`, `job transfer`, `collect`, `campaign collect` and `postprocess`: each
+repeats (the values of one option are alternatives), and a job must match
+every option given. A job whose step cannot be determined (an unreadable
+`job.json` or a damaged `state.json`) matches no `--step`: `job list` logs a
+warning, `job transfer` reports an error, and `collect` counts it as
+unreadable. `--step` reads each examined job's `job.json` and `state.json`, so
+like `--tag-contains` a sparse `--step` page with `--limit` may examine up to
+`max(100 × limit, 10000)` jobs (two small reads each) and come back partial,
+with a `next_after` that resumes the scan. This selector `--step` is not the
+`--step` of `job new`, `job debug` and `job request override_step`, which
+names the step a job starts or resumes at.
 
 `job why` also lists **held** jobs: a job held for a transfer is in neither
 state tree, and `job why JOB` shows its hold, destination and the way back.
@@ -593,23 +609,27 @@ directory. Any combination of local and remote ends works, and a
 remote-to-remote transfer is relayed through the client:
 
 ```console
-httk job transfer (--job JOB … | --kind STATE …) [--placement PREFIX] [--tree] SRC DST [--json] [-q]
+httk job transfer (--job JOB … | --state STATE … | --step STEP …) [--placement PREFIX] [--tree] SRC DST [--json] [-q]
 httk job transfer --resume [SRC] [DST]
 httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [WS]
 httk transfer status [WS] [--json]
 ```
 
 Jobs are selected by name with `--job` (a UUID, key, unique prefix, path or
-glob), or by state with `--kind STATE`, which takes every job of SRC in that
-state (any state of `job list --kind` except `owned`), optionally only under a
+glob), or by state with `--state STATE`, which takes every job of SRC in that
+state (any state of `job list --state` except `owned`), optionally only under a
 placement prefix with `--placement PREFIX`. Both repeat and combine; a job
-selected twice moves once. `httk job transfer --kind succeeded sigma:runs
-default` brings every finished job home in one command. A tree is never
-split: `--kind` leaves out every job whose (not detached) parent is in SRC, so
+selected twice moves once. `--step STEP` (repeatable) narrows `--job` and
+`--state` to jobs at that step; alone it selects from every state but `owned`
+(and `--placement` then narrows it as it narrows `--state`), and a `--job` at
+another step is left out with a note on stderr. `httk job
+transfer --state succeeded sigma:runs default` brings every finished job home
+in one command. A tree is never split: `--state` and `--step` leave out every
+job whose (not detached) parent is in SRC, so
 a child moves only inside its root's bundle, and a note on stderr counts the
 children that did not move that way. Without `--tree`, a selected job whose
 descendants are present is refused, so a campaign whose finished roots have
-children is fetched with `--kind succeeded --tree`; a root's tree then carries
+children is fetched with `--state succeeded --tree`; a root's tree then carries
 all of its descendants, which must be terminal or paused (a failed, cancelled
 or paused child travels with a succeeded root). A child that should move alone
 is detached first. A very large selection on a remote SRC is held in one call:
@@ -623,7 +643,7 @@ the jobs are in neither workspace's state trees. It **copies** the held bundle
 to DST (on one filesystem adoption simply moves it in; otherwise the adapter's
 `push` or `pull` lands it in DST), **adopts** it there into the states and
 priorities it left, and only then **releases** the hold. On a remote SRC,
-`--job` needs canonical job UUIDs; `--kind` is resolved there. Adoption warns about jobs whose workflows DST has not
+`--job` needs canonical job UUIDs; `--state` and `--step` are resolved there. Adoption warns about jobs whose workflows DST has not
 installed. The command prints one line per hold,
 `TRANSFER_ID<TAB>STATUS<TAB>N job(s)<TAB>DESTINATION`, and exits `0` only when
 every hold was adopted or already was. Progress, one line per step, goes to
@@ -658,7 +678,7 @@ abandoned for good is taken back into SRC with
 `httk job adopt --workspace SRC SRC/.httk-workspace/transfers/outgoing/<transfer id>`,
 which is safe only after checking that DST does not have the jobs;
 `job transfer --release T` discards a hold whose jobs DST has. `job transfer
---hold (--job JOB … | --kind STATE …) SRC DST` only holds jobs in a local SRC, recording DST as
+--hold (--job JOB … | --state STATE … | --step STEP …) SRC DST` only holds jobs in a local SRC, recording DST as
 given; it is the first leg a client runs on a remote SRC.
 
 ## Running managers
@@ -751,7 +771,7 @@ See {doc}`monitor` for the panes, keys, and read budget.
 
 | Options | Apply to |
 | --- | --- |
-| `--state`, `--placement`, `--job JOB` (repeatable; not with `--placement`), `--raw`, `--allow-job-collector` | a workspace only |
+| `--state`, `--step`, `--placement`, `--job JOB` (repeatable; not with `--placement`), `--raw`, `--allow-job-collector` | a workspace only |
 | `--dry-run`, `--prefer NAME`, `--exclude PATTERN`, `--collector DIR` | a calculation tree only |
 | `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--no-id-ledger`, `--id-ledger PATH`, `--no-bare-runs`, `--upgrade`, `--degraded`, `--fail-fast`, `--batch-size N` | both |
 
@@ -768,7 +788,7 @@ job was degraded, failed to store, or had an unreadable `job.json`. See
 `--postprocess SCRIPT` (workspace only) collects the declared output files of
 that postprocess script's last run on each selected job instead of the job
 itself: `httk collect WS --postprocess NAME [--job JOB]... [--state S]
-[--placement P] [--into STORE --id-base BASE [--upgrade]]`. The job must
+[--step STEP] [--placement P] [--into STORE --id-base BASE [--upgrade]]`. The job must
 already be collected into the store. It is refused together with `--raw`,
 `--allow-job-collector`, `--no-bare-runs`, `--fail-fast`, `--batch-size`,
 `--degraded`, tree-only options and tree targets, and ends with one
@@ -779,7 +799,7 @@ already be collected into the store. It is refused together with `--raw`,
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `postprocess [OPTIONS] [JOB...]` | run one declared script for each selected job | `--workspace WS`, `--script NAME` (required), `--workflow-dir PKG`, `--state`, `--placement`, `--output-dir DIR`, `--timeout`, `--json` |
+| `postprocess [OPTIONS] [JOB...]` | run one declared script for each selected job | `--workspace WS`, `--script NAME` (required), `--workflow-dir PKG`, `--state`, `--step`, `--placement`, `--output-dir DIR`, `--timeout`, `--json` |
 
 ```console
 httk workflow postprocess --workspace WS --script relaxation-report
@@ -791,7 +811,7 @@ postprocessed. The output root is `<workspace>/postprocess` by default, the
 `postprocess.directory` workspace setting when set, or `--output-dir DIR` for
 one invocation; each job's directory below it is
 `<root>/<placement>/<job_key>/<NAME>/`. A `JOB` selector cannot be combined with
-`--state` or `--placement`. With `--json`, each result is one
+`--state`, `--step` or `--placement`. With `--json`, each result is one
 `httk-workflow-postprocess` object (version 2); without it, one
 `job_key<TAB>script<TAB>returncode<TAB>output_dir` line. The command exits `0`
 only when every selected script ran and returned `0`. Every completed run also
@@ -1017,7 +1037,7 @@ exception: the daemon accepts only commands signed by a key in its own
 | `campaign remove` | clear campaign configuration, keeping jobs and workspaces | `--force` skips confirmation |
 | `campaign show` | show the partition map | `--json` |
 | `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--install`, `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
-| `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--raw`, `--into PATH`, `--id-base BASE`, `--id-series SERIES`, … |
+| `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--step`, `--placement`, `--raw`, `--into PATH`, `--id-base BASE`, `--id-series SERIES`, … |
 | `campaign start-<wbr>managers` | start a manager per selected partition | `--partition`, `--workers`, `--worker-resource`, `--count`, `--launcher`, `--idle-timeout`, `--adapter-timeout` |
 
 A campaign is a thin convention over registered workspaces: a partition map,
@@ -1044,7 +1064,7 @@ and stays held, while the jobs may have arrived. Upgrade DST, check with
 `httk job transfer --release` (or re-run `--resume` after the upgrade):
 
 ```text
-httk job transfer --hold --json [--tree] [--destination-id ID] [--job JOB …] [--kind STATE …] [--placement PREFIX] -- WS DST
+httk job transfer --hold --json [--tree] [--destination-id ID] [--job JOB …] [--state STATE …] [--step STEP …] [--placement PREFIX] -- WS DST
 httk job adopt --json --by-path --workspace ROOT TRANSFER_ID [TRANSFER_ID …]   (in the batch landing)
 httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] WS
 httk transfer status --json WS
@@ -1078,6 +1098,7 @@ leases, receipts and the maintenance lock. These spellings no longer parse:
 | `workspace seal --force` | `job seal` the remaining jobs first, or seal the workspace with them listed as unsealed |
 | `manager run --lease-seconds`, `--takeover-grace-factor`, `--unsafe-persistent-takeover`, `--unsafe-isolated-takeover` | recovery only after the death proof or `workspace attest-dead` |
 | `transfer send`, `transfer fetch`, `transfer status REMOTE` (by remote) | `job transfer --job JOB … SRC DST`; `transfer status WS` lists one workspace's holds (`REMOTE:WS` for a remote one) |
+| `job list --kind`, `job transfer --kind` | `--state STATE` (and `--step STEP` to select by step) |
 
 Workspaces and bundles of the earlier layout are refused with a message that
 there is no migration: re-create the workspace with `httk workspace init` and

@@ -29,8 +29,8 @@ import httk.core
 from httk.core.cli import CLIContext
 
 from ..adapters import resolve_remote, run_adapter
-from ..errors import ResolutionMiss, WorkflowError
-from ..models import BUDGET_LIMITS, WORKSPACE_DIRECTORY
+from ..errors import FormatError, ResolutionMiss, WorkflowError
+from ..models import BUDGET_LIMITS, WORKSPACE_DIRECTORY, validate_step
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, list_workspaces, resolve_workspace
 from ..scaffold import STRUCTURE_PATTERNS, JobItem, _sanitize_tag, structure_tag
 from ..seals import require_cli_modifiable
@@ -612,6 +612,8 @@ def _remote_workspace_read(
         sys.stdout.write(stdout if stdout.endswith("\n") else stdout + "\n")
     if stderr:
         sys.stderr.write(stderr)
+    if returncode == 2 and ("unrecognized arguments" in stderr or "invalid choice" in stderr):
+        sys.stderr.write("the remote may run an older httk-workflow; upgrade it\n")
     return returncode
 
 
@@ -658,6 +660,21 @@ def _add_by_path_argument(parser: argparse.ArgumentParser) -> None:
     """
 
     parser.add_argument("--by-path", action="store_true", help=argparse.SUPPRESS)
+
+
+def _step_name(value: str) -> str:
+    """Parse one ``--step`` value: a valid step name."""
+
+    try:
+        return validate_step(value)
+    except FormatError as exc:
+        raise argparse.ArgumentTypeError(f"not a step name: {value!r}") from exc
+
+
+def _add_step_option(parser: argparse.ArgumentParser, *, help_text: str) -> None:
+    """Add the repeatable ``--step STEP`` job filter: a job's current activation's step, else its initial step."""
+
+    parser.add_argument("--step", action="append", metavar="STEP", type=_step_name, help=help_text)
 
 
 def _add_adapter_timeout(parser: argparse.ArgumentParser) -> None:

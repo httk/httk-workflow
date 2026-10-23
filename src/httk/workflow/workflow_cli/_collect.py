@@ -8,14 +8,14 @@ from pathlib import Path
 from httk.core.cli import CLIContext
 
 from ..calculations import DirectoryClaim, claims, collect_tree
-from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, CollectedJob, collect, job_records
+from ..collecting import COLLECTABLE_STATES, DEFAULT_COLLECT_STATES, CollectedJob, collect, job_records
 from ..errors import ResolutionMiss, SealError
 from ..introspection import selector_is_path
 from ..postprocessing import collect_postprocess
 from ..seals import default_workspace_keys, tree_ledger_keys
 from ..storing import _collected_mapping, _postprocess_mapping, store_collected, store_postprocess
 from ..workspace import Workspace
-from ._common import _LOGGER, _leaf, _local_root
+from ._common import _LOGGER, _add_step_option, _leaf, _local_root
 
 CLAIM_FORMAT = "httk-collect-claim"
 CLAIM_FORMAT_VERSION = 1
@@ -23,6 +23,7 @@ CLAIM_FORMAT_VERSION = 1
 _TREE_ONLY = (("dry_run", "--dry-run"), ("prefer", "--prefer"), ("exclude", "--exclude"), ("collector", "--collector"))
 _WORKSPACE_ONLY = (
     ("state", "--state"),
+    ("step", "--step"),
     ("placement", "--placement"),
     ("job", "--job"),
     ("raw", "--raw"),
@@ -160,6 +161,7 @@ def _collect_postprocess(arguments: argparse.Namespace, workspace: Workspace, jo
         placement=arguments.placement,
         jobs=jobs,
         on_skipped=_skip,
+        steps=arguments.step,
     )
     summary: dict[str, object] = {"format": "httk-workflow-postprocess-collect-summary", "format_version": 1}
     if arguments.into is not None:
@@ -324,6 +326,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
                 placement=arguments.placement,
                 on_skipped=_skip,
                 jobs=jobs,
+                steps=arguments.step,
             )
             collected = 0
             for record in records:
@@ -341,6 +344,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             fail_fast=arguments.fail_fast,
             batch_size=64 if arguments.batch_size is None else arguments.batch_size,
             jobs=jobs,
+            steps=arguments.step,
         )
 
         def resolve_keys() -> Sequence[tuple[str, bytes]]:
@@ -427,8 +431,11 @@ def build_collect_parser(
         "--state",
         action="append",
         metavar="STATE",
-        choices=COLLECTABLE_KINDS,
-        help=f"state kind to collect (repeatable, default: {', '.join(DEFAULT_COLLECT_STATES)})",
+        choices=COLLECTABLE_STATES,
+        help=f"job state to collect (repeatable, default: {', '.join(DEFAULT_COLLECT_STATES)})",
+    )
+    _add_step_option(
+        parser, help_text="collect only jobs at this step: the current activation's, else the initial step (repeatable)"
     )
     parser.add_argument("--placement", metavar="PLACEMENT", help="collect only jobs at or below this placement")
     parser.add_argument(

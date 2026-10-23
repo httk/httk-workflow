@@ -401,7 +401,7 @@ records = job_records(
 )
 ```
 
-`states` defaults to `("succeeded",)` and accepts only stopped-job kinds:
+`states` defaults to `("succeeded",)` and accepts only the states of stopped jobs:
 `succeeded`, `failed`, `cancelled` and `paused`; other values are refused by
 name. `placement` restricts collection to jobs at or below one placement, as
 `httk job list --placement` does.
@@ -426,6 +426,13 @@ states yields its succeeded children. A child whose directory cannot be found, a
 whose damaged `state.json` hides its children, are passed to `on_skipped` (the
 job itself is still collected, with `gaps` set). `jobs` and `placement`
 cannot be combined. `collect(..., jobs=...)` passes the selection through.
+
+`steps` (`--step STEP`) keeps only the jobs at one of these steps: the step of
+the job's current activation, or the initial step of its `job.json` before the
+first. It narrows a sweep and, with `jobs`, the reported jobs (the tree is
+still walked). A job left out for its step is not passed to `on_skipped` and
+is not counted as skipped. `collect`, `campaign_collect` and
+`collect_postprocess` take `steps` too.
 
 ## From the command line
 

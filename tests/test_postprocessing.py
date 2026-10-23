@@ -387,6 +387,14 @@ def test_postprocess_cli_selector_with_state_is_a_usage_error(tmp_path: Path, ca
         == 2
     )
     assert "state" in capsys.readouterr().err
+    base = ["postprocess", "--workspace", workspace_name, "--script", "report", "--workflow-dir", str(package)]
+    assert command([*base, "--step", "start", record.job_id], context) == 2
+    assert "--step" in capsys.readouterr().err
+    # Without job selectors --step selects: a job at another step is left out.
+    assert command([*base, "--step", "elsewhere"], context) == 0
+    assert capsys.readouterr().out == ""
+    assert command([*base, "--step", str(record.job["initial_step"])], context) == 0
+    assert capsys.readouterr().out.split("\t")[:3] == [record.job_key, "report", "0"]
 
 
 # -- declared outputs and the postprocess receipt -----------------------------

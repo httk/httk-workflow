@@ -156,17 +156,17 @@ class WorkspaceView:
 
     def counts(
         self,
-        kinds: Sequence[str] | None = None,
+        states: Sequence[str] | None = None,
         placement_prefix: str | None = None,
     ) -> dict[str, int]:
-        """Return counts for the active kind/prefix filter within the TTL.
+        """Return counts for the active state/prefix filter within the TTL.
 
-        :param kinds: State kinds shown by the current page, or all kinds.
+        :param states: States shown by the current page, or all states.
         :param placement_prefix: Active placement subtree, if any.
-        :return: Counts keyed by selected state kind.
+        :return: Counts keyed by selected state.
         """
 
-        selected = tuple(kinds or JOB_STATES)
+        selected = tuple(states or JOB_STATES)
         prefix = placement_prefix
         key = (selected, prefix)
         now = time.monotonic()
@@ -181,16 +181,16 @@ class WorkspaceView:
                 tail=self._list_tail(selected, prefix, None, None, 1),
             )
             raw = _first_mapping(document).get("counts", {})
-            result = {kind: int(raw.get(kind, 0)) for kind in selected} if isinstance(raw, Mapping) else {}
+            result = {state: int(raw.get(state, 0)) for state in selected} if isinstance(raw, Mapping) else {}
         else:
             assert self.workspace is not None
-            result = {kind: count_jobs(self.workspace, kind, prefix) for kind in selected}
+            result = {state: count_jobs(self.workspace, state, prefix) for state in selected}
         self._remember_counts(selected, prefix, result)
         return dict(result)
 
     @staticmethod
     def _list_tail(
-        kinds: Sequence[str],
+        states: Sequence[str],
         placement_prefix: str | None,
         tag_contains: str | None,
         cursor: str | None,
@@ -199,8 +199,8 @@ class WorkspaceView:
         """Compose remote job-list options before ``--workspace``."""
 
         tail: list[str] = ["--limit", str(limit)]
-        for kind in kinds:
-            tail.extend(("--kind", kind))
+        for state in states:
+            tail.extend(("--state", state))
         if placement_prefix:
             tail.extend(("--placement", placement_prefix))
         if tag_contains:
@@ -212,7 +212,7 @@ class WorkspaceView:
 
     def page(
         self,
-        kind_filter: Sequence[str] | None = None,
+        state_filter: Sequence[str] | None = None,
         placement_prefix: str | None = None,
         tag_contains: str | None = None,
         cursor: str | None = None,
@@ -222,13 +222,13 @@ class WorkspaceView:
 
         if limit < 1:
             raise ValueError("page limit must be positive")
-        kinds = tuple(kind_filter or JOB_STATES)
+        states = tuple(state_filter or JOB_STATES)
         if self.remote:
             document = _first_mapping(
                 self._remote_json(
                     REMOTE_JOB_LIST_COMMAND,
                     flags=("--json", "--counts"),
-                    tail=self._list_tail(kinds, placement_prefix, tag_contains, cursor, limit),
+                    tail=self._list_tail(states, placement_prefix, tag_contains, cursor, limit),
                 )
             )
             rows = document.get("jobs", [])
@@ -236,13 +236,13 @@ class WorkspaceView:
             page = JobListPage(
                 [dict(row) for row in rows] if isinstance(rows, list) else [],
                 document.get("next_after") if isinstance(document.get("next_after"), str) else None,
-                {kind: int(raw_counts.get(kind, 0)) for kind in kinds} if isinstance(raw_counts, Mapping) else None,
+                {state: int(raw_counts.get(state, 0)) for state in states} if isinstance(raw_counts, Mapping) else None,
             )
         else:
             assert self.workspace is not None
             page = list_jobs(
                 self.workspace,
-                kinds=kinds,
+                states=states,
                 placement_prefix=placement_prefix,
                 after=cursor,
                 limit=limit,
