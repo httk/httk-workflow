@@ -620,9 +620,9 @@ directory. Any combination of local and remote ends works, and a
 remote-to-remote transfer is relayed through the client:
 
 ```console
-httk job push [SRC] DST [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--json] [-q]
-httk job pull SRC [DST] [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--json] [-q]
-httk job transfer (--job JOB … | --state STATE … | --step STEP …) [--placement PREFIX] [--tree] SRC DST [--json] [-q]
+httk job push [SRC] DST [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--no-workflows] [--json] [-q]
+httk job pull SRC [DST] [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--no-workflows] [--json] [-q]
+httk job transfer (--job JOB … | --state STATE … | --step STEP …) [--placement PREFIX] [--tree] [--no-workflows] SRC DST [--json] [-q]
 httk job transfer --resume [SRC] [DST]
 httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [WS]
 httk transfer status [WS] [--json]
@@ -670,8 +670,25 @@ the jobs are in neither workspace's state trees. It **copies** the held bundle
 to DST (on one filesystem adoption simply moves it in; otherwise the adapter's
 `push` or `pull` lands it in DST), **adopts** it there into the states and
 priorities it left, and only then **releases** the hold. On a remote SRC,
-`--job` needs canonical job UUIDs; `--state` and `--step` are resolved there. Adoption warns about jobs whose workflows DST has not
-installed. The command prints one line per hold,
+`--job` needs canonical job UUIDs; `--state` and `--step` are resolved there.
+
+Before the first adoption of a batch, the workflows the held jobs need (each
+job's effective workflow and the closure of its calls, as SRC resolves them)
+that DST lacks and SRC has are installed in DST under the same ids: one query of
+DST's store, then, only when something is missing, one copy of those store
+entries (`install.json` and `package/`) and one receiving call, the internal
+`workflow install --from-store`. After the release, a shipped workflow with
+`[workflow.build]` is built there, as is a needed one DST already had without
+a build for its platform (the query asks for that with the internal
+`workflow list --built-for ID`, whose rows then carry `built`, `null` without a
+build section; a plain listing never runs a platform probe). An installation DST already has is never replaced,
+even with another tree. `--no-workflows` skips all of this. With
+`--json` each outcome lists `workflows`, one `{id, status}` per needed workflow:
+`installed`, `present`, `mismatch` (DST keeps its other tree, which the jobs
+run), `missing` (installed in neither), `refused` or `failed` (with a
+`reason`), or `unbuilt` (installed, its build failed; the reason names the
+`httk workflow build` remedy). Adoption warns about jobs whose workflows DST
+still lacks. The command prints one line per hold,
 `TRANSFER_ID<TAB>STATUS<TAB>N job(s)<TAB>DESTINATION`, and exits `0` only when
 every hold was adopted or already was. Progress, one line per step, goes to
 stderr unless `-q`/`--quiet` is given.
@@ -681,9 +698,12 @@ one batch, so the number of adapter calls (and ssh connections) does not grow
 with the number of jobs: one hold call on a remote SRC, one `push` or `pull` of
 every bundle (a remote DST receives them in
 `.httk-workspace/transfers/incoming/<batch token>/`), one adoption call on a
-remote DST, and one release call on a remote SRC. Local to remote takes three
-calls (the probe of DST, the push and the adoption), remote to local four (the
-hold, `transfer status`, the pull and the release), and remote to remote seven.
+remote DST, and one release call on a remote SRC. Local to remote takes four
+calls (the probe of DST, the query of its workflows, the push and the
+adoption), remote to local four (the hold, `transfer status`, the pull and the
+release), and remote to remote eight; shipping workflows adds one copy and one
+install call, and one build call per shipped workflow that has
+`[workflow.build]`.
 Only a batch whose id lists exceed 64 KiB of command text (some 1500 jobs) is
 split, into as many such calls per step as it needs. A copy or adoption call
 that fails as a whole marks every hold it carried `failed`; they stay held for

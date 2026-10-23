@@ -40,11 +40,15 @@ from ..scaffold import (
     resolve_workflow,
     workflow_provider,
 )
+from ..seals import require_cli_modifiable
 from ..workspace import Workspace
 from ._common import (
     _ERRORS,
     _add_adapter_timeout,
+    _add_by_path_argument,
+    _durable,
     _leaf,
+    _local_root,
     _modifiable,
     _remote_workspace_read,
     _resolve_binding,
@@ -488,7 +492,14 @@ def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
     if root is None:
         assert binding is not None
         return _remote_relay(binding, context, arguments, "list")
-    rows = [_installed_row(installed) for installed in _store.list_installed(Workspace(root))]
+    installations = _store.list_installed(Workspace(root))
+    rows = [_installed_row(installed) for installed in installations]
+    if arguments.built_for:
+        # Whether a [workflow.build] package is built for this platform (null without one), for the ids a transfer
+        # asks about: the platform probe runs package code, so never for a plain listing.
+        for row, installed in zip(rows, installations, strict=True):
+            if installed.id in arguments.built_for:
+                row["built"] = _store.built(installed)
     if not rows and not arguments.json:
         print(f"no workflows installed in {root}")
     # A recorded tag or branch shows as the NAME@REF selector of that installation.
@@ -613,9 +624,62 @@ def _install_targets(source: str) -> tuple[list[str], dict[str, WorkflowProvider
     return [provider.workflow_id for provider in providers], siblings
 
 
+def _install_copies(arguments: argparse.Namespace, context: Any) -> int:
+    """Install copied store entries (``--from-store DIR...``) under their recorded ids, printing one JSON document.
+
+    Each DIR yields a row ``{"directory", "id", "status"}``, in argument order, with status ``installed``,
+    ``present`` (that id with the same tree), ``mismatch`` (that id with another tree, left as it is) or
+    ``refused`` (with ``reason``, and ``id`` null); all but a refused row tell whether the installation has a
+    ``[workflow.build]`` (``build``). The DIRs are left in place unless ``--consume`` discards the pushed copy
+    holding them, ``tmp/push.<hex>/``, whatever the outcome once the workspace is known (a failure to discard
+    it goes to stderr only).
+    """
+
+    given = [flag for flag in ("sources", "no_calls", "no_build", "format") if getattr(arguments, flag)]
+    if given:
+        raise ValueError(f"--from-store cannot be combined with {given[0].replace('_', '-')}")
+    if arguments.workspace is None:
+        raise ValueError("--from-store needs --workspace")
+    workspace = Workspace(
+        _local_root(arguments, context, action="install workflows into it"), durable=_durable(arguments)
+    )
+    label = arguments.source_label or "a copied store entry"
+    rows: list[dict[str, object]] = []
+    try:
+        require_cli_modifiable(workspace)
+        with _kernel.register_owner(
+            workspace, kind="cli", label="workflow install", allocation=None, advertised={}
+        ) as owner:
+            for directory in arguments.from_store:
+                row: dict[str, object] = {"directory": directory}
+                try:
+                    status, installed = _store.install_copy(
+                        workspace, owner, Path(directory).absolute(), source_label=label
+                    )
+                    row.update(id=installed.id, status=status, build=installed.record.get("build") is True)
+                except _ERRORS as exc:
+                    row.update(id=None, status="refused", reason=str(exc))
+                rows.append(row)
+        print(json.dumps({"workflows": rows}, indent=2, sort_keys=True))
+    finally:
+        if arguments.consume:
+            for directory in {Path(directory).parent: directory for directory in arguments.from_store}.values():
+                try:
+                    _consume(workspace, directory)
+                except _ERRORS as exc:
+                    print(f"{directory}: the pushed copy was not discarded: {exc}", file=sys.stderr)
+    return 1 if any(row["status"] == "refused" for row in rows) else 0
+
+
 def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
     """Install workflows into a workspace's store, or fetch git workflows on this machine without one."""
 
+    if arguments.from_store is not None:
+        return _install_copies(arguments, context)
+    if arguments.source_label is not None:
+        raise ValueError("--source-label applies only to --from-store")
+    if not arguments.sources:
+        raise ValueError("give at least one SOURCE to install")
     if arguments.workspace is None:
         return _install_on_this_machine(arguments)
     binding, root = _resolve_binding(arguments, context)
@@ -824,6 +888,8 @@ def build_list_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         handler=handle_workflow_list,
     )
     _add_store_options(listing, "list the workflows installed in this workspace")
+    _add_by_path_argument(listing)
+    listing.add_argument("--built-for", action="append", default=[], metavar="ID", help=argparse.SUPPRESS)
 
 
 def build_describe_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -871,12 +937,16 @@ def build_install_parser(subparsers: argparse._SubParsersAction[argparse.Argumen
         ),
         handler=handle_workflow_install,
     )
-    install.add_argument("sources", metavar="SOURCE", nargs="+", help="what to install")
+    install.add_argument("sources", metavar="SOURCE", nargs="*", help="what to install")
     _add_store_options(install, "the workspace to install into (without it: fetch git URIs on this machine)")
+    _add_by_path_argument(install)
     install.add_argument("--no-calls", action="store_true", help="do not install the declared calls")
     install.add_argument("--no-build", action="store_true", help="do not build a [workflow.build] package")
     install.add_argument("--format", metavar="FORMAT", help="force FORMAT for a bare workflow document or directory")
     install.add_argument("--consume", action="store_true", help=argparse.SUPPRESS)
+    # Hidden: the receiving side of a transfer, installing copied store entries under their recorded ids.
+    install.add_argument("--from-store", metavar="DIR", nargs="+", help=argparse.SUPPRESS)
+    install.add_argument("--source-label", metavar="TEXT", help=argparse.SUPPRESS)
     uninstall = _leaf(
         subparsers,
         "uninstall",

@@ -14,6 +14,7 @@ import shlex
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import Sequence
 from contextlib import redirect_stdout
 from copy import copy
@@ -24,7 +25,7 @@ from typing import Any, cast
 
 from httk.core.cli import CLIContext
 
-from .. import _fs, _kernel, _moving
+from .. import _fs, _kernel, _moving, _store
 from .._bundles import BundleError
 from .._manager_scheduling import current_step
 from .._util import write_json_atomic
@@ -67,6 +68,7 @@ from ._common import (
     confirm,
     remote_workspace_output,
 )
+from ._describe import _WORKFLOW_COMMAND, _stdout_to_stderr
 
 # ---------------------------------------------------------------------------
 # remote
@@ -549,6 +551,7 @@ def eject_once(
     locator: str | None = None,
     destination_workspace_id: str | None = None,
     owner_key: str | None = None,
+    workflows: bool = False,
 ) -> _moving.EjectReport | _moving.Hold | str:
     """Claim and eject one job, or hold it when *destination* is ``None``: the report, or why it cannot move now.
 
@@ -560,6 +563,7 @@ def eject_once(
     :param locator: The transfer destination a hold records.
     :param destination_workspace_id: The destination workspace's id a hold records.
     :param owner_key: The optional key that may control the adopted root through the workspace daemon.
+    :param workflows: Have a hold report the workflows its members need.
     :return: The report (the hold, when held), or the reason; a job that cannot move stays where it is (as after
         any raised error).
     """
@@ -577,6 +581,7 @@ def eject_once(
             tree=tree,
             destination_locator=locator,
             destination_workspace_id=destination_workspace_id,
+            workflows=workflows,
         )
     except _moving.Busy as exc:
         return str(exc)
@@ -596,11 +601,13 @@ def adopt_document(report: _moving.AdoptReport) -> dict[str, object]:
     }
 
 
-def _holds(src: _End, context: CLIContext, arguments: argparse.Namespace) -> list[_moving.Hold]:
-    """The holds of *src*."""
+def _holds(
+    src: _End, context: CLIContext, arguments: argparse.Namespace, *, workflows: bool = True
+) -> list[_moving.Hold]:
+    """The holds of *src*; a local *src* reports their workflows only with *workflows*."""
 
     if src.workspace is not None:
-        return _moving.held(src.workspace)
+        return _moving.held(src.workspace, workflows=workflows)
     code, out, err = _remote(src, context, arguments, [*REMOTE_TRANSFER_STATUS_COMMAND, "--json", src.plain])
     if code:
         raise RuntimeError(f"transfer status failed on {src.locator}: {err.strip()}")
@@ -685,6 +692,8 @@ def _hold_jobs(
                         tree=arguments.tree,
                         locator=dst.locator,
                         destination_workspace_id=dst.workspace_id,
+                        # Only --hold prints the holds; a transfer drives them from the source's listing.
+                        workflows=arguments.hold,
                     )
                 except _ERRORS as exc:
                     outcome = f"{ref.job_key}: {exc}"
@@ -854,6 +863,221 @@ def _deliver(
     return dict(zip(ids, adopted, strict=True))
 
 
+def _dst_workflows(
+    dst: _End, context: CLIContext, arguments: argparse.Namespace, ids: list[str]
+) -> dict[str, tuple[object, bool]]:
+    """Which of *ids* *dst* has installed: each one's ``tree_sha256`` and whether it lacks its build there."""
+
+    if dst.workspace is not None:
+        found = {workflow_id: _store.lookup(dst.workspace, workflow_id) for workflow_id in ids}
+        return {
+            key: (installed.record.get("tree_sha256"), _store.built(installed) is False)
+            for key, installed in found.items()
+            if installed is not None
+        }
+    assert dst.root is not None
+    # ponytail: one call with every id as --built-for; a batch needing thousands of workflows would need chunks.
+    asked = [item for workflow_id in ids for item in ("--built-for", workflow_id)]
+    argv = [*_WORKFLOW_COMMAND, "list", "--json", "--by-path", "--workspace", dst.root, *asked]
+    code, out, err = _remote(dst, context, arguments, argv)
+    rows = json.loads(out) if code == 0 else None
+    if not isinstance(rows, list):
+        raise RuntimeError(err.strip() or f"workflow list failed on {dst.locator}")
+    # An older DST reports no "built": its unbuilt installations are not built by the transfer.
+    return {
+        row["id"]: (row.get("tree_sha256"), row.get("built") is False)
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("id"), str)
+    }
+
+
+def _install_shipped(
+    src: _End, dst: _End, store: str, directories: list[str], context: CLIContext, arguments: argparse.Namespace
+) -> dict[str, dict[str, Any]]:
+    """Copy SRC's store entries ``<store>/<directory>/{install.json,package}`` to *dst* and install them there.
+
+    A local *dst* installs them with :func:`httk.workflow._store.install_copy`, from SRC's store itself or from a
+    landing scratch; a remote one receives them in ``tmp/push.<hex>/`` and installs them with ``workflow install
+    --from-store --consume``, which discards that landing (else ``workspace gc`` does, after a day). The result
+    is a ``workflow install --from-store`` row by directory; an error raised fails them all.
+    """
+
+    files = [f"{directory}/{name}" for directory in directories for name in ("install.json", "package")]
+    label = f"transfer from {src.locator}"
+    rows: dict[str, dict[str, Any]] = {}
+    if dst.workspace is not None:
+        require_cli_modifiable(dst.workspace)
+        failure: Exception | None = None
+        with _owner(dst.workspace, "job transfer") as owner:
+            # Errors are kept, not raised, inside: an owner left by an error stays open for recovery.
+            scratch = None
+            try:
+                base = Path(store)
+                if src.workspace is None:
+                    scratch = owner.scratch("landing")
+                    base = scratch / "workflows"
+                    for chunk in _chunks(files):
+                        _adapter(src, context, arguments, "pull", store, str(base), chunk)
+                for directory in directories:
+                    try:
+                        status, installed = _store.install_copy(
+                            dst.workspace, owner, base / directory, source_label=label
+                        )
+                        build = installed.record.get("build") is True
+                        rows[directory] = {"id": installed.id, "status": status, "build": build}
+                    except _ERRORS as exc:
+                        rows[directory] = {"status": "refused", "reason": str(exc)}
+            except _ERRORS as exc:
+                failure = exc
+            finally:
+                if scratch is not None:
+                    owner.discard_scratch(scratch)
+        if failure is not None:
+            raise failure
+        return rows
+    assert dst.root is not None
+    landing = PurePosixPath(dst.root, WORKSPACE_DIRECTORY, "tmp", f"push.{uuid.uuid4().hex}")
+    consumed = pushed = False
+    try:
+        if src.workspace is not None:
+            for chunk in _chunks(files):
+                pushed = True
+                _adapter(dst, context, arguments, "push", store, str(landing), chunk)
+        else:
+            with tempfile.TemporaryDirectory(prefix="httk-transfer-") as relay:
+                for chunk in _chunks(files):
+                    _adapter(src, context, arguments, "pull", store, f"{relay}/workflows", chunk)
+                for chunk in _chunks(files):
+                    pushed = True
+                    _adapter(dst, context, arguments, "push", f"{relay}/workflows", str(landing), chunk)
+        argv = [*_WORKFLOW_COMMAND, "install", "--by-path", "--workspace", dst.root, "--source-label", label]
+        # Bare names, run within the landing; "./" keeps a name starting with "-" an argument.
+        chunks = _chunks([f"./{directory}" for directory in directories])
+        for index, chunk in enumerate(chunks):
+            names = [item.removeprefix("./") for item in chunk]
+            # The last call discards the landing, whatever its outcome.
+            consume = ["--consume"] if index == len(chunks) - 1 else []
+            try:
+                code, out, err = _remote(
+                    dst, context, arguments, [*argv, *consume, "--from-store", *chunk], cwd=str(landing)
+                )
+                document = json.loads(out) if code in (0, 1) else None
+                entries = document.get("workflows") if isinstance(document, dict) else None
+                if not isinstance(entries, list) or len(entries) != len(chunk):
+                    older = " (it may run an older httk-workflow)" if "unrecognized arguments" in err else ""
+                    raise RuntimeError(f"workflow install failed on {dst.locator}{older}: {err.strip()}")
+            except _ERRORS as exc:
+                rows.update({name: {"status": "failed", "reason": str(exc)} for name in names})
+                continue
+            consumed |= bool(consume)
+            for name, entry in zip(names, entries, strict=True):
+                ok = isinstance(entry, dict) and entry.get("status") in ("installed", "present", "mismatch", "refused")
+                rows[name] = entry if ok else {"status": "failed", "reason": f"malformed report {entry!r}"}
+    finally:
+        if pushed and not consumed:
+            print(
+                f"warning: the copied workflows are left in {landing} on {dst.locator}; "
+                "`httk workspace gc` removes them after a day",
+                file=sys.stderr,
+            )
+    return rows
+
+
+def _ship_workflows(
+    src: _End, dst: _End, holds: list[_moving.Hold], context: CLIContext, arguments: argparse.Namespace
+) -> dict[str, dict[str, Any]]:
+    """Install in *dst*, under the same ids, the workflows the holds need that it lacks and *src* has.
+
+    The result maps every needed id to ``{"status", "reason"?, "build"?}``: ``present`` or ``mismatch`` (*dst*
+    already has it, with the same or another tree, and keeps it), ``missing`` (installed in neither),
+    ``installed``, ``refused`` or ``failed``; ``build`` marks one :func:`_build_shipped` builds. Nothing is ever
+    replaced, and a failure here never fails the transfer: the jobs then wait at *dst*.
+    """
+
+    needed = {entry[0]: entry for hold in holds for entry in hold.workflows or ()}
+    if not needed:
+        return {}
+    try:
+        have = _dst_workflows(dst, context, arguments, sorted(needed))
+    except _ERRORS as exc:
+        reason = f"cannot list the workflows of {dst.locator}: {exc}"
+        return {workflow_id: {"status": "failed", "reason": reason} for workflow_id in needed}
+    shipping: dict[str, dict[str, Any]] = {}
+    ship: dict[str, str] = {}
+    for workflow_id, (_, directory, digest) in needed.items():
+        if workflow_id in have:
+            there, unbuilt = have[workflow_id]
+            # An installation an earlier transfer could not build is built (or reported) again.
+            shipping[workflow_id] = {"status": "present" if digest in (None, there) else "mismatch"}
+            if unbuilt:
+                shipping[workflow_id]["build"] = True
+        elif directory is None:
+            shipping[workflow_id] = {"status": "missing"}
+        else:
+            ship[directory] = workflow_id
+    store = PurePosixPath(holds[0].path)
+    expected = ("outgoing", "transfers", WORKSPACE_DIRECTORY)
+    if ship and tuple(parent.name for parent in store.parents[:3]) != expected:
+        reason = f"the hold path {store} is not below a workspace's transfers/outgoing"
+        shipping.update({workflow_id: {"status": "failed", "reason": reason} for workflow_id in ship.values()})
+    elif ship:
+        _say(arguments, f"installing {len(ship)} workflow(s) in {dst.locator}")
+        try:
+            # One workspace's holds share its store: <root>/workflows beside <root>/.httk-workspace/transfers/outgoing.
+            rows = _install_shipped(src, dst, str(store.parents[3] / "workflows"), sorted(ship), context, arguments)
+        except _ERRORS as exc:
+            rows = {directory: {"status": "failed", "reason": str(exc)} for directory in ship}
+        for directory, workflow_id in ship.items():
+            row = rows.get(directory, {"status": "failed", "reason": "not reported"})
+            if row["status"] != "refused" and row["status"] != "failed" and row.get("id") != workflow_id:
+                row = {"status": "refused", "reason": f"{directory} installed {row.get('id')!r}, not {workflow_id}"}
+            shipping[workflow_id] = {key: row[key] for key in ("status", "reason") if key in row}
+            if row["status"] == "installed" and row.get("build"):
+                # Only what this transfer installed: another actor's installation is built only when DST lacked a
+                # build when queried.
+                shipping[workflow_id]["build"] = True
+    return shipping
+
+
+def _build_shipped(
+    dst: _End, shipping: dict[str, dict[str, Any]], context: CLIContext, arguments: argparse.Namespace
+) -> None:
+    """Build in *dst* each needed workflow marked ``build``: one this transfer installed that declares
+    ``[workflow.build]``, or one *dst* had without a build for its platform.
+
+    A failed build marks it ``unbuilt`` with the reason and the remedy; the installation stays either way.
+    """
+
+    built = [workflow_id for workflow_id, entry in shipping.items() if entry.pop("build", False)]
+    built = [workflow_id for workflow_id in built if shipping[workflow_id]["status"] in _BUILDABLE]
+    if built:
+        _say(arguments, f"building {len(built)} workflow(s) in {dst.locator}")
+    for workflow_id in built:
+        reason = None
+        try:
+            if dst.workspace is not None:
+                with _owner(dst.workspace, "job transfer") as owner:
+                    try:
+                        with _stdout_to_stderr(True):
+                            _store.build(dst.workspace, owner, workflow_id)
+                    except _ERRORS as exc:
+                        reason = str(exc)
+            else:
+                assert dst.root is not None
+                argv = [*_WORKFLOW_COMMAND, "build", "--by-path", "--workspace", dst.root, workflow_id]
+                code, _, err = _remote(dst, context, arguments, argv)
+                reason = None if code == 0 else err.strip() or f"workflow build exited with {code}"
+        except _ERRORS as exc:
+            reason = str(exc)
+        if reason is not None:
+            remedy = f"build it with `httk workflow build --workspace {dst.locator} {workflow_id}`"
+            shipping[workflow_id].update(status="unbuilt", reason=f"{reason}; {remedy}")
+
+
+#: The statuses whose installation in DST a transfer builds when marked ``build``.
+_BUILDABLE = ("installed", "present", "mismatch")
+
+
 def _release(src: _End, transfer_ids: list[str], context: CLIContext, arguments: argparse.Namespace) -> list[str]:
     """Step 4: discard the holds on *src*; one already gone (adopted in on one filesystem) is fine.
 
@@ -884,7 +1108,7 @@ def _drive(
     A hold that was not adopted stays held on *src*.
     """
 
-    outcomes = {
+    outcomes: dict[str, dict[str, Any]] = {
         hold.transfer_id: {"transfer_id": hold.transfer_id, "members": list(hold.members), "destination": dst.locator}
         for hold in holds
     }
@@ -898,6 +1122,16 @@ def _drive(
             outcomes[hold.transfer_id].update(status="refused", message=message)
         else:
             ready.append(hold)
+    shipping: dict[str, dict[str, Any]] = {}
+    if ready and not arguments.no_workflows:
+        if any(hold.workflows is None for hold in ready):
+            print(
+                f"warning: {src.locator} reported no usable workflows for its holds (it may run an older or newer "
+                "httk-workflow); workflows were not shipped",
+                file=sys.stderr,
+            )
+        # Once a batch, before the first adoption: a job adopted after its workflow can start at once.
+        shipping = _ship_workflows(src, dst, ready, context, arguments)
     entries: dict[str, dict[str, Any]] = {}
     token = _fs.fresh_token()  # one landing for every chunk
     by_id = {hold.transfer_id: hold for hold in ready}
@@ -931,13 +1165,40 @@ def _drive(
             f"the jobs are in {dst.locator}, but the hold was not released: {reason}; "
             f"run `httk job transfer --resume` or `httk job transfer --release {transfer_id}`"
         )
+    _build_shipped(dst, shipping, context, arguments)
+    for hold in ready:
+        if shipping and hold.workflows is not None:
+            outcomes[hold.transfer_id]["workflows"] = [
+                {"id": workflow_id, **shipping[workflow_id]} for workflow_id, _, _ in hold.workflows
+            ]
     return list(outcomes.values())
+
+
+#: The report lines of the shipped workflows by status (those with a reason get a line each).
+_SHIPPED = {
+    "installed": "installed these workflows in the destination",
+    "mismatch": "warning: the destination has these workflows with another tree, left as they are (the jobs run it)",
+    "missing": "warning: these workflows are installed in neither workspace, so their jobs wait",
+}
 
 
 def _report(
     outcomes: list[dict[str, Any]], errors: list[str], *, json_output: bool, empty: str = "no held transfers to drive"
 ) -> int:
     missing = sorted({workflow for outcome in outcomes for workflow in outcome.get("missing_workflows", ())})
+    # One warning per id: a root the adoption names as missing is left to its line below.
+    shipped = {
+        entry["id"]: entry
+        for outcome in outcomes
+        for entry in outcome.get("workflows", ())
+        if not (entry["status"] == "missing" and entry["id"] in missing)
+    }
+    for status, text in _SHIPPED.items():
+        if listed := sorted(workflow_id for workflow_id, entry in shipped.items() if entry["status"] == status):
+            print(f"{text}: {', '.join(listed)}", file=sys.stderr)
+    for workflow_id, entry in sorted(shipped.items()):
+        if "reason" in entry:
+            print(f"warning: workflow {workflow_id} {entry['status']}: {entry['reason']}", file=sys.stderr)
     if missing:
         print(f"warning: these workflows are not installed, so their jobs wait: {', '.join(missing)}", file=sys.stderr)
     for error in errors:
@@ -960,7 +1221,7 @@ def _report(
 
 def _handle_release(arguments: argparse.Namespace, context: CLIContext) -> int:
     if arguments.destination is not None or any(
-        (arguments.jobs, arguments.state, arguments.step, arguments.resume, arguments.hold)
+        (arguments.jobs, arguments.state, arguments.step, arguments.resume, arguments.hold, arguments.no_workflows)
     ):
         raise ValueError("--release takes transfer ids and at most the workspace holding them")
     for transfer_id in arguments.release:
@@ -989,6 +1250,8 @@ def _handle_hold(arguments: argparse.Namespace, context: CLIContext) -> int:
     selected = arguments.jobs or arguments.state or arguments.step
     if arguments.resume or arguments.source is None or arguments.destination is None or not selected:
         raise ValueError("--hold takes --job, --state or --step, SRC and the destination to record")
+    if arguments.no_workflows:
+        raise ValueError("--no-workflows applies to a transfer, not to --hold")
     src = _end(arguments.source, context, arguments)
     if src.workspace is None:
         raise ValueError(f"--hold holds jobs in a workspace on this machine, not in {src.locator}")
@@ -1072,7 +1335,7 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     # Every run re-drives the holds bound for its destination (with --resume and no DST: every hold), each
     # destination's holds as one batch.
     batches: dict[str, list[_moving.Hold]] = {}
-    for hold in _holds(src, context, arguments):
+    for hold in _holds(src, context, arguments, workflows=not arguments.no_workflows):
         locator = hold.destination_locator
         if dst is not None and locator not in ends:
             continue
@@ -1114,7 +1377,7 @@ def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -
             src.binding, context, [*REMOTE_TRANSFER_STATUS_COMMAND, *tail, src.plain], timeout=arguments.adapter_timeout
         )
     now = time.time()
-    holds = _holds(src, context, arguments)
+    holds = _holds(src, context, arguments, workflows=arguments.json)
     if arguments.json:
         listed = [hold.as_mapping(now) for hold in holds]
         document = {"format": TRANSFER_STATUS_FORMAT, "format_version": 1, "workspace": src.locator, "holds": listed}
@@ -1159,6 +1422,13 @@ because one of its jobs is already there) stays held on SRC and is reported.
 The holds bound for one DST travel as one batch: one copy and one adoption
 call, however many jobs move. Progress goes to stderr unless -q is given.
 
+Workflows travel too: before adopting, the transfer installs in DST, under the
+same ids, the workflows the jobs need (each job's effective workflow and its
+calls) that DST lacks and SRC has, copying only their sources, and after the
+adoption builds those with [workflow.build] there. An installation DST already
+has is never replaced, even with another tree (reported). --no-workflows ships
+none.
+
 Recovery: delivery is at least once. Every run, and `job transfer --resume
 [SRC] [DST]`, first re-drives the holds bound for DST (with --resume and no DST,
 every hold, to the destination it records); DST reports "already adopted" for
@@ -1185,8 +1455,9 @@ with none the command is refused.
 whose parent is in SRC moves only in its root's tree. A root moves only whole: one whose
 children are not all terminal or paused (a parent that an any_terminal,
 any_succeeded or at_least join let finish before its children) is refused
-and stays, never split. Every run re-drives the held transfers bound for
-DST; --resume, --release and --hold stay on `job transfer`, which also
+and stays, never split. The workflows the jobs need that DST lacks and SRC
+has are installed there too (--no-workflows ships none; see `job transfer`).
+Every run re-drives the held transfers bound for DST; --resume, --release and --hold stay on `job transfer`, which also
 covers the general case."""
 
 _EVERYDAY = {
@@ -1293,6 +1564,11 @@ def build_transfer_parser(
                 metavar="WORKSPACE_ID",
                 help="with --hold: the destination workspace's id, recorded so that the transfer adopts only there",
             )
+        parser.add_argument(
+            "--no-workflows",
+            action="store_true",
+            help="do not install the workflows the jobs need in DST (by default those DST lacks and SRC has travel)",
+        )
         parser.add_argument("-q", "--quiet", action="store_true", help="print no progress lines to stderr")
         _add_adapter_timeout(parser)
         parser.add_argument("--json", action="store_true", help="print the outcomes as one JSON document")

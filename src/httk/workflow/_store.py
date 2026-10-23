@@ -22,6 +22,10 @@ leaves only that moved-aside tree, which lookups then use as the installation
 and ``httk workspace gc`` moves back into place; gc removes a moved-aside tree
 only once the installation exists. A replaced or removed installation is
 discarded from the owner's scratch.
+
+:func:`install_copy`, which installs another workspace's store entry under its
+id, is the exception: it never replaces an installation, and its final rename
+fails on an occupied name, so of concurrent copies of one id the first wins.
 """
 
 import hashlib
@@ -34,7 +38,7 @@ import shutil
 import signal
 import stat
 import subprocess
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -47,8 +51,8 @@ from httk.core.git_sources import parse_git_uri
 
 from httk.workflow import _fs, git_workflows, scaffold
 from httk.workflow._kernel import KernelWorkspace, Owner, reconcile_scratch
-from httk.workflow.errors import RunnerResolutionError
-from httk.workflow.models import WORKFLOW_ID_PREFIXES
+from httk.workflow.errors import RunnerResolutionError, WorkflowError
+from httk.workflow.models import WORKFLOW_ID_PREFIXES, is_workflow_id
 from httk.workflow.packages import (
     MANIFEST_NAME,
     artifact_excluder,
@@ -62,11 +66,14 @@ __all__ = [
     "ClosureReport",
     "Installed",
     "build",
+    "built",
     "closure",
     "install",
+    "install_copy",
     "list_installed",
     "lookup",
     "platform_tag",
+    "resolve_calls",
     "stale_replacements",
     "uninstall",
 ]
@@ -339,24 +346,52 @@ def closure(workspace: KernelWorkspace, workflow_id: str, *, check_builds: bool)
 
     missing: list[str] = []
     unbuilt: list[str] = []
-    seen: set[str] = set()
-    pending = [workflow_id]
-    while pending:
-        reference = pending.pop()
-        if reference in seen:
-            continue
-        seen.add(reference)
-        found = lookup(workspace, reference)
+    for reference, found in resolve_calls(workspace, [workflow_id]).items():
         if found is None:
             missing.append(reference)
             continue
         spec = read_build_spec(found.package) if check_builds and found.record.get("build") is True else None
         if spec is not None and found.build_dir(platform_tag(spec)) is None:
             unbuilt.append(found.id)
-        calls = found.record.get("calls")
+    return ClosureReport(tuple(sorted(missing)), tuple(sorted(unbuilt)))
+
+
+def built(found: Installed) -> bool | None:
+    """Report whether an installation's ``[workflow.build]`` has a build for this platform.
+
+    :param found: The installation.
+    :return: ``None`` without a build section; ``False`` also when its build section or platform probe fails.
+    """
+
+    if found.record.get("build") is not True:
+        return None
+    try:
+        spec = read_build_spec(found.package)
+        return spec is None or found.build_dir(platform_tag(spec)) is not None
+    except (RunnerResolutionError, ValueError, OSError) as exc:
+        _LOGGER.info("workflow %s counts as unbuilt: %s", found.id, exc)
+        return False
+
+
+def resolve_calls(workspace: KernelWorkspace, workflow_ids: Iterable[str]) -> dict[str, Installed | None]:
+    """Resolve workflows and the transitive closure of their recorded ``[workflow.calls]``.
+
+    :param workspace: The workspace.
+    :param workflow_ids: The root workflow ids (or names).
+    :return: Every reference met, to its installation (see :func:`lookup`) or ``None`` when not installed.
+    """
+
+    resolved: dict[str, Installed | None] = {}
+    pending = list(workflow_ids)
+    while pending:
+        reference = pending.pop()
+        if reference in resolved:
+            continue
+        found = resolved[reference] = lookup(workspace, reference)
+        calls = None if found is None else found.record.get("calls")
         if isinstance(calls, dict):
             pending.extend(str(callee) for callee in calls.values())
-    return ClosureReport(tuple(sorted(missing)), tuple(sorted(unbuilt)))
+    return resolved
 
 
 def _environment() -> dict[str, str]:
@@ -634,6 +669,35 @@ def _runner(provider: WorkflowProvider) -> dict[str, object]:
     return {"command": command, "entry": provider.entry if plain else None, "builtin": builtin}
 
 
+def _record(
+    workflow_id: str,
+    name: str,
+    source: str,
+    reference: str | None,
+    tree_sha256: str,
+    calls: Mapping[str, str],
+    provider: WorkflowProvider,
+) -> dict[str, object]:
+    """Return the ``install.json`` content of one installation."""
+
+    return {
+        "format": _FORMAT,
+        "format_version": 1,
+        "id": workflow_id,
+        "name": name,
+        "source": source,
+        "reference": reference,
+        "tree_sha256": tree_sha256,
+        "installed_at": datetime.now(UTC).isoformat(),
+        "calls": dict(calls),
+        "requires": list(provider.requires),
+        "runner": _runner(provider),
+        "steps": list(provider.steps),
+        "initial_step": provider.initial_step,
+        "build": provider.build is not None,
+    }
+
+
 def install(
     workspace: KernelWorkspace,
     owner: Owner,
@@ -739,22 +803,7 @@ def _install(
         tree.mkdir()
         _copy_package(provider.directory, tree / "package", provider.build)
         tree_sha256 = source_tree_digest(tree / "package")
-        record: dict[str, object] = {
-            "format": _FORMAT,
-            "format_version": 1,
-            "id": workflow_id,
-            "name": name,
-            "source": origin,
-            "reference": reference,
-            "tree_sha256": tree_sha256,
-            "installed_at": datetime.now(UTC).isoformat(),
-            "calls": recorded,
-            "requires": list(provider.requires),
-            "runner": _runner(provider),
-            "steps": list(provider.steps),
-            "initial_step": provider.initial_step,
-            "build": provider.build is not None,
-        }
+        record = _record(workflow_id, name, origin, reference, tree_sha256, recorded, provider)
         _fs.write_file(_fs.loc(tree / "install.json"), _encode(record), durable=workspace.durable)
         if build and provider.build is not None:
             stamp = {"id": workflow_id, "tree_sha256": tree_sha256}
@@ -771,6 +820,101 @@ def _install(
             _fs.move_owned(_fs.loc(old), _fs.loc(work / "old"), durable=workspace.durable)
     _LOGGER.info("installed workflow %s in %s", workflow_id, target)
     return Installed(workflow_id, name, target, record)
+
+
+def _copied_record(entry: Path) -> tuple[str, str | None, dict[str, str], str]:
+    """Read and check the ``install.json`` of a copied store entry: its id, reference, calls and tree digest."""
+
+    try:
+        data = _fs.read_bounded(_fs.loc(entry / "install.json"), _RECORD_LIMIT)
+        record = None if data is None else json.loads(data)
+    except (OSError, ValueError, RecursionError, WorkflowError) as exc:
+        raise ValueError(f"{entry}: unreadable install.json: {exc}") from exc
+    if not isinstance(record, dict) or record.get("format") != _FORMAT or record.get("format_version") != 1:
+        raise ValueError(f"{entry}: install.json is not an {_FORMAT} version 1 record")
+    workflow_id, reference, calls, digest = (record.get(key) for key in ("id", "reference", "calls", "tree_sha256"))
+    if not isinstance(workflow_id, str) or not is_workflow_id(workflow_id):
+        raise ValueError(f"{entry}: not a workflow id: {workflow_id!r}")
+    if workflow_id.startswith("git+") and not parse_git_uri(workflow_id).pinned:
+        raise ValueError(f"{entry}: the git workflow id is not pinned to a commit: {workflow_id}")
+    if reference is not None and not isinstance(reference, str):
+        raise ValueError(f"{entry}: reference must be a string or null")
+    if not isinstance(calls, dict) or not all(isinstance(value, str) for value in calls.values()):
+        raise ValueError(f"{entry}: calls must map aliases to workflow references")
+    if not isinstance(digest, str):
+        raise ValueError(f"{entry}: tree_sha256 must be a string")
+    return workflow_id, reference, cast(dict[str, str], calls), digest
+
+
+def _compared(found: Installed, tree_sha256: str) -> tuple[str, Installed]:
+    return "present" if found.record.get("tree_sha256") == tree_sha256 else "mismatch", found
+
+
+def install_copy(workspace: KernelWorkspace, owner: Owner, entry: Path, *, source_label: str) -> tuple[str, Installed]:
+    """Install a copy of another workspace's store entry under its recorded id, never replacing an installation.
+
+    *entry* is a copied ``workflows/<slug>--<h16>/`` holding ``install.json`` and ``package/``; anything else in
+    it (``builds/``) is ignored. Only the record's ``id``, ``reference`` and ``calls`` are taken; everything else
+    is derived from the copied package, whose tree digest must equal the recorded ``tree_sha256``. The copy is
+    recorded as installed now from *source_label*, so it becomes this workspace's newest installation of its
+    short name. It is not built.
+
+    An installation already under the id (also one only a crashed reinstall's moved-aside tree holds) is left
+    untouched: ``"present"`` when its tree digest is the copy's, else ``"mismatch"``. The copy is moved into
+    place by a rename that fails on an occupied name, so one another actor lands meanwhile is reported alike.
+
+    :param workspace: The workspace.
+    :param owner: The registered owner whose scratch assembles the installation.
+    :param entry: The copied store entry.
+    :param source_label: The ``source`` to record, such as ``"transfer from WS"``.
+    :return: ``"installed"``, ``"present"`` or ``"mismatch"``, and the installation now under the id.
+    :raises ValueError: If the copy is refused: an unreadable or invalid record, an id without a known prefix or
+        a git id not pinned to a commit, calls other than the manifest's, a symlink or special file in the
+        package, or a tree digest other than the recorded one.
+    """
+
+    workflow_id, reference, calls, claimed = _copied_record(entry)
+    existing = lookup(workspace, workflow_id)
+    if existing is not None:
+        return _compared(existing, claimed)
+    source = entry / "package"
+    try:
+        is_directory = stat.S_ISDIR(os.lstat(source).st_mode)
+    except OSError as exc:
+        raise ValueError(f"{entry}: no package: {exc}") from exc
+    if not is_directory:
+        raise ValueError(f"{entry}: package is a symlink or not a directory")
+    with _scratch(owner) as work:
+        tree = work / "tree"
+        _fs.make_dirs(tree, durable=workspace.durable)
+        _copy_package(source, tree / "package", read_build_spec(source))
+        # Everything recorded is derived from the copy itself, never from the copied record or the source tree.
+        tree_sha256 = source_tree_digest(tree / "package")
+        if tree_sha256 != claimed:
+            raise ValueError(f"{entry}: tree digest mismatch: the package has {tree_sha256}, the record {claimed}")
+        provider = parse_workflow_manifest(tree / "package", _uri=workflow_id)
+        name = provider.name or provider.workflow_id
+        if (workflow_id.startswith("local:") and workflow_id != f"local:{name}") or (
+            workflow_id.startswith("adhoc:") and not workflow_id.startswith(f"adhoc:{name}@")
+        ):
+            raise ValueError(f"{entry}: the id {workflow_id} does not name the package's workflow {name!r}")
+        if set(calls) != set(provider.calls or {}):
+            raise ValueError(f"{entry}: the recorded calls {sorted(calls)} are not the manifest's")
+        record = _record(workflow_id, name, source_label, reference, tree_sha256, calls, provider)
+        _fs.write_file(_fs.loc(tree / "install.json"), _encode(record), durable=workspace.durable)
+        target = _workflows(workspace) / _dirname(workflow_id, name)
+        try:
+            # Rename as CAS, without install's move-aside: an occupied target is another actor's installation.
+            _fs.move_owned(_fs.loc(tree), _fs.loc(target), durable=workspace.durable)
+        except _fs.MoveFailed as exc:
+            if exc.errno not in _fs._OCCUPIED_ERRNOS:
+                raise
+            winner = lookup(workspace, workflow_id)
+            if winner is None:
+                raise ValueError(f"{target} is occupied, but not by an installation of {workflow_id}") from exc
+            return _compared(winner, tree_sha256)  # the scratch discards this copy
+    _LOGGER.info("installed a copy of workflow %s in %s", workflow_id, target)
+    return "installed", Installed(workflow_id, name, target, record)
 
 
 def uninstall(workspace: KernelWorkspace, owner: Owner, id_or_name: str) -> Installed:

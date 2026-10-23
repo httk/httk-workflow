@@ -19,7 +19,8 @@ One collection runs the categories of :data:`GC_CATEGORIES`, in order:
 - ``owner_tombstones``: ``dead.json`` of recovered owners older than
   ``retention.owner_tombstone_days``;
 - ``tmp_entries``: write temporaries older than a day in ``requests/`` and
-  ``owners/*/``, ``tmp/trash.<token>`` entries a crashed removal left, and
+  ``owners/*/``, ``tmp/trash.<token>`` entries a crashed removal left,
+  ``tmp/push.<hex>/`` copies a remote install or transfer left, and
   ``workflows/<slug>--<h16>.old.<token>/`` trees a crashed reinstall left once
   their installation exists (one whose installation is missing is moved back
   into place instead).
@@ -66,7 +67,8 @@ __all__ = [
 _LOGGER = logging.getLogger(__name__)
 
 GC_REPORT_FORMAT = "httk-workflow-gc"
-#: How old a write temporary, a ``tmp/trash.<token>`` entry or a moved-aside installation must be to be garbage.
+#: How old a write temporary, a ``tmp/trash.<token>`` entry, a ``tmp/push.<hex>/`` copy or a moved-aside installation
+#: must be to be garbage.
 TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
 #: How long a malformed request, or one whose job cannot be found, waits before it is quarantined.
 REQUEST_GRACE_SECONDS = 24 * 60 * 60
@@ -84,6 +86,7 @@ GC_CATEGORIES = (
 _DAY = 86400.0
 _PRUNE_BUDGET = 100_000
 _TRASH_NAME_LENGTH = len("trash.") + 16
+_PUSHED = re.compile(r"push\.[0-9a-f]{32}")
 _LAUNCHER_LOG = re.compile(r"([0-9a-f]{32})\.[A-Za-z0-9.]+")
 _PUBLISHED_LAUNCHER_LOG = re.compile(r"[0-9a-f]{32}\.log")
 
@@ -575,7 +578,9 @@ class _Collection:
         tmp = self.control / "tmp"
         for name in _kernel.list_names(tmp):
             # Only entries already moved for deletion carry this name; a crashed removal left them.
-            if name.startswith("trash.") and len(name) == _TRASH_NAME_LENGTH and self._aged(tmp / name, cutoff):
+            trash = name.startswith("trash.") and len(name) == _TRASH_NAME_LENGTH
+            # A pushed copy a remote workflow install did not consume (its call failed): in use for a day at most.
+            if (trash or _PUSHED.fullmatch(name)) and self._aged(tmp / name, cutoff):
                 self._remove(tally, tmp / name)
         for path in _store.stale_replacements(self.workspace, cutoff, writable=not self.dry_run):
             self._remove(tally, path)

@@ -125,6 +125,7 @@ _PARTIAL = ".partial"
 RESERVED_NAMES = frozenset({_SOURCE, _PLAN, "rekey.json", _PARTIAL})
 _RECORD_TEMPORARY = re.compile(r"\.(source|plan|rekey)\.json\.[a-z2-7]{16}\.tmp")
 _RECORD_LIMIT = 1 << 16
+_DIGEST = re.compile(r"[0-9a-f]{64}")
 #: The format of the ``reason.json`` beside a refused bundle.
 REJECTION_FORMAT = "httk-workspace-exchange-rejection"
 
@@ -181,6 +182,9 @@ class Hold:
     :param destination_locator: The transfer's destination as recorded, or ``None``.
     :param destination_workspace_id: The destination workspace's id as recorded, or ``None``.
     :param created_at: When the bundle was built, an ISO 8601 timestamp with a time zone.
+    :param workflows: The workflows the members need (each one's effective workflow and the closure of its
+        calls) as ``(id, store directory, tree_sha256)``, the last two ``None`` when the holding workspace has
+        no installation of it; ``None`` when not reported (an older holding workspace).
     """
 
     transfer_id: str
@@ -189,13 +193,20 @@ class Hold:
     destination_locator: str | None
     destination_workspace_id: str | None
     created_at: str
+    workflows: tuple[tuple[str, str | None, str | None], ...] | None = None
 
     @classmethod
-    def from_manifest(cls, path: Path, manifest: BundleManifest) -> Self:
+    def from_manifest(
+        cls,
+        path: Path,
+        manifest: BundleManifest,
+        workflows: tuple[tuple[str, str | None, str | None], ...] | None = None,
+    ) -> Self:
         """Describe the held bundle at *path* from its manifest.
 
         :param path: The bundle directory.
         :param manifest: Its manifest.
+        :param workflows: The workflows its members need (see the class).
         :return: The hold.
         """
 
@@ -206,6 +217,7 @@ class Hold:
             manifest.destination_locator,
             manifest.destination_workspace_id,
             manifest.created_at,
+            workflows,
         )
 
     def as_mapping(self, now: float | None = None) -> dict[str, object]:
@@ -225,6 +237,16 @@ class Hold:
             "destination_workspace_id": self.destination_workspace_id,
             "created_at": self.created_at,
             "age_seconds": max(0, int((time.time() if now is None else now) - created)),
+            **(
+                {}
+                if self.workflows is None
+                else {
+                    "workflows": [
+                        {"id": workflow_id, "directory": directory, "tree_sha256": digest}
+                        for workflow_id, directory, digest in self.workflows
+                    ]
+                }
+            ),
         }
 
     @classmethod
@@ -234,7 +256,7 @@ class Hold:
         :param value: The decoded mapping.
         :return: The hold.
         :raises ValueError: For a malformed hold: a bad transfer id, a path not ending in it, no members, or a
-            malformed destination, workspace id or timestamp.
+            malformed destination, workspace id or timestamp. A malformed ``workflows`` member reads as ``None``.
         """
 
         if not isinstance(value, dict):
@@ -261,7 +283,34 @@ class Hold:
             workspace_id = canonical_uuid(workspace_id, "destination_workspace_id")
         if datetime.fromisoformat(created_at).tzinfo is None:
             raise ValueError(f"a hold's created_at has no time zone: {created_at!r}")
-        return cls(transfer_id, path, tuple(members), locator, workspace_id, created_at)
+        workflows = value.get("workflows")
+        if workflows is not None:
+            try:
+                if not isinstance(workflows, list):
+                    raise ValueError(f"not a list: {workflows!r}")
+                workflows = tuple(_workflow_entry(entry) for entry in workflows)
+            except ValueError as exc:
+                # Not usable (a newer or broken report): the hold still moves, its workflows are not shipped.
+                _LOGGER.debug("ignoring the workflows of hold %s: %s", transfer_id, exc)
+                workflows = None
+        return cls(transfer_id, path, tuple(members), locator, workspace_id, created_at, workflows)
+
+
+def _workflow_entry(entry: object) -> tuple[str, str | None, str | None]:
+    """Check one ``workflows`` entry of a reported hold: a store directory is one plain store name."""
+
+    if not isinstance(entry, dict):
+        raise ValueError(f"a malformed workflow of a hold: {entry!r}")
+    workflow_id, directory, digest = entry.get("id"), entry.get("directory"), entry.get("tree_sha256")
+    store_name = isinstance(directory, str) and (
+        _store._INSTALLATION.fullmatch(directory) or _store._REPLACED.fullmatch(directory)
+    )
+    if isinstance(workflow_id, str) and workflow_id:
+        if directory is None and digest is None:
+            return workflow_id, None, None
+        if store_name and isinstance(digest, str) and _DIGEST.fullmatch(digest):
+            return workflow_id, cast(str, directory), digest
+    raise ValueError(f"a malformed workflow of a hold: {entry!r}")
 
 
 # -- eject ----------------------------------------------------------------------------------------------------------
@@ -1181,6 +1230,7 @@ def hold(
     tree: bool,
     destination_locator: str | None = None,
     destination_workspace_id: str | None = None,
+    workflows: bool = False,
 ) -> Hold:
     """Eject into this workspace's own ``transfers/outgoing/<transfer-id>/``: the held bundle of a transfer.
 
@@ -1191,6 +1241,7 @@ def hold(
     :param destination_locator: The transfer's destination, recorded in ``bundle.json`` for resumption.
     :param destination_workspace_id: The destination workspace's id, recorded in ``bundle.json``, so that a
         resumption adopts only into that workspace.
+    :param workflows: Also report the workflows its members need (:attr:`Hold.workflows`).
     :return: The hold.
     :raises Busy: As :func:`eject`, which also gives the other failures and their outcome: *root*'s handle is
         retired whatever happens.
@@ -1206,13 +1257,41 @@ def hold(
         locator=destination_locator,
         destination_workspace_id=destination_workspace_id,
     )
-    return Hold.from_manifest(report.destination, manifest)
+    needed = _needed_workflows(workspace, report.destination, manifest) if workflows else None
+    return Hold.from_manifest(report.destination, manifest, needed)
 
 
-def held(workspace: "Workspace") -> list[Hold]:
+def _needed_workflows(
+    workspace: _kernel.KernelWorkspace, bundle: Path, manifest: BundleManifest
+) -> tuple[tuple[str, str | None, str | None], ...]:
+    """The workflows a held bundle's members need, as :attr:`Hold.workflows` reports them, by id."""
+
+    roots: set[str] = set()
+    for member in manifest.members:
+        directory = manifest.member_dir(bundle, member)
+        try:
+            job = JobDefinition.from_path(directory / "job.json")
+        except ValueError as exc:
+            _LOGGER.debug("no workflow of the held job %s: %s", member.job_key, exc)
+            continue
+        roots.add(effective_workflow(job, read_state_unowned(directory / "state.json")[0])[0])
+    needed: dict[str, tuple[str, str | None, str | None]] = {}
+    for reference, found in _store.resolve_calls(workspace, sorted(roots)).items():
+        if found is None:
+            needed.setdefault(reference, (reference, None, None))
+        else:
+            digest = found.record.get("tree_sha256")
+            needed[found.id] = (found.id, found.directory.name, digest if isinstance(digest, str) else None)
+    # A record without a digest is reported as not installed: nothing comparable could be shipped.
+    return tuple(entry if entry[2] is not None else (entry[0], None, None) for _, entry in sorted(needed.items()))
+
+
+def held(workspace: "Workspace", *, workflows: bool = False) -> list[Hold]:
     """List the held bundles.
 
     :param workspace: The workspace.
+    :param workflows: Also report the workflows each hold's members need (:attr:`Hold.workflows`), read from
+        their ``job.json`` and ``state.json`` and resolved in this workspace's store.
     :return: The holds, by transfer id.
     """
 
@@ -1220,7 +1299,9 @@ def held(workspace: "Workspace") -> list[Hold]:
     holds = []
     for name in _kernel.list_names(outgoing):
         if _TRANSFER_ID.fullmatch(name) and (read := read_manifest(outgoing / name / "bundle.json")) is not None:
-            holds.append(Hold.from_manifest(outgoing / name, read[1]))
+            bundle = outgoing / name
+            needed = _needed_workflows(workspace, bundle, read[1]) if workflows else None
+            holds.append(Hold.from_manifest(bundle, read[1], needed))
     return holds
 
 

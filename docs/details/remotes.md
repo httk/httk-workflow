@@ -148,8 +148,27 @@ $ httk workflow run --workspace kappa:runs --count 4
 the workspace the command runs in, else the default workspace (the per-user
 one is created on first use).
 
-Workflows never travel with jobs: a transferred job whose workflow is not
-installed at the destination waits there, and the transfer warns about it. The
+Workflows travel with the jobs. A transfer (push, pull or `job transfer`, local
+or remote ends, either direction) installs in DST every workflow the moved jobs
+need that DST lacks and SRC has, under the same id, before adopting them: each
+job's effective workflow (after `job request set_workflow`) and the closure of
+its `[workflow.calls]`. One query asks DST which of them it has; the missing
+store entries then travel as their sources only (`install.json` and
+`package/`, never `builds/`, and `requires` is not checked there), each is
+installed after its tree digest is verified (an integrity check of the copy:
+SRC is trusted, and the digest does not prove that the content belongs to the
+id), and one with `[workflow.build]` is built for DST's platform after the
+adoption, as is one DST already had without a build for its platform. Nothing
+is ever replaced: a DST that has the id with another tree keeps it, the jobs
+run it, and the transfer warns. A shipped workflow is recorded as installed now, so it becomes DST's
+newest installation of its short name. A build that fails, or a workflow
+installed in neither workspace, leaves the jobs waiting at DST with a warning
+(`httk workflow build --workspace DST ID` builds it later, as does the next
+transfer); `--no-workflows` ships nothing, and an SRC running an older
+httk-workflow ships nothing either, with a warning. A copy a failed call left
+in DST's `.httk-workspace/tmp/push.<hex>/` is named in a warning and removed by
+`httk workspace gc` after a day. The workspace daemon's exchange never installs a workflow a
+client sends. The
 remote invocation asks the owning machine to run
 `httk workflow manager run --workspace runs --detach …`. The target workspace
 then applies its own `manager.launch`, `manager.workers`, scheduler settings and

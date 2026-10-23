@@ -584,7 +584,7 @@ def incoming(workspace: Workspace) -> list[Path]:
     return list((workspace.control / "transfers" / "incoming").iterdir())
 
 
-def test_local_to_remote_over_ssh_makes_three_calls_whatever_the_number_of_jobs(
+def test_local_to_remote_over_ssh_makes_four_calls_whatever_the_number_of_jobs(
     tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     project = tmp_path / "project"
@@ -600,11 +600,12 @@ def test_local_to_remote_over_ssh_makes_three_calls_whatever_the_number_of_jobs(
         plan = jobs(near, count)
         assert run(project, "--json", *selected(plan), near_name, f"cluster:{far_name}") == 0
         assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * count
-        assert calls == ["status", "push", "job adopt"]
+        # One query of the workflows the destination has (the jobs' workflow is installed nowhere).
+        assert calls == ["status", "workflow list", "push", "job adopt"]
         connections.append(len(remote.commands()) - before)
         assert_in(far, plan)
         assert outgoing(near) == [] and incoming(far) == []
-    assert connections == [3, 3]
+    assert connections == [4, 4]
 
 
 def test_remote_to_local_over_ssh_makes_four_calls_whatever_the_number_of_jobs(
@@ -630,7 +631,7 @@ def test_remote_to_local_over_ssh_makes_four_calls_whatever_the_number_of_jobs(
     assert connections == [4, 4]
 
 
-def test_remote_to_remote_makes_seven_calls_whatever_the_number_of_jobs(
+def test_remote_to_remote_makes_eight_calls_whatever_the_number_of_jobs(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, far, far_name = _remote_pair(tmp_path)
@@ -640,7 +641,8 @@ def test_remote_to_remote_makes_seven_calls_whatever_the_number_of_jobs(
         plan = jobs(near, count)
         assert run(project, "--json", *selected(plan), f"cluster:{near_name}", f"other:{far_name}") == 0
         assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * count
-        expected = ["status", "job transfer", "transfer status", "pull", "push", "job adopt", "job transfer"]
+        expected = ["status", "job transfer", "transfer status", "workflow list", "pull", "push", "job adopt"]
+        expected.append("job transfer")
         assert calls == expected
         assert_in(far, plan)
         assert outgoing(near) == [] and incoming(far) == []
@@ -695,8 +697,9 @@ def test_a_failed_batch_adoption_keeps_every_hold_and_resume_delivers(
     assert all("unrecognized arguments" in outcome["message"] for outcome in transfers)
     assert sorted(outgoing(near)) == sorted(outcome["transfer_id"] for outcome in transfers)
     assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
-    # Quiet: no progress, only the outcome messages.
-    assert all("stays held" in line for line in captured.err.splitlines())
+    # Quiet: no progress, only the outcome messages (and the warning that the jobs' workflow is installed nowhere).
+    lines = [line for line in captured.err.splitlines() if "installed in neither workspace" not in line]
+    assert len(lines) == 3 and all("stays held" in line for line in lines)
     (landing,) = incoming(far)  # the unadopted copies, reported by hygiene as stale incoming
     assert run(project, "--json", "--resume", near_name, f"cluster:{far_name}") == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 3
@@ -800,7 +803,7 @@ def test_long_id_lists_are_split_into_calls_that_fit_the_budget(
     plan = jobs(near, 5)
     assert run(project, "--json", *selected(plan), near_name, f"cluster:{far_name}") == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 5
-    assert calls == ["status", "push", "job adopt", "push", "job adopt"]
+    assert calls == ["status", "workflow list", "push", "job adopt", "push", "job adopt"]
     assert_in(far, plan)
     assert outgoing(near) == [] and incoming(far) == []
     calls.clear()

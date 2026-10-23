@@ -82,7 +82,7 @@ WORKSPACE/
 │   ├── requests/<job-uuid>.<request-uuid>.json
 │   ├── tmp/<owner-id>.<purpose>.<token>/   owner scratch
 │   ├── tmp/trash.<token>                   an entry being removed
-│   ├── tmp/push.<hex>/                     a remote install's pushed package
+│   ├── tmp/push.<hex>/                     a remote install's or transfer's pushed copy
 │   ├── quarantine/<epoch>-<token>/         {entry, reason.json}
 │   ├── exchange-jobs/<exchange-name>/      the exchange index
 │   ├── transfers/outgoing/<transfer-id>/   held bundles
@@ -1228,7 +1228,9 @@ from `applied_requests` at the next write.
 
 A job references a workflow by id, and that workflow, and the transitive
 closure of its `[workflow.calls]`, must be installed before a manager starts
-the job. There is no automatic transfer of workflows with jobs.
+the job. A job transfer installs the workflows its jobs need in the
+destination when it lacks them, as copies of the source's store entries (see
+**Install a copy** below); the exchange never does.
 
 ```text
 workflows/<slug>--<h16>/
@@ -1273,9 +1275,20 @@ platform_tag, built_at}`.
   leaves only `.old.<t>`, which lookups use as the installation and which `gc`
   moves back into place; `gc` removes an `.old.<t>` tree only once the
   installation exists.
+- **Install a copy** (the receiving side of a transfer, hidden
+  `workflow install --workspace WS --from-store DIR…`) takes another
+  workspace's store entry: only `id`, `reference` and `calls` from its
+  `install.json` (a known id prefix, a git id pinned to a commit, `calls`
+  naming the manifest's aliases), everything else derived again from the copied
+  `package/`, whose tree digest must be the recorded `tree_sha256`. `source`
+  records the transfer (`transfer from SRC`) and `installed_at` the time of the
+  copy. It never replaces: an installation of the id already here (an
+  `.old.<t>` only copy too) is kept, and the final rename onto
+  `<slug>--<h16>` fails on an occupied name, so of two concurrent copies the
+  first wins and the other reports the winner as present or as another tree.
 - **Uninstall** and **build** work in a scratch and move the result.
-- **No races are handled, by decision.** Users do not change workflows that
-  jobs are using, and two operators installing one id at once is not
+- **No other races are handled, by decision.** Users do not change workflows
+  that jobs are using, and two operators installing one id at once is not
   supported.
 - **At launch** the manager records `workflow_pin: {id, tree_sha256}` in
   `state.json`. Nothing enforces that the installed digest matches the one
@@ -1664,7 +1677,7 @@ primitives, so a killed collection leaves the workspace consistent.
 | `manager_logs` | `logs/managers/<owner-id>.log` of owners without `owner.json`, older than `trash_days`. |
 | `launcher_logs` | `logs/launchers/<launch id>.*` older than `trash_days` when no owner record carries that launch id, and `exchange/launchers/<handle>.log` older than `trash_days`. |
 | `owner_tombstones` | A tombstone older than `owner_tombstone_days` whose owner holds nothing else. |
-| `tmp_entries` | Write temporaries older than a day in `requests/` and `owners/*/`, `tmp/trash.<t>` entries older than a day, and `workflows/*.old.<t>` trees older than a day once their installation exists (an only copy is moved back instead). |
+| `tmp_entries` | Write temporaries older than a day in `requests/` and `owners/*/`, `tmp/trash.<t>` entries and `tmp/push.<hex>/` copies older than a day, and `workflows/*.old.<t>` trees older than a day once their installation exists (an only copy is moved back instead). |
 
 There is no age-based collection of scratch, held bundles or quarantine.
 

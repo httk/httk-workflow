@@ -74,8 +74,9 @@ httk workflow install --workspace default 'git+https://github.com/httk/workflows
 httk workspace workflows default
 ```
 
-`job new --install` installs a missing workflow on the fly. Workflows never
-travel with jobs: install them in every workspace that runs those jobs.
+`job new --install` installs a missing workflow on the fly. A job transfer
+(`job push`, `job pull`, `job transfer`) installs the workflows its jobs need
+in the destination when it lacks them (see {doc}`details/remotes`).
 
 ## Environment preludes
 

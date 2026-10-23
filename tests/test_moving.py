@@ -885,9 +885,13 @@ def test_hold_held_release(tmp_path: Path) -> None:
     source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
     plan = tree(source)
     with cli_owner(source) as owner:
-        made = _moving.hold(source, owner, claim_root(source, owner, plan[0][0]["id"]), tree=True)
-    (hold,) = _moving.held(source)
+        made = _moving.hold(source, owner, claim_root(source, owner, plan[0][0]["id"]), tree=True, workflows=True)
+    (hold,) = _moving.held(source, workflows=True)
     path = Path(hold.path)
+    # The workflows the members need, by default not computed (and absent from an older workspace's report).
+    assert hold.workflows == made.workflows == ((WORKFLOW[0], None, None),)
+    assert _moving.held(source) == [dataclasses.replace(hold, workflows=None)]
+    assert "workflows" not in _moving.held(source)[0].as_mapping()
     assert hold == made and path.parent == source.control / "transfers" / "outgoing"
     assert hold.transfer_id == path.name and len(hold.members) == 4
     assert _moving.Hold.from_mapping(json.loads(json.dumps(hold.as_mapping()))) == hold

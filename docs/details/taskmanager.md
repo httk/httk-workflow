@@ -175,10 +175,13 @@ and builds a `[workflow.build]` package for this platform (unless
 platform, and `httk workflow uninstall --workspace WORKSPACE SELECTOR` removes
 one; `--check` warns about unfinished jobs that still use it.
 
-Workflows never travel with jobs. A job transferred, ejected or adopted into a
-workspace that lacks its workflow stays `ready` and unclaimed until the workflow
-is installed there; `job adopt` and `job transfer` warn about it, and `job why`
-and `workflow precheck` name it. Do not reinstall a workflow that running jobs
+`job transfer` (and `job push`/`job pull`) installs the workflows its jobs need
+in the destination when it lacks them and the source has them, never replacing
+an installation (see {doc}`remotes`). Otherwise a job ejected, adopted, or
+transferred with `--no-workflows` into a workspace that lacks its workflow
+stays `ready` and unclaimed until the workflow is installed there; `job adopt`
+and `job transfer` warn about it, and `job why` and `workflow precheck` name
+it. Do not reinstall a workflow that running jobs
 use: the installed digest is recorded at launch (`workflow_pin`), not enforced.
 
 ## Submitting jobs

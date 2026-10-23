@@ -2,13 +2,14 @@
 
 import json
 import os
-from collections.abc import Iterator
+import shutil
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
-from httk.workflow import _kernel, _store, git_workflows, scaffold
+from httk.workflow import _fs, _kernel, _store, git_workflows, scaffold
 from httk.workflow._kernel import Owner, register_owner
 from httk.workflow.packages import parse_workflow_manifest, source_tree_digest
 from httk.workflow.scaffold import WorkflowProvider
@@ -290,3 +291,148 @@ def test_in_process_provider_is_refused(ws: FakeWorkspace, owner: Owner, monkeyp
         _store.install(ws, owner, "mem")
     with pytest.raises(ValueError, match="no workflow package"):
         _store.install(ws, owner, "unknown-name")
+
+
+@pytest.fixture()
+def dst(tmp_path: Path) -> FakeWorkspace:
+    root = tmp_path / "dst"
+    workspace = FakeWorkspace(root, root / ".httk-workspace", root / "jobs", False, 0.2)
+    (workspace.control / "tmp").mkdir(parents=True)
+    (workspace.control / "owners").mkdir()
+    return workspace
+
+
+@pytest.fixture()
+def dst_owner(dst: FakeWorkspace, monkeypatch: pytest.MonkeyPatch) -> Iterator[Owner]:
+    monkeypatch.setattr(_kernel, "_RECONCILERS", {})
+    with register_owner(dst, kind="cli", label=None, allocation=None, advertised={}) as registered:
+        yield registered
+
+
+def _landed(installed: _store.Installed, landing: Path) -> Path:
+    """Copy a store entry the way a transfer lands it, ``builds/`` included."""
+
+    entry = landing / installed.directory.name
+    shutil.copytree(installed.directory, entry, symlinks=True)
+    return entry
+
+
+def _edit_record(entry: Path, **changes: object) -> None:
+    path = entry / "install.json"
+    path.write_text(json.dumps({**json.loads(path.read_text(encoding="utf-8")), **changes}), encoding="utf-8")
+
+
+def _scratch_left(workspace: FakeWorkspace) -> list[str]:
+    return [entry.name for entry in (workspace.control / "tmp").iterdir() if ".build." in entry.name]
+
+
+def test_install_copy_installs_git_and_local_entries_under_their_ids(
+    ws: FakeWorkspace, owner: Owner, dst: FakeWorkspace, dst_owner: Owner, tmp_path: Path
+) -> None:
+    build = '\n[workflow.build]\ncommand = "sh -c \'echo built > out.bin\'"\nartifacts = ["out.bin"]\n'
+    callee = _git_install(ws, owner, package(tmp_path / "a", "callee", build=build), GIT_ID, GIT_ID)
+    caller = _store.install(ws, owner, package(tmp_path / "b", "caller", calls={"sub": GIT_ID}))
+    assert caller.record["calls"] == {"sub": GIT_ID} and (callee.directory / "builds").is_dir()
+    landing = tmp_path / "landing"
+    entries = [_landed(found, landing) for found in (callee, caller)]
+    # Only id, reference and calls travel: forged derived fields are re-derived from the package.
+    _edit_record(entries[1], name="forged", runner={"command": ["rm", "-rf", "/"]}, requires=["evil"], build=True)
+    (entries[0] / "builds" / "planted").mkdir()
+    for found, entry in zip((callee, caller), entries, strict=True):
+        status, copy = _store.install_copy(dst, dst_owner, entry, source_label="transfer from ws")
+        assert status == "installed" and copy.id == found.id and copy.directory.name == found.directory.name
+        assert sorted(path.name for path in copy.directory.iterdir()) == ["install.json", "package"]
+        on_disk = json.loads((copy.directory / "install.json").read_text(encoding="utf-8"))
+        assert on_disk == dict(copy.record) and on_disk["source"] == "transfer from ws"
+        assert on_disk["installed_at"] > str(found.record["installed_at"])
+        ignored = ("source", "installed_at")
+        assert {k: v for k, v in on_disk.items() if k not in ignored} == {
+            k: v for k, v in found.record.items() if k not in ignored
+        }
+        assert _store.lookup(dst, found.id) == copy and _store.lookup(dst, found.name) == copy
+    assert _store.closure(dst, caller.id, check_builds=False).ok
+    # A build section is recorded, not run: the closure wants a build only for the package that declares one.
+    assert _store.closure(dst, caller.id, check_builds=True).unbuilt == (GIT_ID,)
+    assert _store.closure(dst, "local:caller", check_builds=True).missing == ()
+    assert _scratch_left(dst) == []
+    assert all(entry.is_dir() for entry in entries)  # the landed entries are the caller's to remove
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        (lambda e: (e / "package" / "lib" / "data.txt").write_text("tampered\n", encoding="utf-8"), "tree digest"),
+        (lambda e: _edit_record(e, id="git+https://example.test/w.git@v1#sub"), "not pinned"),
+        (lambda e: _edit_record(e, id="other:demo"), "not a workflow id"),
+        (lambda e: _edit_record(e, id="local:other"), "does not name the package's workflow"),
+        (lambda e: _edit_record(e, calls={"sub": "local:x"}), "calls"),
+        (lambda e: _edit_record(e, format_version=2), "version 1 record"),
+        (lambda e: (e / "install.json").write_bytes(b"{" * 10), "unreadable install.json"),
+        (lambda e: (e / "package" / "lib" / "escape").symlink_to("/etc/passwd"), "symlink or special file"),
+        (lambda e: shutil.rmtree(e / "package"), "no package"),
+    ],
+)
+def test_install_copy_refuses_an_invalid_entry(
+    ws: FakeWorkspace,
+    owner: Owner,
+    dst: FakeWorkspace,
+    dst_owner: Owner,
+    tmp_path: Path,
+    damage: Callable[[Path], object],
+    message: str,
+) -> None:
+    entry = _landed(_store.install(ws, owner, package(tmp_path, "demo")), tmp_path / "landing")
+    damage(entry)
+    with pytest.raises(ValueError, match=message):
+        _store.install_copy(dst, dst_owner, entry, source_label="transfer")
+    assert _store.list_installed(dst) == [] and _scratch_left(dst) == []
+
+
+def test_install_copy_never_replaces_an_installation(
+    ws: FakeWorkspace, owner: Owner, dst: FakeWorkspace, dst_owner: Owner, tmp_path: Path
+) -> None:
+    entry = _landed(_store.install(ws, owner, package(tmp_path / "a", "demo")), tmp_path / "landing")
+    same = _store.install(dst, dst_owner, package(tmp_path / "b", "demo"))
+    assert _store.install_copy(dst, dst_owner, entry, source_label="transfer") == ("present", same)
+    assert _store.lookup(dst, "local:demo") == same  # untouched: installed_at and source unchanged
+    other = package(tmp_path / "c", "demo")
+    (other / "lib" / "data.txt").write_text("different\n", encoding="utf-8")
+    different = _store.install(dst, dst_owner, other)
+    assert _store.install_copy(dst, dst_owner, entry, source_label="transfer") == ("mismatch", different)
+    assert _store.lookup(dst, "local:demo") == different
+    # A crashed reinstall's moved-aside tree is the installation.
+    aside = different.directory.with_name(f"{different.directory.name}.old.{'a' * 16}")
+    different.directory.rename(aside)
+    status, found = _store.install_copy(dst, dst_owner, entry, source_label="transfer")
+    assert status == "mismatch" and found.directory == aside and not different.directory.exists()
+    assert _scratch_left(dst) == []
+
+
+@pytest.mark.parametrize("same_tree", [True, False])
+def test_install_copy_loses_a_race_to_another_installation(
+    ws: FakeWorkspace,
+    owner: Owner,
+    dst: FakeWorkspace,
+    dst_owner: Owner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    same_tree: bool,
+) -> None:
+    entry = _landed(_store.install(ws, owner, package(tmp_path / "a", "demo")), tmp_path / "landing")
+    rival = package(tmp_path / "b", "demo")
+    if not same_tree:
+        (rival / "lib" / "data.txt").write_text("different\n", encoding="utf-8")
+    target = dst.root / "workflows" / entry.name
+    raced: list[_store.Installed] = []
+    started: list[bool] = []
+
+    def another_actor(op: str, phase: str, src: _fs.Loc | None, to: _fs.Loc | None) -> None:
+        # Between install_copy's lookup and its rename, another actor installs the id.
+        if op == "rename" and phase == "before" and to is not None and to.path == target and not started:
+            started.append(True)
+            raced.append(_store.install(dst, dst_owner, rival))
+
+    monkeypatch.setattr(_fs, "_fault", another_actor)
+    status, found = _store.install_copy(dst, dst_owner, entry, source_label="transfer")
+    assert raced and found == raced[0] and status == ("present" if same_tree else "mismatch")
+    assert _store.list_installed(dst) == raced and _scratch_left(dst) == []
