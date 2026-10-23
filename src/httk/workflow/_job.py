@@ -1,7 +1,9 @@
 """The immutable ``job.json`` of a job (format ``httk-workflow-job``, version 3): :class:`JobDefinition`.
 
-Version 3 carries no runner, workdir, data, ``requires`` or ``calls``: the
-installed workflow supplies them. ``placement`` is authoritative and immutable.
+Version 3 carries no runner, workdir, data, ``requires`` or fixed calls: the
+installed workflow supplies them. The optional ``calls`` member binds the
+workflow's call slots, and the optional ``persist_outputs`` member names the
+outputs a job called through a slot records for its caller. ``placement`` is authoritative and immutable.
 The job digest is the SHA-256 of the stored bytes, exactly as submitted.
 """
 
@@ -28,11 +30,13 @@ from httk.workflow.models import (
     parse_job_key,
     parse_placement_text,
     placement_text,
+    validate_call_bindings,
     validate_declarations,
     validate_declared,
     validate_environment,
     validate_label,
     validate_parameters,
+    validate_persist_outputs,
     validate_resources,
     validate_step,
 )
@@ -66,8 +70,11 @@ _MEMBERS = frozenset(
         "parent",
         "seal_succeeded",
         "staged_files",
+        "calls",
+        "persist_outputs",
     }
 )
+_OPTIONAL_MEMBERS = frozenset({"staged_files", "calls", "persist_outputs"})
 _RETRY_MEMBERS = frozenset(
     {"maximum_attempts_per_activation", "maximum_total_attempts", "maximum_activations", "retry_on"}
 )
@@ -166,6 +173,10 @@ class JobDefinition:
     :param staged_files: The files staged into the payload (``--file``/``--files`` and declared-input
         destinations), sorted by path: each ``{path, size, sha256}``, or only ``{path}`` from a
         runner-prepared payload; the member is absent when there are none.
+    :param calls: The call slot bindings, alias to ``{workflow, parameters}``; ``None`` (the member absent) when
+        the workflow has no call slots.
+    :param persist_outputs: The call slot output names to the output roles this job records for its caller, or
+        ``None`` (the member absent).
     :param stored_digest: The SHA-256 of the stored bytes this definition was read from, if any.
     """
 
@@ -189,6 +200,8 @@ class JobDefinition:
     parent: Mapping[str, Frozen] | None
     seal_succeeded: bool | None
     staged_files: tuple[Mapping[str, Frozen], ...] = ()
+    calls: Mapping[str, Frozen] | None = None
+    persist_outputs: Mapping[str, Frozen] | None = None
     stored_digest: str | None = field(default=None, compare=False, repr=False)
 
     @property
@@ -212,7 +225,7 @@ class JobDefinition:
         :raises httk.workflow.errors.FormatError: If the document is malformed.
         """
 
-        doc = _exact(value, "job.json", _MEMBERS, optional=frozenset({"staged_files"}))
+        doc = _exact(value, "job.json", _MEMBERS, optional=_OPTIONAL_MEMBERS)
         if doc["format"] != JOB_FORMAT or doc["format_version"] != JOB_FORMAT_VERSION:
             raise FormatError("job.json is not httk-workflow-job version 3")
         workflow = _exact(doc["workflow"], "workflow", frozenset({"id", "name"}))
@@ -248,6 +261,10 @@ class JobDefinition:
             parent=_parent(doc["parent"]),
             seal_succeeded=seal_succeeded,
             staged_files=_staged_files(doc["staged_files"]) if "staged_files" in doc else (),
+            calls=_frozen(validate_call_bindings(doc["calls"])) if "calls" in doc else None,
+            persist_outputs=(
+                _frozen(validate_persist_outputs(doc["persist_outputs"])) if "persist_outputs" in doc else None
+            ),
         )
 
     @classmethod
@@ -323,6 +340,8 @@ class JobDefinition:
             "parent": _thaw(self.parent),
             "seal_succeeded": self.seal_succeeded,
             **({"staged_files": [_thaw(entry) for entry in self.staged_files]} if self.staged_files else {}),
+            **({"calls": _thaw(self.calls)} if self.calls is not None else {}),
+            **({"persist_outputs": _thaw(self.persist_outputs)} if self.persist_outputs is not None else {}),
         }
 
     def encode(self) -> bytes:

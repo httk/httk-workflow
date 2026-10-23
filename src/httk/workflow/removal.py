@@ -11,7 +11,7 @@ waiting for a manager.
 
 import dataclasses
 import logging
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import islice
@@ -217,7 +217,8 @@ def workflow_switch_problem(
     declare the same output names; (5) declare no parameter the job lacks a value for (unless the job's own
     declaration also lacked it) and none of the job's declared parameters may be unknown to it, with every
     value of its declared type; (6) declare the same environment names and types; and (7) declare the step
-    the job runs next (for a waiting parent, the steps its join advances to). A language realization never
+    the job runs next (for a waiting parent, the steps its join advances to); and (8) declare exactly the call
+    slots the job binds, each binding fitting the candidate's slot as installed now. A language realization never
     switches: its executed document lives in the payload. A job made from an installed package (it stores
     ``declarations.workflow``) records empty parameter, input and environment declarations by leaving them
     out; any other job without a snapshot (a spawned child) is compared with its current installation, and
@@ -326,6 +327,44 @@ def workflow_switch_problem(
     for step in steps:
         if isinstance(step, str) and step not in provider.steps:
             return f"rule 7 (step): {candidate.id} does not declare the job's step {step!r}"
+    return _slots_problem(workspace, job, candidate.id, provider, current if job.calls else None)
+
+
+def _slots_problem(
+    workspace: _kernel.KernelWorkspace,
+    job: JobDefinition,
+    candidate: str,
+    provider: WorkflowProvider,
+    current: Callable[[], WorkflowProvider | None] | None,
+) -> str | None:
+    """Rule 8: the job's call slot bindings carry over to the same interfaces, each fitting as installed now."""
+
+    from ._slots import SlotMismatch, fit, interface_key
+
+    slots = provider.slots or {}
+    bindings = job.calls or {}
+    if sorted(slots) != sorted(bindings):
+        return (
+            f"rule 8 (call slots): {candidate} has call slots {sorted(slots) or 'none'}, "
+            f"the job binds {sorted(bindings) or 'none'}"
+        )
+    present = None if current is None else current()
+    for alias in bindings:
+        # What the running step reads back is the interface's outputs, so the interface itself must not change.
+        before = None if present is None else (present.slots or {}).get(alias)
+        if before is None:
+            return f"rule 8 (call slots): cannot be verified: the job's current workflow has no call slot {alias!r}"
+        if interface_key(before.interface) != interface_key(slots[alias].interface):
+            return f"rule 8 (call slots): {candidate} declares another interface for call slot {alias!r}"
+    for alias, binding in bindings.items():
+        bound = str(cast(Mapping[str, object], binding)["workflow"])
+        found = _store.lookup(workspace, bound)
+        if found is None or found.id != bound:
+            return f"rule 8 (call slots): the workflow {bound} bound to call slot {alias!r} is not installed"
+        try:
+            fit(slots[alias].interface, found.provider())
+        except (SlotMismatch, ValueError) as exc:
+            return f"rule 8 (call slots): {bound} bound to call slot {alias!r} does not fit {candidate}: {exc}"
     return None
 
 

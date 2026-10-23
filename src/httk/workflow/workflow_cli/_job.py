@@ -415,6 +415,13 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
         name: _json_value(text, f"job parameter {name!r}")
         for name, text in _pairs(arguments.parameters, "a job parameter")
     }
+    calls = dict(_pairs(arguments.calls, "a call slot binding"))
+    if len(calls) != len(arguments.calls):
+        raise ValueError("--call binds one call slot twice")
+    call_parameters: dict[str, dict[str, object]] = {}
+    for alias, pair in arguments.call_parameters:
+        [(name, text)] = _pairs([pair], "a call slot parameter")
+        call_parameters.setdefault(alias, {})[name] = _json_value(text, f"call slot {alias!r} parameter {name!r}")
     files = _staged_files(arguments, context)
     inputs, items, input_tag = _load_inputs(arguments.inputs, arguments.input_from)
     move_inputs = dict(_pairs(arguments.input_moves, "an input moved from a job"))
@@ -436,6 +443,8 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
             "format": arguments.format,
             "name": arguments.name,
             "install": arguments.install,
+            "calls": calls,
+            "call_parameters": call_parameters,
         }
         results: Iterator[ScaffoldedJob]
         if items:
@@ -1887,7 +1896,25 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
     new.add_argument(
         "--install",
         action="store_true",
-        help="install the workflow (and its calls) into the workspace first when it is not installed",
+        help="install the workflow (and its calls and bound call slot targets) into the workspace first when it "
+        "is not installed",
+    )
+    new.add_argument(
+        "--call",
+        action="append",
+        default=[],
+        dest="calls",
+        metavar="ALIAS=WORKFLOW",
+        help="bind the workflow's call slot ALIAS to WORKFLOW instead of its default (repeatable)",
+    )
+    new.add_argument(
+        "--call-parameter",
+        action="append",
+        nargs=2,
+        default=[],
+        dest="call_parameters",
+        metavar=("ALIAS", "NAME=VALUE"),
+        help="one parameter of the workflow bound to call slot ALIAS, spelled as for --parameter (repeatable)",
     )
     new.add_argument(
         "--parameter",

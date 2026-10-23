@@ -157,14 +157,134 @@ httk_workflow_main
 
 ## Passing results between calls
 
-Wiring outputs into the next call is currently explicit. Read the child back
+For a fixed call, wiring outputs into the next call is explicit. Read the child back
 through {py:attr}`~httk.workflow.Attempt.children` and copy the file you want
 from {py:attr}`~httk.workflow.ChildResult.workdir` (its persistent `run/`)
 or {py:attr}`~httk.workflow.ChildResult.data` (what it committed with
-transactions) into the `files=` of the next `call`. Output roles are not matched to input roles between jobs
-automatically. A workflow's {doc}`/details/declarations` describe what it consumes and
-produces as provenance: they are recorded, not used to plumb one call into the
-next.
+transactions) into the `files=` of the next `call`. A call through a
+[call slot](#call-slots) instead passes values by role: the child records the
+property values the slot's interface names, and
+{py:meth}`~httk.workflow.Attempt.child_outputs` reads them back.
+
+## Call slots
+
+A **call slot** is a call whose target the job's creator chooses, constrained by
+an interface: "a structure in, the forces on that structure out", whichever code
+computes them. A phonon workflow declares one slot and works with DFT or an
+interatomic potential alike.
+
+### Declaring a slot
+
+A table in `[workflow.calls]` is a slot; a string stays a fixed call:
+
+```toml
+[workflow.calls]
+relax = "vasp.relax"                       # a fixed call
+
+[workflow.calls.forces]                    # a call slot
+description = "computes the forces on every site of one structure"
+declaration_file = "calls/structure-forces.json"
+default = "ase.static"                     # optional
+```
+
+`declaration_file` names the slot's **interface declaration**, a package member
+shaped like a workflow declaration (see
+[interface declarations](declarations.md#interface-declarations)):
+
+```json
+{
+  "title": "structure to forces",
+  "inputs": [{"name": "structure", "entry_type": "structures",
+              "ref": "https://schemas.optimade.org/defs/v1.3/entrytypes/optimade/structures"}],
+  "outputs": [{"name": "forces", "entry_type": "records",
+               "ref": "https://schemas.httk.org/defs/v0.1/properties/core/cartesian_site_forces",
+               "product_of": "structure"}]
+}
+```
+
+### What fits a slot
+
+A workflow fits a slot when its declaration (its external declaration file, or
+the one generated from its manifest) matches the interface:
+
+- each interface input matches the workflow's input with an equal `entry_type`
+  and `ref`: the one with the same name when several do, otherwise the only one;
+- each interface output matches an output the same way, which must in addition
+  be a `product_of` the input its interface `product_of` maps to, so forces on a
+  relaxed structure never fit "forces on the input structure";
+- no two interface entries map to one workflow input or output, and every
+  required input of the workflow is supplied by the interface;
+- the workflow has no call slots of its own.
+
+IRIs compare exactly, versions included. A refusal lists every reason at once.
+
+### Binding a slot
+
+Every job binds each slot of its workflow when it is created: to the workflow
+the creator names, or else to the slot's `default` as installed. A slot without
+either refuses the job.
+
+```bash
+httk job new --workflow phonopy.phonons --input structure=POSCAR \
+    --call forces=ase.static --call-parameter forces calculator=ase.calculators.emt:EMT
+```
+
+`--call ALIAS=WORKFLOW` names the workflow (a workflow name or commit-pinned
+git URI, like a `[workflow.calls]` reference (never a path), installed first
+with `--install`); `--call-parameter ALIAS NAME=VALUE` gives it
+a parameter, spelled as for `--parameter`. In Python these are the `calls=` and
+`call_parameters=` arguments of {py:func}`~httk.workflow.scaffold.new_job`. The
+binding is fitted and its parameters type-checked at creation, recorded in the
+job's `job.json`, and the job waits until the bound workflow is installed;
+installing a workflow installs its slot defaults too, and `workflow build`
+builds them.
+
+### Calling through a slot
+
+```python
+for index, supercell in enumerate(supercells):
+    a.call("forces", label=f"d{index}", inputs={"structure": supercell})
+a.gather("analyse")
+```
+
+```python
+def analyse(a):
+    forces = [a.child_outputs(child, call="forces")["forces"] for child in a.children.succeeded]
+```
+
+- `inputs` are named by the interface and every one must be given; they reach
+  the bound workflow's inputs by the fit. A path is loaded and restaged in the
+  bound workflow's format when its destination has a writer, so a Bash runner
+  passing `--input structure=supercell.cif` reaches a POSCAR reader.
+- The binding's parameters are passed; naming one of them again in
+  `parameters=` is refused.
+- A staged structure is read back and compared with the supplied one site by
+  site: chemical symbols, fractional coordinates within 1e-9 (modulo 1) and the
+  lattice within 1e-9 relative. Writers such as POSCAR group sites by species,
+  so order the sites species-contiguously before calling.
+- The child records the interface's outputs when it succeeds: its own collect
+  hook runs on it and each value lands in `.httk-job/outputs.json`. A missing
+  role or a value of another definition fails the child with
+  `workflow.outputs_unavailable`. The hook sees the job as its data will be
+  once the outcome commits: `result_file` and `read_file` find what the
+  succeeding attempt published with `a.put` or a transaction before the
+  committed `data/`. An executable hook reads paths itself, so it sees the
+  committed `data/` and the workdir only.
+- {py:meth}`~httk.workflow.Attempt.child_outputs` reads that file back as plain
+  JSON, per-site values in the order of the structure you passed, with no
+  installation of the called workflow needed.
+
+### Limits
+
+- No nested slots: a workflow with slots cannot be bound to a slot, and one
+  called through a fixed call must give every slot a default.
+- IRIs compare exactly; a definition of another version does not fit.
+- `child_outputs` is Python-only; a Bash step reads `.httk-job/outputs.json`
+  of the child itself.
+- The bound workflow's collect hook runs inside its last attempt, so keep it
+  deterministic and light.
+- Values persisted for a slot call are checked for their definition and
+  finiteness only; full property validation happens at collection.
 
 ## Sharing files with children
 

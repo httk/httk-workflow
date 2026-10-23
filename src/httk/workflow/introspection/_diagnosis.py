@@ -18,7 +18,7 @@ from .._durations import format_duration
 from .._job import JobDefinition
 from .._kernel import OWNED, JobRef, OwnerRecord
 from .._manager_commit import attempt_budget_failure
-from .._manager_scheduling import effective_workflow, unmet_job_requirements
+from .._manager_scheduling import binding_problem, bound_workflows, effective_workflow, unmet_job_requirements
 from .._state import TERMINAL_STATES, StateDoc
 from .._util import timestamp_seconds
 from ..errors import FormatError, RunnerResolutionError, WorkflowError
@@ -564,11 +564,14 @@ def _workflow_checks(workspace: Workspace, job: JobDefinition, doc: StateDoc | N
 
     workflow_id, _name = effective_workflow(job, doc)
     try:
-        closure = _store.closure(workspace, workflow_id, check_builds=True)
+        closure = _store.closure(workspace, workflow_id, check_builds=True, also=bound_workflows(job))
         installed = _store.lookup(workspace, workflow_id)
     except (RunnerResolutionError, ValueError) as exc:
         report.check("installed workflow", False, f"workflow {workflow_id} cannot be checked: {exc}")
         return False
+    binding = None if installed is None else binding_problem(job, installed)
+    if binding is not None:
+        report.check("call slot bindings", False, binding)
     if closure.missing:
         report.check("installed workflow", False, f"not installed in this workspace: {', '.join(closure.missing)}")
         report.hint("install it with 'httk workflow install --workspace WORKSPACE SOURCE'")
@@ -588,7 +591,7 @@ def _workflow_checks(workspace: Workspace, job: JobDefinition, doc: StateDoc | N
             if unmet
             else f"{', '.join(requires)} met in this process's environment; each manager re-checks them in its own",
         )
-    return closure.ok
+    return closure.ok and binding is None
 
 
 def _manager_checks(

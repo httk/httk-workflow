@@ -5,7 +5,7 @@ import logging
 import time
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from httk.core.requirements import parse_requirements, unmet_requirements
 
@@ -17,6 +17,7 @@ from ._state import StateDoc, read_state_unowned
 from .errors import FormatError
 
 if TYPE_CHECKING:
+    from ._store import Installed
     from .manager import TaskManager, WorkCensus
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
@@ -65,6 +66,35 @@ def effective_workflow(job: JobDefinition, doc: StateDoc | None) -> tuple[str, s
     if override is None:
         return job.workflow_id, job.workflow_name
     return str(override["id"]), str(override["name"])
+
+
+def bound_workflows(job: JobDefinition) -> tuple[str, ...]:
+    """Return the installed ids the job's call slot bindings name: dependencies of the job beside its workflow's.
+
+    :param job: The job.
+    :return: The ids, sorted and distinct.
+    """
+
+    bindings = (cast(Mapping[str, object], binding) for binding in (job.calls or {}).values())
+    return tuple(sorted({str(binding["workflow"]) for binding in bindings}))
+
+
+def binding_problem(job: JobDefinition, installed: "Installed") -> str | None:
+    """Return why the job's call slot bindings are not exactly the call slots of its installed workflow, or ``None``.
+
+    A job arriving through the exchange was never bound by job creation, so the whole binding set is checked here.
+
+    :param job: The job.
+    :param installed: The job's effective installed workflow.
+    :return: The problem, or ``None``.
+    """
+
+    recorded = installed.record.get("slots")
+    slots = sorted(recorded) if isinstance(recorded, dict) else []
+    bound = sorted(job.calls or {})
+    if bound == slots:
+        return None
+    return f"the job binds call slots {bound or 'none'}, but workflow {installed.id} has call slots {slots or 'none'}"
 
 
 def effective_requirement(
@@ -201,7 +231,7 @@ def assess(
 
     The checks run in a fixed order, so a job this manager cannot run is
     attributed to exactly one blocker: pool, capability, the installed workflow
-    and its call closure (``calls``), the installed manifest's ``requires``,
+    and its call closure, the job's call slot bindings and theirs (``calls``), the installed manifest's ``requires``,
     resources, and ``mintime`` against the drain point.
 
     :param manager: The manager.
@@ -218,6 +248,13 @@ def assess(
     installed, problem = manager._workflow(workflow_id)
     if installed is None:
         return None, ("calls", problem or f"workflow {workflow_id} is not installed")
+    if (problem := binding_problem(job, installed)) is not None:
+        return None, ("calls", problem)
+    for bound in bound_workflows(job):
+        # Cached per workflow id: the facts about one installation, never the job-specific union.
+        found, problem = manager._workflow(bound)
+        if found is None:
+            return None, ("calls", problem or f"workflow {bound} is not installed")
     requires = installed.record.get("requires")
     unmet = unmet_job_requirements(tuple(str(item) for item in requires) if isinstance(requires, list) else ())
     if unmet:

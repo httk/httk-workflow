@@ -48,7 +48,7 @@ from ._durations import cap_maxtime
 from ._job import JobDefinition
 from ._state import StateDoc, _thaw, read_state_unowned
 from ._util import json_bytes, read_json, require_string, validate_inputs, write_json_atomic
-from .errors import FormatError
+from .errors import FormatError, WorkflowError
 from .models import (
     JOB_STATE_DIRECTORY,
     RESERVED_WORKFLOW_ENVIRONMENT_PREFIX,
@@ -78,7 +78,15 @@ from .runtime_builders import (
     join_mapping,
 )
 
+#: The failure code of a job called through a call slot whose requested outputs cannot be recorded.
+_OUTPUTS_UNAVAILABLE = "workflow.outputs_unavailable"
+#: The ``.httk-job/`` file a job called through a call slot records its requested outputs in, and its format.
+_OUTPUTS_FILE = "outputs.json"
+_OUTPUTS_FORMAT = "httk-workflow-outputs"
+_OUTPUTS_LIMIT = 64 << 20
+
 if TYPE_CHECKING:
+    from ._slots import SlotMapping
     from ._store import Installed
     from .workspace import Workspace
 
@@ -304,7 +312,8 @@ class ChildSpec:
         """Return the job specification of this child under *parent*.
 
         The child runs *workflow* (``(id, name)``), the installation the spawning attempt was launched from
-        (the parent's effective workflow, not necessarily ``job.json``'s). A child never inherits
+        (the parent's effective workflow, not necessarily ``job.json``'s) with the parent's call slot
+        bindings. A child never inherits
         ``mintime``, and every ``maxtime`` it ends with is at most *maxtime_cap*, the spawning attempt's
         effective ``maxtime``.
         """
@@ -345,6 +354,8 @@ class ChildSpec:
             parameters=dict(self.parameters),
             declarations=validate_declarations(self.declarations, "child declarations"),
             seal_succeeded=parent.seal_succeeded,
+            # The child runs the parent's workflow, so it keeps the parent's call slot bindings.
+            calls=None if parent.calls is None else cast(Mapping[str, Mapping[str, object]], _thaw(parent.calls)),
         )
 
 
@@ -548,6 +559,8 @@ class Attempt:
         self._children: ChildrenView | None = None
         self._parent: ParentJob | None | _Missing = _MISSING
         self._environment_snapshot: dict[str, object] | None = None
+        self._own: Installed | None = None
+        self._fits: dict[tuple[str, object], SlotMapping] = {}
 
     def __repr__(self) -> str:
         return f"Attempt(job_id={self.context.job_id!r}, step={self.step!r}, attempt_id={self.context.attempt_id!r})"
@@ -1193,6 +1206,52 @@ class Attempt:
             )
         return installed
 
+    def _own_installation(self) -> "Installed":
+        """Return the installation this attempt was launched from (the job's effective workflow)."""
+
+        from . import _store
+
+        if self._own is None:
+            own = _store.lookup(self._workspace(), self.context.workflow_id)
+            if own is None:
+                raise ValueError(f"this job's workflow {self.context.workflow_id} is not installed in the workspace")
+            self._own = own
+        return self._own
+
+    def _slot_callee(self, alias: str) -> "tuple[Installed, SlotMapping, Mapping[str, object]] | None":
+        """Return the workflow call slot *alias* is bound to, how the slot maps onto it, and its bound parameters.
+
+        ``None`` when *alias* is no call slot of this job's workflow. The binding comes from ``job.json``, which may
+        have arrived through the exchange, so the installed target is fitted to the slot again (once per tree).
+        """
+
+        from . import _store
+        from ._slots import SlotMismatch, fit
+
+        own = self._own_installation()
+        slot = (own.provider().slots or {}).get(alias)
+        if slot is None:
+            return None
+        binding = cast(Mapping[str, object] | None, (self.job.calls or {}).get(alias))
+        if binding is None:
+            raise ValueError(
+                f"job.json binds no workflow to call slot {alias!r} of {own.id}; the job does not match its workflow"
+            )
+        target = str(binding["workflow"])
+        installed = _store.lookup(self._workspace(), target)
+        if installed is None or installed.id != target:
+            raise ValueError(
+                f"the workflow {target} bound to call slot {alias!r} is not installed in the workspace; "
+                f"install it with `httk workflow install {target}`"
+            )
+        key = (alias, installed.record.get("tree_sha256"))
+        if key not in self._fits:
+            try:
+                self._fits[key] = fit(slot.interface, installed.provider())
+            except SlotMismatch as exc:
+                raise ValueError(f"call slot {alias!r} bound to {target}: {exc}") from exc
+        return installed, self._fits[key], cast(Mapping[str, object], _thaw(binding["parameters"]))
+
     def call(
         self,
         workflow: str,
@@ -1223,7 +1282,21 @@ class Attempt:
         The child takes the called workflow's resources, with every ``maxtime``
         capped at this attempt's effective ``maxtime``.
 
-        :param workflow: The declared alias, or installed id, of the workflow to call.
+        When *workflow* is a call slot alias, the child runs the workflow this
+        job's ``calls`` binding names, fitted to the slot's interface again:
+
+        - *inputs* are named by the interface, and every interface input must be
+          given; they reach the bound workflow's inputs through the fit;
+        - a path whose destination has a registered writer is loaded and staged
+          in the bound workflow's format;
+        - a staged structure must hold the supplied structure's sites in the
+          same order and cell (order sites species-contiguously for POSCAR);
+        - the binding's parameters are merged with *parameters*, and a name in
+          both is refused;
+        - the child records the interface's outputs when it succeeds
+          (``persist_outputs``), read back with :meth:`child_outputs`.
+
+        :param workflow: The declared alias, call slot alias, or installed id of the workflow to call.
         :param label: The unique label used to gather and observe the child later.
         :param inputs: Supply the called workflow's declared inputs.
         :param files: Map payload names to files to stage for the child.
@@ -1238,14 +1311,28 @@ class Attempt:
         :param name: Set the child job's display name.
         :return: The reference to the registered child.
         :raises ValueError: If the workflow is undeclared or not installed, or the label, inputs, or job
-            settings are invalid.
+            settings are invalid; for a call slot, also if the job binds no workflow to it, the bound workflow
+            no longer fits, an interface input is unknown or missing, a path cannot be loaded, a parameter is
+            given twice, or a staged structure does not keep the supplied sites.
         """
 
         self._reject_published()
         validate_label(label, "child label")
         target = self._default_child_placement() if placement is None else placement
-        installed = self._callee(workflow)
-        from .scaffold import _build_payload, _prepare
+        slot = self._slot_callee(workflow)
+        persist_outputs: dict[str, str] | None = None
+        if slot is None:
+            installed = self._callee(workflow)
+        else:
+            installed, mapping, bound_parameters = slot
+            inputs = self._slot_inputs(workflow, mapping, installed, inputs)
+            if collisions := sorted(set(bound_parameters) & set(parameters or {})):
+                raise ValueError(
+                    f"call slot {workflow!r} parameter {collisions[0]!r} is already given by the job's binding"
+                )
+            parameters = {**bound_parameters, **(parameters or {})}
+            persist_outputs = dict(mapping.outputs)
+        from .scaffold import _build_payload, _prepare, payload_relative
 
         staging = self.control / f"call.{uuid.uuid4()}"
         staging.mkdir(parents=True, exist_ok=False)
@@ -1262,12 +1349,113 @@ class Attempt:
                 priority=priority,
                 name=name,
                 maxtime_cap=self.context.resources.get("maxtime"),
+                persist_outputs=persist_outputs,
             )
+            if slot is not None:
+                from ._slots import check_staged_sites
+
+                destinations = installed.provider().inputs
+                for key, value in (inputs or {}).items():
+                    destination = destinations.get(key)
+                    if destination is not None and not isinstance(value, (str, os.PathLike)):
+                        staged = staging.joinpath(*payload_relative(destination).parts)
+                        check_staged_sites(value, staged, f"call slot {workflow!r} input for {key!r}")
             reference = self._require_draft().add_child(staging, target, label=label, move=True)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         _LOGGER.debug("called workflow %s as %s (%s)", installed.id, label, reference.job_key)
         return reference
+
+    def child_outputs(self, child: ChildResult, *, call: str) -> Mapping[str, object]:
+        """Return the outputs a child called through call slot *call* recorded for this job.
+
+        A job called through a slot records, when it succeeds, the property value of each output of the slot's
+        interface in ``.httk-job/outputs.json``; this reads them back, with no installation of the called
+        workflow needed. The values are plain JSON (a list of lists of floats for per-site vectors), and a
+        per-site value is in the site order of the structure the call staged, which is the order of the
+        structure passed to :meth:`call`.
+
+        :param child: A succeeded child, from :attr:`children` or :attr:`spawned`.
+        :param call: The call slot the child was called through, an alias of this job's workflow.
+        :return: A read-only mapping from each output name of the slot's interface to its value.
+        :raises ValueError: If *call* is no call slot, the child did not succeed or is not located, or its
+            recorded outputs are missing, malformed, or not the slot interface's outputs and definitions.
+        """
+
+        from .introspection._reading import read_job_file
+
+        slot = (self._own_installation().provider().slots or {}).get(call)
+        if slot is None:
+            raise ValueError(f"{call!r} is no call slot of {self.context.workflow_id}")
+        if not child.succeeded or child.payload is None:
+            raise ValueError(f"child {child.job_key} has not succeeded or is not located; it has no outputs to read")
+        relative = f"{JOB_STATE_DIRECTORY}/{_OUTPUTS_FILE}"
+        try:
+            data = read_job_file(child.payload, relative, _OUTPUTS_LIMIT)
+            document = None if data is None else json.loads(data)
+        except (OSError, ValueError, WorkflowError) as exc:
+            raise ValueError(f"child {child.job_key}: cannot read {relative}: {exc}") from exc
+        if document is None:
+            raise ValueError(f"child {child.job_key} recorded no outputs; was it called through call slot {call!r}?")
+        if (
+            not isinstance(document, dict)
+            or document.get("format") != _OUTPUTS_FORMAT
+            or document.get("format_version") != 1
+            or not isinstance(document.get("outputs"), dict)
+        ):
+            raise ValueError(f"child {child.job_key}: {relative} is not an {_OUTPUTS_FORMAT} version 1 document")
+        recorded = cast(dict[str, object], document["outputs"])
+        interface = {
+            str(entry["name"]): str(entry["ref"])
+            for entry in cast(list[Mapping[str, object]], slot.interface["outputs"])
+        }
+        if set(recorded) != set(interface):
+            raise ValueError(
+                f"child {child.job_key} recorded outputs {sorted(recorded)}, call slot {call!r} has {sorted(interface)}"
+            )
+        values: dict[str, object] = {}
+        for name, ref in interface.items():
+            entry = recorded[name]
+            if not isinstance(entry, dict) or entry.get("definition") != ref or "value" not in entry:
+                raise ValueError(f"child {child.job_key}: output {name!r} is not a recorded {ref} value")
+            values[name] = entry["value"]
+        return MappingProxyType(values)
+
+    def _slot_inputs(
+        self,
+        alias: str,
+        mapping: "SlotMapping",
+        callee: "Installed",
+        inputs: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        """Translate a slot call's inputs to the callee's input keys, loading a path its writer can restage."""
+
+        import httk.core
+
+        supplied = dict(inputs or {})
+        if unknown := sorted(set(supplied) - set(mapping.inputs)):
+            raise ValueError(
+                f"call slot {alias!r} has no input {unknown[0]!r}; its inputs: {', '.join(mapping.inputs)}"
+            )
+        if missing := sorted(set(mapping.inputs) - set(supplied)):
+            raise ValueError(f"call slot {alias!r} needs every input; missing: {', '.join(missing)}")
+        destinations = callee.provider().inputs
+        translated: dict[str, object] = {}
+        for name, value in supplied.items():
+            key = mapping.inputs[name]
+            destination = destinations.get(key)
+            if (
+                isinstance(value, (str, os.PathLike))
+                and destination is not None
+                and httk.core.has_writer_for(PurePosixPath(destination).name)
+            ):
+                # Staged in the callee's own format, whatever format the caller had it in.
+                try:
+                    value = httk.core.load(os.fspath(value))
+                except (OSError, ValueError) as exc:
+                    raise ValueError(f"call slot {alias!r} input {name!r}: {exc}") from exc
+            translated[key] = value
+        return translated
 
     def advance(
         self,
@@ -1381,10 +1569,94 @@ class Attempt:
     def succeed(self) -> Path:
         """Publish the successful completion of this job.
 
+        A job called through a call slot (its ``job.json`` names ``persist_outputs``) first records the outputs
+        its caller reads: its own workflow's collect hook runs on this job, and each requested role's property
+        value is written to ``.httk-job/outputs.json``. When that fails, the job fails instead, with code
+        ``workflow.outputs_unavailable`` naming the role and the cause.
+
         :return: The path of the published outcome.
         """
 
+        self._reject_published()
+        # An attempt bound without a job.json (a fabricated context) has nothing to persist, as for parent.
+        defined = self._job is not None or (self.payload / "job.json").exists()
+        if defined and self.job.persist_outputs is not None:
+            try:
+                self._persist_outputs()
+            except Exception as exc:  # every cause, from a hook's own exception to a wrong definition, fails the job
+                _LOGGER.warning("job %s cannot persist its outputs: %s", self.context.job_key, exc)
+                return self.fail(_OUTPUTS_UNAVAILABLE, f"the outputs requested by the caller are unavailable: {exc}")
         return self._publish("succeed")
+
+    def _persist_outputs(self) -> Path:
+        """Collect this job's requested outputs and write them to ``.httk-job/outputs.json``."""
+
+        from ._slots import property_value
+        from .collecting import JobRecord, _collect_outputs_strict, _job_mapping, children_of, declarations_of
+
+        # Checked before the hook runs: a role that is no records output with a ref cannot be recorded.
+        requested = {name: str(role) for name, role in (self.job.persist_outputs or {}).items()}
+        declared = {
+            str(metadata.get("role", key)): metadata
+            for key, metadata in self._own_installation().provider().outputs.items()
+        }
+        refs: dict[str, str] = {}
+        for role in requested.values():
+            metadata = declared.get(role)
+            ref = None if metadata is None else metadata.get("ref")
+            if metadata is None or metadata.get("entry_type") != "records" or not isinstance(ref, str):
+                raise ValueError(f"output role {role!r} is no records output with a ref of {self.context.workflow_id}")
+            refs[role] = ref
+        doc = self._own_state()
+        if doc.workflow_pin is None:
+            raise ValueError("this job's state.json pins no installed workflow")
+        workspace = self._workspace()
+        root = workspace.root.resolve()
+        payload = PurePosixPath(self.payload.resolve().relative_to(root).as_posix())
+        # The manager applies this attempt's transactions only after the outcome, in sequence order: the record
+        # overlays their data trees, newest first, on the committed data, as the job's data will be.
+        transactions = [path for path in (self.control / "txn").glob("[0-9]*") if path.name.isdigit()]
+        if self._implicit is not None:
+            transactions.append(self._implicit.path)
+        pending = tuple(
+            path / "data"
+            for path in sorted(transactions, key=lambda path: path.name[:6], reverse=True)
+            if (path / "data").is_dir()
+        )
+        record = JobRecord(
+            workspace_root=root,
+            workspace_id=self.context.workspace_id,
+            job_id=self.context.job_id,
+            job_key=self.context.job_key,
+            job=_job_mapping(self.job, doc),
+            runner_provenance=cast(Mapping[str, object], _thaw(doc.workflow_pin)),
+            state="succeeded",
+            failure=None,
+            placement=self.job.placement,
+            payload_path=payload,
+            workdir_path=PurePosixPath(self.workdir.resolve().relative_to(root).as_posix()),
+            data_path=payload / "data" if (self.payload / "data").is_dir() else None,
+            provenance={},
+            runner_steps=None,
+            children=children_of(doc),
+            declarations=declarations_of(self.job, self.payload)[0],
+            _pending_data=pending,
+        )
+        entries = _collect_outputs_strict(workspace, record, sorted(set(requested.values())))
+        outputs: dict[str, object] = {}
+        for name, role in requested.items():
+            ref = refs[role]
+            try:
+                definition, value = property_value(entries[role])
+            except ValueError as exc:
+                raise ValueError(f"output role {role!r}: {exc}") from exc
+            if definition != ref:
+                raise ValueError(f"output role {role!r} holds a {definition} value, not the declared {ref}")
+            outputs[name] = {"role": role, "definition": definition, "value": value}
+        path = self.payload / JOB_STATE_DIRECTORY / _OUTPUTS_FILE
+        document = {"format": _OUTPUTS_FORMAT, "format_version": 1, "outputs": outputs}
+        write_json_atomic(path, document, durable=self.context.durable)
+        return path
 
     def retry(self, reason: str) -> Path:
         """Ask for another attempt of this same activation.

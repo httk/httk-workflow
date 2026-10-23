@@ -75,6 +75,10 @@ def describe_job(workspace: Workspace, ref: JobRef, *, include_children: bool = 
                 "retry_on": sorted(job.retry_policy.retry_on),
             }
         )
+        if job.calls is not None:
+            report["calls"] = _thaw(job.calls)
+        if job.persist_outputs is not None:
+            report["persist_outputs"] = _thaw(job.persist_outputs)
     join = None if doc is None else doc.join
     # A waiting parent's join, or the one a parent that failed at its wait keeps for `continue`.
     if ref.state == "waiting" or join is not None:
@@ -127,6 +131,18 @@ def render_job(report: Mapping[str, Any]) -> str:
         joined = ",".join(str(item) for item in capabilities) if isinstance(capabilities, Sequence) else ""
         lines.append(_pair("claim pool", claim.get("claim_pool")))
         lines.append(_pair("capabilities", joined or "-"))
+    calls = report.get("calls")
+    if isinstance(calls, Mapping):
+        for index, (alias, binding) in enumerate(sorted(calls.items())):
+            parameters = binding.get("parameters") if isinstance(binding, Mapping) else None
+            shown = f" {json.dumps(parameters, sort_keys=True)}" if parameters else ""
+            target = binding.get("workflow") if isinstance(binding, Mapping) else None
+            lines.append(_pair("call slots" if index == 0 else "", f"{alias} -> {target}{shown}"))
+    outputs = report.get("persist_outputs")
+    if isinstance(outputs, Mapping):
+        lines.append(
+            _pair("persisted outputs", ", ".join(f"{name} <- {role}" for name, role in sorted(outputs.items())))
+        )
     lines.append(_pair("step", f"{report.get('step') or '-'} (initial {report.get('initial_step') or '-'})"))
     steps = report.get("runner_steps")
     if isinstance(steps, Sequence) and not isinstance(steps, (str, bytes)):

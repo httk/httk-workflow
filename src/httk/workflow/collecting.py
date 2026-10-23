@@ -40,6 +40,7 @@ record reads only that job's own directory.
 
 from __future__ import annotations
 
+import functools
 import importlib
 import io
 import json
@@ -394,6 +395,10 @@ def _job_mapping(job: JobDefinition, doc: StateDoc | None) -> dict[str, object]:
         result["workflow_override"] = _thaw(doc.workflow_override)
     if job.staged_files:
         result["staged_files"] = [_thaw(entry) for entry in job.staged_files]
+    if job.calls is not None:
+        result["calls"] = _thaw(job.calls)
+    if job.persist_outputs is not None:
+        result["persist_outputs"] = _thaw(job.persist_outputs)
     return result
 
 
@@ -536,6 +541,9 @@ class JobRecord:
     #: Reserved: the machine-readable self-description a runner prints for
     #: ``--describe`` attaches here in a later phase. Always ``None`` today.
     runner_description: Mapping[str, object] | None = None
+    #: The ``data`` trees of transactions a running job has staged but its manager has not applied yet, newest
+    #: first; they overlay the committed data (see :meth:`result_file`). Empty for a stopped job.
+    _pending_data: tuple[Path, ...] = field(default=(), repr=False, compare=False)
 
     @property
     def payload(self) -> Path:
@@ -589,7 +597,9 @@ class JobRecord:
         A job with committed data is read from that data, at ``published``
         (default ``name``) below ``data_prefix``, and never falls back to
         unpublished workdir files; any other job is read from its workdir, at
-        ``name``.
+        ``name``. A running job's record (the one its outputs are persisted
+        from) reads the data its pending transactions stage first, newest first,
+        as if they were committed.
         When the exact file is absent, a compressed copy (``name`` plus a
         registered compression suffix, tried in registry order) is returned.
 
@@ -602,10 +612,14 @@ class JobRecord:
         """
 
         identity = f"{self.workspace_id}:{self.job_id}"
+        target = PurePosixPath(data_prefix, published or name)
+        for pending in self._pending_data:
+            if (found := existing_file(pending / target)) is not None:
+                return found
         data = self.data
-        if data is not None:
-            path = data / PurePosixPath(data_prefix, published or name)
-            found = existing_file(path)
+        if data is not None or self._pending_data:
+            path = (data or self.payload / "data") / target
+            found = None if data is None else existing_file(path)
             if found is None:
                 raise ValueError(f"{identity}: expected published data file {path}")
             return found
@@ -635,6 +649,11 @@ class JobRecord:
 
         identity = f"{self.workspace_id}:{self.job_id}"
         try:
+            if PurePosixPath(relative).parts[:1] == ("data",):
+                # A pending transaction tree mirrors the payload root, so it is read exactly like it.
+                for pending in self._pending_data:
+                    if (staged := read_job_file(pending.parent, relative, limit)) is not None:
+                        return staged
             data = read_job_file(self.payload, relative, limit)
         except (WorkflowError, OSError, ValueError) as exc:
             raise ValueError(f"{identity}: cannot read {relative}: {exc}") from exc
@@ -1339,9 +1358,19 @@ def _entry_record(value: Mapping[str, object], declared: Mapping[str, object]) -
 
 
 def _resolve_executable_output(
-    record: JobRecord, provider: object, role: str, value: object, declared: Mapping[str, object] | None = None
+    record: JobRecord,
+    provider: object,
+    role: str,
+    value: object,
+    declared: Mapping[str, object] | None = None,
+    *,
+    validate: bool = True,
 ) -> object:
-    """Resolve one executable-collector descriptor; *declared* overrides the output role's declaration."""
+    """Resolve one executable-collector descriptor; *declared* overrides the output role's declaration.
+
+    Without *validate*, a ``{"value": ...}`` of a declared ``ref`` is not checked against its definition, so
+    httk-store is not needed.
+    """
 
     if not isinstance(value, Mapping):
         raise ValueError("output must be exactly one of {'entry': {...}}, {'value': ...}, or {'file': '...'}")
@@ -1353,6 +1382,9 @@ def _resolve_executable_output(
     if keys == {"value"}:
         raw = value["value"]
         ref = declared.get("ref")
+        if isinstance(ref, str) and not validate:
+            definition = _core().load_property_definition(ref)
+            return _core().DataRecord.from_value(definition.definition_id, definition.name, raw)
         if isinstance(ref, str):
             try:
                 from httk.store import validation  # pyright: ignore[reportMissingImports]
@@ -1372,9 +1404,9 @@ def _resolve_executable_output(
 
 
 def _run_executable_collector(
-    records: Sequence[JobRecord], provider: object, root: Path
+    records: Sequence[JobRecord], provider: object, root: Path, *, validate: bool = True
 ) -> tuple[dict[int, Collected], dict[int, str], int | None]:
-    """Run one executable collector and resolve its ordered responses.
+    """Run one executable collector and resolve its ordered responses (*validate*: see :func:`_resolve_executable_output`).
 
     The third element is the collector's exit status when it is nonzero after a
     complete set of responses, so that a stored result can surface a collector
@@ -1582,6 +1614,7 @@ def _run_executable_collector(
         return {}, group_failures(breach_reason), None
 
     responses = response_lines
+    resolve = _resolve_executable_output if validate else functools.partial(_resolve_executable_output, validate=False)
     resolved: dict[int, Collected] = {}
     failures: dict[int, str] = {}
     for index, record in enumerate(records):
@@ -1611,12 +1644,9 @@ def _run_executable_collector(
                 raise ValueError("response inputs is not a mapping")
             input_roles = _input_roles(_job_workflow_document(record, provider)) if inputs else {}
             resolved[index] = Collected(
+                {str(role): resolve(record, provider, str(role), output) for role, output in outputs.items()},
                 {
-                    str(role): _resolve_executable_output(record, provider, str(role), output)
-                    for role, output in outputs.items()
-                },
-                {
-                    str(role): _resolve_executable_output(record, provider, str(role), item, input_roles.get(role, {}))
+                    str(role): resolve(record, provider, str(role), item, input_roles.get(role, {}))
                     for role, item in inputs.items()
                 },
             )
@@ -1682,6 +1712,52 @@ def _job_collector(
 
     hook = _tree_hook(installed.package, pinned, provider.collect_file, "collect")
     return cast(Callable[[JobRecord], Mapping[str, object]], hook), provider, None
+
+
+def _collect_outputs_strict(workspace: Workspace, record: JobRecord, roles: Iterable[str]) -> dict[str, object]:
+    """Run one job's own collect hook, from the installed tree it is pinned to, and return the requested roles.
+
+    This is :func:`collect`'s per-job hook run without its degradation: the Python hook is executed from the
+    digest-verified pinned tree, an executable one through the collect stream, and every problem raises.
+
+    :param workspace: The job's workspace.
+    :param record: The job's record; its ``runner_provenance`` pins the installed workflow.
+    :param roles: The output roles that must be returned.
+    :return: The raw entries of *roles*, as the hook returned them.
+    :raises ValueError: If the hook cannot be resolved, raises, answers malformed, exits nonzero, or misses a role.
+    """
+
+    workflow_id = (record.runner_provenance or {}).get("id")
+    if not isinstance(workflow_id, str):
+        raise ValueError("the job records no pinned installed workflow")
+    adapter, provider, reason = _job_collector(workspace, record, workflow_id)
+    if provider is None:
+        raise ValueError(reason or "the job's collect hook is unavailable")
+    if provider.collector_exec is not None:
+        assert provider.directory is not None  # an installed package
+        # The persisted value is checked for its definition and finiteness; full validation is collect's.
+        resolved, failures, exit_status = _run_executable_collector(
+            [record], provider, provider.directory.resolve(), validate=False
+        )
+        if 0 in failures:
+            raise ValueError(failures[0])
+        if exit_status is not None:
+            raise ValueError(f"the executable collect hook exited with status {exit_status}")
+        raw: object = resolved[0]
+    else:
+        # A language realization collects through its format's registered collector.
+        adapter = adapter or _collector(provider.collector)
+        if adapter is None:
+            raise ValueError(reason or "the job's workflow has no collect hook")
+        raw = adapter(record)
+    outputs = raw.outputs if isinstance(raw, Collected) else raw
+    if not isinstance(outputs, Mapping):
+        raise ValueError("the collect hook must return a mapping of output roles or a Collected")
+    entries = cast(Mapping[str, object], outputs)
+    wanted = list(roles)
+    if missing := [role for role in wanted if role not in entries]:
+        raise ValueError(f"the collect hook returned no output role {missing[0]!r}")
+    return {role: entries[role] for role in wanted}
 
 
 def _attach_product_of(

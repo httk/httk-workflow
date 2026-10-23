@@ -53,6 +53,29 @@ def _print_row(row: Mapping[str, object]) -> None:
     print(f"registered: {row['artifacts']}")
 
 
+def _build_slot_defaults(
+    workspace: Workspace, owner: _kernel.Owner, target: str, rows: list[dict[str, object]], json_output: bool
+) -> bool:
+    """Build the workflows only *target*'s call slot defaults bring in; return whether one failed."""
+
+    fixed = _store.resolve_calls(workspace, [target])
+    failed = False
+    for reference, found in _store.resolve_calls(workspace, [target], include_slot_defaults=True).items():
+        if reference in fixed or found is None or found.record.get("build") is not True:
+            continue
+        try:
+            with _stdout_to_stderr(json_output):
+                build = _store.build(workspace, owner, found.id)
+        except _ERRORS as exc:
+            failed = True
+            print(f"{found.id}: {exc}", file=sys.stderr)
+            continue
+        rows.append(_row(found.id, build))
+        if not json_output:
+            _print_row(rows[-1])
+    return failed
+
+
 def handle_build(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Build installed workflows for this platform, or list the registered builds."""
 
@@ -95,10 +118,11 @@ def handle_build(arguments: argparse.Namespace, context: CLIContext) -> int:
             except _ERRORS as exc:
                 failed = True
                 print(f"{target}: {exc}", file=sys.stderr)
-                continue
-            rows.append(_row(target if installed is None else installed.id, build))
-            if not arguments.json:
-                _print_row(rows[-1])
+            else:
+                rows.append(_row(target if installed is None else installed.id, build))
+                if not arguments.json:
+                    _print_row(rows[-1])
+            failed = _build_slot_defaults(workspace, owner, target, rows, arguments.json) or failed
     if arguments.json:
         print(json.dumps(rows, indent=2, sort_keys=True))
     return 1 if failed else 0
@@ -113,7 +137,8 @@ def build_build_parser(subparsers: "argparse._SubParsersAction[argparse.Argument
         summary="build installed workflows for this platform",
         description=(
             "Build installed workflows (by id or short name) that declare [workflow.build], in the foreground, "
-            "and register the artifacts for this platform; a REMOTE:WS workspace builds on the remote"
+            "and register the artifacts for this platform, together with the workflows their call slot defaults "
+            "bring in; a REMOTE:WS workspace builds on the remote"
         ),
         handler=handle_build,
     )

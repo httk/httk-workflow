@@ -1,6 +1,7 @@
 """Protocol models and validation."""
 
 import hashlib
+import json
 import re
 import uuid
 from collections.abc import Mapping, Sequence
@@ -65,6 +66,8 @@ MAXIMUM_PARAMETERS_BYTES = 262144
 # reason: a declaration describes one job, it is not a place for bulk content.
 MAXIMUM_DECLARATIONS_BYTES = 262144
 MAXIMUM_ENVIRONMENT_BYTES = 262144
+# The serialized budget of the optional ``calls`` member: the call slot bindings of one job.
+MAXIMUM_CALL_BINDINGS_BYTES = 262144
 # The serialized budget of the optional ``declared`` object, which mirrors the
 # environment member: it carries the declared parameter and input metadata a
 # workflow announced, so a later precheck can consume it. Same allowance, same
@@ -461,6 +464,68 @@ def validate_calls(value: object, source: str) -> dict[str, str]:
     if shadowed:
         raise FormatError(f"{source} alias {shadowed[0]!r} is also another call's reference")
     return calls
+
+
+def validate_call_bindings(value: object, name: str = "calls") -> dict[str, dict[str, object]]:
+    """Validate the optional ``calls`` member of a job: its call slot bindings.
+
+    Each call slot alias maps to exactly ``{"workflow": <installed id>, "parameters": {...}}``.
+
+    :param value: The bindings mapping to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated bindings.
+    :raises httk.workflow.errors.FormatError: If the mapping is empty, a binding is malformed, or the member
+        holds non-finite numbers or exceeds its size limit.
+    """
+
+    mapping = require_mapping(value, name)
+    if not mapping:
+        raise FormatError(f"{name} must bind at least one call slot when present")
+    result: dict[str, dict[str, object]] = {}
+    for alias, binding in mapping.items():
+        label = validate_label(alias, f"{name} alias")
+        entry = require_mapping(binding, f"{name}.{label}")
+        if set(entry) != {"workflow", "parameters"}:
+            raise FormatError(f"{name}.{label} members differ: {sorted(set(entry) ^ {'workflow', 'parameters'})}")
+        workflow = require_string(entry["workflow"], f"{name}.{label}.workflow")
+        if not workflow or any(character.isspace() for character in workflow):
+            raise FormatError(f"{name}.{label}.workflow must be an installed workflow id without whitespace")
+        result[label] = {
+            "workflow": workflow,
+            "parameters": validate_parameters(entry["parameters"], f"{name}.{label}.parameters"),
+        }
+    try:
+        size = len(
+            json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+        )
+    except ValueError as exc:
+        raise FormatError(f"{name} must contain only finite JSON values: {exc}") from exc
+    if size > MAXIMUM_CALL_BINDINGS_BYTES:
+        raise FormatError(
+            f"{name} serializes to {size} bytes, which exceeds the {MAXIMUM_CALL_BINDINGS_BYTES}-byte limit"
+        )
+    return result
+
+
+def validate_persist_outputs(value: object, name: str = "persist_outputs") -> dict[str, str]:
+    """Validate the optional ``persist_outputs`` member of a job: call slot output names to output roles.
+
+    :param value: The mapping to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated mapping.
+    :raises httk.workflow.errors.FormatError: If the mapping is empty or an entry is malformed.
+    """
+
+    mapping = require_mapping(value, name)
+    if not mapping:
+        raise FormatError(f"{name} must name at least one output when present")
+    result: dict[str, str] = {}
+    for output, role in mapping.items():
+        label = validate_label(output, f"{name} name")
+        if not isinstance(role, str) or not role:
+            raise FormatError(f"{name}.{label} must name an output role")
+        result[label] = role
+    return result
 
 
 _RUNNER_COMMAND_ELEMENT = re.compile(

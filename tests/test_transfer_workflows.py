@@ -59,6 +59,31 @@ def landings(workspace: Workspace) -> list[str]:
     return [path.name for path in (workspace.control / "tmp").iterdir() if path.name.startswith("push.")]
 
 
+def test_a_transfer_ships_the_workflow_a_call_slot_is_bound_to(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    caller = package(tmp_path / "caller", "caller", '\n[workflow.calls.forces]\ndeclaration_file = "forces.json"\n')
+    interface = {
+        "inputs": [{"name": "structure", "entry_type": "structures", "ref": "https://example.test/structure"}],
+        "outputs": [
+            {"name": "forces", "entry_type": "records", "ref": "https://example.test/f", "product_of": "structure"}
+        ],
+    }
+    (caller / "forces.json").write_text(json.dumps(interface), encoding="utf-8")
+    with cli_owner(source) as owner:
+        installed = _store.install(source, owner, caller)
+        bound = _store.install(source, owner, package(tmp_path / "bound", "bound"))
+    mapping = job_mapping(installed, {"start": "succeed"}, tag="solo", placement="proj/solo")
+    mapping["calls"] = {"forces": {"workflow": bound.id, "parameters": {}}}
+    place(source, mapping, "succeeded")
+    assert run(tmp_path, "--json", "--job", str(mapping["id"]), source_name, target_name) == 0
+    (outcome,) = outcomes(capsys)["transfers"]
+    assert shipped(outcome) == {"local:caller": "installed", "local:bound": "installed"}
+    assert _store.lookup(target, "local:bound") is not None
+
+
 def test_local_to_local_ships_the_workflows_and_their_calls(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     source, source_name = registered(tmp_path, "a")
     target, target_name = registered(tmp_path, "b")

@@ -16,7 +16,7 @@ import sys
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from httk.core.git_sources import GitUri, parse_git_uri
 
@@ -162,6 +162,22 @@ def _declaration_document(workflow: ResolvedWorkflow) -> dict[str, object]:
     return {"present": True, "id": document.get("$id"), "origin": origin}
 
 
+def _calls_document(workflow: ResolvedWorkflow) -> dict[str, object]:
+    """Return the fixed calls and the call slots, each slot with a summary of its interface."""
+
+    slots: dict[str, object] = {}
+    for alias, slot in (workflow.slots or {}).items():
+        interface = {key: slot.interface[key] for key in ("$id", "title") if key in slot.interface}
+        for kind, keys in (
+            ("inputs", ("name", "entry_type", "ref")),
+            ("outputs", ("name", "entry_type", "ref", "product_of")),
+        ):
+            entries = cast(list[Mapping[str, object]], slot.interface[kind])
+            interface[kind] = [{key: entry[key] for key in keys} for entry in entries]
+        slots[alias] = {"description": slot.description, "default": slot.default, "interface": interface}
+    return {"fixed": dict(workflow.calls or {}), "slots": slots}
+
+
 def _workflow_description(target: str, format: str | None = None) -> dict[str, object]:
     workflow = resolve_workflow(target, format=format)
     source = workflow.directory if workflow.directory is not None else workflow.source
@@ -217,6 +233,7 @@ def _description(workflow: ResolvedWorkflow, source_document: Mapping[str, objec
             name: {**script, "outputs": script.get("outputs")} for name, script in workflow.postprocess_scripts.items()
         },
         "references": {label: dict(table) for label, table in workflow.references.items()},
+        "calls": _calls_document(workflow),
         "declaration": _declaration_document(workflow),
         "recognize": (
             None
@@ -266,6 +283,28 @@ def _resources_text(resources: Any) -> dict[str, object]:
     """Return one resource mapping with its time labels as Slurm durations."""
 
     return {name: format_duration(value) if name in TIME_RESOURCES else value for name, value in resources.items()}
+
+
+def _calls_text(calls: Any) -> list[str]:
+    """Render the fixed calls and the call slots, one line per call and per slot entry."""
+
+    if not isinstance(calls, Mapping) or not (calls["fixed"] or calls["slots"]):
+        return ["calls: -"]
+    lines = ["calls:"]
+    lines.extend(f"  {alias}: {reference}" for alias, reference in calls["fixed"].items())
+    for alias, slot in calls["slots"].items():
+        interface = slot["interface"]
+        name = interface.get("title") or interface.get("$id")
+        lines.append(
+            f"  {alias}: slot{f' {name!r}' if name else ''}, default={slot['default'] or '-'}"
+            + (f" — {slot['description']}" if slot["description"] else "")
+        )
+        lines.extend(f"    in {entry['name']}: {entry['entry_type']} {entry['ref']}" for entry in interface["inputs"])
+        lines.extend(
+            f"    out {entry['name']}: {entry['entry_type']} {entry['ref']} (product_of {entry['product_of']})"
+            for entry in interface["outputs"]
+        )
+    return lines
 
 
 def _render_text(description: Mapping[str, object]) -> str:
@@ -366,6 +405,7 @@ def _render_text(description: Mapping[str, object]) -> str:
         assert isinstance(value, Mapping)
         details = " — ".join(str(part) for part in (value.get("doi") or value.get("url"), value.get("title")) if part)
         lines.append(f"  {label}: {details}")
+    lines.extend(_calls_text(description.get("calls")))
     declaration = description["declaration"]
     assert isinstance(declaration, Mapping)
     lines.append(f"declaration: {declaration['origin']} ({declaration['id'] or 'no $id'})")
@@ -944,7 +984,9 @@ def build_install_parser(subparsers: argparse._SubParsersAction[argparse.Argumen
     install.add_argument("sources", metavar="SOURCE", nargs="*", help="what to install")
     _add_store_options(install, "the workspace to install into (without it: fetch git URIs on this machine)")
     _add_by_path_argument(install)
-    install.add_argument("--no-calls", action="store_true", help="do not install the declared calls")
+    install.add_argument(
+        "--no-calls", action="store_true", help="do not install the declared calls or call slot defaults"
+    )
     install.add_argument("--no-build", action="store_true", help="do not build a [workflow.build] package")
     install.add_argument("--format", metavar="FORMAT", help="force FORMAT for a bare workflow document or directory")
     install.add_argument("--consume", action="store_true", help=argparse.SUPPRESS)

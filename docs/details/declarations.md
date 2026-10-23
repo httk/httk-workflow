@@ -134,6 +134,24 @@ step_aggregate() {
 }
 ```
 
+## Interface declarations
+
+A [call slot](composing_workflows.md#call-slots) names an *interface
+declaration*: a workflow-declaration-shaped JSON object that states what any
+workflow bound to the slot must consume and produce. Unlike a workflow
+declaration, the engine reads it, so it is validated when the manifest is
+parsed:
+
+- members `$id`, `title`, `description`, `inputs`, `outputs`, nothing else;
+  `$id` and `title` are documentation only;
+- `inputs` and `outputs` are nonempty arrays of `{name, entry_type, ref,
+  description?}` with unique label `name`s and a required definition `ref`;
+- every output is a `records` entry whose `product_of` names one interface
+  input: this version passes property values between jobs, nothing else.
+
+A workflow fits the interface by its own declaration's `entry_type`s and
+`ref`s and its manifest's `product_of` curations, compared exactly.
+
 ## Names and size limits
 
 Declaration names are both keys and file basenames, so they are single safe

@@ -329,7 +329,9 @@ def lookup(workspace: KernelWorkspace, id_or_name: str) -> Installed | None:
     return max(_candidates(list_installed(workspace), id_or_name), key=_installed_order, default=None)
 
 
-def closure(workspace: KernelWorkspace, workflow_id: str, *, check_builds: bool) -> ClosureReport:
+def closure(
+    workspace: KernelWorkspace, workflow_id: str, *, check_builds: bool, also: Iterable[str] = ()
+) -> ClosureReport:
     """Check that a workflow and its transitive calls are installed (and built for this platform).
 
     With *check_builds*, each installed package with a ``[workflow.build]`` is
@@ -339,6 +341,7 @@ def closure(workspace: KernelWorkspace, workflow_id: str, *, check_builds: bool)
     :param workspace: The workspace.
     :param workflow_id: The root workflow id (or name).
     :param check_builds: Also report packages without a build for this platform.
+    :param also: Further roots whose closures are joined in, such as the workflows a job's call slots are bound to.
     :return: The missing and unbuilt ids.
     :raises httk.workflow.errors.RunnerResolutionError: If a package's platform probe fails.
     :raises ValueError: If an installed package's build section is malformed.
@@ -346,7 +349,7 @@ def closure(workspace: KernelWorkspace, workflow_id: str, *, check_builds: bool)
 
     missing: list[str] = []
     unbuilt: list[str] = []
-    for reference, found in resolve_calls(workspace, [workflow_id]).items():
+    for reference, found in resolve_calls(workspace, [workflow_id, *also]).items():
         if found is None:
             missing.append(reference)
             continue
@@ -373,11 +376,14 @@ def built(found: Installed) -> bool | None:
         return False
 
 
-def resolve_calls(workspace: KernelWorkspace, workflow_ids: Iterable[str]) -> dict[str, Installed | None]:
-    """Resolve workflows and the transitive closure of their recorded ``[workflow.calls]``.
+def resolve_calls(
+    workspace: KernelWorkspace, workflow_ids: Iterable[str], *, include_slot_defaults: bool = False
+) -> dict[str, Installed | None]:
+    """Resolve workflows and the transitive closure of their recorded fixed ``[workflow.calls]``.
 
     :param workspace: The workspace.
     :param workflow_ids: The root workflow ids (or names).
+    :param include_slot_defaults: Also follow the recorded default of every call slot.
     :return: Every reference met, to its installation (see :func:`lookup`) or ``None`` when not installed.
     """
 
@@ -391,6 +397,9 @@ def resolve_calls(workspace: KernelWorkspace, workflow_ids: Iterable[str]) -> di
         calls = None if found is None else found.record.get("calls")
         if isinstance(calls, dict):
             pending.extend(str(callee) for callee in calls.values())
+        slots = None if found is None or not include_slot_defaults else found.record.get("slots")
+        if isinstance(slots, dict):
+            pending.extend(str(default) for default in slots.values() if default is not None)
     return resolved
 
 
@@ -676,6 +685,7 @@ def _record(
     reference: str | None,
     tree_sha256: str,
     calls: Mapping[str, str],
+    slots: Mapping[str, str | None],
     provider: WorkflowProvider,
 ) -> dict[str, object]:
     """Return the ``install.json`` content of one installation."""
@@ -690,6 +700,7 @@ def _record(
         "tree_sha256": tree_sha256,
         "installed_at": datetime.now(UTC).isoformat(),
         "calls": dict(calls),
+        "slots": dict(slots),
         "requires": list(provider.requires),
         "runner": _runner(provider),
         "steps": list(provider.steps),
@@ -723,7 +734,8 @@ def install(
     :param workspace: The workspace.
     :param owner: The registered owner whose scratch assembles the installation.
     :param source: The source.
-    :param calls: Install every ``[workflow.calls]`` reference first (recursively) unless already installed.
+    :param calls: Install every ``[workflow.calls]`` reference and call slot default first (recursively)
+        unless already installed.
     :param build: Build for the current platform when the package declares ``[workflow.build]``.
     :param initial_step: The default step of an ad hoc package (runner file sources only); required
         when the runner registers several steps and none of them is ``start``.
@@ -734,7 +746,8 @@ def install(
         selects by it); by default that of a ``git+…@REF`` source, ``None`` for a commit or no ref.
     :return: The installation.
     :raises ValueError: For an unresolvable or invalid source, a symlink or special file in the
-        package, a package registered in-process only, or a call cycle.
+        package, a package registered in-process only, a call cycle, or a fixed-call target with a
+        call slot that has no default.
     """
 
     return _install(
@@ -763,6 +776,7 @@ def _install(
     language: str | None = None,
     siblings: Mapping[str, WorkflowProvider],
     reference: str | None = None,
+    caller: str | None = None,
 ) -> Installed:
     with _scratch(owner) as work:
         sibling = siblings.get(os.fspath(source))
@@ -777,10 +791,14 @@ def _install(
             reference = _git_reference(origin)
         if workflow_id in stack:
             raise ValueError(f"workflow calls form a cycle: {' -> '.join((*stack, workflow_id))}")
+        if caller is not None:
+            _require_defaults(
+                workflow_id, {alias: slot.default for alias, slot in (provider.slots or {}).items()}, caller
+            )
         if stack and (installed := lookup(workspace, workflow_id)) is not None and installed.id == workflow_id:
             return installed  # a callee already installed under its resolved id is kept
-        recorded: dict[str, str] = {}
-        for alias, written in (provider.calls or {}).items():
+
+        def installed_callee(written: str, caller: str | None) -> str:
             # A sibling binds by its pinned id, so another installation of its name never answers.
             bound = written if (callee := siblings.get(written)) is None else callee.workflow_id
             found = lookup(workspace, bound)
@@ -795,15 +813,27 @@ def _install(
                     siblings=siblings,
                     # A sibling comes from the same plugin source, so it was installed from the same reference.
                     reference=None if callee is None else reference,
+                    caller=caller,
                 )
+            elif found is not None and caller is not None:
+                _require_defaults(found.id, found.record.get("slots"), caller)
             # Without calls, an uninstalled reference is recorded as written; closure() reports it missing.
-            recorded[alias] = written if found is None else found.id
+            return written if found is None else found.id
+
+        recorded = {
+            alias: installed_callee(written, f"[workflow.calls].{alias} of {workflow_id}")
+            for alias, written in (provider.calls or {}).items()
+        }
+        defaults = {
+            alias: None if slot.default is None else installed_callee(slot.default, None)
+            for alias, slot in (provider.slots or {}).items()
+        }
         assert provider.directory is not None  # _resolve refuses providers without a package directory
         tree = work / "tree"
         tree.mkdir()
         _copy_package(provider.directory, tree / "package", provider.build)
         tree_sha256 = source_tree_digest(tree / "package")
-        record = _record(workflow_id, name, origin, reference, tree_sha256, recorded, provider)
+        record = _record(workflow_id, name, origin, reference, tree_sha256, recorded, defaults, provider)
         _fs.write_file(_fs.loc(tree / "install.json"), _encode(record), durable=workspace.durable)
         if build and provider.build is not None:
             stamp = {"id": workflow_id, "tree_sha256": tree_sha256}
@@ -822,8 +852,22 @@ def _install(
     return Installed(workflow_id, name, target, record)
 
 
-def _copied_record(entry: Path) -> tuple[str, str | None, dict[str, str], str]:
-    """Read and check the ``install.json`` of a copied store entry: its id, reference, calls and tree digest."""
+def _require_defaults(workflow_id: str, slots: object, caller: str) -> None:
+    """Refuse a fixed-call target with a call slot that has no default: nothing could bind it."""
+
+    missing = sorted(alias for alias, default in slots.items() if default is None) if isinstance(slots, dict) else []
+    if missing:
+        raise ValueError(
+            f"{caller} names {workflow_id}, whose call slot {missing[0]!r} has no default; "
+            "a workflow called through a fixed call must give every call slot a default"
+        )
+
+
+def _copied_record(entry: Path) -> tuple[str, str | None, dict[str, str], dict[str, str | None], str]:
+    """Read and check the ``install.json`` of a copied store entry: its id, reference, calls, slots and tree digest.
+
+    A record written before call slots existed has no ``slots`` member, which means none.
+    """
 
     try:
         data = _fs.read_bounded(_fs.loc(entry / "install.json"), _RECORD_LIMIT)
@@ -841,9 +885,12 @@ def _copied_record(entry: Path) -> tuple[str, str | None, dict[str, str], str]:
         raise ValueError(f"{entry}: reference must be a string or null")
     if not isinstance(calls, dict) or not all(isinstance(value, str) for value in calls.values()):
         raise ValueError(f"{entry}: calls must map aliases to workflow references")
+    slots = record.get("slots", {})
+    if not isinstance(slots, dict) or not all(value is None or isinstance(value, str) for value in slots.values()):
+        raise ValueError(f"{entry}: slots must map aliases to default workflow references or null")
     if not isinstance(digest, str):
         raise ValueError(f"{entry}: tree_sha256 must be a string")
-    return workflow_id, reference, cast(dict[str, str], calls), digest
+    return workflow_id, reference, cast(dict[str, str], calls), cast(dict[str, str | None], slots), digest
 
 
 def _compared(found: Installed, tree_sha256: str) -> tuple[str, Installed]:
@@ -854,10 +901,10 @@ def install_copy(workspace: KernelWorkspace, owner: Owner, entry: Path, *, sourc
     """Install a copy of another workspace's store entry under its recorded id, never replacing an installation.
 
     *entry* is a copied ``workflows/<slug>--<h16>/`` holding ``install.json`` and ``package/``; anything else in
-    it (``builds/``) is ignored. Only the record's ``id``, ``reference`` and ``calls`` are taken; everything else
-    is derived from the copied package, whose tree digest must equal the recorded ``tree_sha256``. The copy is
-    recorded as installed now from *source_label*, so it becomes this workspace's newest installation of its
-    short name. It is not built.
+    it (``builds/``) is ignored. Only the record's ``id``, ``reference``, ``calls`` and ``slots`` are taken;
+    everything else is derived from the copied package, whose tree digest must equal the recorded
+    ``tree_sha256``. The copy is recorded as installed now from *source_label*, so it becomes this workspace's
+    newest installation of its short name. It is not built.
 
     An installation already under the id (also one only a crashed reinstall's moved-aside tree holds) is left
     untouched: ``"present"`` when its tree digest is the copy's, else ``"mismatch"``. The copy is moved into
@@ -869,11 +916,11 @@ def install_copy(workspace: KernelWorkspace, owner: Owner, entry: Path, *, sourc
     :param source_label: The ``source`` to record, such as ``"transfer from WS"``.
     :return: ``"installed"``, ``"present"`` or ``"mismatch"``, and the installation now under the id.
     :raises ValueError: If the copy is refused: an unreadable or invalid record, an id without a known prefix or
-        a git id not pinned to a commit, calls other than the manifest's, a symlink or special file in the
+        a git id not pinned to a commit, calls or call slots other than the manifest's, a symlink or special file in the
         package, or a tree digest other than the recorded one.
     """
 
-    workflow_id, reference, calls, claimed = _copied_record(entry)
+    workflow_id, reference, calls, slots, claimed = _copied_record(entry)
     existing = lookup(workspace, workflow_id)
     if existing is not None:
         return _compared(existing, claimed)
@@ -900,7 +947,9 @@ def install_copy(workspace: KernelWorkspace, owner: Owner, entry: Path, *, sourc
             raise ValueError(f"{entry}: the id {workflow_id} does not name the package's workflow {name!r}")
         if set(calls) != set(provider.calls or {}):
             raise ValueError(f"{entry}: the recorded calls {sorted(calls)} are not the manifest's")
-        record = _record(workflow_id, name, source_label, reference, tree_sha256, calls, provider)
+        if set(slots) != set(provider.slots or {}):
+            raise ValueError(f"{entry}: the recorded call slots {sorted(slots)} are not the manifest's")
+        record = _record(workflow_id, name, source_label, reference, tree_sha256, calls, slots, provider)
         _fs.write_file(_fs.loc(tree / "install.json"), _encode(record), durable=workspace.durable)
         target = _workflows(workspace) / _dirname(workflow_id, name)
         try:

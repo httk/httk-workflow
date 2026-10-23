@@ -266,7 +266,8 @@ selects the newest installation of that name) that declare
 artifacts in the installation's `builds/<platform>/`; a `REMOTE:WS` workspace
 builds on the remote. `install` already builds for the platform it runs on; run
 `build` on each other platform whose managers serve the workspace. `--list`
-prints the registered builds. The exit status is `1` when any target failed.
+prints the registered builds. A target's call slot defaults, and the workflows
+they call, are built with it. The exit status is `1` when any target failed.
 The manager passes the artifacts to the runner through
 `HTTK_WORKFLOW_RUNNER_ARTIFACTS`, and a job whose workflow is not built for the
 manager's platform stays `ready` and unclaimed there.
@@ -277,7 +278,7 @@ manager's platform stays `ready` and unclaimed there.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--parameter`, `--environment`, `--format`, `--input`, `--input-move-from-job`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--step`, `--json` |
+| `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--call`, `--call-parameter`, `--parameter`, `--environment`, `--format`, `--input`, `--input-move-from-job`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--step`, `--json` |
 | `job submit SOURCE...` | submit prepared payload directories | `--workspace`, `--move`, `--json` |
 | `job request ACTION JOB_ID...` | post one operator request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--operator`, required `--reason`, `--state`, `--step`, `--placement`, `--priority`, `--override-step`, `--destination`, `--max-attempts-per-activation`, `--max-total-attempts`, `--max-activations`, `--force`, `--keep-budget`, `--wait`, `--timeout`, `--adapter-timeout`, daemon-only `--request-id` |
 | `job delete JOB...` | delete terminal or paused jobs (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
@@ -345,6 +346,12 @@ Other options:
   workflows-vasp workflows keep their results in the persistent workdir `run/`
   and copy a curated set into `data/` only with `--parameter publish_data=true`.
 - `--environment NAME=VALUE` overrides one declared workflow environment entry.
+- `--call ALIAS=WORKFLOW` binds the workflow's call slot ALIAS to WORKFLOW
+  (a workflow name or commit-pinned git URI, like a `[workflow.calls]`
+  reference (never a path), installed first with `--install`) instead of its
+  default; `--call-parameter ALIAS NAME=VALUE` gives the bound workflow one
+  parameter, spelled as for `--parameter`. Both repeat. See
+  [call slots](composing_workflows.md#call-slots).
 - `--format FORMAT` selects the format of a bare document (see
   [Running workflow documents](#running-workflow-documents)).
 - `--priority` (0 is highest) and `--step` override the workflow's defaults.

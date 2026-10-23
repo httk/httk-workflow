@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 from . import _store, compat
 from ._job import JobDefinition
 from ._kernel import JobRef
-from ._manager_scheduling import effective_workflow, unmet_job_requirements
+from ._manager_scheduling import binding_problem, bound_workflows, effective_workflow, unmet_job_requirements
 from ._state import StateDoc
 from .errors import RunnerResolutionError, WorkflowError
 from .introspection import JOB_STATES, iter_jobs, job_placement, read_job, read_state
@@ -112,22 +112,29 @@ def _strings(value: object) -> tuple[str, ...]:
 
 
 def _workflow_problems(
-    workspace: Workspace, workflow_id: str
+    workspace: Workspace, workflow_id: str, job: JobDefinition | None = None
 ) -> tuple[tuple[str, str] | None, list[str], _store.Installed | None]:
     """Check the job's workflow and its call closure: installed here, and built for this platform.
 
+    With *job*, the workflows its call slots are bound to join the closure, and its bindings must be exactly
+    the call slots of the installed workflow.
+
     :param workspace: The workspace.
     :param workflow_id: The job's effective workflow id.
+    :param job: The job whose call slot bindings to check.
     :return: The root workflow's ``(status, problem)`` or ``None``, one problem per callee, and the installation.
     """
 
     try:
-        closure = _store.closure(workspace, workflow_id, check_builds=True)
+        bound = () if job is None else bound_workflows(job)
+        closure = _store.closure(workspace, workflow_id, check_builds=True, also=bound)
         installed = _store.lookup(workspace, workflow_id)
     except (RunnerResolutionError, ValueError) as exc:
         return ("problem", f"workflow {workflow_id} cannot be checked: {exc}"), [], None
     root: tuple[str, str] | None = None
     calls: list[str] = []
+    if job is not None and installed is not None and (problem := binding_problem(job, installed)) is not None:
+        calls.append(problem)
     for missing in closure.missing:
         problem = f"workflow {missing} is not installed in this workspace; run 'httk workflow install'"
         if missing == workflow_id:
@@ -338,7 +345,7 @@ def _finding(
     environment = environment_findings(job, settings)
     doc, _damage = read_state(ref)
     workflow_id, _name = effective_workflow(job, doc)
-    workflow_problem, call_problems, installed = _workflow_problems(workspace, workflow_id)
+    workflow_problem, call_problems, installed = _workflow_problems(workspace, workflow_id, job)
     runner: dict[str, object] = {"status": "ok", "ok": True}
     if workflow_problem is not None:
         status, problem = workflow_problem

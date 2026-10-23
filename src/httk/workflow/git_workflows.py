@@ -143,7 +143,7 @@ def fetch_workflows(reference: str) -> tuple[WorkflowProvider, ...]:
 
 
 def _ordered(providers: list[WorkflowProvider]) -> tuple[WorkflowProvider, ...]:
-    """Order providers callees first, stably, so installing them in turn installs no callee twice.
+    """Order providers callees (and call slot defaults) first, stably, so installing them in turn installs none twice.
 
     Calls bind by the store's sibling mapping, not by this order; members in a cycle keep the given
     order and the store reports the cycle.
@@ -153,7 +153,8 @@ def _ordered(providers: list[WorkflowProvider]) -> tuple[WorkflowProvider, ...]:
     while remaining:
         for index, provider in enumerate(remaining):
             others = {name for other in remaining if other is not provider for name in (other.name, other.alias)}
-            if not others.intersection((provider.calls or {}).values()):
+            defaults = {slot.default for slot in (provider.slots or {}).values() if slot.default is not None}
+            if not others.intersection({*(provider.calls or {}).values(), *defaults}):
                 done.append(remaining.pop(index))
                 break
         else:  # a cycle: the store's install reports it

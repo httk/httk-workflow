@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from httk.workflow import TaskManager, Workspace, _bundles, _fs, _kernel, _moving, _requests, removal, scaffold
+from httk.workflow import TaskManager, Workspace, _bundles, _fs, _kernel, _moving, _requests, _store, removal, scaffold
 from httk.workflow._bundles import BundleError, BundleManifest
 from httk.workflow._job import JobDefinition
 from httk.workflow._state import Release, StateDoc, read_state_unowned
@@ -499,6 +499,17 @@ def client_bundle(
     jobs = family() if jobs is None else jobs
     manifest = dataclasses.replace(manifest_of(jobs), owner_key=owner_key)
     return write_bundle(path, jobs, manifest)[1]
+
+
+def test_untrusted_adoption_reports_bound_workflows_missing_and_installs_nothing(tmp_path: Path) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    jobs = family()
+    jobs[0]["calls"] = {"forces": {"workflow": "local:bound-elsewhere", "parameters": {}}}
+    client_bundle(tmp_path / "inbox" / "entry", jobs)
+    with cli_owner(ws) as owner:
+        report = _moving.adopt(ws, owner, tmp_path / "inbox" / "entry", untrusted=True, refused_to=tmp_path / "x")
+    assert report is not None and "local:bound-elsewhere" in report.missing_workflows
+    assert _store.list_installed(ws) == []
 
 
 def test_untrusted_adoption_rekeys_and_records_the_exchange_name(tmp_path: Path) -> None:

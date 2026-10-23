@@ -21,6 +21,7 @@ from httk.core.digests import tree_digest
 from httk.core.requirements import Requirement, parse_requirements
 
 from . import compat
+from ._slots import validate_interface
 from ._util import validate_inputs
 from .errors import FormatError
 from .models import (
@@ -30,10 +31,18 @@ from .models import (
     runner_command_reference,
     validate_calls,
     validate_declarations,
+    validate_label,
     validate_runner_command,
 )
 from .postprocessing import _valid_output_pattern
-from .scaffold import RecognizeSpec, WorkflowProvider, _declared_settings, payload_relative, register_workflow
+from .scaffold import (
+    CallSlot,
+    RecognizeSpec,
+    WorkflowProvider,
+    _declared_settings,
+    payload_relative,
+    register_workflow,
+)
 
 MANIFEST_NAME = "httk_workflow.toml"
 _LOGGER = logging.getLogger(__name__)
@@ -271,6 +280,42 @@ def _references(raw: object, root: Path) -> dict[str, dict[str, object]]:
             raise _error(root, f"{path}: {exc}") from exc
         references[label] = dict(table)
     return references
+
+
+def _calls(raw: object, root: Path) -> tuple[dict[str, str], dict[str, CallSlot] | None]:
+    """Validate ``[workflow.calls]``: a string is a fixed call, a table a call slot.
+
+    :param raw: The authored ``[workflow.calls]`` value.
+    :param root: The package directory.
+    :return: The fixed calls, and the call slots or ``None`` without any.
+    :raises ValueError: If a call, a slot or its interface declaration is malformed.
+    """
+
+    table = _table(raw, "[workflow.calls]", root)
+    tables = {alias: value for alias, value in table.items() if isinstance(value, Mapping)}
+    defaults = {alias: value["default"] for alias, value in tables.items() if "default" in value}
+    try:
+        # A default is a reference like a fixed call's, so it takes part in the alias-shadowing rule.
+        fixed = {alias: value for alias, value in table.items() if alias not in tables}
+        checked = validate_calls(fixed | defaults, "[workflow.calls]")
+        for alias in tables:
+            validate_label(alias, "[workflow.calls] alias")
+            if alias not in defaults and alias in checked.values():
+                raise FormatError(f"[workflow.calls] alias {alias!r} is also another call's reference")
+    except FormatError as exc:
+        raise _error(root, str(exc)) from exc
+    slots: dict[str, CallSlot] = {}
+    for alias, value in tables.items():
+        path = f"[workflow.calls.{alias}]"
+        _unknown(value, {"declaration_file", "description", "default"}, path, root)
+        member = _member(root, value.get("declaration_file"), f"{path}.declaration_file")
+        try:
+            interface = validate_interface(json.loads((root / member).read_text(encoding="utf-8")))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise _error(root, f"{path}.declaration_file {member!r}: {exc}") from exc
+        description = _optional_string(value, "description", path, root)
+        slots[alias] = CallSlot(MappingProxyType(interface), member, description, checked.get(alias))
+    return {alias: checked[alias] for alias in fixed}, slots or None
 
 
 def _validate_input_table(
@@ -563,6 +608,19 @@ def _validate_outputs(
     return result
 
 
+def _same_ref(
+    kind: str, role: str, entry: Mapping[str, object], manifest: Mapping[str, object], directory: Path
+) -> None:
+    """Refuse an external declaration ``ref`` that differs from the manifest's for the same role."""
+
+    external, declared = entry.get("ref"), manifest.get("ref")
+    if external is not None and declared is not None and external != declared:
+        raise _error(
+            directory,
+            f"external declaration {kind} {role!r} has ref {external!r}, but the manifest declares {declared!r}",
+        )
+
+
 def _matches_input_roles(document: Mapping[str, object], provider: WorkflowProvider, directory: Path) -> None:
     inputs = document.get("inputs", [])
     if not isinstance(inputs, list):
@@ -585,6 +643,7 @@ def _matches_input_roles(document: Mapping[str, object], provider: WorkflowProvi
             )
         if entry.get("entry_type") != expected[name].get("entry_type"):
             raise _error(directory, f"external declaration input {name!r} has an incompatible entry_type")
+        _same_ref("input", name, entry, expected[name], directory)
     missing = sorted(set(expected) - set(actual))
     extra = sorted(set(actual) - set(expected))
     if missing:
@@ -618,6 +677,7 @@ def _validate_external_declaration(
             raise _error(directory, f"external declaration output {name!r} is not a manifest output role")
         if entry.get("entry_type") != expected.get("entry_type"):
             raise _error(directory, f"external declaration output {name!r} has an incompatible entry_type")
+        _same_ref("output", name, entry, expected, directory)
         if "product_of" in entry:
             raise _error(
                 directory,
@@ -764,11 +824,9 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         raise _error(root, str(exc)) from exc
     declaration_uri = _optional_string(workflow, "declaration_uri", "[workflow]", root)
     calls: dict[str, str] | None = None
+    slots: dict[str, CallSlot] | None = None
     if "calls" in workflow:
-        try:
-            calls = validate_calls(_table(workflow["calls"], "[workflow.calls]", root), "[workflow.calls]")
-        except FormatError as exc:
-            raise _error(root, str(exc)) from exc
+        calls, slots = _calls(workflow["calls"], root)
     short_name: str | None = None
     if _uri is not None:
         # An installed git package is identified by its URI; the manifest name is its short name.
@@ -1079,6 +1137,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         declaration_file=None,
         requires=requires,
         calls=calls,
+        slots=slots,
         recognize=recognize,
         references=_references(workflow.get("references", {}), root),
         _input_metadata=input_metadata,

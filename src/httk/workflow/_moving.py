@@ -72,7 +72,7 @@ from httk.workflow._bundles import (
 )
 from httk.workflow._job import JobDefinition
 from httk.workflow._kernel import OWNED, JobRef, OwnedJob, Owner, OwnerLost
-from httk.workflow._manager_scheduling import effective_workflow
+from httk.workflow._manager_scheduling import bound_workflows, effective_workflow
 from httk.workflow._state import TERMINAL_STATES, StateDoc, encode_state, read_state_unowned
 from httk.workflow._util import json_bytes, utc_now
 from httk.workflow.errors import FormatError, WorkflowError
@@ -1044,13 +1044,16 @@ def _finish(
     names = exchange_names(scratch) if record.untrusted else {}
     published: list[JobRef] = []
     workflows: set[str] = set()
+    bound: set[str] = set()
     for member in reversed(manifest.members):
         directory = manifest.member_dir(bundle, member)
         if not _fs.exists(_fs.loc(directory)):
             continue
         # A trusted bundle keeps state.json, and with it a set_workflow override: the job runs that workflow.
         kept = None if record.untrusted else read_state_unowned(directory / "state.json")[0]
-        workflows.add(effective_workflow(JobDefinition.from_path(directory / "job.json"), kept)[0])
+        job = JobDefinition.from_path(directory / "job.json")
+        workflows.add(effective_workflow(job, kept)[0])
+        bound.update(bound_workflows(job))
         if record.untrusted:
             doc = StateDoc.empty(member.job_id).updated(origin="exchange", exchange_name=names[member.job_id])
             # A fresh client job has no state.json of its own: its children are recorded here, so the tree is the
@@ -1065,8 +1068,12 @@ def _finish(
             _fs.write_file(_fs.loc(directory / "state.json"), encode_state(doc), durable=durable)
         published.append(_kernel.submit(workspace, owner, directory, state=member.state, priority=member.priority))
     owner.discard_scratch(scratch)
-    missing = tuple(sorted(workflow for workflow in workflows if _installed(workspace, workflow) is None))
-    return AdoptReport(tuple(published), False, missing, record.copied)
+    missing = {workflow for workflow in workflows if _installed(workspace, workflow) is None}
+    # Reported only, never installed: an untrusted binding blocks its job until an operator installs.
+    missing.update(
+        reference for reference, found in _store.resolve_calls(workspace, sorted(bound)).items() if not found
+    )
+    return AdoptReport(tuple(published), False, tuple(sorted(missing)), record.copied)
 
 
 def _installed(workspace: "Workspace", workflow_id: str) -> object:
@@ -1275,6 +1282,7 @@ def _needed_workflows(
             _LOGGER.debug("no workflow of the held job %s: %s", member.job_key, exc)
             continue
         roots.add(effective_workflow(job, read_state_unowned(directory / "state.json")[0])[0])
+        roots.update(bound_workflows(job))
     needed: dict[str, tuple[str, str | None, str | None]] = {}
     for reference, found in _store.resolve_calls(workspace, sorted(roots)).items():
         if found is None:

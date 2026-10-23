@@ -103,6 +103,7 @@ __all__ = [
     "JOB_SCAFFOLD_FORMAT",
     "STRUCTURE_PATTERNS",
     "BuildSpec",
+    "CallSlot",
     "InstantiateContext",
     "JobItem",
     "RecognizeSpec",
@@ -160,6 +161,25 @@ class RecognizeSpec:
 
 
 @dataclass(frozen=True)
+class CallSlot:
+    """One ``[workflow.calls.<ALIAS>]`` table: a call whose target the job creator chooses.
+
+    The chosen workflow must fit the slot's interface declaration, a workflow-declaration-shaped
+    document whose inputs and outputs name an entry type and a definition ``ref``.
+
+    :param interface: The validated interface declaration document.
+    :param declaration_file: Name the package member holding the interface declaration.
+    :param description: Describe what the called workflow must do.
+    :param default: Give the workflow reference bound when the job creator chooses none.
+    """
+
+    interface: Mapping[str, object]
+    declaration_file: str
+    description: str | None = None
+    default: str | None = None
+
+
+@dataclass(frozen=True)
 class WorkflowProvider:
     """One packaged workflow a domain or compat engine offers by name.
 
@@ -209,7 +229,8 @@ class WorkflowProvider:
     :param declaration_file: Name the source declaration file.
     :param name: Give the short name of a workflow whose id is a git URI.
     :param requires: Give the ``NAME>=VERSION`` distribution requirements a job of it must meet.
-    :param calls: Declare the workflows a job of it may call, alias to workflow reference.
+    :param calls: Declare the fixed workflows a job of it may call, alias to workflow reference.
+    :param slots: Declare the call slots whose targets a job's creator binds, alias to slot.
     :param recognize: Declare a recognized-calculation collector, a package that is collected but never run.
     :param references: Declare the literature references stored results cite, label to OPTIMADE reference table.
     """
@@ -249,6 +270,7 @@ class WorkflowProvider:
     name: str | None = None
     requires: tuple[str, ...] = ()
     calls: Mapping[str, str] | None = None
+    slots: Mapping[str, CallSlot] | None = None
     recognize: RecognizeSpec | None = None
     references: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
@@ -612,7 +634,8 @@ class ResolvedWorkflow:
     :param declaration_file: Name the source declaration file.
     :param name: Give the short name of a workflow whose id is a git URI.
     :param requires: Give the ``NAME>=VERSION`` distribution requirements a job of it must meet.
-    :param calls: Declare the workflows a job of it may call, alias to workflow reference.
+    :param calls: Declare the fixed workflows a job of it may call, alias to workflow reference.
+    :param slots: Declare the call slots whose targets a job's creator binds, alias to slot.
     :param recognize: Preserve the recognize declaration of a collector-only package.
     :param references: Preserve the declared literature references, label to OPTIMADE reference table.
     """
@@ -654,6 +677,7 @@ class ResolvedWorkflow:
     name: str | None = None
     requires: tuple[str, ...] = ()
     calls: Mapping[str, str] | None = None
+    slots: Mapping[str, CallSlot] | None = None
     recognize: RecognizeSpec | None = None
     references: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
@@ -1095,6 +1119,7 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
         name=provider.name,
         requires=provider.requires,
         calls=provider.calls,
+        slots=provider.slots,
         recognize=provider.recognize,
         references=provider.references,
         _input_metadata=provider._input_metadata,
@@ -1188,6 +1213,7 @@ def resolve_workflow(
                 declaration_file=provider.declaration_file,
                 requires=provider.requires,
                 calls=provider.calls,
+                slots=provider.slots,
                 recognize=provider.recognize,
                 references=provider.references,
                 _input_metadata=provider._input_metadata,
@@ -1386,6 +1412,8 @@ def new_job(
     provenance: Mapping[str, object] | None = None,
     install: bool = False,
     move_inputs: Mapping[str, str | os.PathLike[str]] | None = None,
+    calls: Mapping[str, str] | None = None,
+    call_parameters: Mapping[str, Mapping[str, object]] | None = None,
 ) -> ScaffoldedJob:
     """Scaffold, submit, and describe one job of an installed *workflow*.
 
@@ -1439,10 +1467,16 @@ def new_job(
         digest is the seal's, so the file is never hashed. An unsealed origin's
         file is hashed. If the job is not submitted, every file moves back and its
         release record is withdrawn.
+    :param calls: Bind call slots of the workflow, alias to a workflow reference resolved like *workflow*
+        (installed first with *install*). A slot not named here is bound to its installed default; each
+        bound workflow must fit the slot's interface. Fixed ``[workflow.calls]`` cannot be rebound.
+    :param call_parameters: Give the parameters a slot's bound workflow is called with, alias to parameters,
+        checked against that workflow's declared parameter types.
     :return: The submitted job description.
     :raises ValueError: If the workflow is not installed (and *install* is false), or workflow,
         inputs, placement, or job settings are invalid, or a file to move is not a regular file
-        inside a succeeded job of *workspace* on its filesystem.
+        inside a succeeded job of *workspace* on its filesystem, or a call slot is unbound, bound to a
+        workflow that does not fit it, or given parameters of the wrong type.
     """
 
     [job] = new_jobs(
@@ -1461,6 +1495,8 @@ def new_job(
         name=name,
         provenance=provenance,
         install=install,
+        calls=calls,
+        call_parameters=call_parameters,
     )
     return job
 
@@ -1482,6 +1518,8 @@ def new_jobs(
     name: str | None = None,
     provenance: Mapping[str, object] | None = None,
     install: bool = False,
+    calls: Mapping[str, str] | None = None,
+    call_parameters: Mapping[str, Mapping[str, object]] | None = None,
 ) -> Generator[ScaffoldedJob, None, None]:
     """Scaffold and submit one job per member of *items*, lazily.
 
@@ -1516,10 +1554,12 @@ def new_jobs(
         merging with it. See :func:`new_job` for the merge rule against a
         workflow-declared ``provenance`` and the entity-claim convention.
     :param install: Install *workflow* into the workspace first when it is not installed.
+    :param calls: Bind call slots of the workflow for every job; see :func:`new_job`.
+    :param call_parameters: Give the parameters of the bound workflows; see :func:`new_job`.
     :return: An iterator yielding each submitted job description.
     :yield: Each submitted job description.
     :raises ValueError: If the workflow is not installed (and *install* is false), or workflow,
-        inputs, placement, or job settings are invalid.
+        inputs, placement, job settings or call slot bindings are invalid.
 
     .. code-block:: python
 
@@ -1535,6 +1575,7 @@ def new_jobs(
     try:
         installed = _installed(workspace, workflow, owner=owner, install=install, step=step, language=format)
         prepared = _prepare(installed, step=step)
+        bindings = _bind_slots(workspace, installed, calls, call_parameters, owner=owner, install=install)
         for item in items:
             scratch = owner.scratch(_SUBMIT)
             staging = scratch / "build"
@@ -1556,6 +1597,7 @@ def new_jobs(
                     provenance=item.get("provenance", provenance),
                     move_inputs=item.get("move_inputs"),
                     moves=moves,
+                    calls=bindings,
                 )
                 ref = _submit_staged(workspace, owner, scratch, staging)
             except BaseException:
@@ -1984,6 +2026,8 @@ def scaffold_job(
     step: str | None = None,
     name: str | None = None,
     maxtime_cap: int | None = None,
+    calls: Mapping[str, str] | None = None,
+    call_parameters: Mapping[str, Mapping[str, object]] | None = None,
 ) -> JobDefinition:
     """Build one job payload of an installed *workflow* into *destination*, without submitting it.
 
@@ -2014,9 +2058,11 @@ def scaffold_job(
     :param name: Set the job's display name.
     :param maxtime_cap: Cap every ``maxtime`` of the job at these seconds, setting the job-level one
         when the workflow declares none; :meth:`httk.workflow.Attempt.call` passes its own ``maxtime``.
+    :param calls: Bind call slots of the workflow to installed workflows; see :func:`new_job`.
+    :param call_parameters: Give the parameters of the bound workflows; see :func:`new_job`.
     :return: The written job definition.
     :raises ValueError: If the destination is not an empty directory, the workflow is not installed,
-        or workflow, inputs, or job settings are invalid.
+        or workflow, inputs, job settings or call slot bindings are invalid.
     """
 
     target = Path(destination)
@@ -2024,7 +2070,9 @@ def scaffold_job(
         raise ValueError(f"a scaffold_job destination must be an existing directory: {target}")
     if any(target.iterdir()):
         raise ValueError(f"a scaffold_job destination must be an empty directory: {target}")
-    prepared = _prepare(_installed(workspace, workflow, owner=None, install=False, step=step), step=step)
+    installed = _installed(workspace, workflow, owner=None, install=False, step=step)
+    prepared = _prepare(installed, step=step)
+    bindings = _bind_slots(workspace, installed, calls, call_parameters, owner=None, install=False)
     return _build_payload(
         workspace,
         prepared,
@@ -2037,7 +2085,81 @@ def scaffold_job(
         priority=priority,
         name=name,
         maxtime_cap=maxtime_cap,
+        calls=bindings,
     )
+
+
+def _bind_slots(
+    workspace: Workspace,
+    installed: Installed,
+    calls: Mapping[str, str] | None,
+    call_parameters: Mapping[str, Mapping[str, object]] | None,
+    *,
+    owner: _kernel.Owner | None,
+    install: bool,
+) -> dict[str, dict[str, object]] | None:
+    """Bind every call slot of *installed* for a new job: the ``job.json`` ``calls`` member, or ``None`` without slots.
+
+    A slot is bound to the reference *calls* gives it, else to the default its installation recorded; the bound
+    workflow is looked up (or, with an *owner* and *install*, installed) like the job's own, must fit the slot's
+    interface, and is given *call_parameters* checked against its declared parameter types.
+    """
+
+    from ._slots import SlotMismatch, fit
+    from .models import validate_calls
+
+    provider = installed.provider()
+    slots = provider.slots or {}
+    chosen: dict[str, str] = dict(calls or {})
+    given_parameters: dict[str, Mapping[str, object]] = dict(call_parameters or {})
+    for member, aliases in (("calls", list(chosen)), ("call_parameters", list(given_parameters))):
+        for alias in aliases:
+            if alias in (provider.calls or {}):
+                raise ValueError(
+                    f"{member} names {alias!r}, a fixed call of {installed.id}; fixed calls cannot be rebound"
+                )
+            if alias not in slots:
+                declared = ", ".join(slots) or "none"
+                raise ValueError(
+                    f"{member} names {alias!r}, which is not a call slot of {installed.id} (slots: {declared})"
+                )
+    if not slots:
+        return None
+    recorded = installed.record.get("slots")
+    defaults = recorded if isinstance(recorded, dict) else {}
+    bindings: dict[str, dict[str, object]] = {}
+    for alias, slot in slots.items():
+        reference = chosen.get(alias, defaults.get(alias))
+        if not isinstance(reference, str):
+            raise ValueError(
+                f"call slot {alias!r} of {installed.id} has no default; bind it (httk job new --call {alias}=WORKFLOW)"
+            )
+        try:
+            # A binding names a workflow like a [workflow.calls] reference: never a path, so nothing is installed
+            # from one.
+            validate_calls({alias: reference}, "calls")
+            bound = _installed(workspace, reference, owner=owner, install=install, step=None)
+        except ValueError as exc:
+            raise ValueError(f"call slot {alias!r}: {exc}") from exc
+        try:
+            fit(slot.interface, bound.provider())
+        except SlotMismatch as exc:
+            raise ValueError(f"call slot {alias!r} bound to {bound.id}: {exc}") from exc
+        parameters = dict(given_parameters.get(alias, {}))
+        declared_parameters = bound.provider().parameters
+        if declared_parameters:
+            _check_parameter_types(parameters, declared_parameters)
+            logger = context_logger(_LOGGER, bound.id)
+            for name in sorted(set(parameters) - set(declared_parameters)):
+                logger.warning(
+                    "call slot %r parameter %r is not declared by %s; declared: %s",
+                    alias,
+                    name,
+                    bound.id,
+                    ", ".join(sorted(declared_parameters)),
+                )
+        bindings[alias] = {"workflow": bound.id, "parameters": parameters}
+    return bindings
 
 
 @dataclass
@@ -2375,6 +2497,8 @@ def _build_payload(
     maxtime_cap: int | None = None,
     move_inputs: Mapping[str, str | os.PathLike[str]] | None = None,
     moves: list[_InputMove] | None = None,
+    calls: Mapping[str, Mapping[str, object]] | None = None,
+    persist_outputs: Mapping[str, str] | None = None,
 ) -> JobDefinition:
     """Stage one job payload into *destination* and write its ``job.json``.
 
@@ -2384,10 +2508,14 @@ def _build_payload(
     caller owns. *move_inputs* moves files out of succeeded jobs (only
     :func:`new_jobs` passes it, with *destination* the ``build/`` of a submit
     scratch); each move is appended to *moves* as it happens, so the caller can
-    roll them back when the job is not submitted.
+    roll them back when the job is not submitted. *calls* is the job's call slot bindings
+    (:func:`_bind_slots`); without them, a workflow's slots are bound to their installed defaults.
+    *persist_outputs* is the ``persist_outputs`` member of a job called through a call slot.
     """
 
     workflow = prepared.workflow
+    if calls is None:
+        calls = _bind_slots(workspace, prepared.installed, None, None, owner=None, install=False)
     caller_tag = tag
     user_files = dict(files or {})
     prepared_members: dict[str, str] = {}
@@ -2580,6 +2708,8 @@ def _build_payload(
             known=[move.entry for move in moves or ()],
         ),
         job_id=job_id,
+        calls=calls,
+        persist_outputs=persist_outputs,
     )
     if prepared.finalize is not None:
         spec = prepared.finalize(spec)

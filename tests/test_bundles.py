@@ -913,6 +913,18 @@ def test_rekey(tmp_path: Path) -> None:
     assert sorted(path.name for path in scratch.iterdir()) == ["entry", "rekey.json"]
 
 
+def test_rekey_keeps_call_slot_bindings_and_persisted_outputs(tmp_path: Path) -> None:
+    jobs = family()
+    calls = {"forces": {"workflow": "local:pair", "parameters": {"cutoff": 400}}}
+    jobs[0]["calls"] = calls
+    jobs[1]["persist_outputs"] = {"forces": "forces"}
+    scratch, bundle, manifest = inbox(tmp_path, "s", jobs)
+    rekeyed = rekey_untrusted(scratch, bundle, manifest, workspace_id=ADOPTER)
+    root, child = (JobDefinition.from_path(rekeyed.member_dir(bundle, m) / "job.json") for m in rekeyed.members[:2])
+    assert root.as_mapping()["calls"] == calls and root.persist_outputs is None
+    assert child.as_mapping()["persist_outputs"] == {"forces": "forces"} and child.calls is None
+
+
 @pytest.mark.parametrize("keyed", [True, False], ids=["keyed", "keyless"])
 def test_rekey_forces_the_claim_pool_of_the_owner_key(tmp_path: Path, keyed: bool) -> None:
     key = "ed25519:" + base64.b64encode(b"k" * 32).decode("ascii")

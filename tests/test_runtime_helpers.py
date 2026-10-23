@@ -66,6 +66,24 @@ def test_an_attempt_reads_its_context_and_publishes_one_outcome(tmp_path: Path) 
         attempt.succeed()
 
 
+def test_an_attempt_bound_without_a_job_json_succeeds_with_nothing_to_persist(tmp_path: Path) -> None:
+    control = tmp_path / "control"
+    control.mkdir()
+    context = {**_context(control), "job_id": str(uuid.uuid4())}
+    (tmp_path / "job").mkdir()
+    environment = {
+        "HTTK_WORKFLOW_CONTEXT": json.dumps(context),
+        "HTTK_WORKFLOW_CONTROL_DIR": str(control),
+        "HTTK_WORKFLOW_JOB_DIR": str(tmp_path / "job"),
+        "HTTK_WORKFLOW_WORKDIR": str(tmp_path / "run"),
+        "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
+        "HTTK_WORKFLOW_DATA_DIR": str(tmp_path / "job" / "data"),
+    }
+    published = Attempt.initialize(environment).succeed()
+    assert json.loads((published / "outcome.json").read_text(encoding="utf-8"))["action"] == "succeed"
+    assert not (tmp_path / "job" / ".httk-job" / "outputs.json").exists()
+
+
 @pytest.mark.timing
 def test_run_command_uses_argv_and_times_out_process_group(tmp_path: Path) -> None:
     sentinel = tmp_path / "not-created"

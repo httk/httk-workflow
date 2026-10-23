@@ -174,6 +174,27 @@ The declaration is resolved through the workspace store:
   installed id an alias names, and the callee must be installed. An ad hoc
   workflow (a runner file) declares no calls and so can call nothing.
 
+A table instead of a string declares a **call slot**, whose target each job's
+creator binds (see [call slots](composing_workflows.md#call-slots)):
+
+```toml
+[workflow.calls.forces]
+declaration_file = "calls/structure-forces.json"   # required: the interface declaration
+description = "computes the forces on every site of one structure"
+default = "ase.static"                             # optional, a reference like a fixed call's
+```
+
+Unknown keys are refused, and the interface document is validated when the
+manifest is parsed (see
+[interface declarations](declarations.md#interface-declarations)). A slot's
+`default` follows the alias rules of a fixed call. `install.json` records the
+fixed calls in `calls` and the slots in `slots`, alias to the installed default
+id or `null`. Installing installs each default as it installs a fixed call (not
+with `--no-calls`), and `httk workflow build` also builds the workflows the
+defaults bring in. A default is not a dependency of a job that bound another
+workflow: readiness follows the job's own bindings. A workflow installed as the
+target of a fixed call must give every slot a default.
+
 ### `[workflow.resources]` and `[workflow.steps.NAME]`
 
 `[workflow.resources]` maps validated resource labels to non-negative,
@@ -599,7 +620,8 @@ metadata and is never emitted. The document becomes
 With `declaration_file`, the document is validated and embedded verbatim. Its
 `$id` must equal `declaration_uri` when both are given, its input and output
 role maps must exactly cover the manifest's entry-typed inputs and outputs,
-and it must not contain `product_of`. The declaration is the authoritative
+an entry's `ref` must equal the manifest's where both give one, and it must not
+contain `product_of`. The declaration is the authoritative
 OPTIMADE document; the manifest is the authoritative *httk*-owned glue.
 
 ## Building and registering binaries

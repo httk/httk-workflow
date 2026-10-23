@@ -6,16 +6,21 @@ those, and is not claimed by a manager until each is installed and, when
 compiled, built on the manager's machine.
 """
 
+import json
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from httk.core.cli import CLIContext
 
 from attempt_fixtures import every_job, find, run_manager
+from conftest import register_ws
 from httk.workflow import Workspace, _kernel, _store, scaffold
 from httk.workflow._job import JobDefinition
 from httk.workflow.packages import parse_workflow_manifest
 from httk.workflow.scaffold import new_job
+from httk.workflow.workflow_cli import command
 
 _SRC = str(Path(__file__).parents[1] / "src")
 
@@ -100,7 +105,7 @@ def _install(workspace: Workspace, source: Path, **options: object) -> _store.In
 @pytest.fixture(autouse=True)
 def _fresh() -> Iterator[None]:
     yield
-    for name in ("tests.calls.parent", "tests.calls.child"):
+    for name in ("tests.calls.parent", "tests.calls.child", "tests.calls.middle"):
         scaffold._WORKFLOW_PROVIDERS.pop(name, None)
 
 
@@ -212,3 +217,125 @@ def test_calls_are_installed_and_checked_transitively(tmp_path: Path, workspace:
 def test_declaring_calls_leaves_the_workflow_alias_alone(tmp_path: Path) -> None:
     provider = parse_workflow_manifest(_packages(tmp_path / "packages") / "parent")
     assert provider.alias is None and provider.calls == {"child": "tests.calls.child"}
+
+
+_INTERFACE = {
+    "inputs": [{"name": "structure", "entry_type": "structures", "ref": "https://example.test/structure"}],
+    "outputs": [
+        {"name": "forces", "entry_type": "records", "ref": "https://example.test/forces", "product_of": "structure"}
+    ],
+}
+_BUILD = '\n[workflow.build]\ncommand = "./build.sh"\nartifacts = ["stamp"]\n'
+
+
+def _slotted(root: Path, *, default: bool = True, extra: str = "") -> Path:
+    """Write the packages with a parent whose call slot defaults to the child, which is known by name."""
+
+    slot = '[workflow.calls.forces]\ndeclaration_file = "forces.json"\n'
+    _packages(root, calls=slot + ('default = "tests.calls.child"\n' if default else "") + extra)
+    (root / "parent" / "forces.json").write_text(json.dumps(_INTERFACE), encoding="utf-8")
+    shutil.copy2(root / "child" / "build.sh", root / "parent" / "build.sh")
+    scaffold.register_workflow(parse_workflow_manifest(root / "child"))
+    return root
+
+
+def test_a_slot_default_is_installed_and_recorded_apart_from_fixed_calls(tmp_path: Path, workspace: Workspace) -> None:
+    root = _slotted(tmp_path / "packages")
+    parent = _install(workspace, root / "parent", build=False)
+    child = _store.lookup(workspace, "tests.calls.child")
+    assert child is not None and parent.record["calls"] == {} and parent.record["slots"] == {"forces": child.id}
+    # A job may rebind the slot, so the default is no dependency: the unbuilt child does not block the parent.
+    assert set(_store.resolve_calls(workspace, [parent.id])) == {parent.id}
+    assert set(_store.resolve_calls(workspace, [parent.id], include_slot_defaults=True)) == {parent.id, child.id}
+    assert _store.closure(workspace, parent.id, check_builds=True).ok
+
+    other = Workspace.initialize(tmp_path / "other", durable=False)
+    skipped = _install(other, root / "parent", calls=False)
+    assert skipped.record["slots"] == {"forces": "tests.calls.child"}
+    assert [installed.id for installed in _store.list_installed(other)] == [skipped.id]
+
+
+def test_a_slot_without_a_default_is_recorded_as_null(tmp_path: Path, workspace: Workspace) -> None:
+    root = _slotted(tmp_path / "packages", default=False)
+    parent = _install(workspace, root / "parent")
+    assert parent.record["slots"] == {"forces": None}
+    assert set(_store.resolve_calls(workspace, [parent.id], include_slot_defaults=True)) == {parent.id}
+    assert _store.closure(workspace, parent.id, check_builds=True).ok
+    assert [installed.id for installed in _store.list_installed(workspace)] == [parent.id]
+
+
+def test_workflow_build_also_builds_slot_defaults(tmp_path: Path, workspace: Workspace) -> None:
+    root = _slotted(tmp_path / "packages", extra=_BUILD)
+    parent = _install(workspace, root / "parent", build=False)
+    child = _store.lookup(workspace, "tests.calls.child")
+    assert child is not None and _store.built(child) is False
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "w")
+    assert command(["build", "--workspace", name, parent.id], context) == 0
+    assert _store.built(child) is True and _store.built(parent) is True
+
+
+def test_a_fixed_call_target_must_give_every_slot_a_default(tmp_path: Path, workspace: Workspace) -> None:
+    root = _packages(tmp_path / "packages", calls='middle = "tests.calls.middle"')
+    _write_package(
+        root / "middle",
+        '[workflow]\nname = "tests.calls.middle"\n\n[workflow.runner]\nentry = "run.py"\nsteps = ["work"]\n\n'
+        '[workflow.calls.forces]\ndeclaration_file = "forces.json"\n',
+        _CHILD.replace("tests.calls.child", "tests.calls.middle"),
+    )
+    (root / "middle" / "forces.json").write_text(json.dumps(_INTERFACE), encoding="utf-8")
+    scaffold.register_workflow(parse_workflow_manifest(root / "middle"))
+    message = (
+        r"\[workflow\.calls\]\.middle of local:tests\.calls\.parent names local:tests\.calls\.middle, "
+        r"whose call slot 'forces' has no default"
+    )
+    with pytest.raises(ValueError, match=message):
+        _install(workspace, root / "parent")
+    assert _store.list_installed(workspace) == []
+    # Installed on its own first (a root workflow may leave a slot without a default), it is refused all the same.
+    _install(workspace, root / "middle")
+    with pytest.raises(ValueError, match=message):
+        _install(workspace, root / "parent")
+
+
+def test_a_copied_slot_workflow_installs_and_an_old_record_without_slots_still_reads(
+    tmp_path: Path, workspace: Workspace
+) -> None:
+    root = _slotted(tmp_path / "packages")
+    parent = _install(workspace, root / "parent", build=False)
+    child = _store.lookup(workspace, "tests.calls.child")
+    assert child is not None
+    landing = tmp_path / "landing"
+    for installed in (parent, child):
+        shutil.copytree(installed.directory, landing / installed.directory.name)
+    # The child was installed before call slots existed: its record has no slots member.
+    record_path = landing / child.directory.name / "install.json"
+    old = json.loads(record_path.read_text(encoding="utf-8"))
+    del old["slots"]
+    record_path.write_text(json.dumps(old), encoding="utf-8")
+
+    target = Workspace.initialize(tmp_path / "target", durable=False)
+    owner = _kernel.register_owner(target, kind="cli", label="test", allocation=None, advertised={})
+    try:
+        status, copy = _store.install_copy(target, owner, landing / parent.directory.name, source_label="t")
+        assert status == "installed" and copy.record["slots"] == {"forces": child.id}
+        status, copy = _store.install_copy(target, owner, landing / child.directory.name, source_label="t")
+        assert status == "installed" and copy.record["slots"] == {}
+
+        mismatched = json.loads((landing / parent.directory.name / "install.json").read_text(encoding="utf-8"))
+        mismatched["slots"] = {}
+        (landing / parent.directory.name / "install.json").write_text(json.dumps(mismatched), encoding="utf-8")
+        other = Workspace.initialize(tmp_path / "third", durable=False)
+        other_owner = _kernel.register_owner(other, kind="cli", label="test", allocation=None, advertised={})
+        try:
+            with pytest.raises(ValueError, match=r"the recorded call slots \[\] are not the manifest's"):
+                _store.install_copy(other, other_owner, landing / parent.directory.name, source_label="t")
+        finally:
+            other_owner.close()
+    finally:
+        owner.close()
+    # A store record without the member reads as one without slots.
+    stripped = _store.lookup(workspace, child.id)
+    assert stripped is not None
+    (stripped.directory / "install.json").write_text(json.dumps(old), encoding="utf-8")
+    assert set(_store.resolve_calls(workspace, [parent.id], include_slot_defaults=True)) == {parent.id, child.id}
