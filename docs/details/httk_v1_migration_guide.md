@@ -518,6 +518,7 @@ The native Bash operations include:
 httk_vasp_prepare --options vasp-options.json
 httk_vasp_get_tag EDIFF INCAR
 httk_vasp_set_tag ISYM 0 INCAR
+httk_vasp_unset_tag NBANDS INCAR
 httk_vasp_prepare_kpoints 40 --centering Gamma
 httk_vasp_prepare_potcar /data/vasp/potpaw_PBE
 httk_vasp_nbands --divisor 4
@@ -528,6 +529,13 @@ httk_vasp_volume vasprun.xml
 httk_vasp_promote_contcar
 httk_vasp_clean_outcar
 ```
+
+`httk_vasp_set_tag` and `httk_vasp_unset_tag` are v1's per-tag INCAR edits;
+unsetting removes every assignment of the tag so VASP uses its own default, and
+an absent tag is no error. A job can do the same without a copied runner through
+its `incar_tags` parameter, where a `null` value unsets; the "Changing INCAR
+tags" section of the [workflows-vasp README](https://github.com/httk/workflows-vasp#changing-incar-tags)
+lists every route.
 
 Behavioral differences from v1:
 

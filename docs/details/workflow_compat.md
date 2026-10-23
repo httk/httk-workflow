@@ -382,7 +382,7 @@ attempt cannot see (its `HOME` is private):
 
 The three VASP commands resolve like `a.setting` (job parameter, then
 `HTTK_VASP_COMMAND` and so on, then the workspace setting). Job parameters with
-these names or `vasp.parallelization`, or starting with `atomate2.` or
+these names, `vasp.parallelization` or `vasp.nbands_rounding`, or starting with `atomate2.` or
 `pymatgen.`, are forwarded from the parent to every child job, so a job-level
 value reaches each step that runs VASP. As for the VASP code package,
 `vasp.command` names only the program, such as `vasp_std`. A command that
@@ -418,9 +418,11 @@ attempt's rank count into the INCAR, unless the INCAR sets `KPAR`, `NCORE` or
 `NPAR` already (so custodian's fixes stick; with atomate2's `VASP_INHERIT_INCAR`
 enabled, which is not the default, later steps inherit the planned tags even
 on a different rank count, so leave it off or set the tags explicitly) or
-`vasp.parallelization` is `off`;
+`vasp.parallelization` is `off`, and then rounds `NBANDS` to the resulting
+band-group count, writing VASP's default rounded when the INCAR has none,
+unless `vasp.nbands_rounding` is `off`;
 then it applies the attempt's launch prefix (`HTTK_WORKFLOW_LAUNCH`) itself and
-execs. Each decision is a `httk.codes.vasp.launch: parallel:` line in the
+execs. Each decision is a `httk.codes.vasp.launch: parallel:` or `nbands:` line in the
 job's `std_err.txt` and `httk-vasp-launch.log`; *httk-workflow-vasp*'s
 documentation states the planning rules. Whichever command custodian's
 automatic Gamma-only switch picks, it runs the same wrapper, which decides

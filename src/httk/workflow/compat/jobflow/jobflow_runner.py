@@ -48,9 +48,11 @@ _VASP_COMMANDS = (
 _DISPATCHER = "httk.codes.vasp.launch"
 #: Workspace setting prefixes passed through to the variables a library reads.
 _LIBRARY_PREFIXES = {"atomate2.": "ATOMATE2_", "pymatgen.": "PMG_"}
-#: Job parameters a parent forwards to every child, so the job layer of these settings reaches ``enter``.
+#: Job parameters a parent forwards to every child, so the job layer of these settings reaches ``enter`` and
+#: the VASP launch wrapper, which reads ``vasp.parallelization`` and ``vasp.nbands_rounding`` from its own job.
 _FORWARDED_PARAMETERS = frozenset(name for name, _variable in _VASP_COMMANDS) | {
     "pymatgen.psp_dir",
+    "vasp.nbands_rounding",
     "vasp.parallelization",
 }
 # ponytail: fixed, below the manager's default 10 s cancel grace so the SIGKILL escalation of
