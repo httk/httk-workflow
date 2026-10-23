@@ -437,7 +437,7 @@ def test_remote_prelude_runs_before_the_command(tmp_path: Path, remote: Remote) 
     # uses for module loads and a venv activation).
     project = tmp_path / "project"
     initialize_project(project, name="prelude")
-    bundle = fake_remote(project, prelude="export HTTK_PRELUDE_MARKER=ran")
+    bundle = fake_remote(project, cli_prelude="export HTTK_PRELUDE_MARKER=ran")
 
     invoked = run_adapter(
         bundle,
@@ -454,7 +454,7 @@ def test_remote_prelude_failure_aborts_before_the_command(tmp_path: Path, remote
     # half-configured shell (``set -e``), rather than running it regardless.
     project = tmp_path / "project"
     initialize_project(project, name="prelude-fail")
-    bundle = fake_remote(project, prelude="false")
+    bundle = fake_remote(project, cli_prelude="false")
     sentinel = remote.root / "prelude-should-not-reach-this"
 
     invoked = run_adapter(
@@ -465,6 +465,50 @@ def test_remote_prelude_failure_aborts_before_the_command(tmp_path: Path, remote
 
     assert invoked["returncode"] != 0
     assert not sentinel.exists()
+
+
+_RENAMED = "renamed to 'cli_prelude'.*--unset prelude --set cli_prelude="
+
+
+def test_an_old_prelude_key_is_refused_where_it_would_run(tmp_path: Path, remote: Remote) -> None:
+    # No compatibility read: a released remote.json still carrying ``prelude``
+    # fails at use with the rename and the fix, instead of silently skipping it.
+    project = tmp_path / "project"
+    initialize_project(project, name="old-prelude")
+    bundle = fake_remote(project, prelude="export HTTK_PRELUDE_MARKER=ran")
+
+    for operation in ("invoke", "status"):
+        with pytest.raises(RuntimeError, match=_RENAMED):
+            run_adapter(bundle, operation, {"argv": ["true"]})
+    assert remote.commands() == []
+
+
+def test_remote_configure_refuses_and_fixes_the_old_prelude_key(
+    tmp_path: Path, remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="old-prelude-cli")
+    bundle = fake_remote(project, prelude="module load old")
+    context = CLIContext("httk", project)
+    stored = (bundle / "remote.json").read_text(encoding="utf-8")
+
+    # Reading an unfixed bundle keeps working, so the fix can be found.
+    assert command(["remote", "list"], context) == 0
+    assert command(["remote", "show", "cluster"], context) == 0
+    assert "prelude=module load old" in capsys.readouterr().out
+
+    # --set prelude= is refused before anything is written (it would otherwise be a credential).
+    assert command(["remote", "configure", "--set", "prelude=x", "cluster"], context) == 1
+    assert "--unset prelude --set cli_prelude=" in capsys.readouterr().err
+    assert (bundle / "remote.json").read_text(encoding="utf-8") == stored
+    assert not (bundle / "credentials.json").exists()
+
+    fix = ["remote", "configure", "--unset", "prelude", "--set", "cli_prelude=export HTTK_SITE=new", "cluster"]
+    assert command(fix, context) == 0
+    capsys.readouterr()
+    assert command(["remote", "show", "--json", "cluster"], context) == 0
+    settings = json.loads(capsys.readouterr().out)[0]["settings"]
+    assert settings["cli_prelude"] == "export HTTK_SITE=new" and "prelude" not in settings
 
 
 def test_remote_invoke_reports_a_failing_remote_command(tmp_path: Path, remote: Remote) -> None:

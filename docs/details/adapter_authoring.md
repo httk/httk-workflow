@@ -442,7 +442,7 @@ The maintained `ssh` adapter moves each push or pull as one uncompressed `tar`
 stream over a single ssh connection: `mkdir -p DEST && tar -xpf - -C DEST` on
 the remote for a push, `tar -cf - -C SRC -- PATH...` for a pull. Both command
 lines, including every name of an explicit `files` batch, are built by
-`_shell_command`. The adapter's `prelude` is not run before them, because
+`_shell_command`. The remote's `cli_prelude` is not run before them, because
 anything it printed would corrupt the stream. The local side packs and unpacks
 with Python's `tarfile`, extracting with its `tar` filter, so no member can land
 outside the destination.

@@ -66,8 +66,14 @@ _MISSING_HTTK = (
     "httk-workflow is not available on the target; log in there and make sure "
     "httk is installed and reachable from a non-interactive shell (for example "
     "with 'pipx install httk-workflow'), or configure the remote with "
-    "httk_command=COMMAND, or set a prelude=... that loads the environment "
+    "httk_command=COMMAND, or set a cli_prelude=... that loads the environment "
     "(e.g. 'module load ...; source ~/venv/bin/activate') before each command"
+)
+# Refuses the old key where it would run; adapters.split_settings refuses it on --set.
+_PRELUDE_RENAMED = (
+    "the remote setting 'prelude' was renamed to 'cli_prelude' (it runs before each httk "
+    "command on the remote, not at job start); fix it with: "
+    "httk remote configure NAME --unset prelude --set cli_prelude=..."
 )
 
 
@@ -395,12 +401,19 @@ def _remote_prelude(settings: Mapping[str, object]) -> str:
     ``ssh`` runs its command in a *non-interactive* shell on the far side, so the
     environment a site keeps in interactive rc files (``module load`` lines, a
     virtualenv activation) is not applied and ``httk`` is often not even on
-    ``PATH``. The optional ``prelude`` remote setting carries exactly that setup
-    for httk's ssh commands only, so it need not go in ``~/.bashrc`` where it
-    would also affect every other tool that logs in over ssh.
+    ``PATH``. The optional ``cli_prelude`` remote setting carries exactly that
+    setup for httk's ssh and mount commands only, so it need not go in
+    ``~/.bashrc`` where it would also affect every other tool that logs in over
+    ssh. It is not run at job start; that is ``environment.prelude``.
+
+    :param settings: The persisted remote settings and their credentials.
+    :return: The stripped prelude text, or ``""`` when none is set.
+    :raises ValueError: If the settings still carry the renamed ``prelude`` key.
     """
 
-    prelude = _text(settings, "prelude")
+    if "prelude" in settings:
+        raise ValueError(_PRELUDE_RENAMED)
+    prelude = _text(settings, "cli_prelude")
     return prelude.strip() if prelude else ""
 
 
@@ -410,7 +423,7 @@ def _remote_command(settings: Mapping[str, object], argv: Sequence[str], *, cwd:
     Both the ``ssh`` transport and the ``mount`` executor concatenate their words
     and hand the result to a shell on the far side, so ``ssh`` and ``mount`` share
     this one composition: the argument vector quoted element-wise by
-    :func:`_shell_command`, prefixed by the optional ``prelude`` run under
+    :func:`_shell_command`, prefixed by the optional ``cli_prelude`` run under
     ``set -e`` (a failing setup line -- a bad module, a missing venv -- then
     aborts before the command instead of running it in a half-configured shell).
 
@@ -575,8 +588,8 @@ def _runner(kind: str, settings: Mapping[str, object]) -> _Runner:
 def _ssh_tar_argv(settings: Mapping[str, object], command: str) -> list[str]:
     """Return the ssh call that runs one ``tar`` command line on the remote.
 
-    The ``prelude`` is deliberately left out: ``tar`` is a system binary, and a
-    prelude that prints would corrupt the archive on the connection's stdout.
+    The ``cli_prelude`` is deliberately left out: ``tar`` is a system binary, and
+    a prelude that prints would corrupt the archive on the connection's stdout.
 
     :param settings: The persisted remote settings and their credentials.
     :param command: The remote command line, built by :func:`_shell_command`.

@@ -343,8 +343,10 @@ def build_remote_parser(
             metavar="KEY=VALUE",
             help=(
                 "one adapter setting, e.g. host=, username=, port=, httk_command=, or "
-                "prelude= (shell run before each remote command, e.g. module loads and a "
-                "venv activation), or interactive_auth= (yes|per-call lets ssh prompt in the "
+                "cli_prelude= (shell run before each httk command the CLI runs on the remote "
+                "over ssh/mount, e.g. module loads and a venv activation; not at job start "
+                "-- see environment.prelude; the tar push/pull stream is exempt), or "
+                "interactive_auth= (yes|per-call lets ssh prompt in the "
                 "terminal for a password or second factor); a secret one is stored in "
                 "credentials.json (repeatable)"
             ),

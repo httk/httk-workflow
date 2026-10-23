@@ -394,7 +394,7 @@ def test_invoke_honours_the_requested_directory(tmp_path: Path, mount: Mount) ->
 def test_invoke_runs_the_prelude_before_the_command(tmp_path: Path, mount: Mount) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="mount-prelude")
-    bundle = _mount_remote(project, mount, prelude="export HTTK_PRELUDE_MARKER=ran")
+    bundle = _mount_remote(project, mount, cli_prelude="export HTTK_PRELUDE_MARKER=ran")
 
     invoked = run_adapter(
         bundle,
@@ -409,13 +409,22 @@ def test_invoke_runs_the_prelude_before_the_command(tmp_path: Path, mount: Mount
 def test_invoke_prelude_failure_aborts_before_the_command(tmp_path: Path, mount: Mount) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="mount-prelude-fail")
-    bundle = _mount_remote(project, mount, prelude="false")
+    bundle = _mount_remote(project, mount, cli_prelude="false")
     sentinel = mount.remote_root / "prelude-should-not-reach-this"
 
     invoked = run_adapter(bundle, "invoke", {"argv": ["touch", str(sentinel)]})
 
     assert invoked["returncode"] != 0
     assert not sentinel.exists()
+
+
+def test_invoke_refuses_the_old_prelude_key(tmp_path: Path, mount: Mount) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="mount-old-prelude")
+    bundle = _mount_remote(project, mount, prelude="true")
+
+    with pytest.raises(RuntimeError, match="renamed to 'cli_prelude'.*--unset prelude --set cli_prelude="):
+        run_adapter(bundle, "invoke", {"argv": ["true"]})
 
 
 # 6. status -------------------------------------------------------------------

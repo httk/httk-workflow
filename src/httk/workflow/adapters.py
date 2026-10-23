@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ._util import write_json_atomic
+from .adapter_runtime import _PRELUDE_RENAMED
 from .configuration import remotes_home
 from .errors import ResolutionMiss
 from .models import CORE_PROFILE
@@ -110,6 +111,7 @@ PERSISTABLE_REMOTE_SETTINGS = frozenset(
     {
         "check_connectivity",
         "check_mount",
+        "cli_prelude",
         "daemon_enrollment_id",
         "daemon_public_key",
         "daemon_workspace_id",
@@ -121,7 +123,6 @@ PERSISTABLE_REMOTE_SETTINGS = frozenset(
         "legacy_settings",
         "mount_root",
         "port",
-        "prelude",
         "remote_root",
         "username",
         "vasp_command",
@@ -143,6 +144,9 @@ _RETIRED_REMOTE_SETTINGS = frozenset(
         "workspace_root",
     }
 )
+
+#: Renamed remote settings and the refusal naming the fix; never read under the old key.
+_RENAMED_REMOTE_SETTINGS = {"prelude": _PRELUDE_RENAMED}
 
 REMOTE_WORKSPACE_INIT_COMMAND = ("httk", "workspace", "init")
 REMOTE_WORKSPACE_DELETE_COMMAND = ("httk", "workspace", "delete")
@@ -453,9 +457,12 @@ def split_settings(settings: Mapping[str, str]) -> tuple[dict[str, str], dict[st
 
     :param settings: The settings supplied by the caller.
     :return: Persistable settings followed by manifest-excluded credentials.
-    :raises ValueError: If a setting name is retired or unsupported.
+    :raises ValueError: If a setting name is retired, renamed or unsupported.
     """
 
+    renamed = sorted(set(settings) & _RENAMED_REMOTE_SETTINGS.keys())
+    if renamed:
+        raise ValueError(_RENAMED_REMOTE_SETTINGS[renamed[0]])
     retired = sorted(set(settings) & _RETIRED_REMOTE_SETTINGS)
     if retired:
         names = ", ".join(retired)

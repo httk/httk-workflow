@@ -49,12 +49,12 @@ directories take default permissions, so a setgid bit is not carried over.
 
 `ssh` runs its command in a non-interactive shell. The environment your login
 files set up interactively (`module load` lines, a virtualenv) is not applied,
-and `httk` is often not on `PATH`. Put that setup in the remote's `prelude`
+and `httk` is often not on `PATH`. Put that setup in the remote's `cli_prelude`
 setting rather than in `~/.bashrc`, so it applies only to httk's ssh commands
 and not to every other tool that logs in over ssh:
 
 ```text
-$ httk remote configure --set prelude='module load Python/3.13.5-bundle
+$ httk remote configure --set cli_prelude='module load Python/3.13.5-bundle
 source ~/venv/bin/activate' kappa
 ```
 
@@ -66,9 +66,16 @@ prelude prints. If only the
 `httk` program is somewhere non-standard and the environment is otherwise
 ready, the narrower `httk_command=/path/to/httk` setting is enough.
 
-The adapter `prelude` is not the workspace's `environment.prelude`. The adapter
-prelude prepares the shell so `httk` can run at all; the manager applies
-`environment.prelude` later, once it is already running on the remote.
+The `cli_prelude` is not the workspace's `environment.prelude`. It runs before
+each `httk` command the CLI runs on the remote over ssh or a mount executor, so
+that `httk` can run at all; it does not run at job start. The manager applies
+`environment.prelude` later, when a launcher starts it, and the per-workflow
+prelude when a job of that workflow runs.
+
+Earlier releases called this setting `prelude`. A remote that still stores
+`prelude` is refused when a command would use it, and `--set prelude=...` is
+refused; rename it with
+`httk remote configure NAME --unset prelude --set cli_prelude=...`.
 
 ### Passwords and second factors
 
@@ -260,7 +267,7 @@ $ httk remote configure \
 `configure` refuses unless `mount_root` is an existing directory (set
 `check_mount=no` to configure the remote before the filesystem is mounted) and
 the executor can run a cheap `true` on the remote (set `check_connectivity=no`
-to configure it anyway). The `prelude` and `httk_command` settings mean the same
+to configure it anyway). The `cli_prelude` and `httk_command` settings mean the same
 as for `ssh`.
 
 A transfer also refuses when `mount_root` does not exist. An empty, unmounted

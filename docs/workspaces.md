@@ -134,12 +134,15 @@ does not schedule anything; the destination workspace's launcher does that.
 ```console
 httk remote add --template ssh kappa
 httk remote configure --set host=login.example.org --set username=me kappa
-httk remote configure --set prelude='module load Python/3.13' kappa
+httk remote configure --set cli_prelude='module load Python/3.13' kappa
 httk remote check kappa
 ```
 
-`ssh` runs commands in a non-interactive shell, so the remote's `prelude`
-setting is where `httk` is put on `PATH` for those commands. A workspace on the
+`ssh` runs commands in a non-interactive shell, so the remote's `cli_prelude`
+setting is where `httk` is put on `PATH` for those commands. It runs before
+each `httk` command the CLI runs on the remote, not at job start: jobs get
+their environment from `environment.prelude` and the per-workflow prelude
+(see [Environment preludes](#environment-preludes)). A workspace on the
 remote is created and addressed by writing the remote name before it:
 
 ```console

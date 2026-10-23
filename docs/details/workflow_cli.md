@@ -931,10 +931,9 @@ See {doc}`/details/remotes` for configuration and request-ID retry rules.
 ### Remote settings
 
 `remote configure --set KEY=VALUE` persists only the machine-level keys
-`check_connectivity`, `check_mount`, `exec_command`, `exchange`, `host`,
-`httk_command`, `interactive_auth`, `legacy_settings`, `mount_root`, `port`,
-`prelude`,
-`remote_root`, `username`, `vasp_command`, and `vasp_pseudo_library` in the
+`check_connectivity`, `check_mount`, `cli_prelude`, `exec_command`, `exchange`,
+`host`, `httk_command`, `interactive_auth`, `legacy_settings`, `mount_root`,
+`port`, `remote_root`, `username`, `vasp_command`, and `vasp_pseudo_library` in the
 shareable `remote.json`. Scheduler profile values are workspace settings
 (`slurm.*`, `manager.workers`) and are refused as remote settings. Other keys
 are stored in the remote's `credentials.json` beside it, with mode `0600`;
@@ -960,7 +959,7 @@ beside the core. Run `remote check` once after configuring a new remote: it
 confirms that the host answers, that `httk` is found (also trying
 `python3 -m httk.core.cli`), and that the workflow command group exists. If the
 check fails, set up *httk₂* on the remote reachable from a non-interactive
-shell, use the remote's `prelude` setting, or point `httk_command` at it.
+shell, use the remote's `cli_prelude` setting, or point `httk_command` at it.
 
 ## Configuration and projects
 
