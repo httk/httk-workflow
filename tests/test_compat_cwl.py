@@ -14,7 +14,7 @@ from httk.core.storage import content_id
 from attempt_fixtures import every_job, find, job_json, new_job, new_jobs, state
 from attempt_fixtures import failure_of as _failure
 from conftest import register_ws
-from httk.workflow import TaskManager, Workspace, _store, collect
+from httk.workflow import TaskManager, Workspace, _requests, _store, collect
 from httk.workflow import collecting as collecting_module
 from httk.workflow import scaffold as scaffold_module
 from httk.workflow.collecting import job_records
@@ -29,6 +29,7 @@ from httk.workflow.compat.cwl import (
 )
 from httk.workflow.introspection import list_jobs
 from httk.workflow.packages import load_workflow_package
+from httk.workflow.removal import serve_requests
 from httk.workflow.scaffold import describe_runner, resolve_workflow
 from httk.workflow.workflow_cli import command
 
@@ -124,6 +125,51 @@ steps:
     in:
       message: messages
     out: [spoken]
+"""
+
+#: Two scattered steps in one job: each step's shards carry their own labels.
+_TWO_SCATTER_WORKFLOW = """
+cwlVersion: v1.2
+class: Workflow
+requirements:
+  ScatterFeatureRequirement: {}
+inputs:
+  messages: string[]
+outputs:
+  first:
+    type: File[]
+    outputSource: say/spoken
+  second:
+    type: File[]
+    outputSource: again/spoken
+steps:
+  say:
+    run: echo.cwl
+    scatter: message
+    in:
+      message: messages
+    out: [spoken]
+  again:
+    run: echo.cwl
+    scatter: message
+    in:
+      message: messages
+    out: [spoken]
+"""
+
+#: A tool running one shell script argument, so a test can make one shard fail until a flag file exists.
+_SCRIPT_TOOL = """
+cwlVersion: v1.2
+class: CommandLineTool
+baseCommand: [sh, -c]
+inputs:
+  message:
+    type: string
+    inputBinding: {position: 1}
+outputs:
+  spoken:
+    type: stdout
+stdout: spoken.txt
 """
 
 _SUBWORKFLOW = """
@@ -656,14 +702,83 @@ def test_cwl_language_scatter_runs_labeled_children_and_publishes_data(tmp_path:
     marker = find(workspace, job.job_id)
     assert marker.state == "succeeded"
     rows = {row["job_key"]: row for row in list_jobs(workspace)}
-    shards = sorted(key for key in rows if key.startswith("s000"))
-    assert [key.split("--")[0] for key in shards] == ["s0000", "s0001", "s0002"]
+    shards = sorted(key for key in rows if key.startswith("000.s"))
+    assert [key.split("--")[0] for key in shards] == ["000.s0000", "000.s0001", "000.s0002"]
     assert {rows[key]["state"] for key in shards} == {"succeeded"}
     outputs = json.loads((find(workspace, job.job_id).path / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
     transcript = _located(workspace, outputs["transcript"])
     assert transcript.read_text(encoding="utf-8").split() == ["alpha", "beta", "gamma"]
     published = sorted((find(workspace, job.job_id).path / "data" / "cwl" / "transcript").iterdir())
     assert [path.name for path in published] == ["0000-joined.txt"]
+
+
+@NEEDS_CWL
+def test_cwl_language_labels_the_children_of_each_step_apart(tmp_path: Path, workspace: Workspace) -> None:
+    package = _package(
+        tmp_path / "twice",
+        "flow.cwl",
+        _TWO_SCATTER_WORKFLOW,
+        "messages",
+        "first",
+        input_entry_type="strings",
+        extra_documents={"echo.cwl": _ECHO_TOOL},
+    )
+    job = new_job(workspace, package, inputs={"messages": ["alpha", "beta"]}, tag="twice")
+
+    _drive(workspace)
+
+    assert find(workspace, job.job_id).state == "succeeded"
+    labels = sorted(str(entry["label"]) for entry in state(find(workspace, job.job_id)).children)
+    assert labels == ["000.s0000", "000.s0001", "001.s0000", "001.s0001"]
+    outputs = json.loads((find(workspace, job.job_id).path / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
+    for port in ("first", "second"):
+        assert [_located(workspace, item).read_text(encoding="utf-8").split() for item in outputs[port]] == [
+            ["alpha"],
+            ["beta"],
+        ]
+
+
+@NEEDS_CWL
+@pytest.mark.slow
+def test_cwl_language_restarted_spawning_step_reuses_its_children(tmp_path: Path, workspace: Workspace) -> None:
+    flag = tmp_path / "flag"
+    package = _package(
+        tmp_path / "flaky",
+        "flow.cwl",
+        _SCATTER_FILE_OUTPUT_WORKFLOW,
+        "messages",
+        "transcripts",
+        input_entry_type="strings",
+        extra_documents={"echo.cwl": _SCRIPT_TOOL},
+    )
+    job = new_job(workspace, package, inputs={"messages": ["echo one", f"test -e {flag} && echo two"]}, tag="flaky")
+
+    _drive(workspace)
+
+    parent = find(workspace, job.job_id)
+    assert parent.state == "failed"
+    before = {ref.job_id: ref for ref in every_job(workspace)}
+    (failed,) = [ref for ref in before.values() if ref.state == "failed" and ref.job_id != job.job_id]
+    flag.write_text("", encoding="utf-8")
+    for ref in (failed, parent):
+        assert ref.placement is not None
+        path = _requests.post(
+            workspace,
+            action="restart",
+            job_id=ref.job_id,
+            placement=ref.placement,
+            operator="Op <op@example.org>",
+            reason="r",
+        )
+        (outcome,) = serve_requests(workspace, [(ref, path)])
+        assert outcome.status == "applied", outcome
+
+    _drive(workspace)
+
+    # The rerun spawning step found both shards under their labels: it created no child, and joined on them.
+    assert find(workspace, job.job_id).state == "succeeded"
+    assert {ref.job_id for ref in every_job(workspace)} == set(before)
+    assert len(state(find(workspace, job.job_id)).children) == 2
 
 
 @NEEDS_CWL
@@ -682,7 +797,7 @@ def test_cwl_language_subworkflow_carries_its_target(tmp_path: Path, workspace: 
 
     marker = find(workspace, job.job_id)
     assert marker.state == "succeeded"
-    child = next(ref for ref in every_job(workspace) if ref.job_key.startswith("sub--"))
+    child = next(ref for ref in every_job(workspace) if ref.job_key.startswith("000.sub--"))
     assert child.state == "succeeded"
     child_definition = job_json(child.path)
     assert child_definition["parameters"]["cwl_target"] == ["inner"]

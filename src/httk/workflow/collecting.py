@@ -329,8 +329,9 @@ def children_of(doc: StateDoc | None) -> dict[str, dict[str, object]]:
     A campaign therefore collects as a tree: every record names the children it
     spawned, and each of those is a job a consumer collects in its own right. The
     children are ``state.json``'s published ``children``; ``kind`` is the state a
-    join last observed the child in, or ``None``. A label reused by a later
-    activation names the child of the most recent spawn under it.
+    join last observed the child in, or ``None``. A label names one child, unless
+    its child no longer existed and a later spawn created it anew; the label then
+    names the most recent child.
 
     :param doc: The job's ``state.json``, when readable.
     :return: Child records keyed by their spawn labels.

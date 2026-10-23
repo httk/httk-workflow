@@ -353,9 +353,12 @@ The same check covers a gather target, its `--on-impossible` step, and the
 
 `httk_workflow_spawn LABEL ...` registers one child job, to be created when the
 outcome is published, and prints its job key. The label is mandatory and unique
-within one attempt: it is how `gather` and `httk_workflow_children` name that
+per parent job: it is how `gather` and `httk_workflow_children` name that
 child later, and it becomes the child's job tag by default, so its payload
-directory is readable at a glance.
+directory is readable at a glance. A spawn or call whose label names an
+existing child of this job reuses it: nothing new is created, and the existing
+child's key is printed. Registering one label twice in an attempt is refused.
+See {doc}`../restarting_jobs`.
 
 A spawned child needs no prepared payload at all. `--step` and `--parameter`
 synthesize a complete `job.json`, and everything not given follows the spawning

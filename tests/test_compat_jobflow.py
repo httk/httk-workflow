@@ -18,11 +18,13 @@ import pytest
 from httk.core import DataRecord
 
 from attempt_fixtures import every_job, fabricate, find, new_job
-from httk.workflow import Attempt, TaskManager, Workspace, collect, job_records
+from attempt_fixtures import state as state_of
+from httk.workflow import Attempt, TaskManager, Workspace, _requests, collect, job_records
 from httk.workflow.collecting import JobRecord
 from httk.workflow.compat import LanguageRequest, available_languages, jobflow, match_document
 from httk.workflow.compat.jobflow import jobflow_runner
 from httk.workflow.models import placement_text
+from httk.workflow.removal import serve_requests
 from httk.workflow.scaffold import InstantiateContext, describe_runner, resolve_workflow
 
 # The optional language integration is in the [ci] extra; these tests skip without it.
@@ -497,11 +499,12 @@ def test_jobflow_phantom_spawn_is_re_pended_and_can_complete() -> None:
     state = DriverState.from_flow(Flow([root], output=root.output))
     key = f"{root.uuid}:{root.index}"
     state.mark_running(key)
-    children = {"j00000": key}
+    label = f"{root.uuid}.{root.index}"
+    children = {label: key}
     processed: set[str] = set()
 
-    jobflow_runner._recover_unmaterialized(state, children, {"j00000"}, processed)
-    assert key in state.running and children == {"j00000": key}
+    jobflow_runner._recover_unmaterialized(state, children, {label}, processed)
+    assert key in state.running and children == {label: key}
     jobflow_runner._recover_unmaterialized(state, children, set(), processed)
     assert key not in state.running and children == {}
 
@@ -900,6 +903,66 @@ class Maker:
     parent = _parent_record(workspace, job.job_id, states=("failed",))
     assert parent.failure is not None and parent.failure.code == "jobflow.resources_invalid"
     assert "greedy" in parent.failure.message
+
+
+@NEEDS_JOBFLOW
+@pytest.mark.slow
+def test_jobflow_override_of_advance_reuses_the_published_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _jobflow_package(
+        tmp_path / "rerun-package",
+        """from jobflow import Flow, JobConfig, job
+
+@job
+def first():
+    return 1
+
+@job(config=JobConfig(manager_config={"httk": {"resources": {"procs": "lots"}}}))
+def greedy(value):
+    return value
+
+class Maker:
+    def make(self):
+        one = first()
+        return Flow([one, greedy(one.output)], output=one.output)
+""",
+    )
+    _set_pythonpath(monkeypatch, package)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package)
+    _drive(workspace)
+    parent = find(workspace, job.job_id)
+    assert parent.state == "failed"
+    before = {ref.job_id for ref in every_job(workspace)}
+    (entry,) = state_of(parent).children
+    # A child is named by its jobflow job (uuid.index); the runner keeps no spawn counter.
+    bookkeeping = json.loads((parent.path / ".httk-job" / "state.json").read_text(encoding="utf-8"))
+    assert "jobflow_ordinal" not in bookkeeping
+    (key,) = bookkeeping["jobflow_children"].values()
+    assert bookkeeping["jobflow_children"] == {str(entry["label"]): key} and key.endswith(":1")
+    assert entry["label"] == key.lower().replace(":", ".")
+
+    # The rerun advance re-pends the job its published child runs, and the respawn reuses that child.
+    assert parent.placement is not None
+    path = _requests.post(
+        workspace,
+        action="override_step",
+        job_id=parent.job_id,
+        placement=parent.placement,
+        operator="Op <op@example.org>",
+        reason="r",
+        step="advance",
+    )
+    (outcome,) = serve_requests(workspace, [(parent, path)])
+    assert outcome.status == "applied", outcome
+    _drive(workspace)
+
+    parent = find(workspace, job.job_id)
+    assert parent.state == "failed" and {ref.job_id for ref in every_job(workspace)} == before
+    assert [child["job_id"] for child in state_of(parent).children] == [entry["job_id"]]
+    failure = state_of(parent).failure
+    assert failure is not None and failure["code"] == "jobflow.resources_invalid"
 
 
 _OVERRIDE_FLOW = """from dataclasses import dataclass, field

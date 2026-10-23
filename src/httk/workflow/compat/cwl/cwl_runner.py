@@ -999,6 +999,9 @@ def _advance(a: Attempt) -> None:
         return
     child = step.get("run")
     assert isinstance(child, Mapping)
+    # Labels name a child for the life of this job: prefix them with the count of completed steps, which
+    # only _record changes, so a rerun of this spawning activation reuses exactly this step's children.
+    prefix = f"{len(done):03d}"
     if step.get("scatter"):
         shards = shard_bindings(step, bindings)
         if not shards:
@@ -1012,9 +1015,9 @@ def _advance(a: Attempt) -> None:
                     parameters=child_inputs(a, [*target, name], shard),
                     name=f"{name} shard {index}",
                 ),
-                label=f"s{index:04d}",
+                label=f"{prefix}.s{index:04d}",
             )
-        a.state.merge({STATE_PENDING: {"step": name, "scattered": True, "shards": len(shards)}})
+        a.state.merge({STATE_PENDING: {"step": name, "scattered": True, "shards": len(shards), "label_prefix": prefix}})
         a.log.append("note", f"cwl step {name}: scattered over {len(shards)} children")
         a.gather("collect")
         return
@@ -1025,9 +1028,9 @@ def _advance(a: Attempt) -> None:
                 parameters=child_inputs(a, [*target, name], bindings),
                 name=f"{name} subworkflow",
             ),
-            label="sub",
+            label=f"{prefix}.sub",
         )
-        a.state.merge({STATE_PENDING: {"step": name, "scattered": False, "shards": 1}})
+        a.state.merge({STATE_PENDING: {"step": name, "scattered": False, "shards": 1, "label_prefix": prefix}})
         a.log.append("note", f"cwl step {name}: one subworkflow child")
         a.gather("collect")
         return
@@ -1075,7 +1078,8 @@ def collect(a: Attempt) -> None:
             # Shard order is the label order, not the order the children happened
             # to finish in: a scattered output is an array in scatter order.
             shards = int(str(pending.get("shards") or 0))
-            collected = [_child_outputs(a, a.children[f"s{index:04d}"]) for index in range(shards)]
+            prefix = str(pending.get("label_prefix") or "")
+            collected = [_child_outputs(a, a.children[f"{prefix}.s{index:04d}"]) for index in range(shards)]
             outputs: dict[str, object] = {port: [item.get(port) for item in collected] for port in ports}
         else:
             collected = [_child_outputs(a, child) for child in a.children.all]

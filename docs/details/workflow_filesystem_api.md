@@ -1011,7 +1011,7 @@ A runner proposes children in its outcome: complete payloads in
 `httk-workflow-spawn`, version 2, strict:
 `{format, format_version, children: [{job_key, label, placement,
 workspace_id?, job_id?, spawn_id?}]}`). Validation (commit step 1) requires
-unique labels and keys, this workspace, a `job_id` agreeing with the key, a
+unique labels and keys within the spawn set, this workspace, a `job_id` agreeing with the key, a
 real directory per child that passes `walk_untrusted`, no `state.json`,
 `seal.json`, `logs` or `attempts` at its top, a valid `job.json` whose key and
 placement match and whose `parent` names this job (id, key, placement,
@@ -1037,6 +1037,11 @@ not copied, which is safe because the parent is quiescent. The children are
 recorded in the parent's `state.json` `children`. A child's workflow is
 checked when the child is claimed, not at the parent's commit.
 
+The manager validates label uniqueness per spawn set only. Uniqueness per parent
+job, across activations, is a runner-side contract the SDK enforces: a spawn or
+call whose label names an existing child of the job reuses that child and
+stages nothing.
+
 ### Waiting and joins
 
 A `wait` outcome records the join in `state.json` and releases the parent to
@@ -1046,6 +1051,9 @@ A `wait` outcome records the join in `state.json` and releases the parent to
 {"children": [{"label": "a", "job_id": "<uuid>", "job_key": "<key>", "placement_hint": "p"}],
  "condition": "all_succeeded", "count": 0, "on_impossible": null, "next_step": "aggregate"}
 ```
+
+A join may name an existing child of this parent, not only children the same
+attempt spawned (a reused child, as `rejoin` entries already do).
 
 | Condition | Satisfied when | Impossible when |
 | --- | --- | --- |

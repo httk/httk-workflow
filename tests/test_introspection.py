@@ -422,7 +422,8 @@ def _failed_at_wait(ws: Workspace, installed: Any, retry_policy: dict[str, int])
 
 _WAIT = (
     "the wait on 2 children can be reopened with `httk job request continue`; "
-    "`restart` reruns step start and spawns new children"
+    "`restart` reruns step start, which reuses the children that still exist, failed or cancelled ones "
+    "included: revive such a child first, or delete it to have the step create a fresh one"
 )
 
 

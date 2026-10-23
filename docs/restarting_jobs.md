@@ -182,7 +182,7 @@ httk job request continue --reason "one more step" PARENT
 ```
 
 With `--keep-budget`, raise `maximum_activations` with `set_budget` first.
-`restart` spawns new children (see
+`restart` reruns the spawning step, which reuses its existing children (see
 [Restarting the parent instead](#restarting-the-parent-instead)).
 
 A limit can also be lowered. A limit set below what the job has already used
@@ -256,7 +256,8 @@ not need `--force`. An unowned job is switched at once; a job a manager holds
 is switched at its next boundary, and a running attempt finishes on the code it
 started with. A waiting parent can be switched; its children are separate jobs
 that keep their own workflows. Children that the job spawns after the switch run
-the new installation, and `a.call` uses the new installation's
+the new installation (a restarted step reuses its existing children, which keep
+their workflow; delete them to get children of the new one), and `a.call` uses the new installation's
 `[workflow.calls]`.
 
 What changes is the runner code and its calls. What stays as created is the
@@ -303,7 +304,8 @@ httk job request continue --reason "child succeeded" PARENT
 
 1. `job why PARENT` says the job failed while waiting on its children, lists
    each child that did not succeed with its failure, and notes that `continue`
-   reopens the wait while `restart` reruns the step and spawns new children.
+   reopens the wait while `restart` reruns the step, which reuses the children
+   that still exist.
 2. Fix the child as described above, then `continue` it. Reviving a child that
    the parent's recorded observations name needs `--force`, unless that parent's
    join still names the child: the parent failed at its wait, or waits on it
@@ -348,22 +350,38 @@ fail again. `--tree` is valid only with `continue`.
 
 ### Restarting the parent instead
 
-`restart` on a parent that failed at its wait reruns the spawning step, which
-creates new children. The old children stay where they are. Terminal ones can be
-removed with `httk job delete`. The restart restores the declared allowance, so
+`restart` on a parent that failed at its wait reruns the spawning step. A child
+label is unique per parent job, and a spawn or call whose label names an
+existing child reuses it: nothing new is created and the new specification is
+ignored. A failed or cancelled child is reused too, so the parent fails at its
+wait again, and the runtime logs a warning saying so. Revive the child first
+(`continue` it), or delete it with `httk job delete` so the restarted step
+creates a fresh one. A child that no longer exists is created anew. The restart restores the declared allowance, so
 it runs even with `maximum_attempts_per_activation = 1`; with `--keep-budget`
 the spawning step's attempt counts against the current limit, and such a
 `restart` fails right back with `retry_exhausted`. Alternatively,
 `httk job request override_step --override-step <spawning step>` reruns that step as a
 new activation.
-The restarted parent no longer waits on them, so
-reviving one of them needs `--force`, and the parent will not notice it.
+The restarted step waits on the reused children again. Between the
+`restart` and the publication of the new wait, reviving one of them still needs
+`--force`; revive the child before restarting the parent and no `--force` is
+needed.
+
+To get several children that share a name, number the labels. A restart of this
+step reuses `site-0`, `site-1`, ... that still exist:
+
+```python
+for index, site in enumerate(sites):
+    a.spawn(ChildSpec(step="relax", parameters={"site": site}), label=f"site-{index}")
+a.gather("collect")
+```
 
 ### Cancelled and deleted children
 
 A cancelled child cannot be revived by any request, so a join naming it stays
-impossible: `continue` on the parent fails again at once. `restart` the parent
-or `override_step` it instead. A deleted child makes a reopened wait fail with `dependency_failure`
+impossible: `continue` on the parent fails again at once. A restart or `override_step` of
+the spawning step reuses the cancelled child too: delete it first, then restart
+the parent or `override_step` it. A deleted child makes a reopened wait fail with `dependency_failure`
 after the join grace, a manager option that defaults to one hour.
 
 ### Parents with `on_impossible`
@@ -374,8 +392,9 @@ instead of failing, which consumed the observation and cleared the join
 its child then still needs `--force`, and the parent does not notice the
 revived child. The wait cannot be reopened. To have the parent use the revived
 child, rerun a step that gathers it again (a runner step that calls
-`gather(..., rejoin=[label])`, via `override_step`), or `restart` or
-`override_step` the spawning step to spawn new children.
+`gather(..., rejoin=[label])`, via `override_step`), or delete the child and
+`restart` or `override_step` the spawning step to create a new one (without the
+delete the step reuses it).
 
 ## Paused jobs
 

@@ -20,7 +20,7 @@ import v3_helpers as h
 from httk.workflow import Attempt, FormatError, Workspace, _kernel, _requests, _store
 from httk.workflow._state import StateDoc, encode_state
 from httk.workflow.protocol import Failure, validate_failure
-from httk.workflow.removal import serve_requests
+from httk.workflow.removal import remove_jobs, serve_requests
 from httk.workflow.runtime_builders import ChildReference
 from test_crash_injection import _all_jobs
 
@@ -277,7 +277,7 @@ def test_gather_refuses_a_join_over_no_children(tmp_path: Path) -> None:
     # A join is resolvable only for children the publishing bundle registers or rejoins, so a gather without
     # either can never become work.
     attempt = _in_process_attempt(tmp_path)
-    with pytest.raises(ValueError, match="neither was provided"):
+    with pytest.raises(ValueError, match="none was given"):
         attempt.gather("aggregate")
     assert not (tmp_path / "control" / "outcome.ready").exists()
 
@@ -503,20 +503,103 @@ def test_continue_reopens_the_wait_of_a_dependency_failure(ws: Workspace, joins:
     assert h.state_of(done).join is None
 
 
+#: An SDK runner: ``start`` spawns the child ``flaky`` (step ``finish``, which fails until the file
+#: ``parameters.switch`` exists) and gathers it into ``gather``. ``start`` and ``gather`` record the step and the
+#: children observed into ``run/events.json``.
+_REUSE_RUNNER = f"""#!/usr/bin/env python3
+import json, pathlib, sys
+
+sys.path.insert(0, {str(Path(__file__).resolve().parents[1] / "src")!r})
+
+from httk.workflow import ChildSpec, Runner
+
+run = Runner("reuse")
+
+
+def record(a):
+    path = a.workdir / "events.json"
+    events = json.loads(path.read_text()) if path.exists() else []
+    events.append({{"step": a.step, "children": [{{"label": c.label, "kind": c.kind}} for c in a.children]}})
+    path.write_text(json.dumps(events))
+
+
+@run.step
+def start(a):
+    record(a)
+    a.spawn(ChildSpec(step="finish", parameters={{"switch": a.parameter("switch")}}), label="flaky")
+    a.gather("gather")
+
+
+@run.step
+def finish(a):
+    if not pathlib.Path(a.parameter("switch")).exists():
+        a.fail("child.broken", "the switch is off")
+        return
+    a.succeed()
+
+
+@run.step
+def gather(a):
+    record(a)
+    a.succeed()
+
+
+raise SystemExit(run.main())
+"""
+
+
+def _sdk_failed_at_wait(ws: Workspace, tmp_path: Path) -> tuple[_kernel.JobRef, _kernel.JobRef, Path]:
+    """A parent of :data:`_REUSE_RUNNER` that failed at its wait on its failed child; return both and the switch."""
+
+    installed = h.install(ws, tmp_path / "reuse", name="reuse", executables={"run": _REUSE_RUNNER})
+    switch = tmp_path / "switch"
+    submitted = h.submit(ws, installed, {}, parameters={"switch": str(switch)})
+    h.run(ws)
+    failed = h.find(ws, submitted.job_id)
+    doc = h.state_of(failed)
+    assert failed.state == "failed" and doc.failure is not None and doc.failure["code"] == "dependency_failure"
+    (observation,) = doc.observations
+    child = h.find(ws, str(observation["job_id"]))
+    assert child.state == "failed"
+    return failed, child, switch
+
+
 @pytest.mark.slow
-def test_restart_reruns_a_parent_that_failed_at_its_wait(ws: Workspace, joins: _store.Installed) -> None:
-    parent, child = _failed_at_wait(ws, joins)
+def test_restart_reruns_a_parent_that_failed_at_its_wait(ws: Workspace, tmp_path: Path) -> None:
+    parent, child, _switch = _sdk_failed_at_wait(ws, tmp_path)
     assert _serve(ws, parent, "restart") == "ready"
     doc = h.state_of(h.find(ws, parent.job_id))
     assert doc.join is None and doc.failure is None
     assert doc.attempt is not None and doc.attempt["reason"] == "manual_continue"
-    # The spawning step runs again and spawns a new child (which fails its first attempt too); the old one stays.
+    # The spawning step runs again and reuses the existing (failed) child, so the parent fails at its wait again.
     h.run(ws)
     rerun = h.find(ws, parent.job_id)
     assert [item["step"] for item in _events(rerun)] == ["start", "start"]
-    (observation,) = h.state_of(rerun).observations
-    assert observation["job_id"] != child.job_id
-    assert h.find(ws, child.job_id).state == "failed" and len(_all_jobs(ws)) == 3
+    doc = h.state_of(rerun)
+    assert rerun.state == "failed" and doc.failure is not None and doc.failure["code"] == "dependency_failure"
+    (observation,) = doc.observations
+    assert observation["job_id"] == child.job_id and observation["label"] == "flaky"
+    assert [entry["job_id"] for entry in doc.children] == [child.job_id]
+    assert h.find(ws, child.job_id).state == "failed" and len(_all_jobs(ws)) == 2
+
+
+@pytest.mark.slow
+def test_restart_after_deleting_the_child_creates_a_fresh_one(ws: Workspace, tmp_path: Path) -> None:
+    parent, child, switch = _sdk_failed_at_wait(ws, tmp_path)
+    assert remove_jobs(ws, [child]).removed_count == 1
+    switch.touch()
+    assert _serve(ws, parent, "restart") == "ready"
+    h.run(ws)
+    done = h.find(ws, parent.job_id)
+    assert done.state == "succeeded", h.state_of(done).failure
+    events = _events(done)
+    assert [item["step"] for item in events] == ["start", "start", "gather"]
+    assert events[2]["children"] == [{"label": "flaky", "kind": "succeeded"}]
+    # The label now records two children; the newest is the fresh one.
+    recorded = h.state_of(done).children
+    assert [entry["label"] for entry in recorded] == ["flaky", "flaky"]
+    assert recorded[0]["job_id"] == child.job_id != recorded[1]["job_id"]
+    assert h.find(ws, str(recorded[1]["job_id"])).state == "succeeded" and len(_all_jobs(ws)) == 2
 
 
 _GHOST_JOIN_RUNNER = """#!/usr/bin/env python3

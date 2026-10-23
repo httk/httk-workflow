@@ -961,7 +961,9 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
                 "wait",
                 None,
                 f"the wait on {count} children can be reopened with `httk job request continue`; "
-                f"`restart` reruns step {step or '-'} and spawns new children",
+                f"`restart` reruns step {step or '-'}, which reuses the children that still exist, failed or "
+                "cancelled ones included: revive such a child first, or delete it to have the step create a "
+                "fresh one",
             )
             _continue_checks(job, doc, report, verb="restart")
         else:

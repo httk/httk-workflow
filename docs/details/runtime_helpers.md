@@ -262,8 +262,8 @@ publication order. It is a live snapshot on each access: `kind` is the child's
 current state (`ready`, `waiting`, `paused`, `owned`, `failed`, `succeeded`,
 `cancelled`) or `missing`, paths are located now, and `failure` is read from
 the child's `state.json` for `failed` and `cancelled`. `ChildrenView.get` and
-`[]` return the most recently published child under a label; this matters for
-`a.spawned`, since labels are unique per attempt, not across activations:
+`[]` return the most recently published child under a label. Labels are unique per parent job,
+so several entries under one label appear only after a child was recreated:
 
 ```python
 # after an any_succeeded join, some siblings may still be running
@@ -303,7 +303,7 @@ is discarded, so no half-outcome reaches the manager.
 | Call | Meaning |
 | --- | --- |
 | `a.advance(step, state=..., priority=...)` | run `step` next; `state` is written before publication |
-| `a.gather(step, when=..., count=..., on_impossible=..., rejoin=...)` | wait for children spawned on this attempt and earlier-activation labels named by `rejoin`, then run `step` |
+| `a.gather(step, when=..., count=..., on_impossible=..., rejoin=...)` | wait for children spawned on this attempt, children this attempt reused by label, and earlier-activation labels named by `rejoin`, then run `step` |
 | `a.succeed()` | the job is done |
 | `a.retry(reason)` | repeat this activation within the job's attempt budget |
 | `a.pause(reason)` | stop until an operator resumes the job |
@@ -319,10 +319,28 @@ honours within the job's budgets. The manager records a malformed failure as
 ### Spawning children
 
 `a.spawn(child, label=..., placement=...)` registers one child job, created
-when the outcome is published. The label is mandatory and unique within one
-attempt; `gather` and `a.children` use it to name the child. It is also the
+when the outcome is published. The label is mandatory and unique per parent job, across all its
+activations; registering one twice in an attempt raises. `gather` and
+`a.children` use it to name the child. It is also the
 child's default job tag, so its payload directory is readable at a glance.
 `placement` defaults to the placement of the spawning job.
+
+A spawn or call whose label names an existing child of this job reuses it:
+nothing new is created, the given specification, payload and placement are
+ignored, and `gather` waits on the existing child. Existing means the newest
+child recorded under that label is still in the workspace, in any state
+(running, failed and cancelled included). A deleted or ejected child is created
+anew. To get several children with one name, number the labels:
+
+```python
+for index, site in enumerate(sites):
+    a.spawn(ChildSpec(step="relax", parameters={"site": site}), label=f"site-{index}")
+a.gather("collect")
+```
+
+A restart of this step reuses `site-0`... that still exist. A loop that
+re-spawns one constant label reuses the first child and runs until
+`maximum_activations`. See {doc}`/restarting_jobs`.
 
 A `ChildSpec` needs no prepared payload. It synthesizes a complete `job.json`
 from the child's starting step and parameters, and everything else follows

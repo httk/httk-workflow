@@ -49,6 +49,8 @@ type OutcomeAction = Literal["advance", "retry", "wait", "succeed", "fail", "pau
 type JoinCondition = Literal["all_succeeded", "all_terminal", "any_succeeded", "any_terminal", "at_least"]
 
 _RUNNER_UNSAFE_PATH_COMPONENTS = _UNSAFE_PATH_COMPONENTS | {".httk-runner"}
+#: Inside an outcome draft: the existing children the attempt reused, for a resuming process; never published.
+_REUSED_CHILDREN = ".reused-children.json"
 
 
 def _relative(value: str | os.PathLike[str], name: str) -> PurePosixPath:
@@ -478,6 +480,7 @@ class OutcomeDraft:
         self.root = root or control / f"outcome.tmp.{uuid.uuid4()}"
         self.root.mkdir(exist_ok=False)
         self._children: list[tuple[ChildReference, dict[str, object]]] = []
+        self._reused: list[tuple[ChildReference, str, int]] = []
 
     @classmethod
     def _resume(
@@ -512,12 +515,28 @@ class OutcomeDraft:
                         str(raw["placement"]),
                     )
                     result._children.append((reference, dict(raw)))
+        reused_path = result.root / _REUSED_CHILDREN
+        result._reused = [
+            (
+                ChildReference(
+                    str(raw["workspace_id"]), str(raw["job_id"]), str(raw["job_key"]), str(raw["placement_hint"])
+                ),
+                str(raw["label"]),
+                int(raw["position"]),
+            )
+            for raw in (read_json(reused_path)["children"] if reused_path.exists() else ())
+        ]
         return result
+
+    def _labels(self) -> set[str]:
+        """Return the labels of every child registered or reused in this draft."""
+
+        return {str(item[1].get("label")) for item in self._children} | {item[1] for item in self._reused}
 
     def _child_label(self, requested: str | None, child: JobDefinition) -> str:
         """Return one child's spawn label, which must be unique in this set."""
 
-        used = {str(item[1].get("label")) for item in self._children}
+        used = self._labels()
         if requested is not None:
             label = validate_label(requested, "child label")
             if label in used:
@@ -630,6 +649,38 @@ class OutcomeDraft:
         self._write_spawn()
         return reference
 
+    def add_existing_child(self, reference: ChildReference, *, label: str) -> ChildReference:
+        """Record that this attempt reuses an existing child of its job under *label*.
+
+        Nothing is staged and the published spawn set is unchanged: the child is
+        only remembered, also for a later process of the attempt, so that the
+        attempt's join can name it.
+
+        :param reference: The existing child.
+        :param label: The label the child was published under.
+        :return: The reference.
+        :raises ValueError: If the label or the child is already registered in this draft.
+        """
+
+        label = validate_label(label, "child label")
+        if label in self._labels():
+            raise ValueError(f"child label is not unique within this spawn set: {label}")
+        if reference.job_id in {item[0].job_id for item in self._children} | {item[0].job_id for item in self._reused}:
+            raise ValueError(f"child is already registered in this spawn set: {reference.job_key}")
+        self._reused.append((reference, label, len(self._children)))
+        write_json_atomic(
+            self.root / _REUSED_CHILDREN,
+            {
+                "children": [
+                    {**item.as_mapping(), "label": item_label, "position": position}
+                    for item, item_label, position in self._reused
+                ]
+            },
+            # Draft-internal like the spawn set, and removed before publication.
+            durable=False,
+        )
+        return reference
+
     @property
     def children(self) -> tuple[ChildReference, ...]:
         """Return the children registered in this outcome.
@@ -637,6 +688,12 @@ class OutcomeDraft:
         :return: The child references in registration order.
         """
         return tuple(item[0] for item in self._children)
+
+    @property
+    def reused(self) -> tuple[tuple[ChildReference, str, int], ...]:
+        """The reused existing children, each with its label and the count of children registered before it."""
+
+        return tuple(self._reused)
 
     def _write_spawn(self) -> None:
         write_json_atomic(
@@ -743,6 +800,8 @@ class OutcomeDraft:
             # orphans of a failed parent, or be staged again by the repeated activation.
             shutil.rmtree(self.root / "children")
             self._children.clear()
+        # The manager never sees the reused children: they enter the outcome only through its join.
+        (self.root / _REUSED_CHILDREN).unlink(missing_ok=True)
         # Draft-internal: durability of the whole draft is the one batched tree
         # sync below, so this final write is not synchronized on its own.
         write_json_atomic(self.root / "outcome.json", body, durable=False)

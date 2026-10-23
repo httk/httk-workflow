@@ -17,7 +17,7 @@ from httk.workflow._state import Release
 
 _SRC = str(Path(__file__).resolve().parents[1] / "src")
 
-# ``first`` spawns a, b (fails) and x and gathers them; ``second`` spawns x again and y and gathers them;
+# ``first`` spawns a, b (fails) and x and gathers them; ``second`` spawns x again (reusing it) and y and gathers them;
 # ``third`` advances to ``fourth``. Every step records what it reads into ``<step>.json`` of its workdir.
 _RUNNER = f'''#!/usr/bin/env python3
 import json
@@ -205,25 +205,26 @@ def test_an_advance_activation_has_no_children(finished: tuple[Workspace, _kerne
     _workspace, parent = finished
     fourth = _seen(parent, "fourth")
     assert fourth["context"]["activation_reason"] == "advance"
-    assert fourth["children"] == [] and len(fourth["spawned"]) == 5
+    assert fourth["children"] == [] and len(fourth["spawned"]) == 4
 
 
 def test_spawned_spans_activations_in_publication_order(finished: tuple[Workspace, _kernel.JobRef]) -> None:
     _workspace, parent = finished
     first, second, third = (_seen(parent, step) for step in ("first", "second", "third"))
     spawned = third["spawned"]
-    assert [child["label"] for child in spawned] == ["a", "b", "x", "x", "y"]
-    assert [child["kind"] for child in spawned] == ["succeeded", "failed", "succeeded", "succeeded", "succeeded"]
+    # The second spawn of x reused the existing child: it is published once.
+    assert [child["label"] for child in spawned] == ["a", "b", "x", "y"]
+    assert [child["kind"] for child in spawned] == ["succeeded", "failed", "succeeded", "succeeded"]
     assert spawned[1]["failure"] == "leaf.broken"
     # Each entry records the activation and attempt that published it.
     publishers = [(child["raw"]["activation_id"], child["raw"]["attempt_id"]) for child in spawned]
     by_first = (first["context"]["activation_id"], first["context"]["attempt_id"])
     by_second = (second["context"]["activation_id"], second["context"]["attempt_id"])
-    assert publishers == [by_first] * 3 + [by_second] * 2
-    # The second join observed only the children of the second activation; a reused label names the newest child.
+    assert publishers == [by_first] * 3 + [by_second]
+    # The second join observed the children of the second activation, in spawn order: x is the first one's.
     assert [child["label"] for child in third["children"]] == ["x", "y"]
-    assert third["spawned_x"] == spawned[3]["job_id"] != spawned[2]["job_id"]
-    assert second["spawned_x"] == spawned[2]["job_id"]
+    assert third["children"][0]["job_id"] == spawned[2]["job_id"]
+    assert third["spawned_x"] == second["spawned_x"] == spawned[2]["job_id"]
 
 
 def _bound(fabricated_root: Path, workspace: Workspace, parent: _kernel.JobRef) -> dict[str, str]:
@@ -274,15 +275,15 @@ def test_spawned_reports_owned_and_missing_children_and_the_bridge_reads_it(tmp_
     owner = _kernel.register_owner(workspace, kind="cli", label="test", allocation=None, advertised={})
     claimed = _kernel.claim(workspace, owner, find(workspace, ids[0]))
     assert claimed is not None
-    removed = find(workspace, ids[4])
+    removed = find(workspace, ids[3])
     shutil.rmtree(removed.path)
 
     spawned = Attempt.initialize(environment).spawned
-    assert [child.kind for child in spawned] == ["owned", "failed", "succeeded", "succeeded", "missing"]
+    assert [child.kind for child in spawned] == ["owned", "failed", "succeeded", "missing"]
     assert spawned.all[0].payload == claimed.path and spawned.all[0].raw["from_state"] == "succeeded"
     assert spawned.all[1].failure is not None and spawned.all[1].failure.code == "leaf.broken"
-    assert spawned.all[4].payload is None and spawned.all[4].workdir is None and spawned.all[4].data is None
-    assert spawned["x"].job_id == ids[3]
+    assert spawned.all[3].payload is None and spawned.all[3].workdir is None and spawned.all[3].data is None
+    assert spawned["x"].job_id == ids[2]
 
     script = tmp_path / "read.sh"
     script.write_text(
@@ -301,14 +302,14 @@ def test_spawned_reports_owned_and_missing_children_and_the_bridge_reads_it(tmp_
     lines = completed.stdout.splitlines()
     # The fourth activation followed an advance, so the join view is empty.
     assert lines[:2] == ["joined", "spawned"]
-    rows = [line.split("\t") for line in lines[2:7]]
+    rows = [line.split("\t") for line in lines[2:6]]
     keys = [child.job_key for child in spawned]
     assert [row[:3] for row in rows] == [
         [label, kind, key] for label, kind, key in zip(labels, [child.kind for child in spawned], keys, strict=True)
     ]
-    assert rows[0][3] == str(claimed.path / "run") and rows[4][3:] == ["", ""]
-    assert lines[7:9] == ["failed", "\t".join(rows[1])]
-    assert lines[9:] == ["fields", ids[3], "missing", "absent=1"]
+    assert rows[0][3] == str(claimed.path / "run") and rows[3][3:] == ["", ""]
+    assert lines[6:8] == ["failed", "\t".join(rows[1])]
+    assert lines[8:] == ["fields", ids[2], "missing", "absent=1"]
     doc = claimed.read_state()
     assert doc is not None
     claimed.release(doc, Release("succeeded", 500))

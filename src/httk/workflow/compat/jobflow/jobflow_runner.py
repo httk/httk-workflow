@@ -794,7 +794,7 @@ def start(a: Attempt) -> None:
         _persist_store(store, root / STORE_FILE)
         state = DriverState.from_flow(flow)
         _write_json(root / STATE_FILE, state.to_mapping())
-        a.state.merge({"jobflow_children": {}, "jobflow_processed": [], "jobflow_ordinal": 0})
+        a.state.merge({"jobflow_children": {}, "jobflow_processed": []})
     except Exception as exc:
         a.fail("jobflow.start_failed", f"cannot initialize jobflow state: {exc}")
         return
@@ -830,8 +830,6 @@ def advance(a: Attempt) -> None:
         {str(label): str(key) for label, key in children_raw.items()} if isinstance(children_raw, Mapping) else {}
     )
     processed = {str(label) for label in processed_raw} if isinstance(processed_raw, list) else set()
-    ordinal_raw = a.state.get("jobflow_ordinal", 0)
-    ordinal = int(ordinal_raw) if isinstance(ordinal_raw, (int, str)) else 0
     observed_labels = {str(child.label) for child in a.children if child.label is not None}
     _recover_unmaterialized(state, children, observed_labels, processed)
     for child in a.children:
@@ -892,7 +890,10 @@ def advance(a: Attempt) -> None:
         producers = {
             job_id: placements[job_id] for job_id in _exec_token_ids([spooled, snapshot]) if job_id in placements
         }
-        label = f"j{ordinal:05d}"
+        # The jobflow job's identity names its child for the life of this job, so a rerun of this step
+        # that re-pends an already spawned job reuses its child. Lowered: jobflow's ULID ids are upper case.
+        # ponytail: a hand-set Job(uuid=...) that is no valid label fails the spawn; map it when one appears.
+        label = f"{job.uuid.lower()}.{job.index}"
         reference = a.spawn(
             ChildSpec(
                 step="enter",
@@ -912,11 +913,10 @@ def advance(a: Attempt) -> None:
         )
         placements[reference.job_id] = reference.placement_hint
         children[label] = key
-        ordinal += 1
         live_labels.append(label)
     _write_json(root / STATE_FILE, state.to_mapping())
     _write_json(root / PLACEMENTS_FILE, placements)
-    bookkeeping = {"jobflow_children": children, "jobflow_processed": sorted(processed), "jobflow_ordinal": ordinal}
+    bookkeeping = {"jobflow_children": children, "jobflow_processed": sorted(processed)}
     # Crash order: durable driver state, then atomic a.state, then exactly one
     # published outcome. Reprocessing is guarded by processed labels and settled
     # keys; spool writes are deterministic overwrites and spawns publish together.

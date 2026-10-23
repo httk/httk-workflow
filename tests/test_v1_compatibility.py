@@ -209,6 +209,71 @@ HT_TASK_FINISHED
     assert _task_directories(parent_payload, set(cast(list[str], spawned))) == []
 
 
+def test_v1_equal_task_ids_of_two_steps_are_two_children(tmp_path: Path) -> None:
+    source = _legacy_source(
+        tmp_path,
+        """#!/usr/bin/env bash
+. "$HTTK_DIR/Execution/tasks/ht_tasks_api.sh"
+HT_TASK_INIT "$@"
+MAKE_CHILD() { cp "$HT_TASK_TOP_DIR/child_ht_steps" ht_steps; chmod +x ht_steps; }
+if [ "$STEP" = "start" ]; then
+    mkdir -p first
+    printf 'one\\n' | HT_TASK_CREATE MAKE_CHILD first child any 4
+    HT_TASK_SUBTASKS again
+fi
+if [ "$STEP" = "again" ]; then
+    mkdir -p second
+    printf 'one\\n' | HT_TASK_CREATE MAKE_CHILD second child any 4
+    HT_TASK_SUBTASKS after
+fi
+if [ "$STEP" = "after" ]; then
+    HT_TASK_FINISHED
+fi
+exit 1
+""",
+    )
+    child = source / "child_ht_steps"
+    child.write_text(
+        "#!/usr/bin/env bash\n. \"$HTTK_DIR/Execution/tasks/ht_tasks_api.sh\"\nHT_TASK_INIT \"$@\"\nHT_TASK_FINISHED\n",
+        encoding="utf-8",
+    )
+    child.chmod(0o755)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    parent = _new_v1_job(workspace, source, "project/twice")
+
+    with TaskManager(workspace, maximum_workers=2, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30)
+
+    # A label carries the child's deterministic id: the second step's task "one" is a child of its own.
+    assert find(workspace, parent.job_id).state == "succeeded"
+    children = state(find(workspace, parent.job_id)).children
+    assert len(children) == 2 and len(every_job(workspace)) == 3
+    assert [str(entry["label"]) for entry in children] == [f"one-{entry['job_id']}" for entry in children]
+
+
+def test_v1_respawn_of_one_task_keeps_its_label(tmp_path: Path) -> None:
+    payload = tmp_path / "payload"
+    tasks = [payload / name / "ht.task.any.one.child.0.none.4.waitstart" for name in ("first", "second", "first")]
+    for task in tasks:
+        task.mkdir(parents=True, exist_ok=True)
+    (payload / "attempt").mkdir()
+    labels: list[str] = []
+    attempt = SimpleNamespace(
+        control=payload / "attempt",
+        job=SimpleNamespace(id="00000000-0000-4000-8000-000000000001", as_mapping=dict),
+        parameters={"v1_compatibility": {"profile": "httk-v1-task-v1"}},
+        context=SimpleNamespace(placement="project"),
+        spawn=lambda _child, *, label, placement: labels.append(label),
+    )
+
+    for task in tasks:
+        v1_runner._spawn(cast(Attempt, attempt), [task], 1, payload)
+
+    # The same task directory respawns under its label (and so reuses its child); an equal task id elsewhere does not.
+    assert labels[0] == labels[2] != labels[1]
+    assert all(label.startswith("one-") and len(label) == 40 for label in labels)
+
+
 def test_v1_walker_keeps_nested_logs_directory_tasks(tmp_path: Path) -> None:
     root = tmp_path / "legacy-payload"
     pending = root / "results" / "logs" / "ht.task.any.one.child.0.none.4.waitstart"

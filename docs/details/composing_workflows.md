@@ -374,7 +374,8 @@ in the gathering step.
 A parent that fails with `dependency_failure` keeps its join. An operator fixes
 the child and `continue`s it, then `continue`s the parent, which reopens the
 wait with the same join and no new attempt. `restart` on the parent instead
-reruns the spawning step, which creates new children. See
+reruns the spawning step, which reuses the children that still exist (child
+labels are unique per parent job). See
 {doc}`/restarting_jobs`.
 
 ## Requirements and limits

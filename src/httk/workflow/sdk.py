@@ -474,8 +474,9 @@ class ChildrenView:
     def get(self, label: str, default: ChildResult | None = None) -> ChildResult | None:
         """Return the child spawned under *label*, or *default*.
 
-        A label is unique within one attempt; across activations it can be reused, and then the most
-        recently published child under it (the last in the view) is returned.
+        A label names one child of a job, as a spawn of an existing child's label reuses that child; only
+        after a child that no longer existed was created anew does a label name several children, and then
+        the most recently published one (the last in the view) is returned.
 
         :param label: The spawn label to find.
         :param default: The value to return when no child has that label.
@@ -561,6 +562,7 @@ class Attempt:
         self._environment_snapshot: dict[str, object] | None = None
         self._own: Installed | None = None
         self._fits: dict[tuple[str, object], SlotMapping] = {}
+        self._recorded: dict[str, tuple[dict[str, object], _kernel.JobRef | None]] | None = None
 
     def __repr__(self) -> str:
         return f"Attempt(job_id={self.context.job_id!r}, step={self.step!r}, attempt_id={self.context.attempt_id!r})"
@@ -669,6 +671,8 @@ class Attempt:
         ``failure`` is read from a failed or cancelled child's own
         ``state.json``. ``raw`` is the published entry (with ``activation_id``
         and ``attempt_id`` when recorded), plus ``from_state`` for an owned child.
+        A reused child appears once, as published; a label appears twice only
+        when its child no longer existed and was created anew.
 
         :raises httk.workflow.errors.FormatError: If this job's ``state.json`` is absent, damaged or
             names another job.
@@ -700,7 +704,9 @@ class Attempt:
             raise FormatError(f"this job's state.json names job {doc.job_id}, not {self.context.job_id}")
         return doc
 
-    def _locate_children(self, records: Sequence[Mapping[str, object]]) -> dict[str, _kernel.JobRef]:
+    def _locate_children(
+        self, records: Sequence[Mapping[str, object]], *, settle: bool = False
+    ) -> dict[str, _kernel.JobRef]:
         """Locate the children *records* name with one read-only listing of their placements (owned included)."""
 
         if not records:
@@ -709,8 +715,70 @@ class Attempt:
             self._workspace(),
             [require_string(item.get("job_id"), "child job_id") for item in records],
             placements=[parse_placement_text(item.get("placement"), "child placement") for item in records],
-            settle=False,
+            settle=settle,
         )
+
+    def _reuse_child(self, label: str) -> ChildReference | None:
+        """Register the existing child this job published under *label* in the draft, or return ``None``.
+
+        :param label: The validated child label.
+        :return: The existing child, or ``None`` when there is none.
+        :raises ValueError: If the label is already used in this attempt.
+        :raises httk.workflow.errors.FormatError: If this job's ``state.json`` is damaged or names another job.
+        """
+
+        found = self._existing_child(label)
+        if found is None:
+            return None
+        reference, state = found
+        self._require_draft().add_existing_child(reference, label=label)
+        if state in {"failed", "cancelled"}:
+            _LOGGER.warning(
+                "reusing existing child %s: %s, which is %s; revive it, or delete it with `httk job delete` "
+                "to have the step create a fresh child",
+                label,
+                reference.job_key,
+                state,
+            )
+        else:
+            _LOGGER.info("reusing existing child %s: %s", label, reference.job_key)
+        return reference
+
+    def _existing_child(self, label: str) -> tuple[ChildReference, str] | None:
+        """Return the existing child this job published under *label* and its state, or ``None`` when there is none.
+
+        Only the newest child recorded under a label counts, and it exists when it is found in the
+        workspace (owned included). This job's ``state.json`` is read and its children located once per
+        attempt: its ``children`` change only when this attempt's outcome is committed. An absent
+        ``state.json`` (a payload no manager has claimed) records no children.
+
+        :param label: The validated child label.
+        :return: The child with its recorded key and placement, and its state (the state an owned child was
+            claimed from), or ``None``.
+        :raises httk.workflow.errors.FormatError: If this job's ``state.json`` is damaged or names another job.
+        """
+
+        if self._recorded is None:
+            doc = self._own_state() if (self.payload / "state.json").exists() else None
+            newest: dict[str, dict[str, object]] = {}
+            for item in () if doc is None else doc.children:
+                entry = cast(dict[str, object], _thaw(item))
+                if entry.get("label") is not None:
+                    newest[str(entry["label"])] = entry
+            refs = self._locate_children(list(newest.values()))
+            # A child caught mid-rename (a claim or release) is not gone: settle only the misses.
+            missing = [entry for entry in newest.values() if str(entry["job_id"]) not in refs]
+            refs.update(self._locate_children(missing, settle=True))
+            self._recorded = {name: (entry, refs.get(str(entry["job_id"]))) for name, entry in newest.items()}
+        entry, ref = self._recorded.get(label, ({}, None))
+        if ref is None:
+            return None
+        # The recorded placement, not the located one: an owned child has none, and a join looks for the
+        # child where its job.json places it.
+        reference = ChildReference(
+            self.context.workspace_id, str(entry["job_id"]), str(entry["job_key"]), str(entry["placement"])
+        )
+        return reference, ref.from_state or ref.state
 
     @property
     def parent(self) -> ParentJob | None:
@@ -1132,31 +1200,43 @@ class Attempt:
         """Register one child job under *label*, to be created on publication.
 
         *child* is either a :class:`ChildSpec`, which needs no payload at all, or
-        the path of a prepared payload directory. The label is mandatory and must
-        be unique within one attempt: it is how :meth:`gather` and
+        the path of a prepared payload directory. The label is mandatory and names
+        one child for the life of this job: it is how :meth:`gather` and
         :attr:`children` name this child later.
+
+        A label that names an existing child of this job (published by an
+        earlier activation or attempt, as a rerun spawning step does) returns
+        that child and registers nothing: *child* and *placement* are ignored and
+        the child is kept exactly as it is, also when it failed or was cancelled.
+        A child that no longer exists in the workspace is created anew. A step
+        wanting several children under one base name numbers the labels
+        (``scf-1``, ``scf-2``).
 
         A :class:`ChildSpec` child never inherits ``mintime``, and its ``maxtime``
         requirements are capped at this attempt's effective ``maxtime``. A
         prepared payload directory is registered exactly as written, uncapped.
 
         :param child: The child specification or prepared payload directory.
-        :param label: The unique label used to observe the child later.
+        :param label: The label used to observe the child later, unique within this job.
         :param placement: The workspace placement for the child; when omitted, ``<this placement>/<this job key>.children``,
             or this attempt's placement under the workspace setting ``children.placement = flat`` or when
             the nested placement would exceed 1024 bytes.
-        :return: The reference to the registered child.
-        :raises ValueError: If the child or label is invalid, or the label is reused.
+        :return: The reference to the registered or existing child.
+        :raises ValueError: If the child or label is invalid, or the label is already used in this attempt.
+        :raises httk.workflow.errors.FormatError: If this job's ``state.json`` is damaged or names another job.
         """
 
         self._reject_published()
         entry_label = validate_label(label, "child label")
+        if isinstance(child, ChildSpec):
+            # The child runs this very workflow, so its initial step is a step of
+            # this runner and a typo in it is catchable here, also when the child exists.
+            self._check_step(child.step, "spawned child step")
+        if (existing := self._reuse_child(entry_label)) is not None:
+            return existing
         target = self._default_child_placement() if placement is None else placement
         if not isinstance(child, ChildSpec):
             return self._require_draft().add_child(child, target, label=entry_label)
-        # The child runs this very workflow, so its initial step is a step of
-        # this runner and a typo in it is catchable here.
-        self._check_step(child.step, "spawned child step")
         # Everything this child needs is validated before the draft exists, so a
         # refused spawn leaves the attempt exactly as it found it.
         spec = child._job_spec(
@@ -1282,6 +1362,11 @@ class Attempt:
         The child takes the called workflow's resources, with every ``maxtime``
         capped at this attempt's effective ``maxtime``.
 
+        As for :meth:`spawn`, a label that names an existing child of this job
+        returns that child and registers nothing: no payload is built, the other
+        arguments are ignored, and the called workflow need not be installed. A
+        child that no longer exists in the workspace is created anew.
+
         When *workflow* is a call slot alias, the child runs the workflow this
         job's ``calls`` binding names, fitted to the slot's interface again:
 
@@ -1297,7 +1382,7 @@ class Attempt:
           (``persist_outputs``), read back with :meth:`child_outputs`.
 
         :param workflow: The declared alias, call slot alias, or installed id of the workflow to call.
-        :param label: The unique label used to gather and observe the child later.
+        :param label: The label used to gather and observe the child later, unique within this job.
         :param inputs: Supply the called workflow's declared inputs.
         :param files: Map payload names to files to stage for the child.
         :param parameters: Supply opaque parameters for the child job.
@@ -1309,15 +1394,19 @@ class Attempt:
         :param priority: Set the child scheduling priority.
         :param step: Override the called workflow's initial step.
         :param name: Set the child job's display name.
-        :return: The reference to the registered child.
-        :raises ValueError: If the workflow is undeclared or not installed, or the label, inputs, or job
-            settings are invalid; for a call slot, also if the job binds no workflow to it, the bound workflow
-            no longer fits, an interface input is unknown or missing, a path cannot be loaded, a parameter is
-            given twice, or a staged structure does not keep the supplied sites.
+        :return: The reference to the registered or existing child.
+        :raises ValueError: If the workflow is undeclared or not installed, the label is invalid or already
+            used in this attempt, or the inputs or job settings are invalid; for a call slot, also if the job
+            binds no workflow to it, the bound workflow no longer fits, an interface input is unknown or
+            missing, a path cannot be loaded, a parameter is given twice, or a staged structure does not keep
+            the supplied sites.
+        :raises httk.workflow.errors.FormatError: If this job's ``state.json`` is damaged or names another job.
         """
 
         self._reject_published()
         validate_label(label, "child label")
+        if (existing := self._reuse_child(label)) is not None:
+            return existing
         target = self._default_child_placement() if placement is None else placement
         slot = self._slot_callee(workflow)
         persist_outputs: dict[str, str] | None = None
@@ -1498,8 +1587,9 @@ class Attempt:
     ) -> Path:
         """Wait for this attempt's and optionally earlier children, then run *step*.
 
-        The join names children :meth:`spawn` registered on this attempt and
-        labels from earlier join activations named by *rejoin*. *when* is one of
+        The join names the children :meth:`spawn` and :meth:`call` registered or
+        reused on this attempt, in the order of those calls, and labels from
+        earlier join activations named by *rejoin*. *when* is one of
         ``all_succeeded``, ``all_terminal``, ``any_succeeded``, ``any_terminal``,
         or ``at_least`` with *count*. When the condition can no longer be met,
         the job advances to *on_impossible* if one is named and fails with
@@ -1514,56 +1604,58 @@ class Attempt:
         :param resources: The requirement of the join activation, when changed; ``maxtime`` and
             ``mintime`` are Slurm duration strings such as ``"1:30:00"``.
         :return: The path of the published wait outcome.
-        :raises ValueError: If no children were spawned or rejoined, a rejoined label is unknown, or a named step is invalid.
+        :raises ValueError: If no children were spawned, reused or rejoined, a rejoined label is unknown or names
+            a child already joined, or a named step is invalid.
         """
 
         self._reject_published()
         self._check_step(step, "gather target")
         if on_impossible is not None:
             self._check_step(on_impossible, "on_impossible target")
-        rejoin_children: list[dict[str, object]] = []
         draft = self._draft
-        children = () if draft is None else draft.children
-        labels: set[str] = set()
-        identities: set[tuple[str, str]] = set()
+        # Spawned and reused children in the order of their calls: a reused child records how many children
+        # were registered before it. A spawned child's label is filled in by the manager from the spawn set.
+        ordered: list[tuple[tuple[int, int], str | None, Mapping[str, object]]] = []
         if draft is not None:
-            for draft_child, entry in draft._children:
-                label = entry.get("label")
-                if label is not None:
-                    label = str(label)
-                    if label in labels:
-                        raise ValueError(f"duplicate join child label: {label}")
-                    labels.add(label)
-                identity = (draft_child.workspace_id, draft_child.job_id)
-                if identity in identities:
-                    raise ValueError(f"duplicate join child identity: {draft_child.job_id}")
-                identities.add(identity)
+            ordered += [
+                ((index, 1), None if entry.get("label") is None else str(entry["label"]), child.as_mapping())
+                for index, (child, entry) in enumerate(draft._children)
+            ]
+            ordered += [
+                ((position, 0), label, {**child.as_mapping(), "label": label})
+                for child, label, position in draft.reused
+            ]
+        ordered.sort(key=lambda item: item[0])
+        joined: list[tuple[str | None, Mapping[str, object]]] = [(label, entry) for _, label, entry in ordered]
         for label in rejoin:
             observed = self.children.get(label)
             if observed is None:
                 known_labels = ", ".join(self.children.labels) or "none"
                 raise ValueError(f"unknown rejoin child label {label!r}; known labels: {known_labels}")
-            if label in labels:
-                raise ValueError(f"duplicate join child label: {label}")
-            identity = (self.context.workspace_id, observed.job_id)
+            entry = {
+                "workspace_id": self.context.workspace_id,
+                "job_id": observed.job_id,
+                "job_key": observed.job_key,
+                "label": label,
+                "placement_hint": placement_text(observed.placement),
+            }
+            joined.append((label, entry))
+        labels: set[str] = set()
+        identities: set[tuple[object, object]] = set()
+        for joined_label, joined_entry in joined:
+            if joined_label is not None:
+                if joined_label in labels:
+                    raise ValueError(f"duplicate join child label: {joined_label}")
+                labels.add(joined_label)
+            identity = (joined_entry["workspace_id"], joined_entry["job_id"])
             if identity in identities:
-                raise ValueError(f"duplicate join child identity: {observed.job_id}")
-            labels.add(label)
+                raise ValueError(f"duplicate join child identity: {joined_entry['job_id']}")
             identities.add(identity)
-            rejoin_children.append(
-                {
-                    "workspace_id": self.context.workspace_id,
-                    "job_id": observed.job_id,
-                    "job_key": observed.job_key,
-                    "label": label,
-                    "placement_hint": placement_text(observed.placement),
-                }
-            )
-        if not children and not rejoin_children:
+        if not joined:
             raise ValueError(
-                "gather requires children spawned on this attempt or rejoin entries, and neither was provided"
+                "gather requires children spawned or reused on this attempt or rejoin entries; none was given"
             )
-        join = join_mapping(children, when, count, on_impossible, rejoin_children)
+        join = join_mapping((), when, count, on_impossible, [entry for _, entry in joined])
         return self._publish("wait", next_step=step, priority=priority, join=join, resources=resources)
 
     def succeed(self) -> Path:

@@ -261,15 +261,11 @@ def _task_directories(root: Path, spawned: set[str]) -> list[Path]:
     return sorted(result)
 
 
-def _label(task_id: str, used: set[str]) -> str:
-    base = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9._-]+", "-", task_id.lower()).strip("-."))[:48].strip("-.")
-    base = base if base and base[0].isalnum() else f"task-{base}"[:48].rstrip("-.")
-    label, index = base, 1
-    while label in used:
-        index += 1
-        label = f"{base[:44]}-{index}"
-    used.add(label)
-    return label
+def _label(task_id: str, child_id: str) -> str:
+    """Return the child label of one task: its readable task id head, then its deterministic child id."""
+
+    base = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9._-]+", "-", task_id.lower()).strip("-."))[:11].rstrip("-.")
+    return f"{base}-{child_id}" if base[:1].isalnum() else child_id
 
 
 def _safe_tag(value: str) -> str:
@@ -284,7 +280,6 @@ def _placement(a: Attempt, child_id: str) -> str:
 
 
 def _spawn(a: Attempt, sources: Sequence[Path], attempts: int, legacy_root: Path) -> list[str]:
-    labels: set[str] = set()
     spawned: list[str] = []
     with tempfile.TemporaryDirectory(prefix="v1-spawn.", dir=a.control) as temporary:
         staging = Path(temporary)
@@ -315,7 +310,7 @@ def _spawn(a: Attempt, sources: Sequence[Path], attempts: int, legacy_root: Path
             compatibility["root_placement"] = str(compatibility.get("root_placement", a.context.placement))
             mapping["parameters"] = {**a.parameters, "v1_compatibility": compatibility}
             write_json_atomic(prepared / "job.json", mapping)
-            a.spawn(prepared, label=_label(fields["task_id"], labels), placement=_placement(a, child_id))
+            a.spawn(prepared, label=_label(fields["task_id"], child_id), placement=_placement(a, child_id))
             spawned.append(relative)
     return spawned
 
