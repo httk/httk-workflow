@@ -1063,3 +1063,32 @@ def test_manifest_id_key_is_retired_and_git_names_are_refused(tmp_path: Path) ->
     git = _package(tmp_path / "git", _MANIFEST.replace('name = "tests.package"', 'name = "git+https://x.test/a"'))
     with pytest.raises(ValueError, match="must not start with 'git\\+'"):
         parse_workflow_manifest(git)
+
+
+def _with_settings(settings: str) -> str:
+    return _MANIFEST.replace('declaration_uri = "', f'settings = {settings}\ndeclaration_uri = "', 1)
+
+
+def test_settings_declare_keys_and_environment_entries_count(tmp_path: Path) -> None:
+    manifest = _with_settings('["mywf.threshold", "tool.command"]') + (
+        '\n[workflow.environment.command]\nsetting = "tool.command"\n\n[workflow.environment.retries]\n'
+    )
+    provider = parse_workflow_manifest(_package(tmp_path / "settings", manifest))
+    assert provider.settings == ("mywf.threshold", "retries", "tool.command")
+    assert parse_workflow_manifest(_package(tmp_path / "plain")).settings == ()
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        ('"mywf.threshold"', "must be an array"),
+        ("[1]", "nonempty dotted identifiers"),
+        ('["bad-name"]', "nonempty dotted identifiers"),
+        ('["mywf.a", "mywf.a"]', "must not repeat"),
+        ('["slurm.qos"]', "namespace httk-workflow owns"),
+        ('["confine"]', "namespace httk-workflow owns"),
+    ],
+)
+def test_settings_refuse_ill_formed_repeated_and_engine_keys(tmp_path: Path, settings: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_workflow_manifest(_package(tmp_path / "invalid", _with_settings(settings)))

@@ -97,6 +97,7 @@ and output relationships are all validated before a provider is returned.
 | `resources` | no | Default resource requirements: a table mapping resource labels to non-negative integers, or to Slurm duration strings for `maxtime` and `mintime`. |
 | `steps` | no | Per-step resource overrides. Valid only with an executable runner, and only for names in its declared `steps` list. |
 | `calls` | no | The sub-workflows this one calls: a `[workflow.calls]` table mapping an alias to a workflow name or commit-pinned git URI. |
+| `settings` | no | The workspace settings the workflow reads, as a list of unique dotted names outside *httk-workflow*'s namespaces; see [`settings`](#settings). |
 | `requires` | no | Minimum distribution versions as a list of `NAME>=VERSION` strings (only `>=`, a plain `N(.N)*` release, each distribution once), for example `["httk-workflow>=2.2.0", "httk-atomistic>=2.1.2"]`. |
 
 ```toml
@@ -402,6 +403,30 @@ decoding JSON values when possible. In Python, `new_job(environment={...})`
 supplies shared overrides, and each `JobItem` in `new_jobs` may carry its own
 `environment` mapping. `workflow describe` shows each entry's type, setting,
 default, and description.
+
+### `settings`
+
+The optional `[workflow]` member `settings` lists the workspace settings the
+workflow reads beyond its environment entries, such as keys it reads with
+`Attempt.setting`. It only informs: `httk workspace settings show` marks a key
+an installed workflow declares as *recognized by workflow NAME*, and writing it
+prints no notice. Each item is a dotted setting name, listed once. A name in a
+namespace *httk-workflow* owns (`manager`, `slurm`, `confine`, `environment`,
+`seal`, `postprocess`, `children`, `httk_v1`) is refused: the workflow's own
+keys belong outside them. The setting each environment entry resolves counts
+as declared without being listed, and `workflow describe` shows the combined
+list. An environment entry whose setting lies in one of those namespaces keeps
+working as before, but never changes how the key is classified.
+
+A manifest rejects unknown keys before its `requires` is checked, so an
+*httk-workflow* older than the release that introduced `settings` refuses a
+package that uses it.
+
+```toml
+[workflow]
+name = "mywf"
+settings = ["mywf.threshold", "mywf.mode"]
+```
 
 ### `[workflow.outputs.<NAME>]`
 

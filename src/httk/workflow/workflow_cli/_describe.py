@@ -211,6 +211,7 @@ def _description(workflow: ResolvedWorkflow, source_document: Mapping[str, objec
         "inputs": _input_document(workflow),
         "parameters": {name: dict(metadata) for name, metadata in workflow.parameters.items()},
         "environment": {name: dict(metadata) for name, metadata in workflow.environment.items()},
+        "settings": list(workflow.settings),
         "outputs": _output_document(workflow),
         "postprocess": {
             name: {**script, "outputs": script.get("outputs")} for name, script in workflow.postprocess_scripts.items()
@@ -320,12 +321,15 @@ def _render_text(description: Mapping[str, object]) -> str:
     drift = description.get("manifest_step_drift")
     if isinstance(drift, str) and drift:
         lines.append(f"WARNING: step drift: {drift}")
+    settings = description["settings"]
     for title, key in (
         ("inputs", "inputs"),
         ("parameters", "parameters"),
         ("environment", "environment"),
         ("outputs", "outputs"),
     ):
+        if key == "outputs" and isinstance(settings, list) and settings:
+            lines.append(f"settings: {', '.join(settings)}")
         lines.append(f"{title}:")
         values = description[key]
         assert isinstance(values, Mapping)

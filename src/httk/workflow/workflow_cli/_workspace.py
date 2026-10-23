@@ -17,7 +17,7 @@ from httk.core.cli import CLIContext
 from httk.core.identity import configured_operator_identity
 
 from .. import _death, _kernel, _store
-from .._setting_catalog import annotate_setting, use_color, warn_unrecognized
+from .._setting_catalog import annotate_setting, installed_workflow_settings, report_written_settings, use_color
 from ..adapters import (
     REMOTE_STATUS_COMMAND,
     REMOTE_WORKSPACE_DELETE_COMMAND,
@@ -170,7 +170,7 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
         )
         for key, value in settings.items():
             workspace.set_setting(key, value)
-        warn_unrecognized(settings)
+        report_written_settings(settings)
         print(workspace.root)
         return 0
     remote, separator, remote_path = arguments.workspace.partition(":")
@@ -208,7 +208,7 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
         created = register_workspace(name, root, durable=_durable(arguments))
     else:
         created = create_workspace(name, root, durable=_durable(arguments), settings=settings)
-        warn_unrecognized(settings)
+        report_written_settings(settings)
     print(created.name)
     project = discover_project(root)
     if project is not None:
@@ -872,8 +872,9 @@ def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLICo
         print(json.dumps(settings, indent=2, sort_keys=True))
         return 0
     color = use_color()
+    workflows = installed_workflow_settings(workspace)
     for key in sorted(settings):
-        shown, annotation = annotate_setting(key, settings[key], color=color)
+        shown, annotation = annotate_setting(key, settings[key], workflows=workflows, color=color)
         print(f"{shown}\t{json.dumps(settings[key], sort_keys=True)}\t{annotation}")
     return 0
 
@@ -915,7 +916,7 @@ def handle_workspace_configure(arguments: argparse.Namespace, context: CLIContex
         workspace = Workspace(root, durable=_durable(arguments))
         require_cli_modifiable(workspace)
         workspace.configure_settings(changes, unset=arguments.unset or ())
-        warn_unrecognized(changes)
+        report_written_settings(changes, workflows=installed_workflow_settings(workspace))
     item = copy(arguments)
     item.key = None
     return handle_workspace_settings_show(item, context)
@@ -967,7 +968,7 @@ def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLICon
     require_cli_modifiable(workspace)
     settings = workspace.configure_settings(changes)
     print(json.dumps({key: settings[key] for key in changes}, sort_keys=True))
-    warn_unrecognized(changes)
+    report_written_settings(changes, workflows=installed_workflow_settings(workspace))
     return 0
 
 

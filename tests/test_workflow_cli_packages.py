@@ -463,6 +463,10 @@ def test_workflow_describe_renders_environment(tmp_path: Path, capsys) -> None:
     output = capsys.readouterr().out
     assert "environment:" in output
     assert "command: type=string, setting=tool.command, default=echo, description=The command." in output
+    assert "\nsettings: tool.command\noutputs:" in output
+    assert command(["describe", "--json", str(package)], context) == 0
+    (description,) = json.loads(capsys.readouterr().out)
+    assert description["settings"] == ["tool.command"]
 
 
 def test_directory_package_runs_and_job_records_retain_the_tree_pin(tmp_path: Path) -> None:

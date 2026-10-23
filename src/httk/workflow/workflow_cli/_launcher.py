@@ -12,7 +12,7 @@ from pathlib import Path
 from httk.core.cli import CLIContext
 
 from .._confine import confine_settings, default_readonly_paths
-from .._setting_catalog import annotate_setting, use_color, warn_unrecognized
+from .._setting_catalog import annotate_setting, report_written_settings, use_color
 from ..launchers import (
     add_launcher,
     check_launcher,
@@ -92,7 +92,7 @@ def handle_launcher_add(arguments: Namespace, context: CLIContext) -> int:
             global_=arguments.global_scope,
         )
     )
-    warn_unrecognized(settings, layer="launcher", kind=template)
+    report_written_settings(settings, layer="launcher", kind=template)
     return 0
 
 
@@ -107,7 +107,7 @@ def handle_launcher_configure(arguments: Namespace, context: CLIContext) -> int:
     for key, value in changed.items():
         print(f"{key}={value}")
     kind = describe_launcher(arguments.name, project=context.cwd)["kind"]
-    warn_unrecognized(settings, layer="launcher", kind=kind if isinstance(kind, str) else None)
+    report_written_settings(settings, layer="launcher", kind=kind if isinstance(kind, str) else None)
     return 0
 
 

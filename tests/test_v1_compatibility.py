@@ -726,7 +726,9 @@ def test_v1_bare_directory_is_realized_and_degraded_on_collect(tmp_path: Path) -
         encoding="utf-8",
     )
     runner.chmod(0o755)
-    assert resolve_workflow(root, format="httk-v1").language == "httk-v1"
+    resolved = resolve_workflow(root, format="httk-v1")
+    assert resolved.language == "httk-v1"
+    assert resolved.settings == ("httk_v1.log_compression", "httk_v1.root", "httk_v1.timeout", "httk_v1.wrapper")
     workspace = Workspace.initialize(tmp_path / "workspace")
     job = new_job(workspace, root, parameters={"value": "bare"}, format="httk-v1")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:

@@ -33,11 +33,13 @@ from .models import (
     validate_runner_command,
 )
 from .postprocessing import _valid_output_pattern
-from .scaffold import RecognizeSpec, WorkflowProvider, payload_relative, register_workflow
+from .scaffold import RecognizeSpec, WorkflowProvider, _declared_settings, payload_relative, register_workflow
 
 MANIFEST_NAME = "httk_workflow.toml"
 _LOGGER = logging.getLogger(__name__)
 
+#: A dotted application-setting name, as ``[workflow].settings`` and environment ``setting`` give it.
+_SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 #: The ``[workflow.references.<LABEL>]`` keys: the OPTIMADE reference fields a manifest authors.
 _REFERENCE_KEYS = {item.name for item in fields(Reference)} - {"immutable_id", "last_modified"}
 _REFERENCE_PERSON_KEYS = {"name", "firstname", "lastname"}
@@ -422,10 +424,7 @@ def _validate_environment(raw: Mapping[str, object], directory: Path) -> dict[st
         ):
             raise _error(directory, f"{path}.default does not match type {environment_type!r}")
         setting = _optional_string(table, "setting", path, directory)
-        if (
-            setting is not None
-            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", setting) is None
-        ):
+        if setting is not None and _SETTING_NAME.fullmatch(setting) is None:
             raise _error(directory, f"{path}.setting must be a nonempty dotted identifier")
         effective_setting = setting if setting is not None else environment
         variable = environment_variable_name(effective_setting)
@@ -446,6 +445,26 @@ def _validate_environment(raw: Mapping[str, object], directory: Path) -> dict[st
             entry["setting"] = setting
         result[environment] = entry
     return result
+
+
+def _validate_settings(raw: object, directory: Path) -> tuple[str, ...]:
+    # Imported here: the catalog pulls in the launcher-policy modules, which parsing a manifest does not need.
+    from ._setting_catalog import _ENGINE_NAMESPACES
+
+    if not isinstance(raw, list):
+        raise _error(directory, "[workflow].settings must be an array of setting names")
+    for key in raw:
+        if not isinstance(key, str) or _SETTING_NAME.fullmatch(key) is None:
+            raise _error(directory, f"[workflow].settings entries must be nonempty dotted identifiers: {key!r}")
+        if key.partition(".")[0] in _ENGINE_NAMESPACES:
+            raise _error(
+                directory,
+                f"[workflow].settings {key!r} lies in a namespace httk-workflow owns "
+                f"({', '.join(sorted(_ENGINE_NAMESPACES))}); a workflow reads its own keys outside them",
+            )
+    if len(set(raw)) != len(raw):
+        raise _error(directory, "[workflow].settings must not repeat a setting name")
+    return tuple(raw)
 
 
 def _matches_input_type(value: object, input_type: str) -> bool:
@@ -715,6 +734,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             "inputs",
             "parameters",
             "environment",
+            "settings",
             "outputs",
             "resources",
             "steps",
@@ -969,6 +989,8 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         _table(workflow.get("environment", {}), "[workflow.environment]", root), root
     )
     environment = {**(lang.environment if lang is not None else {}), **manifest_environment}
+    # Every environment entry resolves a workspace setting, so it declares reading that key too.
+    settings = _declared_settings(environment, _validate_settings(workflow.get("settings", []), root))
     outputs = _validate_outputs(
         _table(workflow.get("outputs", {}), "[workflow.outputs]", root),
         input_metadata,
@@ -1049,6 +1071,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         postprocess_scripts=postprocess_scripts,
         parameters=parameters,
         environment=environment,
+        settings=settings,
         outputs=outputs,
         resources=resources,
         step_resources=step_resources,

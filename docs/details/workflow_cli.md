@@ -122,7 +122,7 @@ Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 | `workspace workflows [NAME...]` | list the workflows installed in a workspace | `--json` |
 | `workspace show [NAME...]` | print application settings, each marked recognized, unrecognized or undeclared | `--key KEY`, `--json` |
 | `workspace configure [NAME...]` | set and unset application settings | `--set KEY=VALUE`, `--unset KEY` (repeatable), `--json` |
-| `workspace settings show\|set\|unset` | print, store or remove application settings; `show` adds a column marking each key recognized, unrecognized or undeclared, and `set` takes repeated `--key`/`--value` pairs in one write, warning about unrecognized keys | `--key KEY`, `--value VALUE` |
+| `workspace settings show\|set\|unset` | print, store or remove application settings; `show` adds a column marking each key recognized, unrecognized or undeclared, and `set` takes repeated `--key`/`--value` pairs in one write, warning about unrecognized keys and noting undeclared ones | `--key KEY`, `--value VALUE` |
 | `workspace workflow-prelude show\|set\|unset` | print, store or remove one workflow's prelude | `--workflow WORKFLOW`, `--value VALUE` (`@FILE` reads a file) |
 | `workspace policy show\|set\|unset` | print, store or reset policy members; `set` takes repeated `--key`/`--value` pairs in one write | `--key KEY`, `--value JSON`, `--json` |
 | `workspace fsck [NAME...]` | check the job tree for what the kernel cannot resolve; only while nothing else uses the workspace | `--repair` (quiescent workspace only, asks first), `--yes`, `--json` |

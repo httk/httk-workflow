@@ -202,6 +202,8 @@ class WorkflowProvider:
     :param postprocess_scripts: Map curated postprocess script names to package members and descriptions.
     :param parameters: Declare the workflow's parameter metadata.
     :param environment: Declare the workflow's environment metadata.
+    :param settings: Name the workspace settings the workflow declares reading; the manifest parser gives the
+        union of ``[workflow].settings`` and the setting each environment entry resolves.
     :param outputs: Declare the workflow's output metadata.
     :param declaration_uri: Identify the source declaration URI.
     :param declaration_file: Name the source declaration file.
@@ -240,6 +242,7 @@ class WorkflowProvider:
     postprocess_scripts: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     environment: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    settings: tuple[str, ...] = ()
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
     declaration_file: str | None = None
@@ -304,6 +307,7 @@ class WorkflowProvider:
             MappingProxyType({step: dict(requirement) for step, requirement in self.step_resources.items()}),
         )
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
+        object.__setattr__(self, "settings", tuple(self.settings))
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
         object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
         object.__setattr__(self, "references", MappingProxyType(dict(self.references)))
@@ -602,6 +606,7 @@ class ResolvedWorkflow:
     :param postprocess_scripts: Preserve curated postprocess script metadata.
     :param parameters: Preserve the workflow's parameter metadata.
     :param environment: Preserve the workflow's environment metadata.
+    :param settings: Preserve the workspace settings the workflow declares reading.
     :param outputs: Preserve the workflow's output metadata.
     :param declaration_uri: Identify the source declaration URI.
     :param declaration_file: Name the source declaration file.
@@ -642,6 +647,7 @@ class ResolvedWorkflow:
     postprocess_scripts: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     environment: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    settings: tuple[str, ...] = ()
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
     declaration_file: str | None = None
@@ -677,6 +683,7 @@ class ResolvedWorkflow:
         object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
         object.__setattr__(self, "references", MappingProxyType(dict(self.references)))
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
+        object.__setattr__(self, "settings", tuple(self.settings))
         object.__setattr__(
             self, "resources", MappingProxyType(validate_resources(self.resources, "workflow.resources"))
         )
@@ -1081,6 +1088,7 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
         postprocess_scripts=provider.postprocess_scripts,
         parameters=provider.parameters,
         environment=provider.environment,
+        settings=provider.settings,
         outputs=provider.outputs,
         declaration_uri=provider.declaration_uri,
         declaration_file=provider.declaration_file,
@@ -1174,6 +1182,7 @@ def resolve_workflow(
                 postprocess_scripts=provider.postprocess_scripts,
                 parameters=provider.parameters,
                 environment=provider.environment,
+                settings=provider.settings,
                 outputs=provider.outputs,
                 declaration_uri=provider.declaration_uri,
                 declaration_file=provider.declaration_file,
@@ -1224,6 +1233,7 @@ def resolve_workflow(
                     directory=directory,
                     outputs=outputs,
                     environment=lang.environment,
+                    settings=_declared_settings(lang.environment),
                     _input_metadata=input_metadata,
                 )
             elif path.is_file():
@@ -1329,6 +1339,17 @@ def structure_tag(path: str | os.PathLike[str]) -> str | None:
         else:
             return None
     return _sanitize_tag(name)
+
+
+def _declared_settings(environment: Mapping[str, Mapping[str, object]], listed: Iterable[str] = ()) -> tuple[str, ...]:
+    """Return the workspace settings a workflow declares reading, sorted and without repeats.
+
+    :param environment: The workflow's environment entries; each reads its ``setting``, or its own name.
+    :param listed: The ``[workflow].settings`` names.
+    :return: The union.
+    """
+
+    return tuple(sorted({*listed, *(str(entry.get("setting", name)) for name, entry in environment.items())}))
 
 
 def _sanitize_tag(name: str) -> str | None:

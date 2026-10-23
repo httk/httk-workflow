@@ -8,12 +8,13 @@ from httk.core.cli import CLIContext
 from httk.core.register import codes as code_registry
 
 from conftest import Remote, fake_remote
-from httk.workflow import _setting_catalog
+from httk.workflow import _setting_catalog, _store
 from httk.workflow._setting_catalog import classify_setting
 from httk.workflow.projects import initialize_project
 from httk.workflow.registry import create_workspace
 from httk.workflow.workflow_cli import command
 from httk.workflow.workspace import Workspace
+from v3_helpers import install
 
 
 @pytest.fixture
@@ -86,6 +87,26 @@ def test_code_declared_keys(zz_code: None) -> None:
     assert status.state == "undeclared" and "code support" not in status.note
 
 
+def test_installed_workflow_declarations_recognize_workspace_keys(zz_code: None) -> None:
+    workflows = {"b": ("zz.other", "mywf.x"), "a": ("mywf.x",), "c": ()}
+    status = classify_setting("mywf.x", 1, workflows=workflows)
+    assert (status.state, status.readers) == ("recognized", ("workflow a", "workflow b"))
+    status = classify_setting("zz.other", 1, workflows=workflows)
+    assert status.annotation == "recognized by workflow b"
+    many = {name: ("zz.command",) for name in "edcba"}
+    status = classify_setting("zz.command", 1, workflows=many)
+    assert status.readers == ("zz code support", *(f"workflow {name}" for name in "abcde"))
+    assert status.annotation == "recognized by zz code support, workflow a, workflow b and 3 more"
+    # A workflow's declaration never makes an ignored engine key read.
+    engine = {"a": ("confine.foo", "slurm.qos")}
+    assert classify_setting("confine.foo", 1, workflows=engine).state == "unrecognized"
+    assert classify_setting("slurm.qos", "x", workflows=engine).state == "unrecognized"
+    # Workflows never read launcher settings.
+    assert classify_setting("mywf.x", 1, layer="launcher", workflows=workflows).state == "unrecognized"
+    status = classify_setting("mywf.y", 1, workflows=workflows)
+    assert status.state == "undeclared" and "future workflow" in status.note
+
+
 def test_settings_show_annotates_and_settings_set_warns(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     settings = {"slurm.account": "p", "slurm.qos": "high", "foo.bar": 1}
     create_workspace("ws", tmp_path / "ws", settings=settings)
@@ -108,6 +129,11 @@ def test_settings_show_annotates_and_settings_set_warns(tmp_path: Path, capsys: 
     assert Workspace(tmp_path / "ws").settings["slurm.qos"] == "low"
     assert command(["workspace", "settings", "set", "--key", "vasp.command", "--value", "v", "ws"], context) == 0
     assert capsys.readouterr().err == ""
+    assert command(["workspace", "settings", "set", "--key", "foo.bar", "--value", "2", "ws"], context) == 0
+    captured = capsys.readouterr()
+    assert captured.out == '{"foo.bar": 2}\n'
+    (notice,) = captured.err.splitlines()
+    assert notice.startswith("notice: setting foo.bar is undeclared:")
     assert command(["workspace", "configure", "--set", "manager.workerz=2", "ws"], context) == 0
     assert "manager.workers" in capsys.readouterr().err
     assert command(["workspace", "init", "--setting", "slurm.qos=x", str(tmp_path / "other")], context) == 0
@@ -176,3 +202,53 @@ def test_custom_kind_launcher_settings_are_undeclared_without_warnings(
     assert capsys.readouterr().err == ""
     assert command(["launcher", "show", "pbs"], context) == 0
     assert "pbs.queue=gpu  # undeclared:" in capsys.readouterr().out
+
+
+def test_settings_show_counts_installed_workflow_declarations(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    create_workspace("ws", tmp_path / "ws", settings={"mywf.threshold": 1, "other.key": 2})
+    install(Workspace(tmp_path / "ws"), tmp_path / "package", name="mywf", workflow='settings = ["mywf.threshold"]')
+    context = CLIContext("httk", tmp_path)
+    assert command(["workspace", "settings", "show", "ws"], context) == 0
+    rows = {row[0]: row[2] for row in (line.split("\t") for line in capsys.readouterr().out.splitlines())}
+    assert rows["mywf.threshold"] == "recognized by workflow mywf"
+    assert rows["other.key"].startswith("undeclared:")
+    assert command(["workspace", "settings", "set", "--key", "mywf.threshold", "--value", "3", "ws"], context) == 0
+    assert capsys.readouterr().err == ""
+    assert command(["workspace", "configure", "--set", "other.key=3", "ws"], context) == 0
+    assert capsys.readouterr().err.startswith("notice: setting other.key is undeclared:")
+
+
+def test_environment_entries_declare_and_engine_keys_still_warn(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    create_workspace("ws", tmp_path / "ws", settings={"tool.command": "x"})
+    manifest = (
+        '[workflow.environment.command]\nsetting = "tool.command"\n\n'
+        '[workflow.environment.mode]\nsetting = "confine.foo"\n'
+    )
+    install(Workspace(tmp_path / "ws"), tmp_path / "package", name="wfa", manifest=manifest)
+    context = CLIContext("httk", tmp_path)
+    assert command(["workspace", "settings", "show", "ws"], context) == 0
+    assert "tool.command\t\"x\"\trecognized by workflow wfa" in capsys.readouterr().out
+    assert command(["workspace", "settings", "set", "--key", "confine.foo", "--value", "1", "ws"], context) == 0
+    assert capsys.readouterr().err.startswith("warning: setting confine.foo is unrecognized:")
+
+
+def test_broken_or_unreadable_installations_leave_keys_undeclared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    create_workspace("ws", tmp_path / "ws")
+    installed = install(Workspace(tmp_path / "ws"), tmp_path / "package", name="mywf", workflow='settings = ["mywf.x"]')
+    assert _setting_catalog.installed_workflow_settings(Workspace(tmp_path / "ws")) == {"mywf": ("mywf.x",)}
+    (installed.package / "httk_workflow.toml").write_text("[workflow\n", encoding="utf-8")
+    assert _setting_catalog.installed_workflow_settings(Workspace(tmp_path / "ws")) == {}
+
+    def unreadable(workspace: object) -> list[object]:
+        raise PermissionError("workflows/")
+
+    monkeypatch.setattr(_store, "list_installed", unreadable)
+    context = CLIContext("httk", tmp_path)
+    assert command(["workspace", "settings", "set", "--key", "mywf.x", "--value", "1", "ws"], context) == 0
+    assert capsys.readouterr().err.startswith("notice: setting mywf.x is undeclared:")
