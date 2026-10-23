@@ -60,13 +60,19 @@ def _seed(tmp_path: Path) -> Path:
 
 
 def _job(
-    *, parent: bool = True, maximum_attempts: int | None = None, maximum_activations: int | None = None
+    *,
+    parent: bool = True,
+    maximum_attempts: int | None = None,
+    maximum_activations: int | None = None,
+    maximum_total_attempts: int | None = None,
 ) -> JobDefinition:
     retry: dict[str, object] = {"retry_on": []}
     if maximum_attempts is not None:
         retry["maximum_attempts_per_activation"] = maximum_attempts
     if maximum_activations is not None:
         retry["maximum_activations"] = maximum_activations
+    if maximum_total_attempts is not None:
+        retry["maximum_total_attempts"] = maximum_total_attempts
     return JobDefinition.from_mapping(
         {
             "format": "httk-workflow-job",
@@ -375,10 +381,15 @@ def test_restart_and_override_step_drop_a_kept_wait() -> None:
     assert new.attempt is not None and new.attempt["reason"] == "manual_continue" and new.attempt["ordinal"] == 2
     new, effect = apply(_job(), doc, "failed", 500, _request("override_step"))
     assert isinstance(effect, Release) and effect.state == "ready" and new.join is None
-    # restart is bound by the budgets, like the legacy continue.
-    new, effect = apply(_job(maximum_attempts=1), doc, "failed", 500, _request("restart"))
+    # With keep_budget, restart is bound by the budgets, like the legacy continue.
+    new, effect = apply(_job(maximum_attempts=1), doc, "failed", 500, _request("restart", keep_budget=True))
     assert isinstance(effect, Release) and effect.state == "failed"
     assert new.failure is not None and new.failure["code"] == "retry_exhausted" and new.attempt == doc.attempt
+    assert new.budget_override is None and "budget" not in new.history_tail[-1]
+    # Without it, the restart restores the declared allowance: the spawning attempt plus one more.
+    new, effect = apply(_job(maximum_attempts=1), doc, "failed", 500, _request("restart"))
+    assert isinstance(effect, Release) and effect.state == "ready"
+    assert dict(new.budget_override or {}) == {"maximum_attempts_per_activation": 2}
 
 
 def test_refusal_and_force() -> None:
@@ -417,7 +428,7 @@ def test_refusal_and_force() -> None:
 
 def test_revival_within_exhausted_budget_fails() -> None:
     doc = _doc()
-    new, effect = apply(_job(maximum_attempts=1), doc, "paused", 500, _request("continue"))
+    new, effect = apply(_job(maximum_attempts=1), doc, "paused", 500, _request("continue", keep_budget=True))
     assert effect == Release("failed", 500, effect.applied_requests)  # type: ignore[union-attr]
     assert new.failure is not None and new.failure["code"] == "retry_exhausted"
     assert new.attempt == doc.attempt
@@ -463,12 +474,12 @@ def test_set_budget_merges_and_keeps_state_and_priority() -> None:
 
 def test_set_budget_lets_an_exhausted_restart_run() -> None:
     job = _job(maximum_attempts=1)
-    doc, effect = apply(job, _doc(), "failed", 500, _request("restart"))
+    doc, effect = apply(job, _doc(), "failed", 500, _request("restart", keep_budget=True))
     assert effect == Release("failed", 500, effect.applied_requests)  # type: ignore[union-attr]
     assert doc.failure is not None and doc.failure["code"] == "retry_exhausted"
     doc, effect = apply(job, doc, "failed", 500, _request("set_budget"))
     assert isinstance(effect, Release) and effect.state == "failed"
-    doc, effect = apply(job, doc, "failed", 500, _request("restart"))
+    doc, effect = apply(job, doc, "failed", 500, _request("restart", keep_budget=True))
     assert isinstance(effect, Release) and effect.state == "ready"
     assert doc.failure is None and doc.attempt is not None and doc.attempt["ordinal"] == 2
 
@@ -492,10 +503,10 @@ def test_activation_budget_sites_honour_the_override() -> None:
     assert _outcome_intent(job, doc, outcome, 500, (), JOB_ID)["target_state"] == "failed"
     assert _outcome_intent(job, raised, outcome, 500, (), JOB_ID)["target_state"] == "ready"
     # override_step opens a second activation: refused by the declared limit, allowed once it is lifted.
-    _, effect = apply(job, doc, "failed", 500, _request("override_step"))
+    _, effect = apply(job, doc, "failed", 500, _request("override_step", keep_budget=True))
     assert isinstance(effect, Release) and effect.state == "failed"
     lifted = doc.updated(budget_override={"maximum_activations": None})
-    new, effect = apply(job, lifted, "failed", 500, _request("override_step"))
+    new, effect = apply(job, lifted, "failed", 500, _request("override_step", keep_budget=True))
     assert isinstance(effect, Release) and effect.state == "ready"
     assert new.activation is not None and new.activation["ordinal"] == 2
 
@@ -548,3 +559,168 @@ def test_unseal_releases_a_succeeded_job_for_delete() -> None:
     assert isinstance(effect, Drop) and "already sealed" in effect.reason
     _, effect = apply(_job(), sealed, "succeeded", 500, _request("delete"))
     assert isinstance(effect, Drop) and "job unseal" in effect.reason
+
+
+def _started(doc: StateDoc) -> StateDoc:
+    assert doc.attempt is not None
+    return doc.with_phase("launching", str(doc.attempt["id"])).with_phase("idle", None)
+
+
+def _failed_after(attempts: int, code: str = "process_failed") -> StateDoc:
+    """A job whose first activation ran *attempts* attempts and failed."""
+
+    doc = _doc()
+    for _ in range(attempts - 1):
+        doc = _started(doc.next_attempt("retry", unclean=False))
+    return doc.with_failure({"code": code, "message": "failed"})
+
+
+def _attempts_run(job: JobDefinition, doc: StateDoc) -> list[int]:
+    """Drive the manager's budget checks: the ordinals that launch, retrying every failure until refused."""
+
+    ran: list[int] = []
+    while doc.attempt is not None and attempt_budget_failure(job, doc) is None:
+        ordinal = doc.attempt["ordinal"]
+        assert isinstance(ordinal, int)
+        ran.append(ordinal)
+        doc = _started(doc)
+        if not retry_budget_available(job, doc):
+            break
+        doc = doc.next_attempt("retry", unclean=False)
+    return ran
+
+
+@pytest.mark.parametrize(("failed_at", "expected"), [(3, [4, 5, 6]), (1, [2, 3, 4])])
+def test_restart_restores_the_declared_attempts(failed_at: int, expected: list[int]) -> None:
+    job = _job(maximum_attempts=3)
+    doc = _failed_after(failed_at, "retry_exhausted" if failed_at == 3 else "process_failed")
+    request = _request("restart")
+    new, effect = apply(job, doc, "failed", 500, request)
+    assert effect == Release("ready", 500, (request.request_id,))
+    assert _attempts_run(job, new) == expected
+    assert dict(new.budget_override or {}) == {"maximum_attempts_per_activation": failed_at + 3}
+    assert new.history_tail[-1]["budget"] == {"maximum_attempts_per_activation": failed_at + 3}
+    # keep_budget changes nothing: the exhausted job stays failed, the other runs out its declared three.
+    kept, effect = apply(job, doc, "failed", 500, _request("restart", keep_budget=True))
+    assert kept.budget_override is None and "budget" not in kept.history_tail[-1]
+    assert isinstance(effect, Release) and effect.state == ("failed" if failed_at == 3 else "ready")
+    if failed_at == 1:
+        assert _attempts_run(job, kept) == [2, 3]
+
+
+def test_continue_of_an_unstarted_retry_counts_it_as_the_next_attempt() -> None:
+    # Settle-then-pause: attempt 1 failed, the retry (attempt 2) was recorded but never started.
+    job = _job(maximum_attempts=3, maximum_total_attempts=3, maximum_activations=1)
+    paused = _failed_after(1).next_attempt("retry", unclean=False)
+    new, _ = apply(job, paused, "paused", 500, _request("continue"))
+    assert new.attempt == paused.attempt and _attempts_run(job, new) == [2, 3, 4]
+    # The activation has a started attempt, so it counts as used: maximum_activations 1 + 1.
+    raised = {"maximum_attempts_per_activation": 4, "maximum_total_attempts": 4, "maximum_activations": 2}
+    assert new.history_tail[-1]["budget"] == raised
+    # An activation whose first attempt never started is the next unit itself: nothing to raise.
+    fresh = StateDoc.empty(JOB_ID).next_activation("start", "initial").next_attempt("launch", unclean=False)
+    new, _ = apply(job, fresh, "paused", 500, _request("continue"))
+    assert new.budget_override is None and "budget" not in new.history_tail[-1]
+    assert _attempts_run(job, new) == [1, 2, 3]
+
+
+def test_continue_at_a_budget_exhausted_wait_restores_one_activation() -> None:
+    job = _job(maximum_activations=1)
+    join = {"condition": "all_succeeded", "count": 0, "next_step": "gather", "children": []}
+    doc, target = decide_join(job, _doc().with_failure(None).updated(join=join), JoinDecision("satisfied", (), ()))
+    assert target == "failed" and doc.failure is not None and doc.failure["code"] == "budget_exhausted"
+    doc, effect = apply(job, doc, "failed", 500, _request("continue"))
+    assert isinstance(effect, Release) and effect.state == "waiting"
+    assert dict(doc.budget_override or {}) == {"maximum_activations": 2}
+    doc, target = decide_join(job, doc, JoinDecision("satisfied", (), ()))
+    assert target == "ready" and doc.activation is not None and doc.activation["ordinal"] == 2
+    # Exactly one more: the next activation is refused again.
+    assert doc.attempt is None
+    doc = _started(doc.next_attempt("launch", unclean=False))
+    assert doc.attempt is not None
+    outcome = {"action": "advance", "attempt_id": doc.attempt["id"], "next_step": "finish"}
+    assert _outcome_intent(job, doc, outcome, 500, (), JOB_ID)["target_state"] == "failed"
+
+
+def test_override_step_restores_attempts_and_activations() -> None:
+    job = _job(maximum_attempts=3, maximum_activations=2)
+    doc = _failed_after(3, "retry_exhausted")
+    new, effect = apply(job, doc, "failed", 500, _request("override_step"))
+    assert isinstance(effect, Release) and effect.state == "ready"
+    # Per activation: the new activation starts at 0, so the declared 3 already fit; activations: 1 used + 2.
+    assert dict(new.budget_override or {}) == {"maximum_activations": 3}
+    assert new.history_tail[-1]["budget"] == {"maximum_activations": 3}
+    assert _attempts_run(job, new.next_attempt("launch", unclean=False)) == [1, 2, 3]
+    # Paused before the new activation's first attempt, continue counts the opened activation as the next unit.
+    paused, _ = apply(job, new, "ready", 500, _request("pause"))
+    resumed, _ = apply(job, paused, "paused", 500, _request("continue"))
+    assert resumed.budget_override == new.budget_override and "budget" not in resumed.history_tail[-1]
+
+
+def test_revival_restores_a_declared_unlimited_limit() -> None:
+    # A stop-by-lowering holds only until a revival without keep_budget.
+    doc = _failed_after(1).updated(budget_override={"maximum_attempts_per_activation": 1, "maximum_activations": 4})
+    new, effect = apply(_job(maximum_activations=1), doc, "failed", 500, _request("restart"))
+    assert isinstance(effect, Release) and effect.state == "ready"
+    assert dict(new.budget_override or {}) == {"maximum_activations": 4}
+    assert new.history_tail[-1]["budget"] == {"maximum_attempts_per_activation": None}
+    only = _failed_after(1).updated(budget_override={"maximum_attempts_per_activation": 1})
+    new, _ = apply(_job(), only, "failed", 500, _request("restart"))
+    assert new.budget_override is None
+    kept, effect = apply(_job(), only, "failed", 500, _request("restart", keep_budget=True))
+    assert isinstance(effect, Release) and effect.state == "failed" and kept.budget_override == only.budget_override
+
+
+def test_revival_never_lowers_or_limits_an_override() -> None:
+    job = _job(maximum_attempts=1, maximum_activations=1)
+    for override in (
+        {"maximum_attempts_per_activation": 10, "maximum_activations": 10},
+        {
+            "maximum_attempts_per_activation": None,
+            "maximum_activations": None,
+        },
+    ):
+        doc = _failed_after(1).updated(budget_override=override)
+        new, effect = apply(job, doc, "failed", 500, _request("restart"))
+        assert isinstance(effect, Release) and effect.state == "ready"
+        assert new.budget_override == doc.budget_override and "budget" not in new.history_tail[-1]
+
+
+def test_keep_budget_envelope() -> None:
+    for action in ("continue", "restart", "override_step"):
+        validate_envelope(_document(action, keep_budget=True))
+        with pytest.raises(FormatError):
+            validate_envelope(_document(action, keep_budget=False))
+    for action in ("pause", "set_budget", "cancel"):
+        with pytest.raises(FormatError):
+            validate_envelope(_document(action, keep_budget=True))
+
+
+@pytest.mark.parametrize("maximum", [1, 2])
+def test_override_step_counts_an_abandoned_never_launched_activation(maximum: int) -> None:
+    job = _job(maximum_activations=maximum)
+    paused = StateDoc.empty(JOB_ID).next_activation("start", "initial")
+    new, effect = apply(job, paused, "paused", 500, _request("override_step"))
+    assert isinstance(effect, Release) and effect.state == "ready"
+    assert new.activation is not None and new.activation["ordinal"] == 2
+    assert dict(new.budget_override or {}) == {"maximum_activations": 1 + maximum}
+    # Exactly the declared activations from the opened one: each advance until the limit is allowed.
+    for _ in range(maximum):
+        new = _started(new.next_attempt("launch", unclean=False))
+        assert new.attempt is not None
+        outcome = {"action": "advance", "attempt_id": new.attempt["id"], "next_step": "finish"}
+        intent = _outcome_intent(job, new, outcome, 500, (), JOB_ID)
+        if new.counters["activations"] == 1 + maximum:
+            assert intent["target_state"] == "failed"
+        else:
+            assert intent["target_state"] == "ready"
+            new = new.next_activation("finish", "advance")
+
+
+def test_override_step_counts_an_abandoned_unstarted_retry() -> None:
+    # Settle-then-pause: attempt 2 was recorded (attempts_total 2) but never started.
+    job = _job(maximum_attempts=2, maximum_total_attempts=2)
+    paused = _failed_after(1).next_attempt("retry", unclean=False)
+    new, _ = apply(job, paused, "paused", 500, _request("override_step"))
+    assert dict(new.budget_override or {}) == {"maximum_total_attempts": 4}
+    assert _attempts_run(job, new.next_attempt("launch", unclean=False)) == [1, 2]

@@ -168,6 +168,7 @@ def request_remote_jobs(
             step=arguments.step,
             budget=_request_budget(arguments),
             destination=arguments.destination,
+            keep_budget=getattr(arguments, "keep_budget", False),
         )
         for selector in selectors
     ]

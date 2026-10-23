@@ -265,6 +265,13 @@ def test_job_retry_refuses_changed_semantic_intent(endpoint: Endpoint, change: d
         prepare_job_request(endpoint, _job_intent(**change))
 
 
+def test_job_retry_refuses_a_changed_keep_budget(endpoint: Endpoint) -> None:
+    prepare_job_request(endpoint, _job_intent(action="restart"))
+
+    with pytest.raises(ValueError, match="intent conflicts"):
+        prepare_job_request(endpoint, _job_intent(action="restart", keep_budget=True))
+
+
 def test_job_request_builder_rejects_explicitly_changed_configuration_pin(endpoint: Endpoint) -> None:
     prepare_request(endpoint, _job_intent())
 

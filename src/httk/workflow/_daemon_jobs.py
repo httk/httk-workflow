@@ -261,6 +261,8 @@ class JobExecutor:
             document["step"] = request.step
         if request.budget is not None:
             document["budget"] = dict(request.budget)
+        if request.keep_budget:
+            document["keep_budget"] = True
         if request.action == "eject":
             document["destination"] = str(self.workspace.root / "exchange" / "outbox" / (request.destination or ""))
             document["tree"] = True

@@ -1065,8 +1065,9 @@ wait so the wait can be reopened (`continue`): with `dependency_failure`
 because the condition became impossible without an `on_impossible` advance, or
 because a child is unresolvable; and with `budget_exhausted` because a
 satisfied join, or an `on_impossible` rescue, would advance past the effective
-`maximum_activations`. After `set_budget` raises that limit, `continue`
-re-decides the join and advances. A successful advance and a join naming an
+`maximum_activations`. A `continue` restores the declared allowance (with
+`keep_budget`, after `set_budget` raises that limit), re-decides the join and
+advances. A successful advance and a join naming an
 invalid step clear it.
 
 **The revival guard:** `continue`, `restart` or `override_step` of a child is
@@ -1113,6 +1114,7 @@ version 3, strict, at most 64 KiB:
 | `step` | `override_step` only, required | The step to restart at. |
 | `destination` | `eject` only, required | An absolute directory, or a missing name in one. |
 | `force` | `continue`, `restart`, `override_step`; only `true` | Accept the revival hazard. |
+| `keep_budget` | `continue`, `restart`, `override_step`; only `true` | Keep the effective retry limits: do not restore the declared allowance (§Application). |
 | `tree` | `eject` only; only `true` | Eject the job's descendants with it. |
 | `operator_key`, `signature` | both or neither | An *httk* identity signature, for attribution. An unsigned request applies; one whose signature does not verify is malformed. |
 
@@ -1140,9 +1142,9 @@ at and the request, giving the new document and one effect:
 | --- | --- | --- |
 | `cancel` | not terminal | `Release(cancelled)` |
 | `pause` | not terminal, not `paused`, not `waiting` | `Release(paused)` |
-| `continue` | `failed` or `paused`, revival guard | `Release(waiting)` with the retained `join` when the job failed at its wait, no new attempt; else `Release(ready)`: failure cleared, next attempt `manual_continue` if the last one started; `failed`/`retry_exhausted` past an effective attempt budget, `budget_exhausted` past `maximum_activations` |
-| `restart` | `failed` or `paused`, revival guard | `Release(ready)`: failure cleared, `join` dropped, next attempt `manual_continue` if the last one started; `failed`/`retry_exhausted` past an effective attempt budget, `budget_exhausted` past `maximum_activations` |
-| `override_step` | `failed` or `paused`, revival guard | `Release(ready)` with a new activation of `step`, dropping a retained `join`; `failed`/`retry_exhausted` or `budget_exhausted` past an effective budget, as `restart` |
+| `continue` | `failed` or `paused`, revival guard | The declared allowance restored (below); `Release(waiting)` with the retained `join` when the job failed at its wait, no new attempt; else `Release(ready)`: failure cleared, next attempt `manual_continue` if the last one started; `failed`/`retry_exhausted` past an effective attempt budget, `budget_exhausted` past `maximum_activations` (reachable only with `keep_budget`) |
+| `restart` | `failed` or `paused`, revival guard | The declared allowance restored; `Release(ready)`: failure cleared, `join` dropped, next attempt `manual_continue` if the last one started; `failed`/`retry_exhausted` past an effective attempt budget, `budget_exhausted` past `maximum_activations` (only with `keep_budget`) |
+| `override_step` | `failed` or `paused`, revival guard | The declared allowance restored; `Release(ready)` with a new activation of `step`, dropping a retained `join`; `failed`/`retry_exhausted` or `budget_exhausted` past an effective budget, as `restart` |
 | `set_priority` | always | `Release(<current state>, priority)` |
 | `set_budget` | not `succeeded` or `cancelled` | `Release(<current state>, priority)` with `budget` merged into `budget_override` (a later value for a key wins); no new attempt, no revival guard |
 | `detach` | the job has a parent link not yet detached | `Release(<current state>)` with `detached: {at, operator}` |
@@ -1150,6 +1152,31 @@ at and the request, giving the new document and one effect:
 | `delete` | terminal or `paused`; a succeeded job only after `unseal`; no non-terminal parent waits on it | `Discard`: the job directory, its request files and (for an exchange root) its index entry are removed |
 | `seal` | `succeeded` without a seal digest | `Seal`: seal the payload, record `seal`, release back |
 | `unseal` | `succeeded`, not yet released | `Unseal`: record `seal: {released: true, ...}`, remove `.httk-job/seal.json`, release back |
+
+**Restoring the declared allowance:** unless it carries `keep_budget`, a
+`continue`, `restart` or `override_step` first merges into `budget_override`,
+for each limit `L` whose `job.json` value `D` is not `null`, `L = max(E, U + D)`
+where `E` is the effective limit (left alone when `null`, i.e. lifted) and `U`
+counts the units already started, read from `state.json` before the revival's
+own attempt or activation:
+
+- `maximum_attempts_per_activation`: `0` for `override_step` and for a
+  `continue` that reopens a wait; else `attempt.ordinal`, less 1 when that
+  attempt's `started_at` is `null`, and `0` without an attempt;
+- `maximum_total_attempts`: `counters.attempts_total`, less 1 when the current
+  attempt is unstarted;
+- `maximum_activations`: `counters.activations`, less 1 when the current
+  activation has no started attempt (no attempt, or an unstarted one with
+  ordinal 1), at least `0`.
+
+The two "less 1" rules do not apply to `override_step`: it abandons the
+unstarted attempt or activation while the counters keep its slot, so its `U`
+is `counters.attempts_total` and `counters.activations`.
+
+A limit whose `D` is `null` is restored to unlimited by removing its key from
+`budget_override` (`null` when no key remains). Only keys that change are
+written, and the `request_applied` history entry then carries them as `budget`
+(`null` for a restored unlimited limit). Automatic retries never raise a limit.
 
 A request that does not apply is a `Drop`: its id is recorded, a
 `request_dropped` entry with the reason goes to `history_tail`, and the job is
@@ -1508,7 +1535,9 @@ hour.
 Authenticated job commands use daemon protocol 5, not the internal request
 format. The confined daemon verifies authorized keys, workspace/enrollment,
 freshness and active configuration. `job_request` names one internal UUID or
-unique UUID prefix and one of all ten internal request actions. It refuses
+unique UUID prefix and one of all ten internal request actions, with the
+optional member `keep_budget` (only `true`, only on `continue`, `restart` and
+`override_step`) copied into the internal request. It refuses
 force, path/glob/tag selectors and destinations outside the exchange outbox;
 eject includes the whole tree. All existing operation guards apply.
 

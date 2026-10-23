@@ -494,6 +494,7 @@ def _request_options(
     budget: Mapping[str, int | None] | None,
     force: bool,
     destination: str | None,
+    keep_budget: bool = False,
 ) -> dict[str, object]:
     """Return the optional request members of *action*, refusing an option it does not take or lacks."""
 
@@ -509,9 +510,13 @@ def _request_options(
             raise ValueError(f"{label} is required by, and only valid with, the {owner} action")
     if force and action not in _FORCE_ACTIONS:
         raise ValueError("--force applies only to the continue, restart and override_step actions")
+    if keep_budget and action not in _FORCE_ACTIONS:
+        raise ValueError("--keep-budget applies only to the continue, restart and override_step actions")
     options: dict[str, object] = {name: value for name, value in given.items() if value is not None}
     if force:
         options["force"] = True
+    if keep_budget:
+        options["keep_budget"] = True
     return options
 
 
@@ -627,7 +632,13 @@ def _continue_notes(
 
 
 def _continue_tree(
-    workspace: Workspace, refs: Sequence[JobRef], *, reason: str, force: bool, identity: OperatorIdentity
+    workspace: Workspace,
+    refs: Sequence[JobRef],
+    *,
+    reason: str,
+    force: bool,
+    keep_budget: bool,
+    identity: OperatorIdentity,
 ) -> int:
     """Post and serve ``continue --tree`` one job at a time, deepest first, stopping at one that does not resume.
 
@@ -637,7 +648,14 @@ def _continue_tree(
 
     for index, ref in enumerate(refs):
         published = publish_job_requests(
-            workspace, [ref], action="continue", reason=reason, operator=identity.label, force=force, identity=identity
+            workspace,
+            [ref],
+            action="continue",
+            reason=reason,
+            operator=identity.label,
+            force=force,
+            keep_budget=keep_budget,
+            identity=identity,
         )
         (outcome,) = serve_requests(workspace, published)
         _print_outcome(outcome)
@@ -667,6 +685,7 @@ def publish_job_requests(
     destination: str | None = None,
     identity: OperatorIdentity | None = None,
     budget: Mapping[str, int | None] | None = None,
+    keep_budget: bool = False,
 ) -> list[tuple[JobRef, Path]]:
     """Post one request per already resolved job, signed with the operator's identity when it has a key.
 
@@ -683,6 +702,8 @@ def publish_job_requests(
     :param destination: Where an ``eject`` sends the job.
     :param identity: Resolved identity used for signing, defaulting to the configured one.
     :param budget: The retry-policy limits (``None`` lifts one), for ``set_budget``.
+    :param keep_budget: Keep the retry budget as it is, for ``continue``, ``restart`` and ``override_step``
+        (otherwise the revival restores the job's declared allowance).
     :return: The posted request files paired with their jobs.
     :raises ValueError: For an unknown action, a misplaced option, or an unknown runner step.
     """
@@ -692,7 +713,13 @@ def publish_job_requests(
     selected = identity or _resolve_request_identity(None)
     ensure_identity_key(selected)
     options = _request_options(
-        action, priority=priority, step=step, budget=budget, force=force, destination=destination
+        action,
+        priority=priority,
+        step=step,
+        budget=budget,
+        force=force,
+        destination=destination,
+        keep_budget=keep_budget,
     )
     _prevalidate(refs, action, step, force=force)
     documents = []
@@ -757,7 +784,14 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         refs = _with_failed_descendants(workspace, refs)
     _continue_notes(workspace, refs, arguments.action, tree=tree)
     if tree:
-        return _continue_tree(workspace, refs, reason=arguments.reason, force=bool(arguments.force), identity=identity)
+        return _continue_tree(
+            workspace,
+            refs,
+            reason=arguments.reason,
+            force=bool(arguments.force),
+            keep_budget=bool(arguments.keep_budget),
+            identity=identity,
+        )
     published = publish_job_requests(
         workspace,
         refs,
@@ -770,6 +804,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         destination=arguments.destination,
         identity=identity,
         budget=_request_budget(arguments),
+        keep_budget=bool(arguments.keep_budget),
     )
     return _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
 
@@ -806,6 +841,7 @@ def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLICont
         budget=_request_budget(arguments),
         force=bool(arguments.force),
         destination=arguments.destination,
+        keep_budget=bool(arguments.keep_budget),
     )
     refs = [resolve_job(workspace, selector) for selector in arguments.job_id]
     _prevalidate(refs, arguments.action, arguments.step, force=bool(arguments.force))
@@ -855,8 +891,17 @@ def _validate_remote_envelopes(
         budget=_request_budget(arguments),
         force=bool(arguments.force),
         destination=getattr(arguments, "destination", None),
+        keep_budget=bool(getattr(arguments, "keep_budget", False)),
     )
-    expected = {"priority": None, "step": None, "budget": None, "destination": None, "force": None, **options}
+    expected = {
+        "priority": None,
+        "step": None,
+        "budget": None,
+        "destination": None,
+        "force": None,
+        "keep_budget": None,
+        **options,
+    }
     expected.update(action=arguments.action, operator=operator, reason=arguments.reason)
     for index, (envelope, key, selector) in enumerate(zip(envelopes, keys, arguments.job_id, strict=True)):
         try:
@@ -919,6 +964,8 @@ def request_remote_job_result(
         argv.append(f"{_BUDGET_OPTIONS[name]}={'unlimited' if limit is None else limit}")
     if arguments.force:
         argv.append("--force")
+    if getattr(arguments, "keep_budget", False):
+        argv.append("--keep-budget")
     argv.extend(arguments.job_id)
     result = run_adapter(
         target.bundle, "invoke", {"argv": argv}, timeout=arguments.adapter_timeout, interactive=interactive
@@ -1635,6 +1682,14 @@ def _add_request_options(parser: argparse.ArgumentParser) -> None:
         "--force",
         action="store_true",
         help="accept reviving a job a decided join already consumed (continue, restart, override_step)",
+    )
+    parser.add_argument(
+        "--keep-budget",
+        action="store_true",
+        help=(
+            "revive without restoring the declared retry allowance (continue, restart, override_step); "
+            "by default a revival raises the job's retry limits so it again has its declared allowance"
+        ),
     )
 
 

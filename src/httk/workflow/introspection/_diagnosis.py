@@ -17,6 +17,7 @@ from .._bundles import read_manifest
 from .._durations import format_duration
 from .._job import JobDefinition
 from .._kernel import OWNED, JobRef, OwnerRecord
+from .._manager_commit import attempt_budget_failure
 from .._manager_scheduling import unmet_job_requirements
 from .._state import TERMINAL_STATES, StateDoc
 from .._util import timestamp_seconds
@@ -637,11 +638,22 @@ def _manager_checks(
         )
 
 
+def _launch_exhausted(job: JobDefinition, doc: StateDoc | None) -> bool:
+    # As the manager's launch: an unstarted attempt is the one launched, otherwise a fresh one is recorded first.
+    if doc is None or doc.activation is None:
+        return False
+    attempt = doc.attempt
+    if attempt is None or attempt.get("started_at") is not None:
+        doc = doc.next_attempt("launch", unclean=False)
+    return attempt_budget_failure(job, doc) is not None
+
+
 def _budget_checks(job: JobDefinition, doc: StateDoc | None, report: _Diagnosing) -> None:
     budgets = budget_status(job, doc)
+    exhausted = _launch_exhausted(job, doc)
     for text in budgets.describe():
-        report.check("budget", not budgets.attempt_budget_exhausted, text)
-    if budgets.attempt_budget_exhausted:
+        report.check("budget", not exhausted, text)
+    if exhausted:
         report.hint(
             "the next claim of this job will fail it with budget_exhausted; raise the limit with 'httk job request "
             f"set_budget --workspace WORKSPACE {budgets.set_budget_option()} --operator NAME --reason WHY JOB'"
@@ -690,27 +702,19 @@ def _continue_checks(
         report.check(name, None, "the job definition is unreadable, so its budget is unknown")
         return
     budgets = budget_status(job, doc)
-    if budgets.attempt_budget_exhausted:
-        report.check(
-            name,
-            False,
-            f"'{verb}' would immediately end the job again with retry_exhausted: " + "; ".join(budgets.describe()),
-        )
-        step = doc.activation.get("step") or "STEP"
+    raised, revived = _requests.restored_budget(job, doc, action=verb)
+    after = budget_status(job, revived)
+    restoring = ", restoring the declared retry allowance" if raised else ""
+    report.check(name, True, f"'{verb}' repeats this activation{restoring}: " + "; ".join(after.describe()))
+    if _launch_exhausted(job, doc):
         report.hint(
-            f"raise the limit with 'httk job request set_budget --workspace WORKSPACE {budgets.set_budget_option()} "
-            f"--operator NAME --reason WHY JOB', then '{verb}' it; or use 'httk job request override_step "
-            f"--workspace WORKSPACE --step {step} --operator NAME --reason WHY JOB' to start a new activation instead"
+            f"with --keep-budget, '{verb}' would immediately end the job again on its exhausted budget: "
+            + "; ".join(budgets.describe())
         )
-        return
-    report.check(name, True, f"'{verb}' repeats this activation: " + "; ".join(budgets.describe()))
     failure = doc.failure
     exhausted = failure is not None and failure.get("code") == "budget_exhausted"
     if exhausted and doc.join is None and budgets.activation_budget_exhausted:
-        report.hint(
-            "the rerun step's advance would exceed maximum_activations again; raise it with 'httk job request "
-            "set_budget --workspace WORKSPACE --max-activations N --operator NAME --reason WHY JOB' first"
-        )
+        report.hint("with --keep-budget, the rerun step's advance would exceed maximum_activations again")
     if verb == "continue":
         report.hint("resume it with 'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB'")
 
@@ -927,16 +931,21 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
             # The join was decided, but its next activation exceeds maximum_activations: continue re-decides it.
             children = join.get("children")
             count = len(children) if isinstance(children, tuple) else 0
+            after = "the declared one"
+            if job is not None and doc is not None:
+                _, revived = _requests.restored_budget(job, doc, action="continue", reopen=True)
+                maximum = budget_status(job, revived).maximum_activations
+                after = "unlimited" if maximum is None else str(maximum)
             report.check(
                 "wait",
                 None,
-                f"the wait on {count} children can be reopened with `httk job request continue` once "
-                "maximum_activations is raised",
+                f"the wait on {count} children can be reopened with `httk job request continue`, which restores the "
+                f"declared retry allowance (maximum_activations {after} after it)",
             )
             report.hint(
-                "raise it with 'httk job request set_budget --workspace WORKSPACE --max-activations N --operator NAME "
-                "--reason WHY JOB', then 'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY "
-                "JOB' reopens the wait"
+                "'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB' reopens the wait; "
+                "with --keep-budget, raise maximum_activations first with 'httk job request set_budget --workspace "
+                "WORKSPACE --max-activations N --operator NAME --reason WHY JOB'"
             )
         elif join is not None:
             # A kept join makes continue reopen the wait, which no budget binds; restart is budget-bound.

@@ -569,14 +569,28 @@ def test_set_budget_lets_an_exhausted_job_restart(ws: Workspace, tmp_path: Path)
     h.run(ws)
     failed = h.find(ws, submitted.job_id)
     assert failed.state == "failed"
-    assert _serve(ws, failed, "restart") == "failed"
+    assert _serve(ws, failed, "restart", keep_budget=True) == "failed"
     failure = h.state_of(h.find(ws, submitted.job_id)).failure
     assert failure is not None and failure["code"] == "retry_exhausted"
     budget = {"maximum_attempts_per_activation": 2}
     assert _serve(ws, h.find(ws, submitted.job_id), "set_budget", budget=budget) == "failed"
-    assert _serve(ws, h.find(ws, submitted.job_id), "restart") == "ready"
+    assert _serve(ws, h.find(ws, submitted.job_id), "restart", keep_budget=True) == "ready"
     h.run(ws)
     done = h.find(ws, submitted.job_id)
     doc = h.state_of(done)
     assert done.state == "succeeded" and doc.attempt is not None and doc.attempt["ordinal"] == 2
     assert doc.budget_override == budget
+
+
+def test_restart_restores_the_declared_allowance(ws: Workspace, tmp_path: Path) -> None:
+    installed = h.install(ws, tmp_path / "demo")
+    submitted = h.submit(ws, installed, {"start": "retry_once"}, retry_policy={"maximum_attempts_per_activation": 1})
+    h.run(ws)
+    assert _serve(ws, h.find(ws, submitted.job_id), "restart") == "ready"
+    h.run(ws)
+    done = h.find(ws, submitted.job_id)
+    doc = h.state_of(done)
+    assert done.state == "succeeded" and doc.attempt is not None and doc.attempt["ordinal"] == 2
+    assert doc.budget_override == {"maximum_attempts_per_activation": 2}
+    applied = [entry for entry in doc.history_tail if entry.get("event") == "request_applied"]
+    assert applied[-1]["budget"] == {"maximum_attempts_per_activation": 2}

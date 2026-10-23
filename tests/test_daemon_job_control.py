@@ -911,6 +911,23 @@ def test_daemon_adoption_refusal_is_checked_for_every_internal_action(
     assert effect.reason == "the exchange adoption changed"
 
 
+@pytest.mark.parametrize("keep_budget", [True, False])
+def test_daemon_revival_forwards_keep_budget_into_the_internal_request(tmp_path: Path, keep_budget: bool) -> None:
+    workspace, ref, state = _setup(tmp_path)
+    ref = _release_in_state(workspace, ref, "paused")
+    ledger = Ledger(state, workspace.workspace_id, ENROLLMENT_ID)
+    entry = ledger.admit(
+        _request(tmp_path, workspace.workspace_id, ref.job_id, action="restart", keep_budget=keep_budget)
+    )
+    with _kernel.register_owner(workspace, kind="daemon", label="restart", allocation=None, advertised={}) as owner:
+        response = JobExecutor(workspace, ledger, owner, configuration_digest=CONFIGURATION_DIGEST).execute(entry)
+    target = ledger.read_target(entry)
+    ledger.close()
+    assert (response.outcome, response.current_state) == ("applied", "ready")
+    assert target is not None
+    assert _Target.decode(target).document.get("keep_budget") is (True if keep_budget else None)
+
+
 def test_malformed_daemon_adoption_attribution_is_refused_by_owner(tmp_path: Path) -> None:
     workspace, ref, _state = _setup(tmp_path)
     path = _requests.post(

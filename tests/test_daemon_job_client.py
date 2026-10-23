@@ -187,6 +187,21 @@ def test_remote_batch_sends_one_typed_command_per_selector(remote, monkeypatch: 
     assert [row[3] for row in rows] == [request.request_id for request in seen]
 
 
+def test_keep_budget_is_sent_on_the_daemon_command(remote, monkeypatch: pytest.MonkeyPatch) -> None:
+    bundle, _endpoint, identity, response_seed = remote
+    seen = _mock_adapter(monkeypatch, response_seed, [("applied", "ready")])
+
+    status, _stdout = _daemon_jobs.request_remote_jobs(
+        WorkspaceBinding("cluster:runs", "cluster", None),
+        CLIContext("httk", bundle.parent),
+        _arguments(action="restart", keep_budget=True),
+        identity,
+    )
+
+    assert status == 0
+    assert [(request.action, request.keep_budget) for request in seen] == [("restart", True)]
+
+
 def test_force_and_non_uuid_selectors_are_refused_before_publication(remote, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle, _endpoint, identity, response_seed = remote
     seen = _mock_adapter(monkeypatch, response_seed, [])

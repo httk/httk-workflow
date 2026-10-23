@@ -210,6 +210,28 @@ def test_request_envelopes_carry_the_budget_and_the_far_side_cannot_change_it(tm
         job_cli._validate_remote_envelopes(changed, arguments, operator)
 
 
+def test_request_envelopes_carry_keep_budget_and_the_far_side_cannot_change_it(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    ref = _job(tmp_path, workspace, "keep-protocol")
+    argv = ["job", "request-envelopes", "restart", "--workspace", workspace_name, "--keep-budget"]
+    argv += ["--operator=Test User <tester@example.test>", "--reason=protocol", "--json", ref.job_id]
+    assert command(argv, _context(tmp_path)) == 0
+    document = json.loads(capsys.readouterr().out)
+    (envelope,) = document["envelopes"]
+    assert envelope["keep_budget"] is True
+    fields = {"job_id": [ref.job_id], "action": "restart", "reason": "protocol", "priority": None, "step": None}
+    kept = argparse.Namespace(**fields, force=False, destination=None, keep_budget=True)
+    operator = "Test User <tester@example.test>"
+    assert job_cli._validate_remote_envelopes(document, kept, operator) == [envelope]
+    # The far side may neither drop the member asked for nor add one that was not.
+    dropped = {**document, "envelopes": [{key: value for key, value in envelope.items() if key != "keep_budget"}]}
+    with pytest.raises(ValueError, match="'keep_budget' disagrees"):
+        job_cli._validate_remote_envelopes(dropped, kept, operator)
+    plain = argparse.Namespace(**fields, force=False, destination=None, keep_budget=False)
+    with pytest.raises(ValueError, match="'keep_budget' disagrees"):
+        job_cli._validate_remote_envelopes(document, plain, operator)
+
+
 def test_remote_request_passes_the_budget_options_to_the_far_side(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -239,6 +261,13 @@ def test_remote_request_passes_the_budget_options_to_the_far_side(
     (argv,) = calls
     assert "--max-attempts-per-activation=unlimited" in argv and "--max-activations=5" in argv
     assert not any(part.startswith("--max-total-attempts") for part in argv)
+    assert "--keep-budget" not in argv
+    calls.clear()
+    fields = {name: value for name, value in vars(namespace).items() if not name.startswith("maximum_")}
+    namespace = argparse.Namespace(**{**fields, "action": "restart", "keep_budget": True})
+    assert job_cli.request_remote_job_result(binding, _context(tmp_path), namespace, identity) == (3, "", "stop")
+    (argv,) = calls
+    assert argv[argv.index("--keep-budget") + 1 :] == ["abc"]
 
 
 def test_the_removed_confirm_launches_ended_verb_is_refused(tmp_path: Path, capsys) -> None:
@@ -634,14 +663,13 @@ def test_continue_tree_stops_at_a_descendant_that_does_not_resume(tmp_path: Path
     tree = [_mapping(tmp_path, workspace, tag) for tag in ("leaf", "child", "parent")]
     _child_of(tree[0], tree[1])
     _child_of(tree[1], tree[2])
-    # The leaf's budget allows one attempt, which it used: its revival lands failed again.
+    # The leaf's budget allows one attempt, which it used: kept as it is, its revival lands failed again.
     leaf = _failed(workspace, tree[0], started=True)
     child = _failed(workspace, tree[1], (_link(tree[0]),))
     parent = _failed(workspace, tree[2], (_link(tree[1]),))
 
-    assert (
-        command([*_request_args(workspace_name, parent.job_id, action="continue"), "--tree"], _context(tmp_path)) == 1
-    )
+    argv = [*_request_args(workspace_name, parent.job_id, action="continue"), "--tree", "--keep-budget"]
+    assert command(argv, _context(tmp_path)) == 1
     captured = capsys.readouterr()
     (line,) = captured.out.splitlines()
     assert line.startswith(f"{leaf.job_id}\t") and line.endswith("state=failed")
@@ -651,6 +679,56 @@ def test_continue_tree_stops_at_a_descendant_that_does_not_resume(tmp_path: Path
             "resolve it and rerun continue --tree)"
         ) in captured.err
     assert [v3.find(workspace, ref.job_id).state for ref in (leaf, child, parent)] == ["failed"] * 3
+    assert not _requests(workspace)
+
+
+def test_continue_tree_restores_budgets_and_forwards_keep_budget(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    tree = [_mapping(tmp_path, workspace, tag) for tag in ("leaf", "child", "parent")]
+    _child_of(tree[0], tree[1])
+    _child_of(tree[1], tree[2])
+    leaf = _failed(workspace, tree[0], started=True)
+    child = _failed(workspace, tree[1], (_link(tree[0]),))
+    parent = _failed(workspace, tree[2], (_link(tree[1]),))
+    seen: list[object] = []
+    original = job_cli.publish_job_requests
+
+    def spy(*args: object, **kwargs: object) -> object:
+        seen.append(kwargs.get("keep_budget"))
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(job_cli, "publish_job_requests", spy)
+    # Without --keep-budget the leaf's revival restores its declared attempt, so the whole tree resumes.
+    argv = [*_request_args(workspace_name, parent.job_id, action="continue"), "--tree"]
+    assert command(argv, _context(tmp_path)) == 0
+    capsys.readouterr()
+    assert seen == [False, False, False]
+    assert v3.state_of(v3.find(workspace, leaf.job_id)).budget_override == {"maximum_attempts_per_activation": 2}
+    assert [v3.find(workspace, ref.job_id).state for ref in (leaf, child, parent)] == ["ready", "waiting", "waiting"]
+
+    # --keep-budget is forwarded to every descendant's continue.
+    second = tmp_path / "second"
+    second.mkdir()
+    workspace, workspace_name = _new_workspace(second)
+    tree = [_mapping(second, workspace, tag) for tag in ("leaf", "child", "parent")]
+    _child_of(tree[0], tree[1])
+    _child_of(tree[1], tree[2])
+    _failed(workspace, tree[0])
+    _failed(workspace, tree[1], (_link(tree[0]),))
+    parent = _failed(workspace, tree[2], (_link(tree[1]),))
+    seen.clear()
+    argv = [*_request_args(workspace_name, parent.job_id, action="continue"), "--tree", "--keep-budget"]
+    assert command(argv, _context(tmp_path)) == 0
+    assert seen == [True, True, True]
+
+
+def test_keep_budget_applies_only_to_revivals(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_id = _job(tmp_path, workspace, "keep").job_id
+    assert command([*_request_args(workspace_name, job_id), "--keep-budget"], _context(tmp_path)) == 2
+    assert "--keep-budget applies only to the continue, restart and override_step actions" in capsys.readouterr().err
     assert not _requests(workspace)
 
 

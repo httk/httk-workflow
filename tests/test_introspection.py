@@ -389,44 +389,83 @@ def test_why_offers_to_reopen_the_wait_of_a_parent_that_failed_at_it(ws: Workspa
     assert "all_succeeded then step gather" in render_job(report)
 
 
-def test_why_warns_that_restart_of_a_kept_wait_is_budget_bound(ws: Workspace, installed: Any) -> None:
+_KEPT_RESTART = "with --keep-budget, 'restart' would immediately end the job again on its exhausted budget"
+
+
+def test_why_says_restart_of_a_kept_wait_restores_the_allowance(ws: Workspace, installed: Any) -> None:
     ref = _failed_at_wait(ws, installed, {"maximum_attempts_per_activation": 1})
     diagnosis = explain_job(ws, ref)
     checks = {check.name: check for check in diagnosis.checks}
     assert checks["wait"].detail == _WAIT
-    assert checks["operator restart"].satisfied is False
+    assert checks["operator restart"].satisfied is True
     assert checks["operator restart"].detail.startswith(
-        "'restart' would immediately end the job again with retry_exhausted"
+        "'restart' repeats this activation, restoring the declared retry allowance: "
+        "attempts this activation 1/2 (declared 1)"
     )
-    assert any("override_step --workspace WORKSPACE --step start " in hint for hint in diagnosis.hints)
+    assert any(hint.startswith(_KEPT_RESTART) for hint in diagnosis.hints)
 
-    # The budget refuses the restart: the job stays failed, keeps its wait, and no longer failed "while waiting".
+    # With --keep-budget the budget refuses the restart: the job stays failed, keeps its wait, and no longer failed
+    # "while waiting".
     assert ref.placement is not None
-    path = _requests.post(ws, action="restart", job_id=ref.job_id, placement=ref.placement, operator="op", reason="r")
+    path = _requests.post(
+        ws, action="restart", job_id=ref.job_id, placement=ref.placement, operator="op", reason="r", keep_budget=True
+    )
     (outcome,) = serve_requests(ws, [(ref, path)])
     assert (outcome.status, outcome.state) == ("applied", "failed")
     diagnosis = explain_job(ws, resolve_job(ws, ref.job_id))
     assert diagnosis.summary == "this job failed with retry_exhausted and stays failed until an operator resumes it"
     assert {check.name: check for check in diagnosis.checks}["wait"].detail == _WAIT
-    assert any("override_step --workspace WORKSPACE --step start " in hint for hint in diagnosis.hints)
+    assert any(hint.startswith(_KEPT_RESTART) for hint in diagnosis.hints)
 
 
-def test_why_steers_a_join_kept_by_maximum_activations_to_set_budget_and_continue(
-    ws: Workspace, installed: Any
-) -> None:
+def test_why_says_continue_reopens_a_join_kept_by_maximum_activations(ws: Workspace, installed: Any) -> None:
     ref = _failed_at_wait(ws, installed, {"maximum_activations": 1})
     doc = v3.state_of(ref).with_failure({"code": "budget_exhausted", "message": "maximum_activations exceeded"})
     (ref.path / "state.json").write_bytes(encode_state(doc))
     diagnosis = explain_job(ws, ref)
     checks = {check.name: check for check in diagnosis.checks}
     assert checks["wait"].detail == (
-        "the wait on 2 children can be reopened with `httk job request continue` once maximum_activations is raised"
+        "the wait on 2 children can be reopened with `httk job request continue`, which restores the declared retry "
+        "allowance (maximum_activations 2 after it)"
     )
     assert "operator restart" not in checks and "operator continue" not in checks
     (hint,) = [hint for hint in diagnosis.hints if "set_budget" in hint]
+    assert hint.startswith(
+        "'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB' reopens the wait; "
+        "with --keep-budget, raise maximum_activations first"
+    )
     assert "set_budget --workspace WORKSPACE --max-activations N --operator NAME" in hint
-    assert "'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB' reopens the wait" in hint
     assert not any("rerun step" in hint or "restart" in hint for hint in diagnosis.hints)
+
+    # The continue reopens the wait with one more activation for the join.
+    assert ref.placement is not None
+    path = _requests.post(ws, action="continue", job_id=ref.job_id, placement=ref.placement, operator="op", reason="r")
+    (outcome,) = serve_requests(ws, [(ref, path)])
+    assert (outcome.status, outcome.state) == ("applied", "waiting")
+    assert v3.state_of(resolve_job(ws, ref.job_id)).budget_override == {"maximum_activations": 2}
+
+
+def test_budget_verdicts_launch_an_unstarted_attempt_as_it_is(ws: Workspace, installed: Any) -> None:
+    submitted = _submit(ws, installed, {"start": "exit"}, retry_policy={"maximum_attempts_per_activation": 2})
+    v3.run(ws)
+    ref = resolve_job(ws, submitted.job_id)
+    job = JobDefinition.from_path(ref.path / "job.json")
+    doc = v3.state_of(ref)
+    assert doc.attempt is not None and doc.attempt["ordinal"] == 1
+    # The recorded retry is attempt 2 of 2: launching it (or a kept-budget continue) is within the budget.
+    retry = doc.next_attempt("retry", unclean=False)
+    report = _diagnosis._Diagnosing()
+    _diagnosis._budget_checks(job, retry, report)
+    _diagnosis._continue_checks(job, retry, report)
+    assert all(check.satisfied for check in report.checks)
+    assert not any("budget" in hint for hint in report.hints)
+    # Lowered below it, both say so.
+    lowered = retry.updated(budget_override={"maximum_attempts_per_activation": 1})
+    report = _diagnosis._Diagnosing()
+    _diagnosis._budget_checks(job, lowered, report)
+    _diagnosis._continue_checks(job, lowered, report)
+    assert any(hint.startswith("the next claim of this job will fail it") for hint in report.hints)
+    assert any(hint.startswith("with --keep-budget, 'continue' would immediately") for hint in report.hints)
 
 
 def test_budget_hint_names_every_exhausted_attempt_budget() -> None:
@@ -452,26 +491,22 @@ def test_render_job_surfaces_a_process_failure_breadcrumb_headline_and_control(w
     assert "attempt control" in rendered
 
 
-@pytest.mark.parametrize(
-    ("limit", "option"),
-    [
-        ("maximum_attempts_per_activation", "--max-attempts-per-activation"),
-        ("maximum_total_attempts", "--max-total-attempts"),
-    ],
-)
-def test_why_reports_an_exhausted_continue_budget(ws: Workspace, installed: Any, limit: str, option: str) -> None:
+@pytest.mark.parametrize("limit", ["maximum_attempts_per_activation", "maximum_total_attempts"])
+def test_why_reports_an_exhausted_continue_budget(ws: Workspace, installed: Any, limit: str) -> None:
     submitted = _submit(ws, installed, {"start": "exit"}, retry_policy={limit: 1})
     v3.run(ws)
 
     diagnosis = explain_job(ws, resolve_job(ws, submitted.job_id))
     checks = {check.name: check for check in diagnosis.checks}
-    assert checks["operator continue"].satisfied is False
-    assert "retry_exhausted" in checks["operator continue"].detail
-    (hint,) = [hint for hint in diagnosis.hints if "set_budget" in hint]
-    assert f"'httk job request set_budget --workspace WORKSPACE {option} N --operator NAME --reason WHY JOB'" in hint
-    assert "then 'continue' it" in hint and "override_step --workspace WORKSPACE --step start " in hint
+    assert checks["operator continue"].satisfied is True
+    assert "restoring the declared retry allowance" in checks["operator continue"].detail
+    assert "1/2 (declared 1)" in checks["operator continue"].detail
+    (hint,) = [hint for hint in diagnosis.hints if "--keep-budget" in hint]
+    assert hint.startswith("with --keep-budget, 'continue' would immediately end the job again on its exhausted budget")
+    assert not any("set_budget" in hint for hint in diagnosis.hints)
 
-    # Raised with set_budget, the same job may continue; job why and job show name the declared limit too.
+    # Raised with set_budget, the same job continues without a further raise; job why and job show name the
+    # declared limit too.
     ref = resolve_job(ws, submitted.job_id)
     assert ref.placement is not None
     path = _requests.post(

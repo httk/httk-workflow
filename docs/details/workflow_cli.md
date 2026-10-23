@@ -279,7 +279,7 @@ manager's platform stays `ready` and unclaimed there.
 | --- | --- | --- |
 | `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--parameter`, `--environment`, `--format`, `--input`, `--input-move-from-job`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--step`, `--json` |
 | `job submit SOURCE...` | submit prepared payload directories | `--workspace`, `--move`, `--json` |
-| `job request ACTION JOB_ID...` | post one operator request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--operator`, required `--reason`, `--priority`, `--step`, `--destination`, `--max-attempts-per-activation`, `--max-total-attempts`, `--max-activations`, `--force`, `--wait`, `--timeout`, `--adapter-timeout`, daemon-only `--request-id` |
+| `job request ACTION JOB_ID...` | post one operator request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--operator`, required `--reason`, `--priority`, `--step`, `--destination`, `--max-attempts-per-activation`, `--max-total-attempts`, `--max-activations`, `--force`, `--keep-budget`, `--wait`, `--timeout`, `--adapter-timeout`, daemon-only `--request-id` |
 | `job delete JOB...` | delete terminal or paused jobs (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
 | `job seal JOB...` | seal succeeded jobs that carry no seal | `--workspace` |
 | `job unseal JOB...` | release succeeded jobs from their seal, so they may be deleted | `--workspace`, `--force` skips the confirmation |
@@ -433,9 +433,12 @@ each action does is tabulated in
 child a parent's observations name (`continue`, `restart`, `override_step`) and
 publishes an `override_step` outside the runner's recorded steps. The revival
 guard does not apply to a child that its parent's join still names (the parent
-failed at its wait, or waits on it again). `--tree` (only with `continue`, and only for a local workspace)
+failed at its wait, or waits on it again). A revival (`continue`, `restart`,
+`override_step`) restores the job's declared retry allowance; `--keep-budget`
+(only with those actions) keeps the current limits instead. `--tree` (only with `continue`, and only for a local workspace)
 also resumes the failed descendants of the job reachable through retained
-joins, deepest first, before the job itself; see {doc}`/restarting_jobs`.
+joins, deepest first, before the job itself, forwarding `--keep-budget` to each;
+see {doc}`/restarting_jobs`.
 
 After publication, the CLI immediately serves the pending requests of each
 unowned job, from a snapshot taken then, oldest first by `created_at` instant

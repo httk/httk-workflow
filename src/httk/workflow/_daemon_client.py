@@ -653,6 +653,7 @@ def _same_intent(saved: Request, intent: Request) -> bool:
         saved.command_id,
         saved.configuration_digest,
         saved.time_limit,
+        saved.keep_budget,
     ) == (
         intent.request_id,
         intent.workspace_id,
@@ -670,6 +671,7 @@ def _same_intent(saved: Request, intent: Request) -> bool:
         intent.command_id,
         intent.configuration_digest,
         intent.time_limit,
+        intent.keep_budget,
     )
 
 

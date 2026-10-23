@@ -85,6 +85,16 @@ def _document(operation: str, **fields: object) -> bytes:
                 "budget": {"maximum_attempts_per_activation": 3, "maximum_activations": None},
             },
         ),
+        (
+            "job_request",
+            {
+                "configuration_digest": CONFIGURATION_DIGEST,
+                "selector": JOB_ID,
+                "action": "restart",
+                "reason": "operator request",
+                "keep_budget": True,
+            },
+        ),
     ],
 )
 def test_each_operation_round_trips(operation: str, fields: dict[str, Any]) -> None:
@@ -106,6 +116,7 @@ def test_each_operation_round_trips(operation: str, fields: dict[str, Any]) -> N
         budget=fields.get("budget"),
         destination=fields.get("destination"),
         command_id=fields.get("command_id"),
+        keep_budget=fields.get("keep_budget", False),
     )
     encoded = encode_request(request)
     assert encoded.isascii()
@@ -307,6 +318,10 @@ def test_start_requires_configuration_digest_when_encoded() -> None:
         ({"destination": "archive"}, "destination is allowed only for eject"),
         ({"destination": "/absolute"}, "destination"),
         ({"destination": "bad\\path"}, "destination"),
+        ({"keep_budget": True}, "keep_budget is allowed only for continue, restart and override_step"),
+        ({"action": "set_budget", "budget": {"maximum_activations": 2}, "keep_budget": True}, "keep_budget"),
+        ({"action": "restart", "keep_budget": 1}, "keep_budget"),
+        ({"action": "restart", "keep_budget": None}, "keep_budget"),
     ],
 )
 def test_job_request_rejects_invalid_options(overrides: dict[str, object], message: str) -> None:
@@ -323,6 +338,25 @@ def test_job_request_rejects_invalid_options(overrides: dict[str, object], messa
     fields.update(overrides)
     with pytest.raises(ValueError, match=message):
         Request(**fields)  # type: ignore[arg-type]
+
+
+def test_keep_budget_is_present_only_as_true_on_a_revival() -> None:
+    fields = {"configuration_digest": CONFIGURATION_DIGEST, "selector": JOB_ID, "reason": "why"}
+    for action in ("continue", "restart", "override_step"):
+        extra = {"step": "relax"} if action == "override_step" else {}
+        request = decode_request(_document("job_request", **fields, action=action, keep_budget=True, **extra))
+        assert request.keep_budget is True and b'"keep_budget":true' in encode_request(request)
+        plain = decode_request(_document("job_request", **fields, action=action, **extra))
+        assert plain.keep_budget is False and b"keep_budget" not in encode_request(plain)
+    for document in (
+        _document("job_request", **fields, action="restart", keep_budget=False),
+        _document("job_request", **fields, action="pause", keep_budget=True),
+        _document("health", keep_budget=True),
+    ):
+        with pytest.raises(ValueError, match="invalid request fields"):
+            decode_request(document)
+    with pytest.raises(ValueError, match="keep_budget"):
+        Request(REQUEST_ID, WORKSPACE_ID, "health", enrollment_id=ENROLLMENT_ID, keep_budget=True)
 
 
 @pytest.mark.parametrize("action", _requests.ACTIONS)

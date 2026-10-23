@@ -81,6 +81,7 @@ class Request:
     :param destination: Select an outbox-relative destination for ``eject``; omitted, the outbox root.
     :param command_id: Identify the original daemon command for ``job_request_status``.
     :param time_limit: Request a canonical Slurm ``--time`` for ``start_manager`` instead of the configured one.
+    :param keep_budget: Keep the retry budget on a ``continue``, ``restart`` or ``override_step`` revival.
     :raises ValueError: If a field is invalid or conflicts with the operation.
     """
 
@@ -104,6 +105,7 @@ class Request:
     destination: str | None = field(default=None, kw_only=True)
     command_id: str | None = field(default=None, kw_only=True)
     time_limit: str | None = field(default=None, kw_only=True)
+    keep_budget: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
         """Refuse invalid fields and operation-specific combinations."""
@@ -113,6 +115,12 @@ class Request:
         _check_time_limit(self.time_limit)
         if self.time_limit is not None and self.operation != "start_manager":
             raise ValueError("time_limit is allowed only for start_manager")
+        if self.keep_budget is not False and (
+            self.keep_budget is not True
+            or self.operation != "job_request"
+            or self.action not in ("continue", "restart", "override_step")
+        ):
+            raise ValueError("keep_budget is allowed only for continue, restart and override_step")
         if type(self.enrollment_id) is not str or _ID_PATTERN.fullmatch(self.enrollment_id) is None:
             raise ValueError("invalid enrollment_id")
         if type(self.workspace_id) is not str:
@@ -356,6 +364,8 @@ def _request_fields(request: Request) -> dict[str, object]:
             value = getattr(request, name)
             if value is not None:
                 fields[name] = dict(value) if name == "budget" else value
+        if request.keep_budget:
+            fields["keep_budget"] = True
     elif request.operation == "job_request_status":
         fields["command_id"] = request.command_id
     return fields
@@ -399,7 +409,7 @@ def decode_request(data: bytes) -> Request:
         keys.add("handle")
     elif operation == "job_request":
         keys.update({"configuration_digest", "selector", "action", "reason"})
-        keys.update(name for name in ("priority", "step", "budget", "destination") if name in value)
+        keys.update(name for name in ("priority", "step", "budget", "destination", "keep_budget") if name in value)
     elif operation == "job_request_status":
         keys.add("command_id")
     if set(value) != keys:
@@ -423,6 +433,8 @@ def decode_request(data: bytes) -> Request:
     if "handle" in value and type(handle) is not str:
         raise ValueError("invalid request fields")
     if "time_limit" in value and type(value["time_limit"]) is not str:
+        raise ValueError("invalid request fields")
+    if "keep_budget" in value and value["keep_budget"] is not True:
         raise ValueError("invalid request fields")
     if type(created_at) is not int or type(expires_at) is not int:
         raise ValueError("invalid request fields")
@@ -452,6 +464,7 @@ def decode_request(data: bytes) -> Request:
             destination=cast(str | None, value.get("destination")),
             command_id=cast(str | None, value.get("command_id")),
             time_limit=cast(str | None, value.get("time_limit")),
+            keep_budget="keep_budget" in value,
         )
     except ValueError as exc:
         raise ValueError("invalid request fields") from exc

@@ -50,6 +50,7 @@ __all__ = [
     "operator_key",
     "parse",
     "post",
+    "restored_budget",
     "unsealed",
     "validate_envelope",
 ]
@@ -85,12 +86,13 @@ _OPTIONS = {
     "budget": ("set_budget",),
     "destination": ("eject",),
     "force": ("continue", "restart", "override_step"),
+    "keep_budget": ("continue", "restart", "override_step"),
     "tree": ("eject",),
 }
 #: Optional flags: present only as ``true``.
-_FLAGS = frozenset({"force", "tree"})
+_FLAGS = frozenset({"force", "keep_budget", "tree"})
 _SIGNATURE = frozenset({"operator_key", "signature"})
-#: The actions that revive a failed or paused job (and may carry ``force``).
+#: The actions that revive a failed or paused job (and may carry ``force`` and ``keep_budget``).
 _REVIVALS = ("continue", "restart", "override_step")
 
 
@@ -259,8 +261,8 @@ def post(
     :param operator: The operator label.
     :param reason: The operator's explanation.
     :param seed_path: Sign with this identity seed; ``None`` posts unsigned.
-    :param **extra: ``priority``, ``step``, ``budget``, ``force``, ``destination``, ``tree`` (``None`` or ``False``
-        are left out), or a deterministic ``request_id`` and ``created_at``.
+    :param **extra: ``priority``, ``step``, ``budget``, ``force``, ``keep_budget``, ``destination``, ``tree``
+        (``None`` or ``False`` are left out), or a deterministic ``request_id`` and ``created_at``.
     :return: The posted request file.
     :raises httk.workflow.errors.FormatError: If the document would be invalid.
     """
@@ -334,6 +336,52 @@ def _budget_failure(job: JobDefinition, doc: StateDoc) -> Mapping[str, object] |
     return None
 
 
+def restored_budget(
+    job: JobDefinition, doc: StateDoc, *, action: str, reopen: bool = False
+) -> tuple[dict[str, int | None], StateDoc]:
+    """Raise a job's effective retry limits so a revival again has its declared allowance from this point.
+
+    Each declared limit ``D`` becomes at least ``U + D``, where ``U`` counts the units already started in the
+    scope the next unit lands in (an unstarted attempt is that next unit, except for ``override_step``, which
+    abandons it while its counters keep it); a limit the operator lifted stays unlimited, and a
+    declared-unlimited limit is restored by dropping its ``budget_override`` key.
+
+    :param job: The job's definition.
+    :param doc: Its ``state.json`` before the revival's own attempt or activation.
+    :param action: The revival: ``continue``, ``restart`` or ``override_step``.
+    :param reopen: Whether a ``continue`` reopens a kept join (its next attempt starts a new activation).
+    :return: The changed limits (``None`` restores unlimited; empty when none change) and the raised document.
+    """
+
+    attempt = doc.attempt or {}
+    ordinal, total, activations = (
+        value if type(value) is int else 0
+        for value in (attempt.get("ordinal"), doc.counters.get("attempts_total"), doc.counters.get("activations"))
+    )
+    abandons = action == "override_step"
+    unstarted = int(not abandons and doc.attempt is not None and attempt.get("started_at") is None)
+    # override_step abandons an unstarted attempt or activation, but the counters keep its slot: count it as used.
+    idle_activation = not abandons and (doc.attempt is None or (unstarted == 1 and ordinal == 1))
+    started = {
+        "maximum_attempts_per_activation": 0 if abandons or reopen else max(ordinal - unstarted, 0),
+        "maximum_total_attempts": max(total - unstarted, 0),
+        "maximum_activations": max(activations - int(idle_activation), 0),
+    }
+    declared, effective = job.retry_policy, job.retry_policy.overridden(doc.budget_override)
+    raised: dict[str, int | None] = {}
+    for name, used in started.items():
+        limit, current = getattr(declared, name), getattr(effective, name)
+        if limit is None and current is not None:
+            raised[name] = None  # declared unlimited: restored by dropping the operator's override
+        elif limit is not None and current is not None and used + limit > current:
+            raised[name] = used + limit
+    if not raised:
+        return raised, doc
+    override = {**(doc.budget_override or {}), **raised}
+    kept = {name: value for name, value in override.items() if name not in raised or value is not None}
+    return raised, doc.updated(budget_override=kept or None)
+
+
 def _refusal(job: JobDefinition, doc: StateDoc, from_state: str, action: str) -> str | None:
     terminal = from_state in TERMINAL_STATES
     if (action == "cancel" and terminal) or (action == "set_budget" and from_state in ("succeeded", "cancelled")):
@@ -379,7 +427,10 @@ def apply(
     deferred: for ``cancel`` the manager signals the attempt meanwhile.
     ``continue`` of a parent that failed at its wait (its join kept) reopens the
     wait; otherwise it, and always ``restart``, retries the activation, while
-    ``override_step`` opens a new one; both drop a kept join.
+    ``override_step`` opens a new one; both drop a kept join. A revival without
+    ``keep_budget`` first raises ``budget_override`` so that each declared limit
+    again allows its declared number of units from this point (a declared
+    unlimited one is lifted again); history records the raised limits.
     ``set_budget`` merges its limits into ``state.json`` ``budget_override``,
     which overrides ``job.json``'s ``retry_policy`` at every budget check, and
     releases the job to the state and priority it was claimed from.
@@ -443,18 +494,27 @@ def apply(
         audit["budget"] = budget
     elif action == "detach":
         new = doc.updated(detached={"at": datetime.now(UTC).isoformat(), "operator": document["operator"]})
-    elif action == "continue" and from_state == "failed" and doc.join is not None:
-        # A parent that failed at its wait (dependency_failure keeps the join): reopen the wait, rerun nothing.
-        new, target = doc.with_failure(None), "waiting"
     elif action in _REVIVALS:
-        new, target = doc.with_failure(None).updated(join=None), "ready"
-        if action == "override_step":
-            new = new.next_activation(validate_step(document["step"]), "override_step")
-        elif doc.attempt is not None and doc.attempt.get("started_at") is not None:
-            # Only a started attempt is retried; an unstarted (or absent) one is simply launched from ready.
-            new = new.next_attempt("manual_continue", unclean=False)
-        if (failure := _budget_failure(job, new)) is not None:
-            new, target = doc.with_failure(failure), "failed"
+        reopen = action == "continue" and from_state == "failed" and doc.join is not None
+        raised: dict[str, int | None] = {}
+        revived = doc
+        if document.get("keep_budget") is not True:
+            raised, revived = restored_budget(job, doc, action=action, reopen=reopen)
+        if raised:
+            audit["budget"] = raised
+        if reopen:
+            # A parent that failed at its wait (dependency_failure keeps the join): reopen the wait, rerun nothing.
+            new, target = revived.with_failure(None), "waiting"
+        else:
+            new, target = revived.with_failure(None).updated(join=None), "ready"
+            if action == "override_step":
+                new = new.next_activation(validate_step(document["step"]), "override_step")
+            elif doc.attempt is not None and doc.attempt.get("started_at") is not None:
+                # Only a started attempt is retried; an unstarted (or absent) one is simply launched from ready.
+                new = new.next_attempt("manual_continue", unclean=False)
+            if (failure := _budget_failure(job, new)) is not None:
+                # Reachable only with keep_budget (a raise always fits the next unit): today's no-raise refusal.
+                new, target = doc.with_failure(failure), "failed"
     elif action == "unseal":
         # The release that makes `delete` apply; the owner removes the seal document.
         released = {"released": True, "at": datetime.now(UTC).isoformat(), "request_id": request.request_id}
