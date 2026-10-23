@@ -11,19 +11,21 @@ waiting for a manager.
 
 import dataclasses
 import logging
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, cast
 
-from . import _fs, _joins, _kernel, _moving, _requests
+from . import _fs, _joins, _kernel, _moving, _requests, _store
 from ._job import JobDefinition
 from ._kernel import JobRef, ListingCache, OwnedJob, Release
-from ._state import TERMINAL_STATES, StateDoc, read_state_unowned
+from ._manager_scheduling import current_step, effective_workflow
+from ._state import TERMINAL_STATES, StateDoc, _thaw, read_state_unowned
 from .errors import FormatError, WorkflowError
 from .models import canonical_uuid
+from .scaffold import WorkflowProvider, _check_parameter_types
 
 if TYPE_CHECKING:  # pragma: no cover
     from .workspace import Workspace
@@ -41,6 +43,7 @@ __all__ = [
     "request_now",
     "serve",
     "serve_requests",
+    "workflow_switch_problem",
 ]
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
@@ -185,25 +188,181 @@ def daemon_attribution_refusal(
     return None
 
 
+def _output_roles(provider: WorkflowProvider) -> list[str]:
+    """The output names a workflow's declaration lists: each output's role."""
+
+    return sorted(str(entry.get("role", name)) for name, entry in provider.outputs.items())
+
+
+def _types(declared: Mapping[str, object]) -> dict[str, object]:
+    """Each declared name with its declared ``type`` (``None`` when untyped)."""
+
+    return {
+        name: metadata.get("type") if isinstance(metadata, Mapping) else None for name, metadata in declared.items()
+    }
+
+
+def workflow_switch_problem(
+    workspace: _kernel.KernelWorkspace,
+    job: JobDefinition,
+    doc: StateDoc | None,
+    candidate: _store.Installed,
+    providers: dict[str, WorkflowProvider | None] | None = None,
+) -> str | None:
+    """Return why the job cannot switch to run *candidate* (``set_workflow``), naming the failed rule.
+
+    The candidate, installed in the job's workspace (rule 1, the caller's lookup), must (2) carry the job's
+    stored declaration ``$id`` (the current installation's for a job that stores no declaration), or without
+    one the same short name; (3) declare the same inputs, by name, destination and hook-consumed flag; (4)
+    declare the same output names; (5) declare no parameter the job lacks a value for (unless the job's own
+    declaration also lacked it) and none of the job's declared parameters may be unknown to it, with every
+    value of its declared type; (6) declare the same environment names and types; and (7) declare the step
+    the job runs next (for a waiting parent, the steps its join advances to). A language realization never
+    switches: its executed document lives in the payload. A job made from an installed package (it stores
+    ``declarations.workflow``) records empty parameter, input and environment declarations by leaving them
+    out; any other job without a snapshot (a spawned child) is compared with its current installation, and
+    without that the switch is refused as unverifiable.
+
+    :param workspace: The job's workspace.
+    :param job: The job.
+    :param doc: Its ``state.json``, or ``None`` before the first claim.
+    :param candidate: The installation to switch to.
+    :param providers: A batch's cache of the jobs' current installations, by id (``None`` when not installed).
+    :return: The refusal, or ``None`` when the switch is compatible.
+    """
+
+    try:
+        provider = candidate.provider()
+    except ValueError as exc:
+        return f"workflow {candidate.id} cannot be read: {exc}"
+    if job.parameters.get("workflow_realization") == "language" or provider.language is not None:
+        return "a language realization cannot switch workflows: its executed document lives in the payload"
+    current_id, current_name = effective_workflow(job, doc)
+    cache = {} if providers is None else providers
+
+    def current() -> WorkflowProvider | None:
+        # The job's current installation stands in only where job.json carries no snapshot: looked up lazily.
+        if current_id not in cache:
+            found = _store.lookup(workspace, current_id)
+            try:
+                cache[current_id] = None if found is None else found.provider()
+            except ValueError:
+                cache[current_id] = None
+        return cache[current_id]
+
+    def unverifiable(rule: str) -> str:
+        return f"{rule}: cannot be verified: job.json has no snapshot and {current_id} is gone"
+
+    stored = job.declarations.get("workflow")
+    # A job made from an installed package stores its workflow declaration and leaves out empty snapshots.
+    # A spawned child may carry its parent's declarations, but never the snapshots the package left out.
+    scaffolded = isinstance(stored, Mapping) and (job.parent is None or "inputs" in job.declared)
+    declaration: Mapping[str, object] = stored if isinstance(stored, Mapping) else {}
+    if not isinstance(stored, Mapping) and (installed := current()) is not None:
+        declaration = installed.declarations.get("workflow", {})  # a spawned child: its installation's
+    offered = provider.declarations.get("workflow", {})
+    if "$id" in declaration:
+        if offered.get("$id") != declaration["$id"]:
+            return (
+                f"rule 2 (declaration): {candidate.id} declares $id {offered.get('$id')!r}, "
+                f"the job's declaration has $id {declaration['$id']!r}"
+            )
+    elif candidate.name != current_name:
+        return f"rule 2 (short name): {candidate.id} is named {candidate.name!r}, the job's workflow {current_name!r}"
+    snapshot = job.declared.get("inputs", {} if scaffolded else None)
+    if isinstance(snapshot, Mapping):
+        inputs: dict[str, object] = {
+            name: metadata.get("destination") if isinstance(metadata, Mapping) else None
+            for name, metadata in snapshot.items()
+        }
+    elif (installed := current()) is not None:
+        inputs = dict(installed.inputs)
+    else:
+        return unverifiable("rule 3 (inputs)")
+    if dict(provider.inputs) != inputs:
+        return f"rule 3 (inputs): {candidate.id} declares inputs {dict(provider.inputs)}, the job {inputs}"
+    listed = declaration.get("outputs")
+    if isinstance(listed, Sequence) and not isinstance(listed, str):
+        outputs = sorted(str(entry.get("name")) for entry in listed if isinstance(entry, Mapping))
+    elif (installed := current()) is not None:
+        outputs = _output_roles(installed)
+    else:
+        return unverifiable("rule 4 (outputs)")
+    if _output_roles(provider) != outputs:
+        return f"rule 4 (outputs): {candidate.id} declares outputs {_output_roles(provider)}, the job {outputs}"
+    declared_parameters = job.declared.get("parameters", {} if scaffolded else None)
+    if isinstance(declared_parameters, Mapping):
+        known = set(declared_parameters)
+    elif (installed := current()) is not None:
+        known = set(installed.parameters)
+    else:
+        return unverifiable("rule 5 (parameters)")
+    if lacking := sorted(set(provider.parameters) - set(job.parameters) - known):
+        return f"rule 5 (parameters): {candidate.id} declares {', '.join(lacking)}, which the job has no value for"
+    if unknown := sorted(known - set(provider.parameters)):
+        return f"rule 5 (parameters): the job's parameters {', '.join(unknown)} are unknown to {candidate.id}"
+    try:
+        _check_parameter_types(cast(dict[str, object], _thaw(job.parameters)), provider.parameters)
+    except ValueError as exc:
+        return f"rule 5 (parameters): {exc}"
+    # job.json always reads back with environment.declared; for a job that stores no declaration an empty one
+    # only says the spawner set none, so its installation stands in.
+    environment = job.environment.get("declared")
+    if isinstance(environment, Mapping) and (scaffolded or environment):
+        expected = _types(environment)
+    elif (installed := current()) is not None:
+        expected = _types(installed.environment)
+    else:
+        return unverifiable("rule 6 (environment)")
+    if _types(provider.environment) != expected:
+        return f"rule 6 (environment): {candidate.id} declares another environment than the job"
+    # A restart reruns the current step; a waiting parent (or one failed at its wait) runs next whichever step
+    # its join advances to.
+    steps: list[object] = [current_step(job, doc)]
+    join = None if doc is None else doc.join
+    if join is not None:
+        rescue = join.get("on_impossible")
+        steps += [join.get("next_step"), rescue.get("next_step") if isinstance(rescue, Mapping) else None]
+    for step in steps:
+        if isinstance(step, str) and step not in provider.steps:
+            return f"rule 7 (step): {candidate.id} does not declare the job's step {step!r}"
+    return None
+
+
 def refusal(
     workspace: _kernel.KernelWorkspace,
     job: JobDefinition,
     request: _requests.Request,
     cache: ListingCache | None = None,
+    doc: StateDoc | None = None,
+    installations: dict[str, _store.Installed | None] | None = None,
 ) -> str | None:
     """The revival guard for ``continue``/``restart``/``override_step``, the waiting-parent check for ``delete``,
-    and the destination check for ``eject`` (an unusable destination is a refusal that moves nothing).
+    the destination check for ``eject`` (an unusable destination is a refusal that moves nothing), and the
+    compatibility check for ``set_workflow`` (:func:`workflow_switch_problem`, against the installation with
+    exactly the requested id).
 
     :param workspace: The workspace.
     :param job: The job the request is for.
     :param request: The request.
     :param cache: The pass's listings, if any.
+    :param doc: The job's current ``state.json``, for ``set_workflow``.
+    :param installations: Installations looked up by exact id, shared with the caller (filled here).
     :return: Why the request must not apply, or ``None``.
     """
 
     attribution_refusal = daemon_attribution_refusal(workspace, job.id, job.placement, request)
     if attribution_refusal is not None:
         return attribution_refusal
+    if request.action == "set_workflow":
+        workflow_id = str(request.document["workflow"])
+        found = {} if installations is None else installations
+        if workflow_id not in found:
+            found[workflow_id] = _store.lookup(workspace, workflow_id)  # id-shaped: exact id only
+        candidate = found[workflow_id]
+        if candidate is None:
+            return f"rule 1 (installed): workflow {workflow_id} is not installed in the job's workspace"
+        return workflow_switch_problem(workspace, job, doc, candidate)
     if request.action in ("continue", "restart", "override_step"):
         return _joins.consumed_by_decided_join(workspace, job, cache=cache)
     if request.action == "eject":
@@ -446,6 +605,8 @@ def apply_requests(
         if outcomes is not None:
             outcomes.append(RequestOutcome(request.job_id, request.request_id, status, explanation, state))
 
+    # One lookup (and one manifest parse) per set_workflow id serves the check and the override's name.
+    installations: dict[str, _store.Installed | None] = {}
     for request in requests:
         new, effect = _requests.apply(
             job,
@@ -453,7 +614,8 @@ def apply_requests(
             from_state,
             from_priority,
             request,
-            refusal=lambda candidate: refusal(workspace, job, candidate, cache),
+            refusal=lambda candidate: refusal(workspace, job, candidate, cache, doc, installations),
+            workflow_name=lambda workflow_id: None if (found := installations.get(workflow_id)) is None else found.name,
         )
         if isinstance(effect, _requests.Eject) and (from_state, from_priority) != (
             owned.from_state,

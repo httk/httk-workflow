@@ -51,6 +51,22 @@ def current_step(job: JobDefinition, doc: StateDoc | None) -> str:
     return step if isinstance(step, str) else job.initial_step
 
 
+def effective_workflow(job: JobDefinition, doc: StateDoc | None) -> tuple[str, str]:
+    """Return the installed workflow the job runs: ``state.json``'s ``workflow_override``, else ``job.json``'s.
+
+    Every place that runs a job resolves its installation through this; ``job.json`` keeps the declared one.
+
+    :param job: The job.
+    :param doc: Its ``state.json``, or ``None`` before the first claim.
+    :return: The workflow's ``(id, name)``.
+    """
+
+    override = None if doc is None else doc.workflow_override
+    if override is None:
+        return job.workflow_id, job.workflow_name
+    return str(override["id"]), str(override["name"])
+
+
 def effective_requirement(
     job: JobDefinition,
     doc: StateDoc | None,
@@ -198,9 +214,10 @@ def assess(
         return None, ("pool", job.claim_pool)
     if missing := job.required_capabilities - manager.capabilities:
         return None, ("capability", min(missing))
-    installed, problem = manager._workflow(job.workflow_id)
+    workflow_id, _name = effective_workflow(job, doc)
+    installed, problem = manager._workflow(workflow_id)
     if installed is None:
-        return None, ("calls", problem or f"workflow {job.workflow_id} is not installed")
+        return None, ("calls", problem or f"workflow {workflow_id} is not installed")
     requires = installed.record.get("requires")
     unmet = unmet_job_requirements(tuple(str(item) for item in requires) if isinstance(requires, list) else ())
     if unmet:

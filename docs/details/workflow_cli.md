@@ -422,13 +422,22 @@ inputs. See {doc}`/details/workflow_compat`.
 
 ### Requests
 
-`job request ACTION JOB_ID...` posts one request per job and requires
-`--reason`. The actions are `cancel`, `pause`, `continue`, `restart`,
+`job request ACTION [JOB_ID...]` posts one request per job and requires
+`--reason`. Jobs are the `JOB_ID` selectors joined with every job in a
+`--state STATE` (repeatable, an unowned state), which `--placement PREFIX`
+narrows to a placement subtree; `--state` and `--placement` select in a local
+workspace only, and a selection with no job exits `1` with `no jobs selected`.
+There is no step selector: `--step` is the target of
+`override_step`. The actions are `cancel`, `pause`, `continue`, `restart`,
 `override_step` (with `--step`), `set_priority` (with `--priority`),
 `set_budget` (with at least one of `--max-attempts-per-activation N|unlimited`,
 `--max-total-attempts N|unlimited` and `--max-activations N|unlimited`; the
-options are valid only with `set_budget`), `detach`, `eject` (with
-`--destination`), `delete`, `seal` and `unseal`. The job's owner applies each
+options are valid only with `set_budget`), `set_workflow` (with
+`--workflow WORKFLOW`: an installed id, short name or `NAME@REF`, resolved once
+in the jobs' workspace, on the remote side for a remote one; every job is
+checked against it before anything is posted, and a workspace daemon remote
+refuses it), `detach`, `eject` (with `--destination`), `delete`, `seal` and
+`unseal`. The job's owner applies each
 once, at its next boundary; a manager claims an unowned job to apply it. What
 each action does is tabulated in
 [the task-manager guide](taskmanager.md#requests). `--force` accepts reviving a

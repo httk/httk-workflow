@@ -298,11 +298,15 @@ class ChildSpec:
     maximum_activations: int | None = None
     retry_on: tuple[str, ...] = ()
 
-    def _job_spec(self, parent: JobDefinition, label: str, maxtime_cap: int | None = None) -> JobSpec:
+    def _job_spec(
+        self, parent: JobDefinition, workflow: tuple[str, str], label: str, maxtime_cap: int | None = None
+    ) -> JobSpec:
         """Return the job specification of this child under *parent*.
 
-        A child never inherits ``mintime``, and every ``maxtime`` it ends with
-        is at most *maxtime_cap*, the spawning attempt's effective ``maxtime``.
+        The child runs *workflow* (``(id, name)``), the installation the spawning attempt was launched from
+        (the parent's effective workflow, not necessarily ``job.json``'s). A child never inherits
+        ``mintime``, and every ``maxtime`` it ends with is at most *maxtime_cap*, the spawning attempt's
+        effective ``maxtime``.
         """
 
         if self.resources is None:
@@ -325,8 +329,8 @@ class ChildSpec:
         resources, step_resources = cap_maxtime(resources, step_resources, maxtime_cap)
         return JobSpec(
             name=self.name or f"{parent.name}: {self.step} ({label})",
-            workflow_id=parent.workflow_id,
-            workflow_name=parent.workflow_name,
+            workflow_id=workflow[0],
+            workflow_name=workflow[1],
             initial_step=validate_step(self.step, "child step"),
             tag=self.tag or label,
             priority=parent.priority if self.priority is None else self.priority,
@@ -1142,7 +1146,12 @@ class Attempt:
         self._check_step(child.step, "spawned child step")
         # Everything this child needs is validated before the draft exists, so a
         # refused spawn leaves the attempt exactly as it found it.
-        spec = child._job_spec(self.job, entry_label, self.context.resources.get("maxtime"))
+        spec = child._job_spec(
+            self.job,
+            (self.context.workflow_id, self.context.workflow_name),
+            entry_label,
+            self.context.resources.get("maxtime"),
+        )
         reference = self._require_draft().add_child_job(spec.as_mapping(), target, label=entry_label)
         _LOGGER.debug("spawned %s at step %s as %s", reference.job_key, child.step, entry_label)
         return reference
@@ -1157,16 +1166,16 @@ class Attempt:
     def _callee(self, workflow: str) -> "Installed":
         """Return the installed workflow *workflow* names among this job's declared calls.
 
-        The calls are the ``[workflow.calls]`` of this job's installed workflow,
-        alias to installed id; *workflow* is one of the aliases or one of the ids.
+        The calls are the ``[workflow.calls]`` of the installation this attempt was launched from (the job's
+        effective workflow), alias to installed id; *workflow* is one of the aliases or one of the ids.
         """
 
         from . import _store
 
         workspace = self._workspace()
-        own = _store.lookup(workspace, self.job.workflow_id)
+        own = _store.lookup(workspace, self.context.workflow_id)
         if own is None:
-            raise ValueError(f"this job's workflow {self.job.workflow_id} is not installed in the workspace")
+            raise ValueError(f"this job's workflow {self.context.workflow_id} is not installed in the workspace")
         recorded = own.record.get("calls")
         calls = {str(alias): str(target) for alias, target in recorded.items()} if isinstance(recorded, dict) else {}
         target = calls.get(workflow, workflow if workflow in calls.values() else None)

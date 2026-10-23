@@ -339,7 +339,7 @@ from httk.workflow.protocol import JobSpec, prepare_job_payload
 
 prepare_job_payload(
     a.workdir / "child",
-    JobSpec(name="Child", workflow_id=a.job.workflow_id, workflow_name=a.job.workflow_name, initial_step="relax"),
+    JobSpec(name="Child", workflow_id=a.context.workflow_id, workflow_name=a.context.workflow_name, initial_step="relax"),
 )
 a.spawn(a.workdir / "child", label="prepared", placement="project/children")
 ```

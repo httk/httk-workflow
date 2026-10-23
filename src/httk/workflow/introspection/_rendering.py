@@ -52,6 +52,7 @@ def describe_job(workspace: Workspace, ref: JobRef, *, include_children: bool = 
         "failure": None if doc is None else _thaw(doc.failure),
         "seal": None if doc is None else _thaw(doc.seal),
         "workflow_pin": None if doc is None else _thaw(doc.workflow_pin),
+        "workflow_override": None if doc is None else _thaw(doc.workflow_override),
         "paths": {
             "payload": str(ref.path),
             "workdir": str(ref.path / "run"),
@@ -99,12 +100,16 @@ def render_job(report: Mapping[str, Any]) -> str:
     :return: The text.
     """
 
-    workflow = report.get("workflow")
+    workflow, override = report.get("workflow"), report.get("workflow_override")
+    declared = f"{workflow['name']} ({workflow['id']})" if isinstance(workflow, Mapping) else None
+    if isinstance(override, Mapping):
+        # set_workflow: job.json keeps the declared workflow; the job runs the override.
+        declared = f"{declared or '-'} -> {override.get('name')} ({override.get('id')}) by set_workflow"
     lines = [
         f"job {report['job_key']} ({report['state']})",
         _pair("job id", report["job_id"]),
         _pair("name", report.get("name")),
-        _pair("workflow", f"{workflow['name']} ({workflow['id']})" if isinstance(workflow, Mapping) else None),
+        _pair("workflow", declared),
         _pair("placement", report["placement"]),
         _pair("priority", report["priority"]),
         _pair("token", report.get("token")),

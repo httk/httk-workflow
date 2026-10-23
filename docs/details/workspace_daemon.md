@@ -608,7 +608,10 @@ be omitted: the job then goes to the outbox root as `outbox/CLIENT_JOB_KEY`
 (the name rule above); with `--destination D` it goes to `outbox/D/<name>`. State, parent/join,
 runner-step and seal guards still apply. `set_budget` is accepted for such a
 root: the typed command carries the action `set_budget` and the field `budget`
-(the `--max-*` options of the CLI). Managers need no client keys; existing
+(the `--max-*` options of the CLI). `set_workflow` is not carried by the
+daemon protocol: the CLI refuses it for a mount-daemon remote, and a job that
+carries a `workflow_override` cannot be ejected into the exchange inbox.
+Managers need no client keys; existing
 `exchange.authorized_keys` settings are left stored but unused.
 
 An idle job that the daemon safely claims changes immediately. A held job,

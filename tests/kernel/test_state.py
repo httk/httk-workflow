@@ -54,6 +54,7 @@ def _full_mapping() -> dict[str, object]:
         workflow_pin={"id": "local:x", "tree_sha256": "ff"},
         history_tail=[{"at": "t", "event": "claimed"}] * 32,
         budget_override={"maximum_attempts_per_activation": 3, "maximum_activations": None},
+        workflow_override={"id": "local:y", "name": "y"},
     )
     return mapping
 
@@ -118,6 +119,14 @@ def test_document_is_immutable_all_the_way_down() -> None:
         ("budget_override", {"retry_on": ["x"]}),
         ("budget_override", {"maximum_total_attempts": 0}),
         ("budget_override", {"maximum_total_attempts": 2.0}),
+        ("workflow_override", {}),
+        ("workflow_override", {"id": "local:y"}),
+        ("workflow_override", {"id": "local:y", "name": ""}),
+        ("workflow_override", {"id": 3, "name": "y"}),
+        ("workflow_override", {"id": "local:y", "name": "y", "tree_sha256": "ff"}),
+        ("workflow_override", "local:y"),
+        ("workflow_override", {"id": "demo", "name": "demo"}),
+        ("workflow_override", {"id": "local:", "name": "demo"}),
     ],
 )
 def test_malformed_members_are_refused(member: str, value: object) -> None:
@@ -151,6 +160,13 @@ def test_budget_override_is_optional_and_overrides_the_declared_policy() -> None
     )
     with pytest.raises(FormatError):
         validate_budget_override({"maximum_activations": -1}, "budget")
+
+
+def test_workflow_override_is_optional() -> None:
+    mapping = StateDoc.empty(JOB_ID).as_mapping()
+    assert mapping["workflow_override"] is None
+    del mapping["workflow_override"]
+    assert StateDoc.from_mapping(mapping).workflow_override is None
 
 
 def test_non_json_values_are_refused() -> None:

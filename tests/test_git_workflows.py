@@ -17,7 +17,18 @@ from httk.core.plugins.install import install_plugin
 from httk.core.userdirs import data_home
 
 from conftest import Remote, fake_remote, register_ws
-from httk.workflow import Attempt, TaskManager, Workspace, _kernel, _store, collect, git_workflows, scaffold
+from httk.workflow import (
+    Attempt,
+    TaskManager,
+    Workspace,
+    _kernel,
+    _requests,
+    _store,
+    collect,
+    git_workflows,
+    removal,
+    scaffold,
+)
 from httk.workflow.git_workflows import fetch_workflow, fetched_workflows
 from httk.workflow.packages import _reset_plugin_workflow_cache, parse_workflow_manifest
 from httk.workflow.projects import initialize_project
@@ -34,7 +45,7 @@ from httk.workflow.scaffold import (
 from httk.workflow.workflow_cli import _describe, command
 from httk.workflow.workflow_cli._collect import _collected_mapping
 from test_campaigns import _campaign_project
-from test_job_creation import workspace_at
+from test_job_creation import install, workspace_at
 from test_workflow_cli_packages import _SUCCESS_RUNNER
 from test_workflow_packages import _package
 
@@ -339,6 +350,43 @@ def test_collect_dispatches_to_the_installed_provider_without_git(
     assert isinstance(run, dict) and run["workflow_definition_uri"] == item.run.workflow_definition_uri
 
 
+def test_a_switched_job_is_collected_by_the_workflow_that_produced_it(tmp_path: Path) -> None:
+    # Commit one fails at once; commit two (same name, no declaration $id) fixes it. set_workflow, then restart.
+    root, _ = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
+    (root / "relax" / "run").write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+    broken = f"git+file://{root}@{_commit(root, 'broken')}#relax"
+    (root / "relax" / "run").write_text(_SUCCESS_RUNNER, encoding="utf-8")
+    fixed = f"git+file://{root}@{_commit(root, 'fixed')}#relax"
+    workspace = workspace_at(tmp_path / "workspace")
+    install(workspace, broken)
+    install(workspace, fixed)
+    ref = new_job(workspace, broken).ref
+    with TaskManager(workspace) as manager:
+        manager.run_until_idle(timeout=120.0)
+    for action, workflow in (("set_workflow", fixed), ("restart", None)):
+        failed = _kernel.locate(workspace, ref.job_id, placement_hint=None, exhaustive=True)
+        assert failed is not None and failed.state == "failed" and failed.placement is not None
+        posted = _requests.post(
+            workspace,
+            action=action,
+            job_id=ref.job_id,
+            placement=failed.placement,
+            operator="op",
+            reason="r",
+            workflow=workflow,
+        )
+        (outcome,) = removal.serve_requests(workspace, [(failed, posted)])
+        assert outcome.status == "applied", outcome
+    with TaskManager(workspace) as manager:
+        manager.run_until_idle(timeout=120.0)
+    item = next(collect(workspace))
+    assert item.record.state == "succeeded" and item.missing_collector is None and set(item.outputs) == {"total"}
+    assert item.workflow_id == fixed and item.run.workflow_definition_uri == fixed
+    # The record keeps the declared workflow and states the override.
+    assert item.record.job["workflow"] == broken
+    assert item.record.job["workflow_override"] == {"id": fixed, "name": "tests.git.relax"}
+
+
 def test_collect_of_an_uninstalled_uri_uses_only_the_pinned_tree(tmp_path: Path) -> None:
     root, _ = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
     workspace = workspace_at(tmp_path / "workspace")
@@ -456,7 +504,8 @@ def _attempt_environment(workspace: Workspace, payload: Path) -> dict[str, str]:
     (payload / "run").mkdir()
     context = {
         "format": "httk-workflow-attempt-context",
-        "format_version": 2,
+        "format_version": 3,
+        "workflow": definition["workflow"],
         "workspace_id": workspace.workspace_id,
         "job_id": definition["id"],
         "job_key": payload.name.split("~")[0],

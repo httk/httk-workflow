@@ -23,7 +23,7 @@ from httk.core.identity import (
     sign_document,
 )
 
-from .. import _fs, _kernel, _moving, _requests
+from .. import _fs, _kernel, _moving, _requests, _store
 from .._bundles import BundleError
 from .._kernel import JobRef
 from .._logging import LOG_LEVELS, configure_logging
@@ -52,9 +52,11 @@ from ..introspection import (
     describe_job,
     explain_held,
     explain_job,
+    iter_jobs,
     job_events,
     job_placement,
     list_jobs,
+    read_job,
     read_state,
     render_events,
     render_job,
@@ -64,12 +66,28 @@ from ..introspection import (
     selector_uses_remote_path,
 )
 from ..introspection._reading import _jsonl
-from ..models import JOB_STATE_DIRECTORY, canonical_uuid, ensure_step_known, parse_job_key, placement_text
+from ..models import (
+    JOB_STATE_DIRECTORY,
+    canonical_uuid,
+    ensure_step_known,
+    is_workflow_id,
+    normalize_placement,
+    parse_job_key,
+    placement_text,
+)
 from ..registry import WorkspaceBinding
-from ..removal import RemovalReport, RequestOutcome, remove_jobs, request_now, serve_requests
+from ..removal import (
+    RemovalReport,
+    RequestOutcome,
+    remove_jobs,
+    request_now,
+    serve_requests,
+    workflow_switch_problem,
+)
 from ..scaffold import (
     DEFAULT_PLACEMENT,
     ScaffoldedJob,
+    WorkflowProvider,
     _sanitize_tag,
     new_job,
     new_jobs,
@@ -101,7 +119,13 @@ from ._transfer import _protocol_workspace, adopt_document, build_transfer_parse
 
 _ENVELOPES_FORMAT = "httk-workflow-request-envelopes"
 #: The option each action requires (and that no other action takes).
-_ACTION_OPTIONS = {"priority": "set_priority", "step": "override_step", "budget": "set_budget", "destination": "eject"}
+_ACTION_OPTIONS = {
+    "priority": "set_priority",
+    "step": "override_step",
+    "budget": "set_budget",
+    "workflow": "set_workflow",
+    "destination": "eject",
+}
 #: The ``set_budget`` options, by the retry-policy limit each sets (also their argparse destinations).
 _BUDGET_OPTIONS = {
     "maximum_attempts_per_activation": "--max-attempts-per-activation",
@@ -496,6 +520,7 @@ def _request_options(
     force: bool,
     destination: str | None,
     keep_budget: bool = False,
+    workflow: str | None = None,
 ) -> dict[str, object]:
     """Return the optional request members of *action*, refusing an option it does not take or lacks."""
 
@@ -503,6 +528,7 @@ def _request_options(
         "priority": priority,
         "step": step,
         "budget": None if budget is None else dict(budget),
+        "workflow": workflow,
         "destination": destination,
     }
     for name, owner in _ACTION_OPTIONS.items():
@@ -557,6 +583,39 @@ def _prevalidate(refs: Sequence[JobRef], action: str, step: str | None, *, force
                 "if it does not implement it",
                 file=sys.stderr,
             )
+
+
+def _switch_target(workspace: Workspace, refs: Sequence[JobRef], workflow: str) -> str:
+    """Resolve ``set_workflow``'s WORKFLOW once in the workspace and check every job against it, before anything
+    is posted (the owner checks again when it applies a request).
+
+    :param workspace: The workspace.
+    :param refs: The selected jobs.
+    :param workflow: The installed workflow: an id, a short name or ``NAME@REF``.
+    :return: The installed id the requests name.
+    :raises ValueError: If WORKFLOW is not installed, or a job cannot switch to it (naming the failed rule).
+    """
+
+    candidate = _store.lookup(workspace, workflow)
+    if candidate is None:
+        raise ValueError(f"rule 1 (installed): no workflow {workflow!r} is installed in the workspace")
+    providers: dict[str, WorkflowProvider | None] = {}
+    for ref in refs:
+        job, problem = read_job(ref)
+        if job is not None:
+            doc, problem = read_state(ref)
+            problem = problem or workflow_switch_problem(workspace, job, doc, candidate, providers)
+        if problem is not None:
+            hint = "; narrow the selection with --placement or JOB ids" if len(refs) > 1 and "rule 2" in problem else ""
+            raise ValueError(f"{ref.job_key} cannot switch to {candidate.id}: {problem}{hint}")
+    provider = candidate.provider()
+    if provider.instantiate or provider.instantiate_exec is not None:
+        print(
+            f"warning: {candidate.id} has an instantiate hook, which is not re-run: each job keeps the payload, "
+            "parameters, declarations and resources it was created with",
+            file=sys.stderr,
+        )
+    return candidate.id
 
 
 def _wait_children(workspace: Workspace, ref: JobRef) -> list[tuple[str, JobRef | None]]:
@@ -687,6 +746,7 @@ def publish_job_requests(
     identity: OperatorIdentity | None = None,
     budget: Mapping[str, int | None] | None = None,
     keep_budget: bool = False,
+    workflow: str | None = None,
 ) -> list[tuple[JobRef, Path]]:
     """Post one request per already resolved job, signed with the operator's identity when it has a key.
 
@@ -705,8 +765,11 @@ def publish_job_requests(
     :param budget: The retry-policy limits (``None`` lifts one), for ``set_budget``.
     :param keep_budget: Keep the retry budget as it is, for ``continue``, ``restart`` and ``override_step``
         (otherwise the revival restores the job's declared allowance).
+    :param workflow: The installed workflow to switch to, for ``set_workflow``: a short name, ``NAME@REF`` or
+        an id, resolved once in *workspace*; the requests name its id.
     :return: The posted request files paired with their jobs.
-    :raises ValueError: For an unknown action, a misplaced option, or an unknown runner step.
+    :raises ValueError: For an unknown action, a misplaced option, an unknown runner step, or a workflow a job
+        cannot switch to.
     """
 
     if action not in _requests.ACTIONS:
@@ -721,8 +784,11 @@ def publish_job_requests(
         force=force,
         destination=destination,
         keep_budget=keep_budget,
+        workflow=workflow,
     )
     _prevalidate(refs, action, step, force=force)
+    if workflow is not None:
+        options["workflow"] = _switch_target(workspace, refs, workflow)
     documents = []
     for ref in refs:
         document = _request_document(ref, action, operator or selected.label, reason, options)
@@ -742,6 +808,19 @@ def _check_wait(wait: bool, timeout: float | None, actions: Sequence[str]) -> No
         raise ValueError("--timeout must be finite and nonnegative")
 
 
+def _selected_jobs(workspace: Workspace, cwd: Path, arguments: argparse.Namespace) -> list[JobRef]:
+    """Return the JOB selectors' jobs, then every other job in a ``--state`` (under ``--placement``), once each."""
+
+    refs = resolve_job_selectors(workspace, cwd, arguments.job_id)
+    if arguments.state:
+        seen = {ref.job_id for ref in refs}
+        for ref in iter_jobs(workspace, arguments.state, placement_prefix=arguments.placement):
+            if ref.job_id not in seen:
+                seen.add(ref.job_id)
+                refs.append(ref)
+    return refs
+
+
 def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Post operator requests against jobs, and optionally wait for pauses to land."""
 
@@ -749,14 +828,24 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     tree = bool(getattr(arguments, "tree", False))
     if tree and arguments.action != "continue":
         raise ValueError("--tree applies only to the continue action")
+    if not (arguments.job_id or arguments.state):
+        raise ValueError("select jobs: give JOB_ID selectors, --state STATE, or both")
+    if arguments.placement is not None and (not arguments.state or not normalize_placement(arguments.placement).parts):
+        raise ValueError("--placement narrows --state to a placement prefix; it needs --state and a nonempty prefix")
     identity = _resolve_request_identity(arguments.operator)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None and ":" in binding.name
         if tree:
             raise ValueError("--tree is applied locally and is not available for remote workspaces")
+        if arguments.state:
+            raise ValueError("--state and --placement select jobs of a local workspace; give job ids for a remote one")
         target = resolve_remote(binding.remote, project=context.cwd)
         if read_metadata(target.bundle).get("kind") == "mount-daemon":
+            if arguments.action == "set_workflow":
+                raise ValueError(
+                    "set_workflow is not carried by the workspace daemon protocol; run it on the daemon host"
+                )
             status, stdout = request_remote_jobs(binding, context, arguments, identity)
             sys.stdout.write(stdout)
             return status
@@ -780,7 +869,10 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         raise ValueError("--request-id is supported only for one mount-daemon job request")
     ensure_identity_key(identity)
     workspace = _modifiable(arguments, context, action="post requests in it")
-    refs = resolve_job_selectors(workspace, context.cwd, arguments.job_id)
+    refs = _selected_jobs(workspace, context.cwd, arguments)
+    if not refs:
+        print("no jobs selected", file=sys.stderr)
+        return 1
     if tree:
         refs = _with_failed_descendants(workspace, refs)
     _continue_notes(workspace, refs, arguments.action, tree=tree)
@@ -806,6 +898,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         identity=identity,
         budget=_request_budget(arguments),
         keep_budget=bool(arguments.keep_budget),
+        workflow=arguments.workflow,
     )
     return _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
 
@@ -843,9 +936,14 @@ def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLICont
         force=bool(arguments.force),
         destination=arguments.destination,
         keep_budget=bool(arguments.keep_budget),
+        workflow=arguments.workflow,
     )
     refs = [resolve_job(workspace, selector) for selector in arguments.job_id]
     _prevalidate(refs, arguments.action, arguments.step, force=bool(arguments.force))
+    if arguments.workflow is not None:
+        # Resolved and checked against this (the far) side's installations; the client accepts the id it names.
+        options["workflow"] = _switch_target(workspace, refs, arguments.workflow)
+        print(f"{arguments.workflow} is installed here as {options['workflow']}", file=sys.stderr)
     _continue_notes(workspace, refs, arguments.action, local=False)
     document = {
         "format": _ENVELOPES_FORMAT,
@@ -893,16 +991,22 @@ def _validate_remote_envelopes(
         force=bool(arguments.force),
         destination=getattr(arguments, "destination", None),
         keep_budget=bool(getattr(arguments, "keep_budget", False)),
+        workflow=getattr(arguments, "workflow", None),
     )
     expected = {
         "priority": None,
         "step": None,
         "budget": None,
+        "workflow": None,
         "destination": None,
         "force": None,
         "keep_budget": None,
         **options,
     }
+    workflow = options.get("workflow")
+    if isinstance(workflow, str) and not is_workflow_id(workflow) and envelopes:
+        # A name (or NAME@REF) resolves on the far side: every envelope must name the one id it resolved to.
+        expected["workflow"] = envelopes[0].get("workflow")
     expected.update(action=arguments.action, operator=operator, reason=arguments.reason)
     for index, (envelope, key, selector) in enumerate(zip(envelopes, keys, arguments.job_id, strict=True)):
         try:
@@ -957,7 +1061,7 @@ def request_remote_job_result(
         f"--reason={arguments.reason}",
         "--json",
     ]
-    for option in ("priority", "step", "destination"):
+    for option in ("priority", "step", "workflow", "destination"):
         value = getattr(arguments, option, None)
         if value is not None:
             argv.append(f"--{option}={value}")
@@ -1669,6 +1773,14 @@ def _add_request_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--priority", type=int, metavar="PRIORITY", help="the new priority, for set_priority")
     parser.add_argument("--step", metavar="STEP", help="the step to resume at, for override_step")
     parser.add_argument(
+        "--workflow",
+        metavar="WORKFLOW",
+        help=(
+            "for set_workflow: the installed workflow (id, short name or NAME@REF) the jobs run from their next "
+            "attempt; it must share the job's declaration and its inputs, outputs, parameters, environment and step"
+        ),
+    )
+    parser.add_argument(
         "--destination",
         metavar="DEST",
         help="where the job goes, for eject; for a mount-daemon remote, a directory in its outbox (default: the outbox)",
@@ -1813,6 +1925,34 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
     new.add_argument("--json", action="store_true", help="print one JSON report per job, as an array")
 
 
+class _IntermixedParser(argparse.ArgumentParser):
+    """A leaf whose optional positionals may follow its options.
+
+    argparse matches an empty ``*`` positional together with the positional before it, so ``job request ACTION
+    --reason TEXT JOB`` would leave ``JOB`` unrecognized; intermixed parsing reads the options first.
+    """
+
+    _inner = False
+
+    def parse_known_args(  # type: ignore[override]
+        self, args: Sequence[str] | None = None, namespace: Any = None
+    ) -> tuple[Any, list[str]]:
+        """Parse intermixed options and positionals (the inner passes run the plain parser).
+
+        :param args: The arguments, ``sys.argv[1:]`` by default.
+        :param namespace: The namespace to fill, a new one by default.
+        :return: The namespace and the unrecognized arguments.
+        """
+
+        if self._inner:
+            return super().parse_known_args(args, namespace)
+        self._inner = True
+        try:
+            return self.parse_known_intermixed_args(args, namespace)
+        finally:
+            self._inner = False
+
+
 def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     request = _leaf(
         group,
@@ -1827,8 +1967,19 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
     request.add_argument("action", metavar="ACTION", choices=_requests.ACTIONS, help=", ".join(_requests.ACTIONS))
     _add_workspace_option(request, help_text="the workspace holding the job")
     request.add_argument(
-        "job_id", metavar="JOB_ID", nargs="+", help="job UUIDs, unique prefixes, or paths inside the workspace"
+        "job_id", metavar="JOB_ID", nargs="*", help="job UUIDs, unique prefixes, or paths inside the workspace"
     )
+    request.add_argument(
+        "--state",
+        action="append",
+        default=[],
+        metavar="STATE",
+        choices=_kernel.UNOWNED_STATES,
+        help="also select every job in this state (repeatable; local workspaces)",
+    )
+    request.add_argument("--placement", metavar="PREFIX", help="with --state: only jobs under this placement prefix")
+    # add_parser takes no per-leaf parser class, so the leaf is given its intermixed class here.
+    request.__class__ = _IntermixedParser
     request.add_argument(
         "--operator", metavar="IDENTITY", help='configured identity short name or a literal "Name <email>"'
     )

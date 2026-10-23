@@ -27,7 +27,7 @@ from typing import Final
 from httk.core import Run, RunEdge
 from httk.core.git_sources import parse_git_uri
 
-from .collecting import JobRecord
+from .collecting import JobRecord, _producing_workflow
 
 __all__ = ["PROVENANCE_DECLARATION", "run_record"]
 
@@ -180,7 +180,7 @@ def run_record(record: JobRecord) -> Run:
     finished_at = max(_attempt_times(record, "finished_at"), default=None)
     return Run(
         workflow_declaration_uri=workflow_uri,
-        workflow_definition_uri=_definition_uri(record.job.get("workflow")),
+        workflow_definition_uri=_definition_uri(_producing_workflow(record)[0]),
         inputs=() if document is None else _edges(identity, document, "inputs"),
         artifacts=() if document is None else _edges(identity, document, "artifacts"),
         outputs=() if document is None else _edges(identity, document, "outputs"),

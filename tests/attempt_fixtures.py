@@ -206,7 +206,8 @@ def fabricate(
     (payload / "state.json").write_bytes(encode_state(doc))
     context = {
         "format": "httk-workflow-attempt-context",
-        "format_version": 2,
+        "format_version": 3,
+        "workflow": {"id": job.workflow_id, "name": job.workflow_name},
         "workspace_id": workspace.workspace_id,
         "job_id": job.id,
         "job_key": job.job_key,

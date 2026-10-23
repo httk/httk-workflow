@@ -1502,9 +1502,11 @@ class TaskManager:
             self._release(owned, budget, Release("failed", owned.from_priority))
             return False
         try:
-            installed, problem = self._workflow(job.workflow_id)
+            # The effective workflow: an operator's set_workflow override wins over job.json's.
+            workflow_id, _name = _manager_scheduling.effective_workflow(job, doc)
+            installed, problem = self._workflow(workflow_id)
             if installed is None:
-                raise RunnerResolutionError("runner_unavailable", problem or f"workflow {job.workflow_id} is gone")
+                raise RunnerResolutionError("runner_unavailable", problem or f"workflow {workflow_id} is gone")
             command, artifacts = self._runner_command(installed)
         except RunnerResolutionError as exc:
             self._commit(
@@ -1585,6 +1587,7 @@ class TaskManager:
                 resources=requirement,
                 deadline=deadline,
                 binding=binding,
+                workflow={"id": installed.id, "name": installed.name},
             )
             environment = runner_environment(
                 base=os.environ.copy(),
@@ -1604,7 +1607,7 @@ class TaskManager:
             environment["HTTK_WORKFLOW_RUNNER_ROOT"] = str(installed.package)
             if artifacts is not None:
                 environment["HTTK_WORKFLOW_RUNNER_ARTIFACTS"] = str(artifacts)
-            command = self._with_prelude(control, job, command)
+            command = self._with_prelude(control, installed.name, command)
             stdio_fd = self._open_chronicle(owned)
             started_line = (
                 f"=== httk attempt {attempt_id} step {step} ordinal {context['attempt_ordinal']} started {utc_now()}\n"
@@ -1716,14 +1719,14 @@ class TaskManager:
         )
         return True
 
-    def _with_prelude(self, control: Path, job: JobDefinition, command: list[str]) -> list[str]:
+    def _with_prelude(self, control: Path, workflow_name: str, command: list[str]) -> list[str]:
         """Wrap *command* in a login shell running the workflow's prelude (under ``set -e``), when it has one.
 
         The login profiles may reset ``PATH``, so the manager's interpreter directory is put first again
         before the prelude, which keeps the last word.
         """
 
-        prelude = self.workspace.read_workflow_preludes().get(job.workflow_name, "")
+        prelude = self.workspace.read_workflow_preludes().get(workflow_name, "")
         if not prelude.strip():
             return command
         interpreter = shlex.quote(os.path.dirname(sys.executable))

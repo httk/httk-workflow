@@ -120,6 +120,7 @@ def _document(action: str, **extra: object) -> dict[str, object]:
     options: dict[str, dict[str, object]] = {
         "set_priority": {"priority": 7},
         "set_budget": {"budget": {"maximum_attempts_per_activation": 3}},
+        "set_workflow": {"workflow": "local:w2"},
         "override_step": {"step": "relax"},
         "eject": {"destination": "out"},
     }
@@ -232,7 +233,13 @@ def test_restart_envelope_takes_only_force() -> None:
 
 @pytest.mark.parametrize(
     ("action", "missing"),
-    [("set_priority", "priority"), ("set_budget", "budget"), ("override_step", "step"), ("eject", "destination")],
+    [
+        ("set_priority", "priority"),
+        ("set_budget", "budget"),
+        ("set_workflow", "workflow"),
+        ("override_step", "step"),
+        ("eject", "destination"),
+    ],
 )
 def test_action_options_are_required(action: str, missing: str) -> None:
     document = _document(action)
@@ -278,7 +285,7 @@ def _expected(action: str, state: str) -> Effect:
         return Release("ready", 500) if state in ("failed", "paused") else Drop("")
     if action == "set_priority":
         return Release(state, 7)
-    if action == "set_budget":
+    if action in ("set_budget", "set_workflow"):
         return Drop("") if state in ("succeeded", "cancelled") else Release(state, 500)
     if action == "detach":
         return Release(state, 500)
@@ -298,7 +305,7 @@ def _expected(action: str, state: str) -> Effect:
 @pytest.mark.parametrize("action", ACTIONS)
 def test_application_table(action: str, state: str) -> None:
     doc, request = _doc(), _request(action)
-    new, effect = apply(_job(), doc, state, 500, request)
+    new, effect = apply(_job(), doc, state, 500, request, workflow_name=lambda _id: "w2")
     expected = _expected(action, state)
     assert type(effect) is type(expected)
     if isinstance(expected, (Release, Eject)):
@@ -325,7 +332,7 @@ def test_application_table(action: str, state: str) -> None:
 @pytest.mark.parametrize("action", ACTIONS)
 def test_live_attempt_defers_what_applies(action: str) -> None:
     doc = _doc(running=True)
-    new, effect = apply(_job(), doc, "ready", 500, _request(action))
+    new, effect = apply(_job(), doc, "ready", 500, _request(action), workflow_name=lambda _id: "w2")
     if isinstance(_expected(action, "ready"), Drop):
         assert isinstance(effect, Drop)
     else:
@@ -470,6 +477,59 @@ def test_set_budget_merges_and_keeps_state_and_priority() -> None:
     for state in ("succeeded", "cancelled"):
         new, effect = apply(_job(), doc, state, 500, _request("set_budget"))
         assert effect == Drop(f"the job is already {state}") and new.budget_override == doc.budget_override
+
+
+@pytest.mark.parametrize("workflow", ["w2", "", 3, None, "demo@v2", "local:", "git+"])
+def test_set_workflow_envelope_names_an_installed_id(workflow: object) -> None:
+    for valid in ("local:w2", "adhoc:run@0123456789ab", "git+https://example.org/r.git@" + "a" * 40):
+        validate_envelope(_document("set_workflow", workflow=valid))
+    with pytest.raises(FormatError):
+        validate_envelope(_document("set_workflow", workflow=workflow))
+    with pytest.raises(FormatError):
+        validate_envelope(_document("set_workflow", workflow="local:w2", force=True))
+    with pytest.raises(FormatError):
+        validate_envelope(_document("restart", workflow="local:w2"))
+
+
+def test_set_workflow_overrides_resets_runner_steps_and_records_both_ids() -> None:
+    doc = _doc().updated(runner_steps=["start", "relax"])
+    names: list[str] = []
+
+    def name_of(workflow_id: str) -> str:
+        names.append(workflow_id)
+        return "w2"
+
+    request = _request("set_workflow")
+    new, effect = apply(_job(), doc, "failed", 321, request, workflow_name=name_of)
+    assert effect == Release("failed", 321, (request.request_id,)) and names == ["local:w2"]
+    assert dict(new.workflow_override or {}) == {"id": "local:w2", "name": "w2"} and new.runner_steps is None
+    assert new.failure == doc.failure and new.attempt == doc.attempt and new.budget_override == doc.budget_override
+    assert new.history_tail[-1]["workflow"] == {"from": "local:w", "to": "local:w2"}
+    # Back to job.json's workflow: the override is cleared, not recorded as a no-op.
+    back = _request("set_workflow", workflow="local:w")
+    cleared, _ = apply(_job(), new, "failed", 321, back, workflow_name=lambda _id: "w")
+    assert cleared.workflow_override is None and cleared.history_tail[-1]["workflow"] == {
+        "from": "local:w2",
+        "to": "local:w",
+    }
+    # A second switch records the override it replaces.
+    again = _request("set_workflow", workflow="local:w3")
+    newer, _ = apply(_job(), new, "failed", 321, again, workflow_name=lambda _id: "w3")
+    assert dict(newer.workflow_override or {}) == {"id": "local:w3", "name": "w3"}
+    assert newer.history_tail[-1]["workflow"] == {"from": "local:w2", "to": "local:w3"}
+    # Gone from the workspace (or nobody to ask): dropped, nothing recorded.
+    for lookup in (None, lambda _id: None):
+        dropped, effect = apply(_job(), doc, "ready", 500, _request("set_workflow"), workflow_name=lookup)
+        assert isinstance(effect, Drop) and "not installed" in effect.reason and dropped.workflow_override is None
+        assert dropped.history_tail[-1]["workflow"] == {"from": "local:w", "to": "local:w2"}
+    # The owner's compatibility check refuses, never forceable; succeeded and cancelled jobs are never switched.
+    _, effect = apply(
+        _job(), doc, "ready", 500, _request("set_workflow"), refusal=lambda _r: "rule 7", workflow_name=lambda _id: "w2"
+    )
+    assert effect == Drop("rule 7")
+    for state in ("succeeded", "cancelled"):
+        _, effect = apply(_job(), doc, state, 500, _request("set_workflow"), workflow_name=lambda _id: "w2")
+        assert effect == Drop(f"the job is already {state}")
 
 
 def test_set_budget_lets_an_exhausted_restart_run() -> None:

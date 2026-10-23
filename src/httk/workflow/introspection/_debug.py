@@ -10,6 +10,7 @@ from .. import _fs, _joins, _kernel
 from .._durations import TIME_RESOURCES
 from .._job import JobDefinition
 from .._kernel import JobRef
+from .._manager_scheduling import effective_workflow
 from .._state import TERMINAL_STATES, StateDoc
 from ..errors import WorkflowError
 from ..models import LOGS_DIRECTORY, normalize_placement, placement_text, validate_step
@@ -209,7 +210,8 @@ def _drive(
     job, job_error = read_job(ref)
     if job is None:
         raise ValueError(f"cannot debug {ref.job_key}: {job_error}")
-    write(f"[{meta}] {ref.job_key} at {placement_text(job.placement)} is {ref.state} (workflow {job.workflow_id})")
+    workflow_id, _name = effective_workflow(job, read_state(ref)[0])
+    write(f"[{meta}] {ref.job_key} at {placement_text(job.placement)} is {ref.state} (workflow {workflow_id})")
     tail = _Tail(ref.path, write)
     deadline = time.monotonic() + timeout
     seen: tuple[str, str] | None = None

@@ -106,7 +106,7 @@ language, and compares everything both left behind.
 | `Runner.main` | `httk_workflow_main` | A step this runner does not implement is reported, with the registered steps named. | `fail` outcome with `failure.code` `unknown_step` |
 | `Attempt` | `httk_workflow_main` | A handler that raises, or dies under set -e, discards its unpublished draft, leaves a breadcrumb, and lets the manager's retry policy own what happens next. | `error.json` (`httk-workflow-runner-error` version 2) in the attempt control directory |
 | `Attempt.initialize` | `httk_workflow_main` | Bind this process to its attempt and replay every workdir batch an earlier attempt sealed but did not apply. | reads the `HTTK_WORKFLOW_*` variables; replays `.httk-runner/workdir-ready/` |
-| `Attempt.context` | `httk_workflow_context` | The manager-written identity and restart evidence of this attempt; one field, or the whole object. | `HTTK_WORKFLOW_CONTEXT` (`httk-workflow-attempt-context` version 2) |
+| `Attempt.context` | `httk_workflow_context` | The manager-written identity and restart evidence of this attempt; one field, or the whole object. | `HTTK_WORKFLOW_CONTEXT` (`httk-workflow-attempt-context` version 3, with `workflow: {id, name}`, the installation the manager launched) |
 | `Attempt.step` | `httk_workflow_context step` | The step this attempt runs. Bash also exports it for the handler. | `HTTK_WORKFLOW_CONTEXT` → `step`; **$HTTK_WORKFLOW_STEP** |
 | `Attempt.control` | — | The attempt control directory, where the outcome is published. | **$HTTK_WORKFLOW_CONTROL_DIR** |
 | `Attempt.payload` | — | The immutable job payload directory. | `HTTK_WORKFLOW_CONTEXT` → absolute `payload`; **$HTTK_WORKFLOW_JOB_DIR** |

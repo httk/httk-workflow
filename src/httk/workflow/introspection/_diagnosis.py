@@ -18,7 +18,7 @@ from .._durations import format_duration
 from .._job import JobDefinition
 from .._kernel import OWNED, JobRef, OwnerRecord
 from .._manager_commit import attempt_budget_failure
-from .._manager_scheduling import unmet_job_requirements
+from .._manager_scheduling import effective_workflow, unmet_job_requirements
 from .._state import TERMINAL_STATES, StateDoc
 from .._util import timestamp_seconds
 from ..errors import FormatError, RunnerResolutionError, WorkflowError
@@ -558,14 +558,16 @@ class _Diagnosing:
         self.hints.append(text)
 
 
-def _workflow_checks(workspace: Workspace, job: JobDefinition, report: _Diagnosing) -> bool:
-    """Record whether the job's workflow and its calls are installed and built here, and its ``requires`` met."""
+def _workflow_checks(workspace: Workspace, job: JobDefinition, doc: StateDoc | None, report: _Diagnosing) -> bool:
+    """Record whether the job's effective workflow and its calls are installed and built here, and its ``requires``
+    met."""
 
+    workflow_id, _name = effective_workflow(job, doc)
     try:
-        closure = _store.closure(workspace, job.workflow_id, check_builds=True)
-        installed = _store.lookup(workspace, job.workflow_id)
+        closure = _store.closure(workspace, workflow_id, check_builds=True)
+        installed = _store.lookup(workspace, workflow_id)
     except (RunnerResolutionError, ValueError) as exc:
-        report.check("installed workflow", False, f"workflow {job.workflow_id} cannot be checked: {exc}")
+        report.check("installed workflow", False, f"workflow {workflow_id} cannot be checked: {exc}")
         return False
     if closure.missing:
         report.check("installed workflow", False, f"not installed in this workspace: {', '.join(closure.missing)}")
@@ -574,7 +576,7 @@ def _workflow_checks(workspace: Workspace, job: JobDefinition, report: _Diagnosi
         report.check("built workflow", False, f"not built for this platform: {', '.join(closure.unbuilt)}")
         report.hint("build it with 'httk workflow build --workspace WORKSPACE WORKFLOW'")
     if closure.ok:
-        report.check("installed workflow", True, f"{job.workflow_id} and its calls are installed and built here")
+        report.check("installed workflow", True, f"{workflow_id} and its calls are installed and built here")
     requires = () if installed is None else _strings(installed.record.get("requires"))
     if requires:
         unmet = unmet_job_requirements(requires)
@@ -854,7 +856,7 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
     if state == "ready":
         summary = "this job is ready and waiting to be claimed; every claim precondition is listed below"
         if job is not None:
-            _workflow_checks(workspace, job, report)
+            _workflow_checks(workspace, job, doc, report)
             manager_checks(claiming=True)
             _budget_checks(job, doc, report)
         _history_check(ref, report)

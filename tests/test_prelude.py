@@ -17,9 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from httk.workflow import TaskManager, Workspace
-from httk.workflow._job import JobDefinition
 from httk.workflow.launch_runtime import _batch_script
-from httk.workflow.runtime_builders import JobSpec
 
 _LAUNCH_ID = "0123456789abcdef0123456789abcdef"
 
@@ -55,13 +53,10 @@ def _wrap(tmp_path: Path, prelude: str) -> tuple[list[str], Path]:
     workspace = Workspace.initialize(tmp_path / "workspace")
     if prelude:
         workspace.set_workflow_prelude("tests.prelude", prelude)
-    job = JobDefinition.from_mapping(
-        JobSpec(name="Prelude", workflow_id="local:tests.prelude", workflow_name="tests.prelude").as_mapping()
-    )
     control = tmp_path / "control"
     control.mkdir(exist_ok=True)
     manager = SimpleNamespace(workspace=workspace)
-    return TaskManager._with_prelude(manager, control, job, ["runner", "--flag"]), control  # type: ignore[arg-type]
+    return TaskManager._with_prelude(manager, control, "tests.prelude", ["runner", "--flag"]), control  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("prelude", ["", "   \n "])

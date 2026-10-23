@@ -780,7 +780,10 @@ from the current working directory. An ambiguous prefix is refused, listing the
 jobs it matched. A job's directory name changes at every move, so script with
 UUIDs or keys, never with paths.
 
-`job show` reports the state and phase, placement, priority, workflow, step,
+`job show` reports the state and phase, placement, priority, workflow (after a
+`set_workflow`, the declared one and the one the job runs:
+`demo (local:demo) -> demo-next (local:demo-next) by set_workflow`; the JSON
+report carries `workflow_override`), step,
 the activation and attempt counters against the effective retry budgets (a
 limit raised by `set_budget` reads `1/3 (declared 1)`), the last failure, a waiting job's children, and the payload, workdir and attempt paths.
 `job log` prints the owner's run log (`claimed`, `attempt_started`, `outcome`,
@@ -832,6 +835,7 @@ httk job request pause --workspace WORKSPACE --reason "inspection" JOB
 httk job request override_step --step relax --reason "redo relax" JOB
 httk job request set_priority --priority 100 --reason "urgent" JOB
 httk job request set_budget --max-attempts-per-activation 3 --reason "flaky node" JOB
+httk job request set_workflow --workflow relax@v1.3.0 --state ready --reason "bump"
 ```
 
 | Action | Applies to | Effect |
@@ -843,6 +847,7 @@ httk job request set_budget --max-attempts-per-activation 3 --reason "flaky node
 | `override_step` | a failed or paused job | `ready` with a new activation of `--step`; a retained join is dropped; the declared retry allowance is restored first unless `--keep-budget` |
 | `set_priority` | any job | the new `--priority` (0 is highest) |
 | `set_budget` | any job not succeeded or cancelled | the retry budgets raised or lifted per `--max-*` option; merged into `state.json` `budget_override`, state and priority unchanged; a limit set below what the job has used ends it at the next budget check |
+| `set_workflow` | any job not succeeded or cancelled whose workflow `--workflow` may replace | the job runs the installed `--workflow` from its next attempt; recorded as `state.json` `workflow_override`, `runner_steps` cleared, state and priority unchanged; refused naming the failed compatibility rule (see {doc}`/restarting_jobs`) |
 | `detach` | a spawned job | independent of its parent, permanently |
 | `eject` | a quiescent job | moved out as a bundle to `--destination` |
 | `delete` | a terminal or paused job; a succeeded one only after `unseal`; no waiting parent | removed |

@@ -32,6 +32,7 @@ def _context(**overrides: Any) -> dict[str, object]:
         "resources": {"cores": 1},
         "deadline": None,
         "binding": None,
+        "workflow": {"id": "local:demo", "name": "demo"},
         **overrides,
     }
     return attempt_context(**arguments)
@@ -60,7 +61,8 @@ def _environment(context: dict[str, object], **overrides: Any) -> dict[str, str]
 def test_minimal_context() -> None:
     context = _context()
     assert context["format"] == "httk-workflow-attempt-context"
-    assert context["format_version"] == 2
+    assert context["format_version"] == 3
+    assert context["workflow"] == {"id": "local:demo", "name": "demo"}
     assert context["is_restart"] is False
     assert context["attempt_reason"] == "claim"
     assert context["deadline"] is None

@@ -257,8 +257,9 @@ def _attempt(
     step_resources: dict[str, dict[str, int]] | None = None,
     context_resources: dict[str, int] | None = None,
     deadline: int | None = None,
+    workflow: tuple[str, str] = ("local:tests.sdk", "tests.sdk"),
 ) -> Attempt:
-    """Bind one attempt of a fabricated job, without a manager."""
+    """Bind one attempt of a fabricated job, without a manager; *workflow* is the launched installation."""
 
     payload = tmp_path / name
     (payload / "files").mkdir(parents=True)
@@ -283,7 +284,8 @@ def _attempt(
         {
             "format": "httk-workflow-attempt-context",
             "durable": False,
-            "format_version": 2,
+            "format_version": 3,
+            "workflow": {"id": workflow[0], "name": workflow[1]},
             "workspace_id": str(uuid.uuid4()),
             "job_id": (_jid := str(uuid.uuid4())),
             "job_key": f"fabricated--{_jid}",
@@ -322,9 +324,19 @@ def test_child_spec_inherits_job_resource_requirements(tmp_path: Path) -> None:
         step_resources={"start": {"mem": 1024}},
     )
     child = ChildSpec(step="start")
-    spec = child._job_spec(attempt.job, "child")
+    spec = child._job_spec(attempt.job, ("local:tests.sdk", "tests.sdk"), "child")
     assert spec.resources == {"procs": 2}
     assert spec.step_resources == {"start": {"mem": 1024}}
+
+
+def test_spawned_child_runs_the_launched_installation_not_job_json(tmp_path: Path) -> None:
+    # After set_workflow the manager launches another installation than job.json names: children follow it.
+    attempt = _attempt(tmp_path, step="start", workflow=("local:tests.sdk-next", "tests.sdk-next"))
+    assert attempt.job.workflow_id == "local:tests.sdk"
+    attempt.spawn(ChildSpec(step="start"), label="child")
+    draft = next(iter(attempt.control.glob("outcome.tmp.*")))
+    (job,) = (json.loads(path.read_text(encoding="utf-8")) for path in draft.glob("children/jobs/*/job.json"))
+    assert job["workflow"] == {"id": "local:tests.sdk-next", "name": "tests.sdk-next"}
 
 
 def test_child_spec_never_inherits_mintime_and_caps_maxtime(tmp_path: Path) -> None:
@@ -338,7 +350,7 @@ def test_child_spec_never_inherits_mintime_and_caps_maxtime(tmp_path: Path) -> N
     cap = attempt.context.resources.get("maxtime")
 
     def spec(**members: Any) -> JobSpec:
-        return ChildSpec(step="start", **members)._job_spec(attempt.job, "child", cap)
+        return ChildSpec(step="start", **members)._job_spec(attempt.job, ("local:tests.sdk", "tests.sdk"), "child", cap)
 
     inherited = spec()
     assert inherited.resources == {"maxtime": 3600, "procs": 2}
@@ -350,7 +362,7 @@ def test_child_spec_never_inherits_mintime_and_caps_maxtime(tmp_path: Path) -> N
     assert clamped.step_resources == {"start": {"maxtime": 3600, "mintime": 3600}, "other": {"procs": 1}}
     with pytest.raises(ValueError, match="Slurm duration"):
         spec(resources={"maxtime": 60})
-    uncapped = ChildSpec(step="start")._job_spec(attempt.job, "child", None)
+    uncapped = ChildSpec(step="start")._job_spec(attempt.job, ("local:tests.sdk", "tests.sdk"), "child", None)
     assert uncapped.resources == {"maxtime": 3600, "procs": 2}
 
     # Attempt.spawn passes the attempt's own effective maxtime as the cap.

@@ -7,7 +7,7 @@ import json
 import sys
 from typing import Any
 
-from ..collecting import COLLECTABLE_STATES, DEFAULT_COLLECT_STATES, job_records
+from ..collecting import COLLECTABLE_STATES, DEFAULT_COLLECT_STATES, _producing_workflow, job_records
 from ..errors import WorkflowError
 from ..introspection import resolve_job_selectors
 from ..packages import load_workflow_package
@@ -108,12 +108,11 @@ def handle_postprocess(arguments: argparse.Namespace, context: Any) -> int:
                 continue
             wanted.discard(record.job_id)
         try:
-            selected: Any = resolved
+            # By default the workflow that produced the job's outputs (after set_workflow, not job.json's).
+            workflow, _name = _producing_workflow(record)
+            selected: Any = resolved if resolved is not None else registered_workflow(workflow) if workflow else None
             if selected is None:
-                workflow = record.job.get("workflow")
-                selected = registered_workflow(workflow) if isinstance(workflow, str) else None
-            if selected is None:
-                raise ValueError(f"workflow {record.job.get('workflow')!r} is not registered")
+                raise ValueError(f"workflow {workflow!r} is not registered")
             result = run_postprocess_script(
                 selected, arguments.script, record, output_root=output_root, timeout=arguments.timeout
             )

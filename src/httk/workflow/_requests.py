@@ -27,6 +27,7 @@ from httk.workflow.errors import FormatError
 from httk.workflow.models import (
     Failure,
     canonical_uuid,
+    is_workflow_id,
     parse_placement_text,
     placement_text,
     validate_budget_override,
@@ -69,6 +70,7 @@ ACTIONS = (
     "override_step",
     "set_priority",
     "set_budget",
+    "set_workflow",
     "detach",
     "eject",
     "delete",
@@ -84,6 +86,7 @@ _OPTIONS = {
     "priority": ("set_priority",),
     "step": ("override_step",),
     "budget": ("set_budget",),
+    "workflow": ("set_workflow",),
     "destination": ("eject",),
     "force": ("continue", "restart", "override_step"),
     "keep_budget": ("continue", "restart", "override_step"),
@@ -216,6 +219,9 @@ def validate_envelope(document: Mapping[str, object]) -> None:
         validate_step(document["step"], "request step")
     if "budget" in allowed:
         validate_budget_override(document["budget"], "request budget")
+    if "workflow" in allowed and not is_workflow_id(require_string(document["workflow"], "request workflow")):
+        # A request names its workflow by installed id only, never by a short name.
+        raise FormatError(f"request workflow must be an installed workflow id, not {document['workflow']!r}")
     for flag in sorted(_FLAGS & members):
         if document[flag] is not True:
             raise FormatError(f"request {flag} must be true")
@@ -261,8 +267,8 @@ def post(
     :param operator: The operator label.
     :param reason: The operator's explanation.
     :param seed_path: Sign with this identity seed; ``None`` posts unsigned.
-    :param **extra: ``priority``, ``step``, ``budget``, ``force``, ``keep_budget``, ``destination``, ``tree``
-        (``None`` or ``False`` are left out), or a deterministic ``request_id`` and ``created_at``.
+    :param **extra: ``priority``, ``step``, ``budget``, ``workflow``, ``force``, ``keep_budget``, ``destination``,
+        ``tree`` (``None`` or ``False`` are left out), or a deterministic ``request_id`` and ``created_at``.
     :return: The posted request file.
     :raises httk.workflow.errors.FormatError: If the document would be invalid.
     """
@@ -384,7 +390,9 @@ def restored_budget(
 
 def _refusal(job: JobDefinition, doc: StateDoc, from_state: str, action: str) -> str | None:
     terminal = from_state in TERMINAL_STATES
-    if (action == "cancel" and terminal) or (action == "set_budget" and from_state in ("succeeded", "cancelled")):
+    if (action == "cancel" and terminal) or (
+        action in ("set_budget", "set_workflow") and from_state in ("succeeded", "cancelled")
+    ):
         return f"the job is already {from_state}"
     if action == "pause" and (terminal or from_state == "paused"):
         return f"the job is already {from_state}"
@@ -417,6 +425,7 @@ def apply(
     request: Request,
     *,
     refusal: Callable[[Request], str | None] | None = None,
+    workflow_name: Callable[[str], str | None] | None = None,
 ) -> tuple[StateDoc, Effect]:
     """Decide one request for an owned job: the new document and the effect. Pure: no I/O.
 
@@ -434,6 +443,11 @@ def apply(
     ``set_budget`` merges its limits into ``state.json`` ``budget_override``,
     which overrides ``job.json``'s ``retry_policy`` at every budget check, and
     releases the job to the state and priority it was claimed from.
+    ``set_workflow`` likewise records its installed workflow id, with the
+    installation's name, as ``state.json`` ``workflow_override`` (the workflow
+    every later attempt runs instead of ``job.json``'s) and clears
+    ``runner_steps``, which described the previous runner; history records the
+    previous and the new id.
     ``seal`` (a repair verb for a succeeded job without a seal) and ``unseal``
     (the operator's release of a succeeded job, after which ``delete`` applies)
     need the payload, so their effects are executed by the owner.
@@ -444,8 +458,11 @@ def apply(
     :param from_priority: The priority it was claimed with.
     :param request: The request, for this job.
     :param refusal: The caller's check for ``continue``, ``restart``, ``override_step`` (the revival guard),
-        ``delete`` (the waiting-parent check) and ``eject`` (the destination check): why the request must not
-        apply, or ``None``. A reason drops the request, unless a revival carries ``force``.
+        ``delete`` (the waiting-parent check), ``eject`` (the destination check) and ``set_workflow`` (the
+        compatibility check): why the request must not apply, or ``None``. A reason drops the request, unless
+        a revival carries ``force``.
+    :param workflow_name: The short name of the installation with exactly this id, or ``None`` when none is
+        installed; a ``set_workflow`` without it is dropped.
     :return: The new document and the effect.
     :raises ValueError: If the request, document and definition name different jobs.
     """
@@ -462,9 +479,13 @@ def apply(
     }
     if "operator_key" in document:
         audit["operator_key"] = document["operator_key"]
+    if action == "set_workflow":
+        # Recorded whether the switch applies or is dropped.
+        previous = job.workflow_id if doc.workflow_override is None else doc.workflow_override["id"]
+        audit["workflow"] = {"from": previous, "to": document["workflow"]}
     reason = _refusal(job, doc, from_state, action)
     daemon_pinned = isinstance(document["operator"], str) and document["operator"].startswith("daemon:")
-    checked = daemon_pinned or (reason is None and action in (*_REVIVALS, "delete", "eject"))
+    checked = daemon_pinned or (reason is None and action in (*_REVIVALS, "delete", "eject", "set_workflow"))
     if checked and refusal is not None and (hazard := refusal(request)) is not None:
         if daemon_pinned:
             reason = hazard
@@ -475,6 +496,14 @@ def apply(
             _LOGGER.warning("forced revival of %s: %s", job.job_key, hazard)
             audit["revival_hazard"] = hazard
     applied = (*doc.applied_requests, request.request_id)
+    switched: dict[str, str] | None = None
+    if reason is None and action == "set_workflow":
+        target_id = require_string(document["workflow"], "request workflow")
+        name = None if workflow_name is None else workflow_name(target_id)
+        if name is None:
+            reason = f"workflow {target_id} is not installed in the job's workspace"
+        else:
+            switched = {"id": target_id, "name": name}
     if reason is not None:
         dropped = doc.with_history("request_dropped", **audit, note=reason).updated(applied_requests=applied)
         return dropped, Drop(reason)
@@ -492,6 +521,12 @@ def apply(
         budget = validate_budget_override(document["budget"], "request budget")
         new = doc.updated(budget_override={**(doc.budget_override or {}), **budget})
         audit["budget"] = budget
+    elif action == "set_workflow":
+        assert switched is not None
+        # Switching back to job.json's workflow clears the override. The recorded runner steps described the
+        # previous runner; the new one records its own.
+        override = None if switched["id"] == job.workflow_id else switched
+        new = doc.updated(workflow_override=override, runner_steps=None)
     elif action == "detach":
         new = doc.updated(detached={"at": datetime.now(UTC).isoformat(), "operator": document["operator"]})
     elif action in _REVIVALS:

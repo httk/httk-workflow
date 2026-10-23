@@ -283,7 +283,10 @@ read.
 A record carries the immutable job digest and, in `runner_provenance`, the
 installed workflow the job ran: its id and the SHA-256 of its installed package
 tree, as the manager recorded them at launch (`workflow_pin` in `state.json`).
-A stored result therefore names the software that produced it.
+A stored result therefore names the software that produced it. For a job that
+`set_workflow` switched, collection resolves the provider, the collector and
+the run's `workflow_definition_uri` from that pinned installation rather than
+from the declared `workflow`.
 
 ### Damage is reported
 
@@ -308,7 +311,7 @@ partition at a time, not as one in-memory result array.
 | --- | --- |
 | `workspace`, `workspace_id` | the absolute workspace root and its identity |
 | `job_id`, `job_key` | the job UUID and the complete `tag--uuid` key |
-| `job` | the validated job definition, including its `digest`, `workflow` (the installed workflow's id) and `workflow_name` |
+| `job` | the validated job definition, including its `digest`, `workflow` (the declared installed workflow's id) and `workflow_name`; `workflow_override` (`{id, name}`) only when an operator's `set_workflow` made the job run another installation |
 | `runner_provenance` | `{"id", "tree_sha256"}` of the installed workflow the job last launched with, or `null` |
 | `state` | the kind this job stopped in: `succeeded`, `failed`, `cancelled`, or `paused` |
 | `failure` | the unified failure record — `code`, `message`, optional `details`, `retryable` — or `null` |

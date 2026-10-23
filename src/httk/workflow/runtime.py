@@ -47,6 +47,9 @@ class AttemptContext:
     :param durable: Record whether storage-crash durability was enabled.
     :param settings: Record workspace application settings at claim time.
     :param resources: Record the resources assigned to the attempt.
+    :param workflow_id: Identify the installed workflow the manager launched: the job's effective workflow
+        (an operator's ``set_workflow`` override, else ``job.json``'s), which spawned children and calls follow.
+    :param workflow_name: Give that installation's short name.
     :param raw: Preserve the complete decoded context.
     :param deadline: Record the epoch second at which the manager stops the
         attempt, or ``None`` when it has no time limit.
@@ -81,6 +84,8 @@ class AttemptContext:
     #: :meth:`~httk.workflow.sdk.Attempt.setting`. The member is required.
     settings: Mapping[str, object]
     resources: Mapping[str, int]
+    workflow_id: str
+    workflow_name: str
     raw: Mapping[str, Any]
     #: The epoch second at which the manager stops this attempt, present exactly
     #: when the attempt runs under a ``maxtime``, otherwise ``None``. The member
@@ -103,8 +108,8 @@ class AttemptContext:
 
         if not isinstance(value, Mapping):
             raise ValueError("attempt context must be a JSON object")
-        if value.get("format") != "httk-workflow-attempt-context" or value.get("format_version") != 2:
-            raise ValueError("attempt context must use httk-workflow-attempt-context version 2")
+        if value.get("format") != "httk-workflow-attempt-context" or value.get("format_version") != 3:
+            raise ValueError("attempt context must use httk-workflow-attempt-context version 3")
         required = (
             "workspace_id",
             "job_id",
@@ -128,6 +133,13 @@ class AttemptContext:
         settings_raw = value.get("settings")
         if not isinstance(settings_raw, Mapping):
             raise ValueError("attempt settings must be an object")
+        workflow = value.get("workflow")
+        if (
+            not isinstance(workflow, Mapping)
+            or set(workflow) != {"id", "name"}
+            or not all(isinstance(workflow[name], str) and workflow[name] for name in ("id", "name"))
+        ):
+            raise ValueError("attempt workflow must be an object {id, name} of nonempty strings")
         payload = value.get("payload")
         if not isinstance(payload, str) or not os.path.isabs(payload):
             raise ValueError("attempt payload must be an absolute path")
@@ -176,6 +188,8 @@ class AttemptContext:
             durable=value["durable"],
             settings=dict(settings_raw),
             resources=resources,
+            workflow_id=workflow["id"],
+            workflow_name=workflow["name"],
             raw=value,
             deadline=optional_integer("deadline"),
             binding=binding,

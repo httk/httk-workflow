@@ -47,6 +47,7 @@ def attempt_context(
     resources: Mapping[str, int],
     deadline: int | None,
     binding: Mapping[str, Any] | None,
+    workflow: Mapping[str, str],
 ) -> dict[str, object]:
     """Return the attempt context document a runner reads from ``HTTK_WORKFLOW_CONTEXT``.
 
@@ -70,12 +71,14 @@ def attempt_context(
     :param resources: The attempt's resource reservation.
     :param deadline: The epoch second the attempt must finish by, or ``None``.
     :param binding: The context binding, or ``None`` for an attempt without a placement.
+    :param workflow: The launched installation's ``{id, name}``: the job's effective workflow, which spawned
+        children and calls follow.
     :return: The context mapping.
     """
 
     return {
         "format": "httk-workflow-attempt-context",
-        "format_version": 2,
+        "format_version": 3,
         "workspace_id": workspace_id,
         "job_id": job_id,
         "job_key": job_key,
@@ -92,6 +95,7 @@ def attempt_context(
         "attempt_reason": attempt_reason or "claim",
         "previous_attempt_id": previous_attempt_id,
         "activation_reason": activation_reason,
+        "workflow": {"id": workflow["id"], "name": workflow["name"]},
         # The workspace durability mode, so every artifact the runner
         # publishes is synchronized to the same standard as the marker and
         # journal that will reference it.

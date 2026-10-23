@@ -8,7 +8,8 @@ from pathlib import PurePosixPath
 from . import _store, compat
 from ._job import JobDefinition
 from ._kernel import JobRef
-from ._manager_scheduling import unmet_job_requirements
+from ._manager_scheduling import effective_workflow, unmet_job_requirements
+from ._state import StateDoc
 from .errors import RunnerResolutionError, WorkflowError
 from .introspection import JOB_STATES, iter_jobs, job_placement, read_job, read_state
 from .introspection._diagnosis import ManagerRecord, claim_requirements, manager_refusals, read_managers
@@ -111,31 +112,31 @@ def _strings(value: object) -> tuple[str, ...]:
 
 
 def _workflow_problems(
-    workspace: Workspace, job: JobDefinition
+    workspace: Workspace, workflow_id: str
 ) -> tuple[tuple[str, str] | None, list[str], _store.Installed | None]:
     """Check the job's workflow and its call closure: installed here, and built for this platform.
 
     :param workspace: The workspace.
-    :param job: The job.
+    :param workflow_id: The job's effective workflow id.
     :return: The root workflow's ``(status, problem)`` or ``None``, one problem per callee, and the installation.
     """
 
     try:
-        closure = _store.closure(workspace, job.workflow_id, check_builds=True)
-        installed = _store.lookup(workspace, job.workflow_id)
+        closure = _store.closure(workspace, workflow_id, check_builds=True)
+        installed = _store.lookup(workspace, workflow_id)
     except (RunnerResolutionError, ValueError) as exc:
-        return ("problem", f"workflow {job.workflow_id} cannot be checked: {exc}"), [], None
+        return ("problem", f"workflow {workflow_id} cannot be checked: {exc}"), [], None
     root: tuple[str, str] | None = None
     calls: list[str] = []
     for missing in closure.missing:
         problem = f"workflow {missing} is not installed in this workspace; run 'httk workflow install'"
-        if missing == job.workflow_id:
+        if missing == workflow_id:
             root = ("problem", problem)
         else:
             calls.append(f"called {problem}")
     for unbuilt in closure.unbuilt:
         problem = f"workflow {unbuilt} is not built for this platform; run 'httk workflow build {unbuilt}'"
-        if unbuilt == job.workflow_id:
+        if unbuilt == workflow_id:
             root = ("problem", problem)
         else:
             calls.append(f"called {problem}")
@@ -283,7 +284,7 @@ def _input_problems(ref: JobRef, job: JobDefinition) -> list[str]:
     return problems
 
 
-def _step_finding(ref: JobRef, job: JobDefinition) -> str | None:
+def _step_finding(doc: StateDoc | None, job: JobDefinition) -> str | None:
     """Return a step problem when the job's next step is outside the runner's recorded step set.
 
     An outcome records the steps its runner implements as ``runner_steps`` in
@@ -292,12 +293,11 @@ def _step_finding(ref: JobRef, job: JobDefinition) -> str | None:
     executed, so a job that has not recorded its steps yet is never faulted
     here; the finding is advisory.
 
-    :param ref: The job.
+    :param doc: The job's ``state.json``, or ``None``.
     :param job: The job's immutable definition, for its initial step.
     :return: A step problem message, or ``None`` when nothing can be faulted.
     """
 
-    doc, _ = read_state(ref)
     known = [] if doc is None else list(_strings(doc.runner_steps))
     if not known:
         return None
@@ -336,7 +336,9 @@ def _finding(
             "step": None,
         }
     environment = environment_findings(job, settings)
-    workflow_problem, call_problems, installed = _workflow_problems(workspace, job)
+    doc, _damage = read_state(ref)
+    workflow_id, _name = effective_workflow(job, doc)
+    workflow_problem, call_problems, installed = _workflow_problems(workspace, workflow_id)
     runner: dict[str, object] = {"status": "ok", "ok": True}
     if workflow_problem is not None:
         status, problem = workflow_problem
@@ -344,7 +346,7 @@ def _finding(
     return {
         "job_key": job.job_key,
         "job_id": job.id,
-        "workflow": job.workflow_id,
+        "workflow": workflow_id,
         "state": ref.state,
         "placement": placement_text(job.placement),
         "environment": environment["entries"],
@@ -355,7 +357,7 @@ def _finding(
         "requirements": _requirements_finding(installed, managers),
         "calls": call_problems,
         "inputs": _input_problems(ref, job),
-        "step": _step_finding(ref, job),
+        "step": _step_finding(doc, job),
     }
 
 

@@ -113,7 +113,8 @@ def test_attempt_context_deadline_is_optional_and_validated() -> None:
         "durable": False,
         "deadline": None,
         "settings": {},
-        "format_version": 2,
+        "format_version": 3,
+        "workflow": {"id": "local:tests", "name": "tests"},
         **{
             name: name
             for name in ("workspace_id", "job_id", "job_key", "placement", "step", "activation_id", "attempt_id")

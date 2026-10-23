@@ -8,6 +8,7 @@ which tolerates a torn or absent file. Nested members are frozen on parse, so a
 
 import dataclasses
 import json
+import logging
 import re
 import uuid
 from collections.abc import Mapping, Sequence
@@ -18,8 +19,9 @@ from types import MappingProxyType
 from typing import Any, NoReturn, Self
 
 from httk.workflow import _fs
+from httk.workflow._util import require_string
 from httk.workflow.errors import FormatError, WorkflowError
-from httk.workflow.models import canonical_uuid, validate_budget_override, validate_step
+from httk.workflow.models import canonical_uuid, is_workflow_id, validate_budget_override, validate_step
 
 __all__ = [
     "MAX_STATE_BYTES",
@@ -43,6 +45,8 @@ MAX_STATE_BYTES = 100 << 20
 UNOWNED_STATES = ("ready", "waiting", "paused", "failed", "succeeded", "cancelled")
 TERMINAL_STATES = ("succeeded", "failed", "cancelled")
 
+_LOGGER = logging.getLogger(__name__)
+
 _FAILURE_HISTORY_LIMIT = 16
 _HISTORY_TAIL_LIMIT = 32
 _PHASE_KINDS = ("idle", "launching", "running")
@@ -51,7 +55,7 @@ _ACTIVATION_REASONS = ("initial", "advance", "retry", "manual_continue", "overri
 _OWNER_ID = re.compile(r"[0-9a-f]{32}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 #: Members a document may lack (it was written before they existed); each reads as ``None``.
-_OPTIONAL_MEMBERS = frozenset({"job_digest", "budget_override"})
+_OPTIONAL_MEMBERS = frozenset({"job_digest", "budget_override", "workflow_override"})
 
 type Frozen = None | bool | int | float | str | tuple["Frozen", ...] | Mapping[str, "Frozen"]
 
@@ -182,6 +186,8 @@ class StateDoc:
     :param job_digest: The digest of ``job.json`` pinned at the job's first activation, or ``None`` before it.
     :param budget_override: The operator's ``set_budget`` limits, which replace those of ``job.json``'s
         ``retry_policy`` (``null`` lifts one), or ``None``.
+    :param workflow_override: The operator's ``set_workflow`` choice ``{id, name}``: the installed workflow the job
+        runs instead of ``job.json``'s ``workflow``, or ``None``.
     """
 
     job_id: str
@@ -209,6 +215,7 @@ class StateDoc:
     history_tail: tuple[Mapping[str, Frozen], ...]
     job_digest: str | None = None
     budget_override: Mapping[str, Frozen] | None = None
+    workflow_override: Mapping[str, Frozen] | None = None
 
     @classmethod
     def empty(cls, job_id: str) -> Self:
@@ -247,6 +254,7 @@ class StateDoc:
                 "history_tail": [],
                 "job_digest": None,
                 "budget_override": None,
+                "workflow_override": None,
             }
         )
 
@@ -293,6 +301,15 @@ class StateDoc:
         budget_override = _mapping_or_none(doc["budget_override"], "budget_override")
         if budget_override is not None:
             validate_budget_override(budget_override, "state.json budget_override")
+        workflow_override = _mapping_or_none(doc["workflow_override"], "workflow_override")
+        if workflow_override is not None:
+            # Validated like job.json's workflow: exactly {id, name}, both nonempty strings.
+            if set(workflow_override) != {"id", "name"}:
+                raise FormatError("state.json workflow_override must be {id, name} or null")
+            for member in ("id", "name"):
+                require_string(workflow_override[member], f"state.json workflow_override.{member}")
+            if not is_workflow_id(str(workflow_override["id"])):
+                raise FormatError("state.json workflow_override.id must be an installed workflow id")
         return cls(
             job_id=canonical_uuid(doc["job_id"], "state.json job_id"),
             updated_at=doc["updated_at"],
@@ -319,6 +336,7 @@ class StateDoc:
             history_tail=_records(doc["history_tail"], "history_tail", _HISTORY_TAIL_LIMIT),
             job_digest=job_digest,
             budget_override=budget_override,
+            workflow_override=workflow_override,
         )
 
     def as_mapping(self) -> dict[str, object]:
@@ -571,4 +589,10 @@ def salvage_state(path: Path) -> dict[str, Any]:
     digest = value.get("job_digest")
     if isinstance(digest, str) and _DIGEST.fullmatch(digest):
         kept["job_digest"] = digest
+    if value.get("workflow_override") is not None:
+        _LOGGER.warning(
+            "%s is damaged: its set_workflow override %r is not salvaged; the job falls back to job.json's workflow",
+            path,
+            value["workflow_override"],
+        )
     return kept

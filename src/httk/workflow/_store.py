@@ -48,6 +48,7 @@ from httk.core.git_sources import parse_git_uri
 from httk.workflow import _fs, git_workflows, scaffold
 from httk.workflow._kernel import KernelWorkspace, Owner, reconcile_scratch
 from httk.workflow.errors import RunnerResolutionError
+from httk.workflow.models import WORKFLOW_ID_PREFIXES
 from httk.workflow.packages import (
     MANIFEST_NAME,
     artifact_excluder,
@@ -82,8 +83,6 @@ _PROBE_STDERR_TAIL = 1024
 _PLATFORM_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], str] = {}
 _INSTALLATION = re.compile(r"[a-z0-9._-]*--[0-9a-f]{16}")
 _REPLACED = re.compile(r"[a-z0-9._-]*--[0-9a-f]{16}\.old\.[a-z2-7]{16}")
-# Every installation id starts with one of these (see _resolve); such text never selects by short name.
-_ID_PREFIXES = ("local:", "adhoc:", "git+")
 
 
 @dataclass(frozen=True)
@@ -318,7 +317,7 @@ def lookup(workspace: KernelWorkspace, id_or_name: str) -> Installed | None:
         stem = directory.name.partition(".old.")[0]
         if stem.endswith(suffix) and (found := _read(directory)) is not None and found.id == id_or_name:
             return found
-    if id_or_name.startswith(_ID_PREFIXES):
+    if id_or_name.startswith(WORKFLOW_ID_PREFIXES):  # id-shaped text never selects by short name (see _resolve)
         return None  # a short name spelled like an id must not stand in for an uninstalled id
     return max(_candidates(list_installed(workspace), id_or_name), key=_installed_order, default=None)
 

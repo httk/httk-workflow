@@ -600,6 +600,20 @@ def validate_step(value: object, name: str = "step") -> str:
     return text
 
 
+#: What every installed workflow id starts with: ``local:<name>``, ``adhoc:<stem>@<sha12>`` or a pinned ``git+`` URI.
+WORKFLOW_ID_PREFIXES = ("local:", "adhoc:", "git+")
+
+
+def is_workflow_id(text: str) -> bool:
+    """Report whether *text* has the shape of an installed workflow id: a known prefix with something after it.
+
+    :param text: The text.
+    :return: Whether it is id-shaped.
+    """
+
+    return any(text.startswith(prefix) and len(text) > len(prefix) for prefix in WORKFLOW_ID_PREFIXES)
+
+
 def ensure_step_known(step: str, steps: Sequence[str], subject: str) -> str:
     """Return *step* when *subject* implements it, else raise listing the known set.
 

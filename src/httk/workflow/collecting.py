@@ -73,6 +73,7 @@ from .models import (
     JOB_STATE_DIRECTORY,
     Failure,
     canonical_uuid,
+    is_workflow_id,
     normalize_placement,
     parse_placement_text,
     placement_text,
@@ -353,13 +354,15 @@ def children_of(doc: StateDoc | None) -> dict[str, dict[str, object]]:
 # ---------------------------------------------------------------------------
 
 
-def _job_mapping(job: JobDefinition) -> dict[str, object]:
+def _job_mapping(job: JobDefinition, doc: StateDoc | None) -> dict[str, object]:
     """Return the validated job definition as one JSON-safe mapping.
 
     This is the definition as the protocol validated it, not the stored bytes:
     those are what ``digest`` pins, and a consumer that needs them reads
-    ``job.json`` at ``payload_path``. ``workflow`` is the installed workflow's
-    id and ``workflow_name`` its short name.
+    ``job.json`` at ``payload_path``. ``workflow`` is the declared installed
+    workflow's id and ``workflow_name`` its short name; ``workflow_override``,
+    present only after an operator's ``set_workflow``, is the ``{id, name}``
+    from ``state.json`` the job ran instead.
     """
 
     policy = job.retry_policy
@@ -387,9 +390,32 @@ def _job_mapping(job: JobDefinition) -> dict[str, object]:
     }
     if job.environment:
         result["environment"] = _thaw(job.environment)
+    if doc is not None and doc.workflow_override is not None:
+        result["workflow_override"] = _thaw(doc.workflow_override)
     if job.staged_files:
         result["staged_files"] = [_thaw(entry) for entry in job.staged_files]
     return result
+
+
+def _producing_workflow(record: JobRecord) -> tuple[str, str | None]:
+    """Return the ``(id, name)`` of the installed workflow that produced *record*'s outputs.
+
+    That is the id the job's last launch pinned (``runner_provenance``) when it differs from an id-shaped declared
+    ``workflow``: only a ``set_workflow`` makes them differ (the override's id, or an earlier one's when the job
+    was switched again, or back, after its last attempt). Otherwise it is the declared workflow; a declared short
+    name may pin a name-resolved installation, which is the same workflow. The name is ``None`` when the record
+    does not know it.
+    """
+
+    declared, name = record.job.get("workflow"), record.job.get("workflow_name")
+    declared, name = (declared if isinstance(declared, str) else ""), (name if isinstance(name, str) else None)
+    pinned = (record.runner_provenance or {}).get("id")
+    if not isinstance(pinned, str) or pinned == declared or not is_workflow_id(declared):
+        return declared, name
+    override = record.job.get("workflow_override")
+    if isinstance(override, Mapping) and override.get("id") == pinned:
+        return pinned, str(override.get("name"))
+    return pinned, None
 
 
 def _optional_posix(value: object) -> PurePosixPath | None:
@@ -832,7 +858,7 @@ def _record_at(workspace: Workspace, ref: JobRef, steps: frozenset[str] | None) 
         workspace_id=workspace.workspace_id,
         job_id=ref.job_id,
         job_key=ref.job_key,
-        job=_job_mapping(job),
+        job=_job_mapping(job, doc),
         runner_provenance=None if doc is None or doc.workflow_pin is None else dict(doc.workflow_pin),
         state=ref.state,
         failure=failure,
@@ -1735,8 +1761,7 @@ def _assemble_collected(
         outputs = {role: _prefixed_url(identity, role, value, url_prefix) for role, value in outputs.items()}
         inputs = {role: _prefixed_url(identity, role, value, url_prefix) for role, value in (inputs or {}).items()}
         staged = {label: _prefixed_url(identity, label, value, url_prefix) for label, value in (staged or {}).items()}
-    workflow_id = record.job.get("workflow")
-    workflow_id = workflow_id if isinstance(workflow_id, str) else ""
+    workflow_id, _name = _producing_workflow(record)
     document = _job_workflow_document(record, provider)
     roles = _output_roles(document)
     unknown = [role for role in outputs if role not in roles]
@@ -2206,8 +2231,7 @@ def _degraded_job(record: JobRecord, provider: object | None, run: httk.core.Run
     :return: The degraded collected job with all declared roles unfulfilled.
     """
 
-    workflow_id = record.job.get("workflow")
-    workflow_id = workflow_id if isinstance(workflow_id, str) else ""
+    workflow_id, _name = _producing_workflow(record)
     unfulfilled = tuple(_output_roles(_job_workflow_document(record, provider)))
     return CollectedJob(workflow_id, {}, unfulfilled, run, (), record, reason)
 
@@ -2236,7 +2260,7 @@ def _child_runs(record: JobRecord) -> tuple[tuple[str, str], ...]:
 
 
 def _registered_provider(record: JobRecord) -> WorkflowProvider | None:
-    """Return the provider registered in this process for the record's workflow.
+    """Return the provider registered in this process for the workflow that produced the record.
 
     A pinned git id selects its installed git workflow; any other job is matched
     by its workflow's short name, then by its id.
@@ -2244,7 +2268,7 @@ def _registered_provider(record: JobRecord) -> WorkflowProvider | None:
 
     from .scaffold import workflow_provider
 
-    workflow_id, name = record.job.get("workflow"), record.job.get("workflow_name")
+    workflow_id, name = _producing_workflow(record)
     if isinstance(workflow_id, str) and workflow_id.startswith("git+"):
         return workflow_provider(workflow_id)
     for candidate in (name, workflow_id):
@@ -2332,8 +2356,7 @@ def collect(
 
         for index, record in enumerate(window):
             identity = f"{record.workspace_id}:{record.job_id}"
-            workflow_id = record.job.get("workflow")
-            workflow_id = workflow_id if isinstance(workflow_id, str) else ""
+            workflow_id, _name = _producing_workflow(record)
             provider = _registered_provider(record)
             try:
                 run = run_record(record)

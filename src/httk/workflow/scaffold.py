@@ -2527,8 +2527,8 @@ def _build_payload(
     declared_member: dict[str, object] = {}
     if declared_parameters:
         declared_member["parameters"] = {name: dict(metadata) for name, metadata in declared_parameters.items()}
-    if declared_input_metadata:
-        declared_member["inputs"] = declared_input_metadata
+    # Always written, even empty: set_workflow verifies a switch against the inputs the job was made with.
+    declared_member["inputs"] = declared_input_metadata
     installed = prepared.installed
     spec = JobSpec(
         name=name or f"{installed.name}: {tag or 'job'}",

@@ -72,6 +72,7 @@ from httk.workflow._bundles import (
 )
 from httk.workflow._job import JobDefinition
 from httk.workflow._kernel import OWNED, JobRef, OwnedJob, Owner, OwnerLost
+from httk.workflow._manager_scheduling import effective_workflow
 from httk.workflow._state import TERMINAL_STATES, StateDoc, encode_state, read_state_unowned
 from httk.workflow._util import json_bytes, utc_now
 from httk.workflow.errors import FormatError, WorkflowError
@@ -568,6 +569,12 @@ def _settle(owner: Owner, scratch: Path) -> bool | None:
     return False
 
 
+def _exchange_inbox(destination: Path) -> bool:
+    """Whether *destination* is an exchange's ``inbox``, whose untrusted adoption rebuilds every ``state.json``."""
+
+    return destination.name == "inbox" and (destination.parent / "exchange.json").is_file()
+
+
 def _eject(
     workspace: "Workspace",
     owner: Owner,
@@ -588,6 +595,17 @@ def _eject(
         elif children := tree_members(workspace, root.job_id, root.read_state()):
             # Ejecting the root alone would orphan the children present here: it is refused.
             raise Busy(children[0].job_key, "it is a child of the job; eject the whole tree")
+        if _exchange_inbox(destination) and (
+            switched := next(
+                (job for job in (root, *members) if (doc := job.read_state()) is not None and doc.workflow_override),
+                None,
+            )
+        ):
+            raise ValueError(
+                f"{switched.job_key} runs another workflow than its job.json names (set_workflow), which the "
+                "exchange's adoption would drop with the rest of state.json; run it here, or submit a new job of "
+                "that workflow to the exchange"
+            )
         scratch = owner.scratch(_HOLD if hold else "eject")
         bundle = build_bundle(
             owner,
@@ -981,7 +999,9 @@ def _finish(
         directory = manifest.member_dir(bundle, member)
         if not _fs.exists(_fs.loc(directory)):
             continue
-        workflows.add(JobDefinition.from_path(directory / "job.json").workflow_id)
+        # A trusted bundle keeps state.json, and with it a set_workflow override: the job runs that workflow.
+        kept = None if record.untrusted else read_state_unowned(directory / "state.json")[0]
+        workflows.add(effective_workflow(JobDefinition.from_path(directory / "job.json"), kept)[0])
         if record.untrusted:
             doc = StateDoc.empty(member.job_id).updated(origin="exchange", exchange_name=names[member.job_id])
             # A fresh client job has no state.json of its own: its children are recorded here, so the tree is the

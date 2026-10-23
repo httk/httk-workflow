@@ -197,6 +197,83 @@ did; a revival raises the limits instead. `--force` does not skip a budget: it
 only accepts the revival hazard, and the manager checks the budget again at
 launch.
 
+## Switching the workflow
+
+A job runs the installed workflow its `job.json` names, and `job.json` cannot
+be edited. To make existing jobs run another installation, such as a newer
+version of the same workflow, post `set_workflow`. To bump every ready job to
+the newest installation of a release:
+
+```console
+httk workflow install git+https://github.com/ORG/REPO@v1.3.0#relax
+httk job request set_workflow --workflow relax@v1.3.0 --state ready --reason "bump to v1.3.0"
+```
+
+To repair failed jobs with a fixed version, switch them, then restart them:
+
+```console
+httk job request set_workflow --workflow relax@v1.3.1 --state failed --reason "fixed runner"
+httk job request restart --state failed --reason "rerun on v1.3.1"
+```
+
+`--workflow` takes an installed id, a short name (the newest installation of
+that name) or `NAME@REF`. It is resolved once, in the job's workspace, and the
+request names the installation's id. Jobs are selected by `JOB_ID` arguments,
+by `--state STATE` (repeatable) and by `--placement PREFIX`, which narrows
+`--state`; the selections are joined, and every action of `job request` takes
+them. `job request` has no `--step` selector: its `--step` is the target step
+of `override_step`.
+
+Every selected job is checked before any request is posted, and the job's owner
+checks again when it applies the request. The candidate must:
+
+1. be installed in the job's workspace;
+2. carry the same declaration `$id` as the job's stored declaration, or, when
+   the job's declaration has no `$id`, have the same short name;
+3. declare the same inputs as the job's `declared.inputs`: the same names,
+   payload destinations and hook-consumed inputs;
+4. declare the same output names as the job's stored declaration;
+5. declare no parameter that the job has no value for, unless the job's own
+   declaration also had no value for it, and keep every parameter the job's
+   declaration lists, each value matching the declared type;
+6. declare the same environment names and types;
+7. declare the step the job runs next; for a parent waiting on its children
+   (or failed at its wait), the steps its join advances to.
+
+A job made from an installed workflow stores its declaration and records
+empty parameter, input and environment declarations by leaving them out. A job
+that stores no declaration, such as a spawned child, is compared with its
+current installation instead; when that is gone too, the switch is refused as
+unverifiable. A refusal names the rule that failed. Switching a job back to the
+workflow its `job.json` names removes the override. A job that runs a
+language realization (CWL, PWD, jobflow, httk v1) is never switched, since its
+executed document lives in the payload.
+
+The request applies to any job that is not `succeeded` or `cancelled`. It does
+not need `--force`. An unowned job is switched at once; a job a manager holds
+is switched at its next boundary, and a running attempt finishes on the code it
+started with. A waiting parent can be switched; its children are separate jobs
+that keep their own workflows. Children that the job spawns after the switch run
+the new installation, and `a.call` uses the new installation's
+`[workflow.calls]`.
+
+What changes is the runner code and its calls. What stays as created is the
+payload, the parameters, the declarations, `resources` and `step_resources`
+(a larger `maxtime` in the new version is not used; `job show` shows the job's
+resources). An instantiate hook of the new version is not run again; the
+command warns when the candidate has one. Implementations that share one
+declaration `$id` can differ in language, so a switch can move a job, for
+example, from a Python runner to a Bash one.
+
+The choice is written to `state.json` as `workflow_override` `{id, name}`, and
+the recorded `runner_steps` of the old runner are cleared. `job show` prints
+the declared workflow and the one the job runs. Collection uses the
+installation that produced the outputs, and the collected job record keeps the
+declared `workflow` with `workflow_override` beside it. A job that carries an
+override cannot be ejected into a workspace daemon's exchange, whose adoption
+rebuilds `state.json`; the workspace daemon protocol does not carry
+`set_workflow`.
+
 ## Parents and children
 
 A parent that waits on children with
@@ -313,8 +390,11 @@ httk job request continue --reason "quota restored" silicon
 
 `continue --tree` works on local workspaces only; it is refused for a remote
 `--workspace` binding. For a remote workspace, post one `continue` per failed
-job yourself, deepest first, then the parent. {doc}`/details/remotes` covers
-what a remote binding accepts.
+job yourself, deepest first, then the parent. `--state` and `--placement` also
+select jobs of local workspaces only; give job ids for a remote one.
+`set_workflow` resolves `--workflow` on the remote side, against the remote
+workspace's installations; it is refused for a workspace daemon remote.
+{doc}`/details/remotes` covers what a remote binding accepts.
 
 ## See also
 

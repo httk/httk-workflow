@@ -235,7 +235,8 @@ def _bound(fabricated_root: Path, workspace: Workspace, parent: _kernel.JobRef) 
     control.mkdir(parents=True)
     context = {
         "format": "httk-workflow-attempt-context",
-        "format_version": 2,
+        "format_version": 3,
+        "workflow": json.loads((parent.path / "job.json").read_text(encoding="utf-8"))["workflow"],
         "workspace_id": workspace.workspace_id,
         "job_id": doc.job_id,
         "job_key": parent.job_key,
