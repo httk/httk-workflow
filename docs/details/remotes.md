@@ -136,13 +136,17 @@ $ httk workspace status kappa:runs
 ```
 
 The `NAME:WORKSPACE` spelling is a binding, not a filesystem path. Install the
-job's workflow there, transfer the job and run its manager there:
+job's workflow there, push the jobs waiting to start and run its manager there:
 
 ```console
 $ httk workflow install --workspace kappa:runs 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-$ httk job transfer --job JOB default kappa:runs
+$ httk job push kappa:runs
 $ httk workflow run --workspace kappa:runs --count 4
 ```
+
+`httk job push [SRC] DST` moves every `ready` job of SRC; the SRC left out is
+the workspace the command runs in, else the default workspace (the per-user
+one is created on first use).
 
 Workflows never travel with jobs: a transferred job whose workflow is not
 installed at the destination waits there, and the transfer warns about it. The
@@ -150,12 +154,21 @@ remote invocation asks the owning machine to run
 `httk workflow manager run --workspace runs --detach …`. The target workspace
 then applies its own `manager.launch`, `manager.workers`, scheduler settings and
 `environment.prelude`, as if the command had been run on the login node. Fetch
-finished jobs back with the reverse transfer, selecting them by state (add
-`--placement PREFIX` for one campaign, or name single jobs with
-`--job JOB_UUID`):
+finished jobs back with a pull, which moves every `succeeded` job of SRC into
+DST, by default the same workspace a push takes from (add `--placement PREFIX`
+for one campaign; `--job JOB_UUID`, `--state STATE` or `--step STEP` replaces
+the implicit state, and `--step` without `--state` selects from every unowned
+state):
 
 ```console
-$ httk job transfer --state succeeded kappa:runs default
+$ httk job pull kappa:runs
+```
+
+Push and pull are the everyday forms of `httk job transfer SRC DST`, which
+names both ends and an explicit selection (`--job`, `--state`, `--step`):
+
+```console
+$ httk job transfer --state succeeded --placement camp kappa:runs default
 ```
 
 A transfer holds the jobs on the source, copies them, adopts them at the
@@ -181,18 +194,21 @@ $ httk workspace init --name scratch local-tree:/tmp/me/httk/scratch
 
 ### Job trees travel together
 
-A child job spawned by another job travels with its parent. `--tree` moves a
-job together with its spawned descendants, with their placements kept; without
-it, a job whose descendants are present is refused. Every descendant must be
-paused or terminal, so a fetch of finished work brings a campaign back whole
-once it is done; to move a tree still in flight, pause its unfinished children
+A child job spawned by another job travels with its parent. `job push` and
+`job pull` always move a root together with its spawned descendants, with
+their placements kept; `job transfer` does so with `--tree` and without it
+refuses a job whose descendants are present. Every descendant must be paused or
+terminal, so a pull of finished work brings a campaign back whole once it is
+done. A root that finished before its children (an `any_terminal`,
+`any_succeeded` or `at_least` join) is refused and stays, never split, until
+they finish; to move a tree still in flight, pause its unfinished children
 first. A child that should leave alone is detached first, because a child may
 read its parent's files in place (see {doc}`composing_workflows`):
 
 ```console
-$ httk job transfer --state succeeded --tree kappa:runs default
+$ httk job pull kappa:runs
 $ httk job detach CHILD
-$ httk job transfer --job CHILD default kappa:runs
+$ httk job push --job CHILD kappa:runs
 ```
 
 ## Mounted filesystem with a separate executor (`mount`)

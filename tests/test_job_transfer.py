@@ -1235,3 +1235,140 @@ def test_a_listed_job_claimed_before_its_hold_is_one_error(
     assert outgoing(source) == []
     taken[0].give_back()
     other.close()
+
+
+# -- job push / job pull ----------------------------------------------------------------------------------------
+
+
+def everyday(verb: str, cwd: Path, *argv: str) -> int:
+    return command(["job", verb, "--no-durable", *argv], CLIContext("httk", cwd))
+
+
+def test_push_and_pull_take_the_enclosing_workspace_as_the_omitted_end(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, _ = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    ready, done = single(source, "ready"), single(source)
+    # One positional: push takes it as DST, from the workspace the command runs in.
+    assert everyday("push", source.root / "jobs", "--json", target_name) == 0
+    assert [len(outcome["members"]) for outcome in outcomes(capsys)["transfers"]] == [1]
+    assert_in(target, [ready])
+    assert_in(source, [done])
+    # One positional: pull takes it as SRC, into the workspace the command runs in.
+    assert everyday("pull", target.root, "--json", str(source.root)) == 0
+    assert len(outcomes(capsys)["transfers"]) == 1
+    assert_in(target, [ready, done])
+
+
+def test_push_and_pull_outside_a_workspace_use_the_registered_default(
+    project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from httk.workflow.projects import write_project_section
+
+    home, home_name = registered(tmp_path, "home")
+    far, far_name = registered(tmp_path, "far")
+    write_project_section(project, "workspace", {"default": home_name})
+    ready, done = single(home, "ready"), single(far)
+    assert everyday("push", project, "--json", f"cluster:{far_name}") == 0
+    assert everyday("pull", project, "--json", f"cluster:{far_name}") == 0
+    assert_in(far, [ready])
+    assert_in(home, [done])
+    # Two positionals name both ends, as for job transfer.
+    assert everyday("push", project, "-q", f"cluster:{far_name}", home_name) == 0
+    assert_in(home, [ready, done])
+    capsys.readouterr()
+
+
+def test_push_and_pull_need_one_end_and_refuse_the_transfer_only_options(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, source_name = registered(tmp_path, "a")
+    for verb, end in (("push", "DST"), ("pull", "SRC")):
+        assert everyday(verb, source.root) == 2
+        assert f"name the other workspace: httk job {verb} {end} (e.g. REMOTE:WS)" in capsys.readouterr().err
+        for option in (["--hold"], ["--resume"], ["--release", "0" * 32], ["--destination-id", "x"], ["--tree"]):
+            assert everyday(verb, source.root, *option, source_name) == 2
+            assert "unrecognized arguments" in capsys.readouterr().err
+
+
+def test_an_explicit_selection_replaces_the_implicit_state(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    ready, done, failed = single(source, "ready"), single(source), single(source, "failed")
+    assert everyday("push", tmp_path, "-q", "--state", "succeeded", source_name, target_name) == 0
+    assert_in(target, [done])
+    assert everyday("push", tmp_path, "-q", "--job", str(failed[0]["id"]), source_name, target_name) == 0
+    assert_in(target, [done, failed])
+    assert_in(source, [ready])
+    # --step without --state selects from every unowned state.
+    assert everyday("pull", tmp_path, "-q", "--step", "start", target_name, source_name) == 0
+    assert_in(source, [ready, done, failed])
+    capsys.readouterr()
+
+
+def test_push_placement_narrows_the_implicit_state(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    ready = single(source, "ready")
+    assert everyday("push", tmp_path, "--placement", "elsewhere", source_name, target_name) == 0
+    assert f"no ready job to move in {source.root} under elsewhere" in capsys.readouterr().out
+    assert everyday("push", tmp_path, "-q", "--placement", "proj", source_name, target_name) == 0
+    assert_in(target, [ready])
+
+
+def test_pull_moves_a_succeeded_root_with_its_children_and_never_splits_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    whole = _family(source, "camp/w", {"c": ("succeeded", "camp/w/c")})
+    assert everyday("pull", tmp_path, "--json", source_name, target_name) == 0
+    assert [len(outcome["members"]) for outcome in outcomes(capsys)["transfers"]] == [2]
+    assert all(find(target, mapping["id"]) is not None for mapping in whole.values())
+    # A parent an any_terminal join let finish before its children: refused whole, not split.
+    family = _family(source, "camp/p", {"c1": ("succeeded", "camp/p/c1"), "c2": ("ready", "camp/p/c2")})
+    assert everyday("pull", tmp_path, "--json", "-q", source_name, target_name) == 1
+    captured = capsys.readouterr()
+    (error,) = json.loads(captured.out)["errors"]
+    assert "tree members must be terminal or paused" in error
+    assert "move only with their root (detach them to move them alone)" in captured.err
+    assert "use --tree" not in captured.err
+    assert all(find(source, mapping["id"]) is not None for mapping in family.values())
+    assert outgoing(source) == []
+
+
+def test_a_remote_push_holds_the_ready_trees(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    near, near_name, far, far_name = _remote_pair(tmp_path)
+    real = transfer_cli._remote
+    holds: list[list[str]] = []
+
+    def recording(end: Any, context: Any, arguments: Any, argv: list[str], cwd: str | None = None) -> Any:
+        if "--hold" in argv:
+            holds.append(argv)
+        return real(end, context, arguments, argv, cwd)
+
+    monkeypatch.setattr(transfer_cli, "_remote", recording)
+    ready, done = single(near, "ready"), single(near)
+    assert everyday("push", project, "--json", f"cluster:{near_name}", far_name) == 0
+    assert len(outcomes(capsys)["transfers"]) == 1
+    (hold,) = holds
+    assert "--tree" in hold and hold[hold.index("--state") + 1] == "ready" and hold.count("--state") == 1
+    assert_in(far, [ready])
+    assert_in(near, [done])
+
+
+def test_push_validates_its_named_end_before_creating_the_default_workspace(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from httk.workflow.configuration import data_home
+    from httk.workflow.registry import list_workspaces
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    before = list_workspaces()
+    assert everyday("push", plain, "no-such-workspace") == 2
+    assert "no-such-workspace" in capsys.readouterr().err
+    assert not (data_home() / "workspace").exists() and list_workspaces() == before

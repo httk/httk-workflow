@@ -229,7 +229,7 @@ def _local_partition_workspace(partition: str, project: str | os.PathLike[str] |
     if binding.remote != LOCAL_REMOTE:
         raise ValueError(
             f"campaign partition {partition!r} is the remote workspace {name!r} on {binding.remote!r}; "
-            "submit locally and move it with `httk job transfer`, or run this on the remote"
+            "submit locally and move it with `httk job push`, or run this on the remote"
         )
     assert binding.path is not None
     return Workspace(binding.path)
@@ -335,7 +335,7 @@ def campaign_collect(
         if binding.remote != LOCAL_REMOTE:
             raise ValueError(
                 f"campaign partition {partition!r} is the remote workspace {name!r} on {binding.remote!r}; "
-                "fetch it home with `httk job transfer` before collecting the campaign"
+                "fetch it home with `httk job pull` before collecting the campaign"
             )
         assert binding.path is not None
         yield from job_records(Workspace(binding.path), states=states, placement=placement, steps=steps)

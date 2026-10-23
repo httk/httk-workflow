@@ -115,7 +115,7 @@ local clone. Module CI does not set it yet, so these tests skip there.
   [`docs/workflow_compat.md`](docs/workflow_compat.md).
 - **Reaches other machines.** Versioned [remote adapters](docs/details/remotes.md)
   transport files and run commands on a cluster; the workspace's [launcher](docs/details/launchers.md)
-  starts its managers, and crash-recoverable `job transfer` moves jobs there and back.
+  starts its managers, and crash-recoverable `job push` and `job pull` move jobs there and back.
 - **Manages projects and identity**: XDG configuration, signed project
   manifests, and workspace policy; see
   [`docs/workflow_cli.md`](docs/workflow_cli.md).

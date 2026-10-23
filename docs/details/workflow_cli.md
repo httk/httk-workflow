@@ -19,7 +19,7 @@ what the commands do to a workspace.
 
 ```text
 httk workspace          show | configure | init | adopt | list | default | move | forget | delete | status | owners (managers) | attest-dead | workflows | settings show|set|unset | workflow-prelude show|set|unset | policy show|set|unset | fsck | gc | seal | unseal | verify | exchange enable | daemon init|configure|show|check|run
-httk job                new | submit | request | delete | seal | unseal | detach | eject | adopt | list | show | log | why | debug | transfer
+httk job                new | submit | request | delete | seal | unseal | detach | eject | adopt | list | show | log | why | debug | push | pull | transfer
 httk collect            [PATH] [--workspace WORKSPACE] [--into PATH] [--dry-run] …
 httk workflow list      [--workspace WORKSPACE] [--json]
 httk workflow describe  TARGET… [--workspace WORKSPACE] [--json]
@@ -93,8 +93,8 @@ workspace, the far side resolves the plain name in its own registry.
 
 Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 `show`, `log`, `why`, `request` and `delete`, `workflow install`, `build` and
-`run`) go through the adapter. Jobs are created locally and moved with
-`job transfer`.
+`run`) go through the adapter. Jobs are created locally, moved with
+`job push` and brought back with `job pull` (or `job transfer` in general).
 
 ## Workspaces
 
@@ -291,6 +291,8 @@ manager's platform stays `ready` and unclaimed there.
 | `job log JOB...` | print run logs (remote: over the adapter) | `--workspace`, `--limit`, `--json` |
 | `job why JOB...` | explain why jobs are not progressing (remote: over the adapter) | `--workspace`, `--json` |
 | `job debug JOB` | drive one job to a terminal state in the foreground | `--workspace`, `--step`, `--placement`, `--follow-children`, `--timeout`, `--log-level` |
+| `job push [SRC] DST` | move the `ready` jobs (as `job transfer --tree --state ready`); the omitted SRC is the enclosing or default workspace | `--job`, `--state`, `--step`, `--placement`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
+| `job pull SRC [DST]` | move the `succeeded` jobs (as `job transfer --tree --state succeeded`); the omitted DST is the enclosing or default workspace | `--job`, `--state`, `--step`, `--placement`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
 | `job transfer SRC DST` | move jobs between two workspaces | `--job`, `--state`, `--step`, `--placement`, `--tree`, `--resume`, `--release`, `--hold`, `--destination-id`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
 
 When giving more than one `JOB_ID`, name the workspace explicitly.
@@ -609,11 +611,25 @@ directory. Any combination of local and remote ends works, and a
 remote-to-remote transfer is relayed through the client:
 
 ```console
+httk job push [SRC] DST [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--json] [-q]
+httk job pull SRC [DST] [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--json] [-q]
 httk job transfer (--job JOB … | --state STATE … | --step STEP …) [--placement PREFIX] [--tree] SRC DST [--json] [-q]
 httk job transfer --resume [SRC] [DST]
 httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [WS]
 httk transfer status [WS] [--json]
 ```
+
+`job push` and `job pull` are the everyday forms: `job push REMOTE:WS` moves
+every `ready` job (created, waiting to start) of the workspace the command
+runs in, else the default workspace, to REMOTE:WS, and `job pull REMOTE:WS`
+moves every `succeeded` job of REMOTE:WS back. With one positional push takes
+it as DST and pull as SRC; the omitted end resolves like any omitted
+workspace (the enclosing workspace, the project's default, else the per-user
+default, which is created on first use), and with none the command is
+refused. Both always act as `--tree`, and `--job`, `--state` or `--step`
+replaces their implicit state (`--step` without `--state` selects from every
+unowned state). `--resume`, `--release`, `--hold` and `--destination-id` stay
+on `job transfer`.
 
 Jobs are selected by name with `--job` (a UUID, key, unique prefix, path or
 glob), or by state with `--state STATE`, which takes every job of SRC in that
@@ -631,7 +647,9 @@ children that did not move that way. Without `--tree`, a selected job whose
 descendants are present is refused, so a campaign whose finished roots have
 children is fetched with `--state succeeded --tree`; a root's tree then carries
 all of its descendants, which must be terminal or paused (a failed, cancelled
-or paused child travels with a succeeded root). A child that should move alone
+or paused child travels with a succeeded root). A root whose children are not
+all terminal or paused (a parent that an `any_terminal`, `any_succeeded` or
+`at_least` join let finish first) is refused and stays, never split. A child that should move alone
 is detached first. A very large selection on a remote SRC is held in one call:
 give it time with `--adapter-timeout`. Should that call fail, the jobs it held
 are still driven by the same run or by `--resume`.

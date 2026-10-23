@@ -2,7 +2,9 @@
 
 ``job transfer`` moves jobs between workspaces as hold + copy + adopt + release
 on :mod:`httk.workflow._moving`, locally or through the remote adapters'
-``invoke``, ``push`` and ``pull``; ``transfer status`` lists held transfers.
+``invoke``, ``push`` and ``pull``; ``job push``/``job pull`` are its everyday forms (an implicit
+``--state ready``/``succeeded``, ``--tree``, the default workspace as the omitted end);
+``transfer status`` lists held transfers.
 """
 
 import argparse
@@ -695,7 +697,7 @@ def _hold_jobs(
         if left := sum(ref.job_key not in moving for ref in children):
             print(
                 f"{left} selected job(s) have a parent in {src.locator} and move only with their root "
-                "(use --tree, or detach them)",
+                + ("(detach them to move them alone)" if arguments.tree else "(use --tree, or detach them)"),
                 file=sys.stderr,
             )
         return holds
@@ -1014,6 +1016,17 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     :return: 0 when every transfer was adopted (or already was), else 1.
     """
 
+    everyday = arguments.transfer_verb != "transfer"
+    if everyday:
+        # job push [SRC] DST / job pull SRC [DST]: the omitted end stays None, which _end resolves as the enclosing
+        # or default workspace; the implicit state is set before the guards so that --placement sees it.
+        if arguments.source is None:
+            end = "DST" if arguments.transfer_verb == "push" else "SRC"
+            raise ValueError(f"name the other workspace: httk job {arguments.transfer_verb} {end} (e.g. REMOTE:WS)")
+        if arguments.transfer_verb == "push" and arguments.destination is None:
+            arguments.source, arguments.destination = None, arguments.source
+        if not (arguments.jobs or arguments.state or arguments.step):
+            arguments.state = ["ready" if arguments.transfer_verb == "push" else "succeeded"]
     if arguments.placement is not None:
         if not (arguments.state or (arguments.step and not arguments.jobs)):
             raise ValueError("--placement narrows --state, or --step without --job; it needs one of them")
@@ -1026,17 +1039,22 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     if arguments.destination_id is not None:
         raise ValueError("--destination-id is recorded by --hold; it needs --hold")
     selected = arguments.jobs or arguments.state or arguments.step
-    if not arguments.resume and (arguments.source is None or arguments.destination is None or not selected):
+    ends_named = everyday or (arguments.source is not None and arguments.destination is not None)
+    if not arguments.resume and not (ends_named and selected):
         raise ValueError(
             "name jobs with --job, --state or --step, and SRC and DST; or re-drive held transfers with --resume"
         )
     if arguments.resume and selected:
         raise ValueError("--resume re-drives held transfers and takes no --job, --state or --step")
-    src = _end(arguments.source, context, arguments)
     ends: dict[str, _End] = {}
     dst = None
-    if arguments.destination is not None:
+    resolve_dst = arguments.destination is not None or everyday
+    if resolve_dst and arguments.source is None:
+        # The named end first: an invalid DST must not create the per-user default workspace as SRC.
         dst = _end(arguments.destination, context, arguments, probe=True)
+    src = _end(arguments.source, context, arguments)
+    if resolve_dst:
+        dst = dst or _end(arguments.destination, context, arguments, probe=True)
         if dst.locator == src.locator:
             raise ValueError(f"SRC and DST are the same workspace: {src.locator}")
         ends[dst.locator] = dst
@@ -1056,7 +1074,7 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     batches: dict[str, list[_moving.Hold]] = {}
     for hold in _holds(src, context, arguments):
         locator = hold.destination_locator
-        if arguments.destination is not None and locator not in ends:
+        if dst is not None and locator not in ends:
             continue
         if locator is None:
             errors.append(f"{hold.transfer_id}: the hold records no destination; adopt or release it by hand")
@@ -1114,15 +1132,19 @@ def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -
 
 
 _TRANSFER_DESCRIPTION = """\
-Move jobs between two workspaces: `job transfer --job JOB [--tree] SRC DST`,
+Move jobs between two workspaces (the everyday forms are `job push [SRC] DST`
+for the ready jobs and `job pull SRC [DST]` for the succeeded ones):
+`job transfer --job JOB [--tree] SRC DST`,
 or every job in a state: `job transfer --state succeeded [--placement PREFIX]
 [--tree] SRC DST` (--state and --job combine; both repeat). `--step STEP`
 (repeatable) narrows the selection to jobs at that step (the current
-activation's, else the initial step); alone it selects from every state but
-owned. --state and --step never split a tree: they leave out jobs whose
+activation's, else the initial step); without --state it selects from every
+unowned state. --state and --step never split a tree: they leave out jobs whose
 parent is in SRC, which move only in their root's tree. Without --tree a selected job that has children present is
 refused: --tree moves a finished campaign's roots with their children (failed,
-cancelled or paused ones too).
+cancelled or paused ones too). A root with children that are not all
+terminal or paused (a parent that an any_terminal, any_succeeded or at_least
+join let finish first) is refused and stays, never split.
 
 Each of SRC and DST is tried first as a registered workspace name (REMOTE:WS
 for a workspace on a remote), then as a workspace directory; `./NAME`
@@ -1149,10 +1171,50 @@ DST has; `job transfer --hold (--job JOB | --state STATE | --step STEP) ... SRC 
 holds, recording DST as given (the first leg a client runs on a remote SRC)."""
 
 
+_EVERYDAY_DESCRIPTION = """\
+`job {verb} {usage}` moves every {state} job ({meaning})
+{direction}, each root with its children. It is
+`job transfer --tree --state {state} SRC DST` with the omitted {omitted}
+defaulting to the enclosing workspace, else the project's default
+workspace, else the per-user default workspace (which this creates on first
+use). With one positional it names {named}: `httk job {verb} REMOTE:WS`;
+with none the command is refused.
+
+--job, --state or --step replaces the implicit --state {state};
+--step without --state selects from every unowned state. A selected job
+whose parent is in SRC moves only in its root's tree. A root moves only whole: one whose
+children are not all terminal or paused (a parent that an any_terminal,
+any_succeeded or at_least join let finish before its children) is refused
+and stays, never split. Every run re-drives the held transfers bound for
+DST; --resume, --release and --hold stay on `job transfer`, which also
+covers the general case."""
+
+_EVERYDAY = {
+    "push": {
+        "usage": "[SRC] DST",
+        "state": "ready",
+        "meaning": "created and waiting to start",
+        "direction": "to DST, typically a remote workspace",
+        "omitted": "SRC",
+        "named": "DST",
+        "summary": "move the ready jobs of a workspace (by default this one) to another",
+    },
+    "pull": {
+        "usage": "SRC [DST]",
+        "state": "succeeded",
+        "meaning": "finished successfully",
+        "direction": "from SRC, typically a remote workspace",
+        "omitted": "DST",
+        "named": "SRC",
+        "summary": "move the succeeded jobs of another workspace to one (by default this one)",
+    },
+}
+
+
 def build_transfer_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
 ) -> None:
-    """Declare the ``job transfer`` verb: move jobs between two workspace names or directories."""
+    """Declare the ``job transfer``, ``job push`` and ``job pull`` verbs: move jobs between two workspaces."""
 
     transfer = _leaf(
         subparsers,
@@ -1161,61 +1223,80 @@ def build_transfer_parser(
         description=_TRANSFER_DESCRIPTION,
         handler=handle_transfer,
     )
-    transfer.add_argument(
-        "source", metavar="SRC", nargs="?", help="the workspace the jobs leave (with --release: the one holding it)"
-    )
-    transfer.add_argument("destination", metavar="DST", nargs="?", help="the workspace the jobs arrive in")
-    transfer.add_argument(
-        "--job",
-        action="append",
-        default=[],
-        dest="jobs",
-        metavar="JOB",
-        help="a job UUID, key, unique prefix or path in SRC; a remote SRC requires canonical job UUIDs (repeatable)",
-    )
-    transfer.add_argument(
-        "--state",
-        action="append",
-        default=[],
-        metavar="STATE",
-        choices=_kernel.UNOWNED_STATES,
-        help="select every job of SRC in this state (repeatable; combinable with --job)",
-    )
-    _add_step_option(
-        transfer,
-        help_text=(
-            "select only jobs at this step: the current activation's, else the initial step (repeatable; "
-            "narrows --job and --state, alone selects from every state but owned)"
-        ),
-    )
-    transfer.add_argument(
-        "--placement",
-        metavar="PREFIX",
-        help="with --state, or --step without --job: only jobs under this placement prefix",
-    )
-    transfer.add_argument("--tree", action="store_true", help="move each job's descendants with it")
-    transfer.add_argument("--resume", action="store_true", help="re-drive the held transfers of SRC (to DST)")
-    transfer.add_argument(
-        "--release",
-        action="append",
-        default=[],
-        metavar="TRANSFER_ID",
-        help="discard a hold whose jobs DST already has (repeatable)",
-    )
-    transfer.add_argument(
-        "--hold",
-        action="store_true",
-        help="only hold the jobs in SRC, recording DST as given (the first leg, as a client drives it remotely)",
-    )
-    transfer.add_argument(
-        "--destination-id",
-        metavar="WORKSPACE_ID",
-        help="with --hold: the destination workspace's id, recorded so that the transfer adopts only there",
-    )
-    transfer.add_argument("-q", "--quiet", action="store_true", help="print no progress lines to stderr")
-    _add_adapter_timeout(transfer)
-    transfer.add_argument("--json", action="store_true", help="print the outcomes as one JSON document")
-    add_durability_arguments(transfer)
+    transfer.set_defaults(transfer_verb="transfer")
+    parsers = [transfer]
+    for verb, text in _EVERYDAY.items():
+        parser = _leaf(
+            subparsers,
+            verb,
+            summary=text["summary"],
+            description=_EVERYDAY_DESCRIPTION.format(verb=verb, **text),
+            handler=handle_transfer,
+        )
+        # The options job transfer keeps for itself; push and pull always move whole trees.
+        parser.set_defaults(transfer_verb=verb, resume=False, release=[], hold=False, destination_id=None, tree=True)
+        parsers.append(parser)
+    for parser in parsers:
+        everyday = parser is not transfer
+        parser.add_argument(
+            "source",
+            metavar="SRC",
+            nargs="?",
+            help="the workspace the jobs leave" + ("" if everyday else " (with --release: the one holding it)"),
+        )
+        parser.add_argument("destination", metavar="DST", nargs="?", help="the workspace the jobs arrive in")
+        parser.add_argument(
+            "--job",
+            action="append",
+            default=[],
+            dest="jobs",
+            metavar="JOB",
+            help="a job UUID, key, unique prefix or path in SRC; a remote SRC requires canonical job UUIDs (repeatable)",
+        )
+        parser.add_argument(
+            "--state",
+            action="append",
+            default=[],
+            metavar="STATE",
+            choices=_kernel.UNOWNED_STATES,
+            help="select every job of SRC in this state (repeatable; combinable with --job)",
+        )
+        _add_step_option(
+            parser,
+            help_text=(
+                "select only jobs at this step: the current activation's, else the initial step (repeatable; "
+                "narrows --job and --state; without --state, selects from every unowned state)"
+            ),
+        )
+        parser.add_argument(
+            "--placement",
+            metavar="PREFIX",
+            help="with --state, or --step without --job: only jobs under this placement prefix",
+        )
+        if not everyday:
+            parser.add_argument("--tree", action="store_true", help="move each job's descendants with it")
+            parser.add_argument("--resume", action="store_true", help="re-drive the held transfers of SRC (to DST)")
+            parser.add_argument(
+                "--release",
+                action="append",
+                default=[],
+                metavar="TRANSFER_ID",
+                help="discard a hold whose jobs DST already has (repeatable)",
+            )
+            parser.add_argument(
+                "--hold",
+                action="store_true",
+                help="only hold the jobs in SRC, recording DST as given (the first leg, as a client drives it remotely)",
+            )
+            parser.add_argument(
+                "--destination-id",
+                metavar="WORKSPACE_ID",
+                help="with --hold: the destination workspace's id, recorded so that the transfer adopts only there",
+            )
+        parser.add_argument("-q", "--quiet", action="store_true", help="print no progress lines to stderr")
+        _add_adapter_timeout(parser)
+        parser.add_argument("--json", action="store_true", help="print the outcomes as one JSON document")
+        add_durability_arguments(parser)
 
 
 def build_transfer_operator_parser(

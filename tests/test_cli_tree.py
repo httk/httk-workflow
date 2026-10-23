@@ -58,6 +58,8 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "log",
         "why",
         "debug",
+        "push",
+        "pull",
         "transfer",
     ),
     "manager": ("run",),

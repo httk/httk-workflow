@@ -169,23 +169,34 @@ nothing else uses the workspace, like `fsck` for a filesystem), and
 
 ## Moving jobs between machines
 
-Jobs are created locally and moved to the workspace that will run them, which
-needs the workflow installed too; when they have finished, the reverse transfer
-of every succeeded job brings them home:
+Jobs are created locally and pushed to the workspace that will run them, which
+needs the workflow installed too; when they have finished, a pull brings every
+succeeded job home:
 
 ```console
 httk workflow install --workspace kappa:runs 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-httk job transfer --job silicon default kappa:runs
+httk job push kappa:runs
 httk workflow run --workspace kappa:runs --count 4
-httk job transfer --state succeeded kappa:runs default
+httk job pull kappa:runs
 ```
+
+`httk job push [SRC] DST` moves every `ready` job (created, waiting to start)
+and `httk job pull SRC [DST]` every `succeeded` one, each root together with
+its children. The end left out is the workspace the command runs in, else the
+default workspace (the per-user one is created on first use). `--job JOB`,
+`--state STATE` or `--step STEP` replaces that implicit state (`--step` without
+`--state` selects from every unowned state), and `--placement PREFIX` narrows
+the selection to one campaign. A root is never split from its children: one
+with children still running (a parent that an `any_terminal`, `any_succeeded`
+or `at_least` join let finish first) is refused and stays until they finish.
+Both are forms of `httk job transfer SRC DST`, the general verb, which needs an
+explicit selection and moves a selected job with its descendants only with
+`--tree`.
 
 A transfer holds the jobs on the source, copies them to the destination,
 adopts them there and only then releases the hold; an interrupted transfer is
 finished by running it again or with `httk job transfer --resume`, and
-`httk transfer status` lists the holds. With `--tree` a job moves together with
-its descendants, as a campaign whose finished jobs have children needs
-(`--state succeeded --tree`); `--job JOB` selects single jobs.
+`httk transfer status` lists the holds.
 
 Without a registered workspace at either end, `job eject` and `job adopt` move
 jobs through a plain directory:

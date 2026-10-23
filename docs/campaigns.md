@@ -90,8 +90,8 @@ job = campaign_submit(
 ```
 
 A job is created where the client runs, so a partition that points at a
-remote workspace is submitted to locally and moved with `httk job transfer`
-({doc}`running`).
+remote workspace is submitted to locally, moved with `httk job push` and
+fetched home with `httk job pull` ({doc}`running`).
 
 ## Running and collecting across partitions
 

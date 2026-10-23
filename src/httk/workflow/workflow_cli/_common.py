@@ -479,7 +479,7 @@ def _local_root(arguments: argparse.Namespace, context: CLIContext, *, action: s
         raise ValueError(
             f"workspace {binding.name!r} is bound to the remote {binding.remote!r}, so it cannot "
             f"{action} locally; run this on {binding.remote}, or reach it with "
-            f"`httk job transfer` and `httk workspace status {binding.name}`"
+            f"`httk job push`/`httk job pull` and `httk workspace status {binding.name}`"
         )
     return root
 

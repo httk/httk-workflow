@@ -478,9 +478,10 @@ Each `--raw` line is exactly `JobRecord.as_mapping()`, and
 to a file, shipped and read back by the storing process.
 
 Jobs that ran on a remote are collected the same way once home:
-`httk job transfer --job JOB REMOTE:NAME default` moves them into the local
-default workspace in their terminal state, and collect cannot tell them from
-local jobs. See {doc}`/details/workflow_cli`.
+`httk job pull REMOTE:NAME` moves every succeeded job into the local
+workspace (the enclosing one, else the default) in its terminal state, and
+`httk job transfer --job JOB REMOTE:NAME default` moves single jobs whatever
+their state; collect cannot tell them from local jobs. See {doc}`/details/workflow_cli`.
 
 ### Summary line and exit codes
 

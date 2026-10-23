@@ -7,7 +7,7 @@ command answers `--help`:
 httk init | identity     operator identities (core-owned)
 httk project             init | show | repair | manifest | seal | unseal | verify-seal | import-v1
 httk workspace           init | list | default | show | configure | status | owners | attest-dead | settings | policy | workflow-prelude | fsck | gc | seal | unseal | verify | exchange | daemon | ...
-httk job                 new | submit | request | delete | detach | seal | unseal | list | show | log | why | debug | transfer | eject | adopt
+httk job                 new | submit | request | delete | detach | seal | unseal | list | show | log | why | debug | push | pull | transfer | eject | adopt
 httk collect             workspaces and calculation trees
 httk workflow            run | list | describe | install | uninstall | precheck | postprocess | build | monitor
 httk seal       verify
