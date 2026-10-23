@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shlex
 import stat
 import uuid
 from dataclasses import dataclass
@@ -142,6 +143,98 @@ def validate_slurm_export(value: object) -> str:
             f"(case-sensitive, no surrounding whitespace): {value!r}"
         )
     return value
+
+
+#: The launcher setting holding free-form ``sbatch`` options, a string of shell words.
+SBATCH_OPTIONS_SETTING = "slurm.sbatch_options"
+#: Options httk sets itself (job bookkeeping and the script contract), or that make ``sbatch`` exit without
+#: submitting a job, refused in ``slurm.sbatch_options``.
+_MANAGED_SBATCH_OPTIONS = (
+    "job-name",
+    "chdir",
+    "output",
+    "error",
+    "input",
+    "export",
+    "export-file",
+    "parsable",
+    "clusters",
+    "requeue",
+    "no-requeue",
+    "wrap",
+    "array",
+    "uid",
+    "gid",
+    "get-user-env",
+    "test-only",
+    "wait",
+    "help",
+    "usage",
+    "version",
+)
+#: Options with a keyed launcher setting, refused in ``slurm.sbatch_options`` in favour of that setting.
+_KEYED_SBATCH_OPTIONS = {
+    "account": "slurm.account",
+    "partition": "slurm.partition",
+    "time": "slurm.time_limit",
+    "nodes": "slurm.nodes",
+    "ntasks": "slurm.ntasks",
+    "cpus-per-task": "slurm.cpus_per_task",
+    "ntasks-per-node": "slurm.ntasks_per_node",
+    "mem": "slurm.mem",
+    "gres": "slurm.gres",
+    "reservation": "slurm.reservation",
+}
+_SBATCH_OPTION = re.compile(r"--([A-Za-z][A-Za-z0-9-]*)(?:=(.*))?")
+
+
+def sbatch_option_lines(value: object) -> tuple[str, ...]:
+    """Return the ``#SBATCH`` line bodies of a ``slurm.sbatch_options`` value, refusing what httk cannot pass.
+
+    The value is a string of shell words, each ``--name`` or ``--name=value``. A name httk manages or that has a
+    keyed ``slurm.*`` setting is refused, and so is any abbreviation of one, because ``sbatch`` accepts
+    unambiguous prefixes of long options.
+
+    :param value: The setting value; ``None`` or a blank string yields no lines.
+    :return: One ``--name`` or ``--name=<shell-quoted value>`` per word, in the given order.
+    :raises ValueError: If the value is not a string, does not split into shell words, or a word is malformed,
+        repeated, or names a refused option.
+    """
+
+    if value is None:
+        return ()
+    setting = SBATCH_OPTIONS_SETTING
+    if type(value) is not str:
+        raise ValueError(f"launcher setting {setting} must be a string of --name=value words: {value!r}")
+    if _PUBLISHED_CONTROL.search(value):
+        raise ValueError(f"launcher setting {setting} must not contain control characters")
+    if "\\" in value:
+        raise ValueError(f"launcher setting {setting} must not contain backslashes")
+    try:
+        words = shlex.split(value)
+    except ValueError as exc:
+        raise ValueError(f"launcher setting {setting} is not valid shell words: {exc}") from None
+    lines: list[str] = []
+    names: set[str] = set()
+    for word in words:
+        match = _SBATCH_OPTION.fullmatch(word)
+        if match is None:
+            raise ValueError(f"launcher setting {setting} word {word!r} is not a long option: use --name=value")
+        name, option_value = match.group(1), match.group(2)
+        if option_value == "":
+            raise ValueError(f"launcher setting {setting} option --{name} has an empty value")
+        if name in names:
+            raise ValueError(f"launcher setting {setting} repeats option --{name}")
+        names.add(name)
+        for denied in (*_KEYED_SBATCH_OPTIONS, *_MANAGED_SBATCH_OPTIONS):
+            if denied.startswith(name):
+                option = f"--{name}" if name == denied else f"--{name} (--{denied})"
+                reason = (
+                    f"use {_KEYED_SBATCH_OPTIONS[denied]}" if denied in _KEYED_SBATCH_OPTIONS else "reserved by httk"
+                )
+                raise ValueError(f"launcher setting {setting} must not set {option}: {reason}")
+        lines.append(f"--{name}" if option_value is None else f"--{name}={shlex.quote(option_value)}")
+    return tuple(lines)
 
 
 def _setting_value(key: str, value: object) -> SettingValue:

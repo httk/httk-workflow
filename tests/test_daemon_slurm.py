@@ -222,12 +222,20 @@ def test_submission_uses_only_the_frozen_launcher_settings(policy: Policy, tmp_p
             "slurm.gres": "gpu:a100=2",
             "slurm.reservation": "maint.1",
             "slurm.nodes": "2",
+            "slurm.sbatch_options": "--qos=high --exclusive",
         },
+    )
+    # A workspace setting on disk never reaches a daemon submission.
+    (policy.workspace / ".httk-workspace/format.json").write_text(
+        json.dumps({"settings": {"slurm.sbatch_options": "--qos=low --mail-type=END"}})
     )
     assert SlurmGateway(policy).submit(launcher, _HANDLE, operator_key=_KEY).job_id == "1"
     script = record.read_text()
     assert "#SBATCH --gres=gpu:a100=2" in script and "#SBATCH --reservation=maint.1" in script
     assert "#SBATCH --nodes=2" in script
+    directives = [line for line in script.splitlines() if line.startswith("#SBATCH ")]
+    assert directives[-2:] == ["#SBATCH --qos=high", "#SBATCH --exclusive"]
+    assert "--qos=low" not in script and "--mail-type" not in script
     assert script.splitlines()[-2] == "module load httk"
     command = shlex.split(script.splitlines()[-1])
     # After a prelude, the launcher's manager command replaces the isolated interpreter.

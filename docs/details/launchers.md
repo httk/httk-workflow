@@ -90,6 +90,7 @@ $ httk workflow run --count 4 --workspace default
 | `slurm.gres` | Slurm generic resource request. |
 | `slurm.reservation` | Slurm reservation. |
 | `slurm.export` | sbatch `--export` mode for a workspace-daemon manager submission: `NONE` (default) or `NIL`. |
+| `slurm.sbatch_options` | Further `sbatch` options as one string of shell words, each `--name` or `--name=value`; see below. |
 | `environment.prelude` | Shell setup run before the manager, such as a module load or environment activation. |
 
 The `slurm.*` values become batch directives, except `slurm.time_limit_max`,
@@ -100,6 +101,29 @@ each mode means. `environment.prelude` runs before
 the manager under `set -e`, and `manager.command` is then looked up on the
 resulting `PATH`. Without a prelude, the launcher preserves the Python
 interpreter that started the command.
+
+`slurm.sbatch_options` passes options that have no keyed setting. Each word
+becomes one `#SBATCH` line, after httk's own directives:
+
+```console
+$ httk launcher configure cluster --set 'slurm.sbatch_options=--qos=high --constraint=rome --mail-type=END'
+```
+
+Write long options only (`--qos=high`, not `-q high`); quote a value with
+spaces in shell style (`--comment="nightly run"`). An empty setting passes no
+options (use `--unset slurm.sbatch_options` to drop the key). Backslashes,
+control characters, empty option values and repeated options are refused. So
+are the options httk sets itself (`--job-name`, `--chdir`, `--output`,
+`--error`, `--input`, `--export`, `--export-file`, `--parsable`, `--clusters`,
+`--requeue`, `--no-requeue`, `--wrap`, `--array`, `--uid`, `--gid`,
+`--get-user-env`, `--test-only`, `--wait`), those that make `sbatch` exit
+without submitting (`--help`, `--usage`, `--version`), and those with a keyed
+setting above (`--time` is `slurm.time_limit`, `--mem` is `slurm.mem`, and so
+on), including any abbreviation of them, since `sbatch` accepts unambiguous
+prefixes. A launcher
+value replaces a workspace value entirely; the two are not combined. An
+`SBATCH_*` variable in the environment of the user who runs `httk workflow run`
+outranks the script's directives.
 
 For MPI programs, `slurm.ntasks` requests the total number of processes and
 `slurm.ntasks_per_node` their placement per node, while `slurm.cpus_per_task`

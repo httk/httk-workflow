@@ -341,6 +341,8 @@ def test_approved_launchers_must_confine_their_managers(confine: str | None, tmp
         ({"slurm.partition": "short\nexport X=1"}, "control characters"),
         ({"manager.workers": "many"}, "manager.workers must be a positive integer"),
         ({"manager.allocation": "pbs"}, "allocation"),
+        ({"slurm.sbatch_options": "--qos=high --job-name=x"}, "must not set --job-name: reserved by httk"),
+        ({"slurm.sbatch_options": "--part=gpu"}, r"use slurm\.partition"),
     ],
 )
 def test_launcher_settings_the_dispatcher_refuses_fail_at_approval(
@@ -366,13 +368,23 @@ def test_a_launcher_whose_published_settings_clients_would_refuse_fails_at_appro
 
 def test_other_launcher_settings_are_frozen_as_ordinary_slurm_settings(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
-    _rewrite_launcher("small", **{"slurm.qos": "high", "slurm.ntasks": 4, "environment.prelude": "module load x"})
+    _rewrite_launcher(
+        "small",
+        **{
+            "slurm.qos": "high",
+            "slurm.ntasks": 4,
+            "environment.prelude": "module load x",
+            "slurm.sbatch_options": "--qos=high",
+        },
+    )
     settings = dict(load_policy(_initialize(layout, "small")).launcher("small").settings)
     assert (settings["slurm.qos"], settings["slurm.ntasks"], settings["environment.prelude"]) == (
         "high",
         4,
         "module load x",
     )
+    # Frozen with the launcher, but operator configuration: never published to clients.
+    assert settings["slurm.sbatch_options"] == "--qos=high"
     published = json.loads((layout.exchange / "daemon.json").read_bytes())["configurations"]["small"]["settings"]
     assert published == {"manager.workers": "3", "slurm.partition": "short", "slurm.ntasks": 4}
 

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ from httk.core.cli import CLIContext
 
 from conftest import Remote
 from httk.workflow import Workspace, launch_runtime, launchers
+from httk.workflow._daemon_policy import sbatch_option_lines
 from httk.workflow.launchers import (
     add_launcher,
     configure_launcher,
@@ -271,6 +273,125 @@ def test_slurm_launcher_start_spools_scripts(tmp_path: Path, remote: Remote) -> 
     assert "module load python" in script
     assert f"exec httk workflow manager run --workspace {workspace.root} --allocation slurm" in script
     assert bundle.exists()
+
+
+def _sbatch_lines(result: dict[str, object]) -> list[str]:
+    script = Path(cast(list[str], result["scripts"])[0]).read_text(encoding="utf-8")
+    return [line for line in script.splitlines() if line.startswith("#SBATCH ")]
+
+
+def test_sbatch_options_are_emitted_last_one_line_per_word(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="sbatch-options")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    options = "--qos=high  --exclusive --comment=\"it's a #1\" --constraint=rome"
+    add_launcher("cluster", template="slurm", settings={"slurm.sbatch_options": options}, project=project)
+    result = start_managers(
+        resolve_launcher("cluster", project=project),
+        workspace_root=workspace.root,
+        argv=["httk", "workflow", "manager", "run"],
+        count=1,
+        settings={"slurm.partition": "main"},
+        timeout=None,
+    )
+    lines = _sbatch_lines(result)
+    assert lines[:2] == ["#SBATCH --job-name=httk-manager", "#SBATCH --partition=main"]
+    assert lines[2].startswith("#SBATCH --chdir=") and lines[3].startswith("#SBATCH --output=")
+    assert lines[4:] == [
+        "#SBATCH --qos=high",
+        "#SBATCH --exclusive",
+        "#SBATCH --comment='it'\"'\"'s a #1'",
+        "#SBATCH --constraint=rome",
+    ]
+    assert shlex.split(lines[6].removeprefix("#SBATCH ")) == ["--comment=it's a #1"]
+
+
+def test_launcher_sbatch_options_replace_the_workspace_value(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="sbatch-options-merge")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    add_launcher("plain", template="slurm", project=project)
+    add_launcher("own", template="slurm", settings={"slurm.sbatch_options": "--qos=high"}, project=project)
+
+    def start(name: str) -> list[str]:
+        result = start_managers(
+            resolve_launcher(name, project=project),
+            workspace_root=workspace.root,
+            argv=["httk", "workflow", "manager", "run"],
+            count=1,
+            settings={"slurm.sbatch_options": "--qos=low --exclusive"},
+            timeout=None,
+        )
+        return _sbatch_lines(result)[3:]
+
+    assert start("plain") == ["#SBATCH --qos=low", "#SBATCH --exclusive"]
+    assert start("own") == ["#SBATCH --qos=high"]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("--job-n=x", r"--job-n \(--job-name\): reserved by httk"),
+        ("--par=gpu", r"--par \(--partition\): use slurm\.partition"),
+        ("--export=ALL", r"must not set --export: reserved by httk"),
+        ("--n=2", r"--n \(--nodes\): use slurm\.nodes"),
+        ("--mem=4G", r"use slurm\.mem"),
+        ("--time=10", r"must not set --time: use slurm\.time_limit"),
+        ("--vers", r"--vers \(--version\): reserved by httk"),
+        ("--help", r"must not set --help: reserved by httk"),
+        ("-p gpu", "use --name=value"),
+        ("high", "use --name=value"),
+        ("---x", "use --name=value"),
+        ("--qos=high\n--exclusive", "control characters"),
+        ("--comment=a\\b", "backslashes"),
+        ("--qos=", "empty value"),
+        ("--qos=high --qos=low", "repeats option --qos$"),
+        ("--comment='open", "not valid shell words"),
+        (4, "must be a string"),
+        (1.5, "must be a string"),
+    ],
+)
+def test_sbatch_options_refusals(value: object, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        sbatch_option_lines(value)
+
+
+def test_sbatch_options_accept_options_beside_the_denied_names() -> None:
+    accepted = (
+        "--mem-per-cpu=2G --time-min=10 --nodelist=n1 --ntasks-per-socket=2 --gres-flags=enforce-binding "
+        "--wait-all-nodes=1 --exclusive --qos=high --gpus=4 --gpus-per-node=2"
+    )
+    assert sbatch_option_lines(accepted) == tuple(accepted.split())
+    assert sbatch_option_lines("  ") == sbatch_option_lines(None) == ()
+
+
+def test_workspace_sbatch_options_are_validated_before_any_submission(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="sbatch-options-workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    add_launcher("cluster", template="slurm", project=project)
+    with pytest.raises(RuntimeError, match="must not set --time: use slurm.time_limit"):
+        start_managers(
+            resolve_launcher("cluster", project=project),
+            workspace_root=workspace.root,
+            argv=["httk", "workflow", "manager", "run"],
+            count=2,
+            settings={"slurm.sbatch_options": "--qos=high --time=1"},
+            timeout=None,
+        )
+    assert not list(remote.spool.glob("*.sbatch"))
+    assert not list((workspace.root / "logs" / "launchers").glob("*.sbatch"))
+
+
+def test_sbatch_options_are_validated_at_configure_and_add(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="sbatch-options-validation")
+    with pytest.raises(ValueError, match="slurm.sbatch_options"):
+        add_launcher("bad", template="slurm", settings={"slurm.sbatch_options": "--wrap=x"}, project=project)
+    add_launcher("cluster", template="slurm", project=project)
+    with pytest.raises(ValueError, match="slurm.sbatch_options"):
+        configure_launcher("cluster", {"slurm.sbatch_options": "--time=10"}, project=project)
+    configure_launcher("cluster", {"slurm.sbatch_options": "--qos=high"}, project=project)
 
 
 @pytest.mark.parametrize(

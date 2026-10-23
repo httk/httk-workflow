@@ -15,7 +15,13 @@ from typing import Any
 
 from ._allocation import argv_allocation, parse_allocation_spec
 from ._confine import is_override_key
-from ._daemon_policy import DEFAULT_SLURM_EXPORT, SLURM_EXPORT_SETTING, validate_slurm_export
+from ._daemon_policy import (
+    DEFAULT_SLURM_EXPORT,
+    SBATCH_OPTIONS_SETTING,
+    SLURM_EXPORT_SETTING,
+    sbatch_option_lines,
+    validate_slurm_export,
+)
 from ._durations import effective_time_limit
 from .launchers import _LAUNCH_ID, _manager_command
 from .models import LAUNCHERS_DIRECTORY
@@ -201,6 +207,8 @@ def _batch_script(
     lines.append(f"#SBATCH --chdir={shlex.quote(_batch_value('workspace', workspace))}")
     if directory is not None:
         lines.append(f"#SBATCH --output={shlex.quote(_batch_value('directory', f'{directory}/{launch_id}.out'))}")
+    # Last, after httk's own directives; the denylist keeps these from overriding them.
+    lines += [f"#SBATCH {line}" for line in sbatch_option_lines(settings.get(SBATCH_OPTIONS_SETTING))]
     lines += ["", "set -e", f"export HTTK_LAUNCH_ID={launch_id}"]
     prelude = _text(settings, "environment.prelude")
     if prelude:

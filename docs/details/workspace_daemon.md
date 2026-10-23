@@ -425,7 +425,10 @@ Slurm's partition and site defaults apply:
 Each signed start submits exactly one manager, with the launcher's batch
 directives plus `--parsable`, `--export=<mode>`, `--no-requeue`,
 `--input=/dev/null`, `--clusters`, the job name `httk-<handle>` and its output
-file. The export mode is the launcher setting `slurm.export`, either `NONE`
+file. The launcher's `slurm.sbatch_options` (see
+[Launchers](launchers.md#workspace-settings)) is frozen with the launcher like any other
+setting and adds its directives last; a workspace's `slurm.sbatch_options`, like
+every workspace setting, never reaches a daemon submission. The export mode is the launcher setting `slurm.export`, either `NONE`
 (the default when unset) or `NIL`; see the site's `sbatch` manual for what each
 means on that cluster. The batch script, piped to `sbatch`, writes nothing into
 the workspace. It runs the frozen `environment.prelude` under `set -e` in a
@@ -647,7 +650,7 @@ that are set: `manager.workers`, `slurm.partition`, `slurm.nodes`,
 operator's own, except that `slurm.time_limit` and `slurm.time_limit_max` are
 canonical `[D-]HH:MM:SS`, with the maximum resolved to its default, the time
 limit. Every other setting stays private, including `slurm.account`,
-`slurm.reservation`, `slurm.export`, `environment.prelude`, `manager.command`,
+`slurm.reservation`, `slurm.export`, `slurm.sbatch_options`, `environment.prelude`, `manager.command`,
 `manager.launch_template`, `manager.launch_mpi`, `manager.allocation`,
 `manager.bind_cpus`, `manager.confine` and every `confine.*` setting: they can
 reveal site-internal shell setup, launch commands and accounting. The published

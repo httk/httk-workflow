@@ -16,7 +16,7 @@ from typing import Any
 
 from ._allocation import argv_allocation, half_physical_memory_mb, split_allocation
 from ._confine import confine_settings, launch_mpi_setting
-from ._daemon_policy import SLURM_EXPORT_SETTING, validate_slurm_export
+from ._daemon_policy import SBATCH_OPTIONS_SETTING, SLURM_EXPORT_SETTING, sbatch_option_lines, validate_slurm_export
 from ._durations import duration_setting
 from ._util import write_json_atomic
 from .configuration import launchers_home
@@ -129,6 +129,7 @@ def _validate_launcher_metadata(
     export = settings.get(SLURM_EXPORT_SETTING)
     if export is not None:
         validate_slurm_export(export)
+    sbatch_option_lines(settings.get(SBATCH_OPTIONS_SETTING))
     timeout = metadata.get("timeout_seconds", 60.0)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
         raise ValueError("launcher timeout_seconds must be positive")
