@@ -34,6 +34,10 @@ register_code("vasp", bridge="httk.codes.vasp._bridge", bash_api="httk.codes.vas
 The code name (`vasp`) is also the prefix of its bridge subcommands (`vasp-`)
 and the stem of its environment variable (`HTTK_WORKFLOW_VASP_BASH_API`).
 
+A code package declares the application settings its workflows read, in its
+own namespace, with `register_code(..., settings=("vasp.command", ...))`, so
+`httk workspace settings show` marks them recognized by that code support.
+
 ## The bridge module
 
 Every function of a Bash API is one invocation of one subcommand of the private

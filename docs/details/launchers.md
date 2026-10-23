@@ -89,9 +89,17 @@ $ httk workflow run --count 4 --workspace default
 | `slurm.mem` | Slurm memory allocation. |
 | `slurm.gres` | Slurm generic resource request. |
 | `slurm.reservation` | Slurm reservation. |
-| `slurm.export` | sbatch `--export` mode for a workspace-daemon manager submission: `NONE` (default) or `NIL`. |
+| `slurm.export` | Launcher setting only, never read from workspace settings: sbatch `--export` mode for a workspace-daemon manager submission, `NONE` (default) or `NIL`. |
 | `slurm.sbatch_options` | Further `sbatch` options as one string of shell words, each `--name` or `--name=value`; see below. |
 | `environment.prelude` | Shell setup run before the manager, such as a module load or environment activation. |
+
+Keys outside these tables under `manager.`, `slurm.` or `environment.` have
+no effect, and an unknown `confine.*` key makes managers refuse to start:
+`workspace settings show` and `launcher show` mark them *unrecognized*, and
+setting one prints a warning. `launcher show` also marks a key a `slurm`
+launcher does not read, such as `manager.launch`; a launcher of another kind
+reads its settings with its own executable, so its keys are only *undeclared*.
+An `sbatch` option without a key of its own goes in `slurm.sbatch_options`.
 
 The `slurm.*` values become batch directives, except `slurm.time_limit_max`,
 which bounds `--time-limit` (see below), and `slurm.export`, which sets

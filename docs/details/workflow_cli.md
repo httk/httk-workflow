@@ -120,9 +120,9 @@ Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 | `workspace owners [NAME...]` | list the owners (managers, CLI processes, daemons) with their liveness; `managers` is an alias | `--kind manager\|cli\|daemon`, `--json` |
 | `workspace attest-dead OWNER [NAME] --reason TEXT` | declare an owner and its launches ended, so the next manager tick or `workspace gc` recovers its jobs | `--operator NAME`, `--force` |
 | `workspace workflows [NAME...]` | list the workflows installed in a workspace | `--json` |
-| `workspace show [NAME...]` | print application settings | `--key KEY`, `--json` |
+| `workspace show [NAME...]` | print application settings, each marked recognized, unrecognized or undeclared | `--key KEY`, `--json` |
 | `workspace configure [NAME...]` | set and unset application settings | `--set KEY=VALUE`, `--unset KEY` (repeatable), `--json` |
-| `workspace settings show\|set\|unset` | print, store or remove application settings; `set` takes repeated `--key`/`--value` pairs in one write | `--key KEY`, `--value VALUE` |
+| `workspace settings show\|set\|unset` | print, store or remove application settings; `show` adds a column marking each key recognized, unrecognized or undeclared, and `set` takes repeated `--key`/`--value` pairs in one write, warning about unrecognized keys | `--key KEY`, `--value VALUE` |
 | `workspace workflow-prelude show\|set\|unset` | print, store or remove one workflow's prelude | `--workflow WORKFLOW`, `--value VALUE` (`@FILE` reads a file) |
 | `workspace policy show\|set\|unset` | print, store or reset policy members; `set` takes repeated `--key`/`--value` pairs in one write | `--key KEY`, `--value JSON`, `--json` |
 | `workspace fsck [NAME...]` | check the job tree for what the kernel cannot resolve; only while nothing else uses the workspace | `--repair` (quiescent workspace only, asks first), `--yes`, `--json` |
@@ -792,7 +792,7 @@ and required inputs. It exits `1` for any problem; see
 | `launcher list` | list manager launchers visible to this project | `--json` |
 | `launcher add NAME...` | create launchers from the packaged `slurm` template | `--template`, `--set`, `--global`, `--non-interactive` |
 | `launcher configure NAME...` | update launcher settings | `--set`, `--unset`, `--add KEY=PATH[:PATH...]`, `--remove KEY=PATH[:PATH...]` |
-| `launcher show NAME...` | describe launchers and their settings | `--json` |
+| `launcher show NAME...` | describe launchers and their settings, each marked by whether the launcher reads it | `--json` |
 | `launcher check NAME...` | check a launcher's required binaries | `--launcher-timeout` |
 | `launcher remove NAME...` | remove launcher bundles | `--force` |
 

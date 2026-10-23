@@ -12,6 +12,7 @@ from pathlib import Path
 from httk.core.cli import CLIContext
 
 from .._confine import confine_settings, default_readonly_paths
+from .._setting_catalog import annotate_setting, use_color, warn_unrecognized
 from ..launchers import (
     add_launcher,
     check_launcher,
@@ -81,15 +82,17 @@ def handle_launcher_add(arguments: Namespace, context: CLIContext) -> int:
         non_interactive=arguments.non_interactive,
         default="slurm",
     )
+    settings = _settings(arguments.set)
     print(
         add_launcher(
             arguments.name,
             template=template,
-            settings=_settings(arguments.set),
+            settings=settings,
             project=context.cwd,
             global_=arguments.global_scope,
         )
     )
+    warn_unrecognized(settings, layer="launcher", kind=template)
     return 0
 
 
@@ -103,6 +106,8 @@ def handle_launcher_configure(arguments: Namespace, context: CLIContext) -> int:
     print(configure_launcher(arguments.name, {**settings, **changed}, unset=arguments.unset, project=context.cwd))
     for key, value in changed.items():
         print(f"{key}={value}")
+    kind = describe_launcher(arguments.name, project=context.cwd)["kind"]
+    warn_unrecognized(settings, layer="launcher", kind=kind if isinstance(kind, str) else None)
     return 0
 
 
@@ -177,7 +182,13 @@ def _render_launcher(description: dict[str, object]) -> str:
     ]
     settings = description.get("settings", {})
     if isinstance(settings, dict):
-        lines.extend(f"{key}={value}" for key, value in sorted(settings.items()))
+        color = use_color()
+        kind = description.get("kind")
+        for key, value in sorted(settings.items()):
+            shown, annotation = annotate_setting(
+                key, value, layer="launcher", kind=kind if isinstance(kind, str) else None, color=color
+            )
+            lines.append(f"{shown}={value}  # {annotation}")
     return "\n".join(lines)
 
 
