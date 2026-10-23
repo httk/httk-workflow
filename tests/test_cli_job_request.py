@@ -108,6 +108,42 @@ def test_job_request_uses_default_workspace_with_one_job_id(tmp_path: Path, caps
     assert v3.find(workspace, job_id).state == "paused"
 
 
+def test_job_request_step_narrows_ids_and_state_and_alone_selects_unowned_jobs(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    installed = _store.lookup(workspace, "demo") or v3.install(workspace, tmp_path / "package")
+    starts = [_job(tmp_path, workspace, tag, f"start/{tag}") for tag in ("one", "two")]
+    late = v3.submit(
+        workspace, installed, {"finish": "succeed"}, tag="late", placement="late/one", initial_step="finish"
+    )
+    context = _context(tmp_path)
+
+    def states() -> list[str]:
+        return [v3.find(workspace, ref.job_id).state for ref in (*starts, late)]
+
+    # --step narrows named jobs, and says which it left out.
+    argv = [*_request_args(workspace_name, starts[0].job_id, late.job_id), "--step", "finish"]
+    assert command(argv, context) == 0
+    assert f"{starts[0].job_key} is at step start, not --step finish: left out" in capsys.readouterr().err
+    assert states() == ["ready", "ready", "paused"]
+    # Alone, --step selects from every unowned state, under --placement when given.
+    argv = [*_request_args(workspace_name, action="cancel"), "--step", "start", "--placement", "start/two"]
+    assert command(argv, context) == 0
+    assert states() == ["ready", "cancelled", "paused"]
+    # With --state, it narrows that listing.
+    assert command([*_request_args(workspace_name), "--state", "ready", "--step", "finish"], context) == 1
+    assert "no jobs selected" in capsys.readouterr().err
+    assert command([*_request_args(workspace_name), "--state", "ready", "--step", "start"], context) == 0
+    assert states() == ["paused", "cancelled", "paused"]
+    # The pre-rename spelling of override_step's target names the option it lacks, before --step selects nothing.
+    argv = [*_request_args(workspace_name, late.job_id, action="override_step"), "--step", "start"]
+    assert command(argv, context) == 2
+    assert "--override-step is required by, and only valid with, the override_step action" in capsys.readouterr().err
+    # With JOB_ID, --step selects no listing for --placement to narrow.
+    argv = [*_request_args(workspace_name, late.job_id), "--step", "finish", "--placement", "late"]
+    assert command(argv, context) == 2
+    assert "--placement narrows --state, or --step without JOB_ID" in capsys.readouterr().err
+
+
 def test_request_id_is_rejected_for_local_jobs(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
     job_id = _job(tmp_path, workspace, "request-id-local").job_id
@@ -125,7 +161,11 @@ def test_request_id_is_rejected_for_local_jobs(tmp_path: Path, capsys) -> None:
 @pytest.mark.parametrize(
     ("action", "options", "message"),
     [
-        ("cancel", ["--step", "start"], "--step is required by, and only valid with, the override_step action"),
+        (
+            "cancel",
+            ["--override-step", "start"],
+            "--override-step is required by, and only valid with, the override_step action",
+        ),
         ("set_priority", [], "--priority is required by"),
         (
             "set_budget",
@@ -198,7 +238,7 @@ def test_request_envelopes_carry_the_budget_and_the_far_side_cannot_change_it(tm
         action="set_budget",
         reason="protocol",
         priority=None,
-        step=None,
+        override_step=None,
         force=False,
         destination=None,
         maximum_total_attempts=7,
@@ -219,7 +259,13 @@ def test_request_envelopes_carry_keep_budget_and_the_far_side_cannot_change_it(t
     document = json.loads(capsys.readouterr().out)
     (envelope,) = document["envelopes"]
     assert envelope["keep_budget"] is True
-    fields = {"job_id": [ref.job_id], "action": "restart", "reason": "protocol", "priority": None, "step": None}
+    fields = {
+        "job_id": [ref.job_id],
+        "action": "restart",
+        "reason": "protocol",
+        "priority": None,
+        "override_step": None,
+    }
     kept = argparse.Namespace(**fields, force=False, destination=None, keep_budget=True)
     operator = "Test User <tester@example.test>"
     assert job_cli._validate_remote_envelopes(document, kept, operator) == [envelope]
@@ -248,7 +294,7 @@ def test_remote_request_passes_the_budget_options_to_the_far_side(
         reason="r",
         job_id=["abc"],
         priority=None,
-        step=None,
+        override_step=None,
         destination=None,
         force=False,
         adapter_timeout=None,
@@ -355,7 +401,7 @@ def test_remote_envelope_correspondence_keeps_tag_prefixes_and_rejects_impersona
         action="pause",
         reason="correspondence",
         priority=None,
-        step=None,
+        override_step=None,
         force=False,
         destination=None,
     )

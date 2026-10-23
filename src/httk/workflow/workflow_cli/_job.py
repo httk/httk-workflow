@@ -27,6 +27,7 @@ from .. import _fs, _kernel, _moving, _requests, _store
 from .._bundles import BundleError
 from .._kernel import JobRef
 from .._logging import LOG_LEVELS, configure_logging
+from .._manager_scheduling import current_step
 from .._state import TERMINAL_STATES
 from .._util import utc_now
 from ..adapters import (
@@ -118,7 +119,7 @@ from ._daemon_jobs import request_remote_jobs
 from ._transfer import _protocol_workspace, adopt_document, build_transfer_parser, eject_once
 
 _ENVELOPES_FORMAT = "httk-workflow-request-envelopes"
-#: The option each action requires (and that no other action takes).
+#: The option each action requires (and that no other action takes), by request member.
 _ACTION_OPTIONS = {
     "priority": "set_priority",
     "step": "override_step",
@@ -533,7 +534,10 @@ def _request_options(
     }
     for name, owner in _ACTION_OPTIONS.items():
         if (given[name] is None) == (action == owner):
-            label = "one of " + ", ".join(_BUDGET_OPTIONS.values()) if name == "budget" else f"--{name}"
+            if name == "budget":
+                label = "one of " + ", ".join(_BUDGET_OPTIONS.values())
+            else:
+                label = "--override-step" if name == "step" else f"--{name}"
             raise ValueError(f"{label} is required by, and only valid with, the {owner} action")
     if force and action not in _FORCE_ACTIONS:
         raise ValueError("--force applies only to the continue, restart and override_step actions")
@@ -808,14 +812,38 @@ def _check_wait(wait: bool, timeout: float | None, actions: Sequence[str]) -> No
         raise ValueError("--timeout must be finite and nonnegative")
 
 
-def _selected_jobs(workspace: Workspace, cwd: Path, arguments: argparse.Namespace) -> list[JobRef]:
-    """Return the JOB selectors' jobs, then every other job in a ``--state`` (under ``--placement``), once each."""
+def _at_steps(ref: JobRef, steps: frozenset[str], *, named: bool) -> bool:
+    """Return whether *ref* is at one of *steps*; say why on standard error when a *named* job is left out."""
 
+    job, error = read_job(ref)
+    doc, state_error = (None, None) if job is None else read_state(ref)
+    if job is None or state_error is not None:
+        # Its step is unknown: a damaged state.json is not the initial step.
+        print(f"{ref.job_key}: {error or state_error}; its step is unknown: left out", file=sys.stderr)
+        return False
+    step = current_step(job, doc)
+    if step in steps:
+        return True
+    if named:
+        print(f"{ref.job_key} is at step {step}, not --step {', '.join(sorted(steps))}: left out", file=sys.stderr)
+    return False
+
+
+def _selected_jobs(workspace: Workspace, cwd: Path, arguments: argparse.Namespace) -> list[JobRef]:
+    """Return the JOB selectors' jobs, then every other job in a ``--state`` (under ``--placement``), once each.
+
+    ``--step`` narrows both; without JOB selectors or ``--state`` it selects from every unowned state.
+    """
+
+    steps = None if arguments.step is None else frozenset(arguments.step)
     refs = resolve_job_selectors(workspace, cwd, arguments.job_id)
-    if arguments.state:
+    if steps is not None:
+        refs = [ref for ref in refs if _at_steps(ref, steps, named=True)]
+    if arguments.state or (steps is not None and not arguments.job_id):
         seen = {ref.job_id for ref in refs}
-        for ref in iter_jobs(workspace, arguments.state, placement_prefix=arguments.placement):
-            if ref.job_id not in seen:
+        states = arguments.state or _kernel.UNOWNED_STATES
+        for ref in iter_jobs(workspace, states, placement_prefix=arguments.placement):
+            if ref.job_id not in seen and (steps is None or _at_steps(ref, steps, named=False)):
                 seen.add(ref.job_id)
                 refs.append(ref)
     return refs
@@ -828,18 +856,29 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     tree = bool(getattr(arguments, "tree", False))
     if tree and arguments.action != "continue":
         raise ValueError("--tree applies only to the continue action")
-    if not (arguments.job_id or arguments.state):
-        raise ValueError("select jobs: give JOB_ID selectors, --state STATE, or both")
-    if arguments.placement is not None and (not arguments.state or not normalize_placement(arguments.placement).parts):
-        raise ValueError("--placement narrows --state to a placement prefix; it needs --state and a nonempty prefix")
+    if arguments.action == "override_step" and arguments.override_step is None:
+        # Checked before selecting, so `override_step --step STEP` is not reported as an empty --step selection.
+        raise ValueError("--override-step is required by, and only valid with, the override_step action")
+    if not (arguments.job_id or arguments.state or arguments.step):
+        raise ValueError("select jobs: give JOB_ID selectors, --state STATE, --step STEP, or a combination")
+    if arguments.placement is not None and (
+        not (arguments.state or (arguments.step and not arguments.job_id))
+        or not normalize_placement(arguments.placement).parts
+    ):
+        raise ValueError(
+            "--placement narrows --state, or --step without JOB_ID, to a placement prefix; "
+            "it needs one of them and a nonempty prefix"
+        )
     identity = _resolve_request_identity(arguments.operator)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None and ":" in binding.name
         if tree:
             raise ValueError("--tree is applied locally and is not available for remote workspaces")
-        if arguments.state:
-            raise ValueError("--state and --placement select jobs of a local workspace; give job ids for a remote one")
+        if arguments.state or arguments.step:
+            raise ValueError(
+                "--state, --step and --placement select jobs of a local workspace; give job ids for a remote one"
+            )
         target = resolve_remote(binding.remote, project=context.cwd)
         if read_metadata(target.bundle).get("kind") == "mount-daemon":
             if arguments.action == "set_workflow":
@@ -892,7 +931,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         reason=arguments.reason,
         operator=identity.label,
         priority=arguments.priority,
-        step=arguments.step,
+        step=arguments.override_step,
         force=bool(arguments.force),
         destination=arguments.destination,
         identity=identity,
@@ -931,7 +970,7 @@ def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLICont
     options = _request_options(
         arguments.action,
         priority=arguments.priority,
-        step=arguments.step,
+        step=arguments.override_step,
         budget=_request_budget(arguments),
         force=bool(arguments.force),
         destination=arguments.destination,
@@ -939,7 +978,7 @@ def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLICont
         workflow=arguments.workflow,
     )
     refs = [resolve_job(workspace, selector) for selector in arguments.job_id]
-    _prevalidate(refs, arguments.action, arguments.step, force=bool(arguments.force))
+    _prevalidate(refs, arguments.action, arguments.override_step, force=bool(arguments.force))
     if arguments.workflow is not None:
         # Resolved and checked against this (the far) side's installations; the client accepts the id it names.
         options["workflow"] = _switch_target(workspace, refs, arguments.workflow)
@@ -986,7 +1025,7 @@ def _validate_remote_envelopes(
     options = _request_options(
         arguments.action,
         priority=arguments.priority,
-        step=arguments.step,
+        step=arguments.override_step,
         budget=_request_budget(arguments),
         force=bool(arguments.force),
         destination=getattr(arguments, "destination", None),
@@ -1061,10 +1100,10 @@ def request_remote_job_result(
         f"--reason={arguments.reason}",
         "--json",
     ]
-    for option in ("priority", "step", "workflow", "destination"):
+    for option in ("priority", "override_step", "workflow", "destination"):
         value = getattr(arguments, option, None)
         if value is not None:
-            argv.append(f"--{option}={value}")
+            argv.append(f"--{option.replace('_', '-')}={value}")
     for name, limit in (_request_budget(arguments) or {}).items():
         argv.append(f"{_BUDGET_OPTIONS[name]}={'unlimited' if limit is None else limit}")
     if arguments.force:
@@ -1771,7 +1810,7 @@ def _add_request_options(parser: argparse.ArgumentParser) -> None:
     """Add the per-action request options shared by ``request`` and ``request-envelopes``."""
 
     parser.add_argument("--priority", type=int, metavar="PRIORITY", help="the new priority, for set_priority")
-    parser.add_argument("--step", metavar="STEP", help="the step to resume at, for override_step")
+    parser.add_argument("--override-step", metavar="STEP", help="the step to resume at, for override_step")
     parser.add_argument(
         "--workflow",
         metavar="WORKFLOW",
@@ -1977,7 +2016,18 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
         choices=_kernel.UNOWNED_STATES,
         help="also select every job in this state (repeatable; local workspaces)",
     )
-    request.add_argument("--placement", metavar="PREFIX", help="with --state: only jobs under this placement prefix")
+    _add_step_option(
+        request,
+        help_text=(
+            "only jobs at this step (repeatable; local workspaces): narrows JOB_ID and --state, "
+            "and alone selects from every unowned state"
+        ),
+    )
+    request.add_argument(
+        "--placement",
+        metavar="PREFIX",
+        help="with --state, or --step without JOB_ID: only jobs under this placement prefix",
+    )
     # add_parser takes no per-leaf parser class, so the leaf is given its intermixed class here.
     request.__class__ = _IntermixedParser
     request.add_argument(

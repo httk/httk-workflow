@@ -279,7 +279,7 @@ manager's platform stays `ready` and unclaimed there.
 | --- | --- | --- |
 | `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--parameter`, `--environment`, `--format`, `--input`, `--input-move-from-job`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--step`, `--json` |
 | `job submit SOURCE...` | submit prepared payload directories | `--workspace`, `--move`, `--json` |
-| `job request ACTION JOB_ID...` | post one operator request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--operator`, required `--reason`, `--priority`, `--step`, `--destination`, `--max-attempts-per-activation`, `--max-total-attempts`, `--max-activations`, `--force`, `--keep-budget`, `--wait`, `--timeout`, `--adapter-timeout`, daemon-only `--request-id` |
+| `job request ACTION JOB_ID...` | post one operator request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--operator`, required `--reason`, `--state`, `--step`, `--placement`, `--priority`, `--override-step`, `--destination`, `--max-attempts-per-activation`, `--max-total-attempts`, `--max-activations`, `--force`, `--keep-budget`, `--wait`, `--timeout`, `--adapter-timeout`, daemon-only `--request-id` |
 | `job delete JOB...` | delete terminal or paused jobs (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
 | `job seal JOB...` | seal succeeded jobs that carry no seal | `--workspace` |
 | `job unseal JOB...` | release succeeded jobs from their seal, so they may be deleted | `--workspace`, `--force` skips the confirmation |
@@ -424,12 +424,13 @@ inputs. See {doc}`/details/workflow_compat`.
 
 `job request ACTION [JOB_ID...]` posts one request per job and requires
 `--reason`. Jobs are the `JOB_ID` selectors joined with every job in a
-`--state STATE` (repeatable, an unowned state), which `--placement PREFIX`
-narrows to a placement subtree; `--state` and `--placement` select in a local
-workspace only, and a selection with no job exits `1` with `no jobs selected`.
-There is no step selector: `--step` is the target of
-`override_step`. The actions are `cancel`, `pause`, `continue`, `restart`,
-`override_step` (with `--step`), `set_priority` (with `--priority`),
+`--state STATE` (repeatable, an unowned state); `--step STEP` (repeatable)
+narrows both and alone selects from every unowned state, and `--placement
+PREFIX` narrows `--state`, or a `--step` without `JOB_ID`, to a placement
+subtree. `--state`, `--step` and `--placement` select in a local workspace
+only, and a selection with no job exits `1` with `no jobs selected`. The
+actions are `cancel`, `pause`, `continue`, `restart`,
+`override_step` (with `--override-step STEP`), `set_priority` (with `--priority`),
 `set_budget` (with at least one of `--max-attempts-per-activation N|unlimited`,
 `--max-total-attempts N|unlimited` and `--max-activations N|unlimited`; the
 options are valid only with `set_budget`), `set_workflow` (with
@@ -523,17 +524,20 @@ deduplicate by `job_id`. `--counts` adds per-state totals, which need a full
 directory walk and ignore `--step`.
 
 `--state STATE` and `--step STEP` select jobs in the same way across `job
-list`, `job transfer`, `collect`, `campaign collect` and `postprocess`: each
+list`, `job transfer`, `job request`, `collect`, `campaign collect` and
+`postprocess`: each
 repeats (the values of one option are alternatives), and a job must match
 every option given. A job whose step cannot be determined (an unreadable
 `job.json` or a damaged `state.json`) matches no `--step`: `job list` logs a
-warning, `job transfer` reports an error, and `collect` counts it as
+warning, `job request` leaves it out with a note, `job transfer` reports an
+error, and `collect` counts it as
 unreadable. `--step` reads each examined job's `job.json` and `state.json`, so
 like `--tag-contains` a sparse `--step` page with `--limit` may examine up to
 `max(100 × limit, 10000)` jobs (two small reads each) and come back partial,
 with a `next_after` that resumes the scan. This selector `--step` is not the
-`--step` of `job new`, `job debug` and `job request override_step`, which
-names the step a job starts or resumes at.
+`--step` of `job new` and `job debug`, which names the step a job starts at;
+`job request override_step` names the step a job resumes at with
+`--override-step`.
 
 `job why` also lists **held** jobs: a job held for a transfer is in neither
 state tree, and `job why JOB` shows its hold, destination and the way back.
@@ -1114,7 +1118,7 @@ httk job transfer --hold --json [--tree] [--destination-id ID] [--job JOB …] [
 httk job adopt --json --by-path --workspace ROOT TRANSFER_ID [TRANSFER_ID …]   (in the batch landing)
 httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] WS
 httk transfer status --json WS
-httk job request-envelopes ACTION --workspace WS --operator LABEL --reason TEXT [--priority N] [--step S] [--destination D] [--max-attempts-per-activation N|unlimited] [--max-total-attempts N|unlimited] [--max-activations N|unlimited] [--force] JOB_ID …
+httk job request-envelopes ACTION --workspace WS --operator LABEL --reason TEXT [--priority N] [--override-step S] [--workflow W] [--destination D] [--max-attempts-per-activation N|unlimited] [--max-total-attempts N|unlimited] [--max-activations N|unlimited] [--force] [--keep-budget] JOB_ID …
 httk job publish-requests --workspace WS --document JSON [--document JSON …] [--wait] [--timeout S]
 httk workspace status --by-path --json PATH
 httk workflow manager run --by-path --workspace PATH

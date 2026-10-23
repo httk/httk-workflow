@@ -145,7 +145,7 @@ def debug_job(
     if step is not None:
         raise ValueError(
             f"job {ref.job_key} already exists, so its step cannot be overridden here; post an operator request "
-            "instead: 'httk job request override_step --workspace WORKSPACE --step STEP --operator NAME --reason WHY JOB'"
+            "instead: 'httk job request override_step --workspace WORKSPACE --override-step STEP --operator NAME --reason WHY JOB'"
         )
     final = _drive(
         workspace,

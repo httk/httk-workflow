@@ -307,7 +307,7 @@ def test_mount_daemon_remotes_refuse_set_workflow(tmp_path: Path, monkeypatch: p
     assert "not carried by the workspace daemon protocol" in capsys.readouterr().err
     argv = _request("cluster:runs", "pause", "--state", "ready")
     assert command(argv, CLIContext("httk", tmp_path)) == 2
-    assert "--state and --placement select jobs of a local workspace" in capsys.readouterr().err
+    assert "--state, --step and --placement select jobs of a local workspace" in capsys.readouterr().err
 
 
 def test_job_request_selects_by_state_for_every_action(tmp_path: Path, capsys) -> None:
@@ -319,7 +319,7 @@ def test_job_request_selects_by_state_for_every_action(tmp_path: Path, capsys) -
     assert capsys.readouterr().out.count("\tapplied\t") == 2
     assert [v3.find(workspace, ref.job_id).state for ref in refs] == ["paused", "paused"]
     assert command(_request(name, "pause"), CLIContext("httk", tmp_path)) == 2
-    assert "give JOB_ID selectors, --state STATE, or both" in capsys.readouterr().err
+    assert "give JOB_ID selectors, --state STATE, --step STEP, or a combination" in capsys.readouterr().err
     assert command(_request(name, "pause", refs[0].job_id, "--placement", "project"), CLIContext("httk", tmp_path)) == 2
     assert "--placement narrows --state" in capsys.readouterr().err
     assert os.environ["XDG_CONFIG_HOME"].startswith(str(tmp_path))
@@ -435,7 +435,13 @@ def test_remote_envelopes_must_name_the_typed_id_or_one_resolved_id() -> None:
             "job_keys": job_ids,
         }
         arguments = SimpleNamespace(
-            job_id=job_ids, action="set_workflow", reason="r", priority=None, step=None, force=False, workflow=typed
+            job_id=job_ids,
+            action="set_workflow",
+            reason="r",
+            priority=None,
+            override_step=None,
+            force=False,
+            workflow=typed,
         )
         return job_cli._validate_remote_envelopes(document, arguments, operator)  # type: ignore[arg-type]
 

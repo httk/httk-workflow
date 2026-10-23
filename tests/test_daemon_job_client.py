@@ -157,7 +157,7 @@ def _arguments(**changes: object) -> argparse.Namespace:
         "adapter_timeout": None,
         "reason": "operator requested cancellation",
         "priority": None,
-        "step": None,
+        "override_step": None,
         "destination": None,
     }
     fields.update(changes)

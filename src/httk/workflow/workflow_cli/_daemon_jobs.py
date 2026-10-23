@@ -165,7 +165,7 @@ def request_remote_jobs(
             action=str(arguments.action),
             reason=str(arguments.reason),
             priority=arguments.priority,
-            step=arguments.step,
+            step=arguments.override_step,
             budget=_request_budget(arguments),
             destination=arguments.destination,
             keep_budget=getattr(arguments, "keep_budget", False),

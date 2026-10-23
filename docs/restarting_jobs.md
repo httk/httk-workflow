@@ -61,7 +61,7 @@ again from that point, unless you ask it not to with `--keep-budget` (see
 ```console
 httk job request continue --reason "fixed the input" silicon
 httk job request restart --reason "redo this step" silicon
-httk job request override_step --step relax --reason "redo relax" silicon
+httk job request override_step --override-step relax --reason "redo relax" silicon
 ```
 
 Each applies to a `failed` or `paused` job. The CLI applies it at once to a job
@@ -72,7 +72,7 @@ job its owner holds applies it at the next boundary.
 | --- | --- |
 | `continue` | A job that failed at its wait on children (see below) returns to `waiting` with its retained join: no new attempt. Any other `failed` job, and a `paused` job, returns to `ready` and the current step reruns as a new attempt. |
 | `restart` | Always `ready`: the current step reruns as a new attempt. The failure is cleared and a retained join is dropped. |
-| `override_step --step STEP` | `ready` with a new activation of `STEP`. `STEP` is checked against the steps the runner recorded unless `--force`. A retained join is dropped. |
+| `override_step --override-step STEP` | `ready` with a new activation of `STEP`. `STEP` is checked against the steps the runner recorded unless `--force`. A retained join is dropped. |
 
 For a job that did not fail at a wait, `continue` and `restart` are the same.
 The attempt reason is `manual_continue` for both. Each of the three first
@@ -219,10 +219,12 @@ httk job request restart --state failed --reason "rerun on v1.3.1"
 `--workflow` takes an installed id, a short name (the newest installation of
 that name) or `NAME@REF`. It is resolved once, in the job's workspace, and the
 request names the installation's id. Jobs are selected by `JOB_ID` arguments,
-by `--state STATE` (repeatable) and by `--placement PREFIX`, which narrows
-`--state`; the selections are joined, and every action of `job request` takes
-them. `job request` has no `--step` selector: its `--step` is the target step
-of `override_step`.
+by `--state STATE` (repeatable), by `--step STEP` (repeatable) and by
+`--placement PREFIX`, as for `job transfer`: `JOB_ID` and
+`--state` are joined, `--step` narrows both and alone selects from every
+unowned state, and `--placement` narrows `--state` or a `--step` given without
+`JOB_ID`. Every action of `job request` takes them, so
+`--state ready --step relax` bumps only the ready jobs that will run `relax`.
 
 Every selected job is checked before any request is posted, and the job's owner
 checks again when it applies the request. The candidate must:
@@ -352,7 +354,7 @@ removed with `httk job delete`. The restart restores the declared allowance, so
 it runs even with `maximum_attempts_per_activation = 1`; with `--keep-budget`
 the spawning step's attempt counts against the current limit, and such a
 `restart` fails right back with `retry_exhausted`. Alternatively,
-`httk job request override_step --step <spawning step>` reruns that step as a
+`httk job request override_step --override-step <spawning step>` reruns that step as a
 new activation.
 The restarted parent no longer waits on them, so
 reviving one of them needs `--force`, and the parent will not notice it.
@@ -390,8 +392,8 @@ httk job request continue --reason "quota restored" silicon
 
 `continue --tree` works on local workspaces only; it is refused for a remote
 `--workspace` binding. For a remote workspace, post one `continue` per failed
-job yourself, deepest first, then the parent. `--state` and `--placement` also
-select jobs of local workspaces only; give job ids for a remote one.
+job yourself, deepest first, then the parent. `--state`, `--step` and `--placement`
+also select jobs of local workspaces only; give job ids for a remote one.
 `set_workflow` resolves `--workflow` on the remote side, against the remote
 workspace's installations; it is refused for a workspace daemon remote.
 {doc}`/details/remotes` covers what a remote binding accepts.

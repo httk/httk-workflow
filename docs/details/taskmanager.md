@@ -835,7 +835,7 @@ request at the next attempt boundary.
 
 ```console
 httk job request pause --workspace WORKSPACE --reason "inspection" JOB
-httk job request override_step --step relax --reason "redo relax" JOB
+httk job request override_step --override-step relax --reason "redo relax" JOB
 httk job request set_priority --priority 100 --reason "urgent" JOB
 httk job request set_budget --max-attempts-per-activation 3 --reason "flaky node" JOB
 httk job request set_workflow --workflow relax@v1.3.0 --state ready --reason "bump"
@@ -847,7 +847,7 @@ httk job request set_workflow --workflow relax@v1.3.0 --state ready --reason "bu
 | `pause` | a job not terminal, paused or waiting | `paused`, at the next boundary when running |
 | `continue` | a failed or paused job | `waiting` with the retained join when the job failed at its wait on children (no new attempt); otherwise `ready`, the failure cleared and a new attempt; the declared retry allowance is restored first unless `--keep-budget` |
 | `restart` | a failed or paused job | `ready`; the failure is cleared, a retained join is dropped, and a new attempt is recorded; the declared retry allowance is restored first unless `--keep-budget` |
-| `override_step` | a failed or paused job | `ready` with a new activation of `--step`; a retained join is dropped; the declared retry allowance is restored first unless `--keep-budget` |
+| `override_step` | a failed or paused job | `ready` with a new activation of `--override-step`; a retained join is dropped; the declared retry allowance is restored first unless `--keep-budget` |
 | `set_priority` | any job | the new `--priority` (0 is highest) |
 | `set_budget` | any job not succeeded or cancelled | the retry budgets raised or lifted per `--max-*` option; merged into `state.json` `budget_override`, state and priority unchanged; a limit set below what the job has used ends it at the next budget check |
 | `set_workflow` | any job not succeeded or cancelled whose workflow `--workflow` may replace | the job runs the installed `--workflow` from its next attempt; recorded as `state.json` `workflow_override`, `runner_steps` cleared, state and priority unchanged; refused naming the failed compatibility rule (see {doc}`/restarting_jobs`) |

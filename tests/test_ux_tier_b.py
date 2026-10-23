@@ -75,12 +75,14 @@ def test_override_step_is_refused_client_side_against_recorded_runner_steps(
     failed = _failed_with_steps(workspace, installed)
     capsys.readouterr()
 
-    assert command(_request(name, failed.job_id, "override_step", "--step", "bogus"), context) == 2
+    assert command(_request(name, failed.job_id, "override_step", "--override-step", "bogus"), context) == 2
     assert "does not implement the step 'bogus'" in capsys.readouterr().err
     assert not list(workspace.control.glob("requests/*.json"))
 
     # A runner may have been reinstalled with a recovery step: --force downgrades the refusal.
-    assert command(_request(name, failed.job_id, "override_step", "--step", "recover", "--force"), context) == 0
+    assert (
+        command(_request(name, failed.job_id, "override_step", "--override-step", "recover", "--force"), context) == 0
+    )
     error = capsys.readouterr().err
     assert "--force was given" in error and "the runner will refuse it at the next attempt" in error
 
@@ -93,7 +95,7 @@ def test_override_step_is_allowed_with_a_note_before_runner_steps_are_recorded(
 
     assert command(_request(name, ref.job_id, "pause"), context) == 0
     capsys.readouterr()
-    assert command(_request(name, ref.job_id, "override_step", "--step", "whatever"), context) == 0
+    assert command(_request(name, ref.job_id, "override_step", "--override-step", "whatever"), context) == 0
     assert "could not be pre-validated" in capsys.readouterr().err
 
 

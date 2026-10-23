@@ -58,7 +58,10 @@ def test_cancel_continue_override_and_detach_apply_without_a_manager(tmp_path: P
     assert command(_request_args(name, ref.job_id), _context(tmp_path)) == 0
     capsys.readouterr()
     assert (
-        command(_request_args(name, ref.job_id, action="override_step") + ["--step", "start"], _context(tmp_path)) == 0
+        command(
+            _request_args(name, ref.job_id, action="override_step") + ["--override-step", "start"], _context(tmp_path)
+        )
+        == 0
     )
     capsys.readouterr()
     assert command(_request_args(name, ref.job_id, action="cancel"), _context(tmp_path)) == 0
