@@ -223,7 +223,7 @@ recently installed one of that name) or `NAME@REF` (see
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workflow install SOURCE...` | install into a workspace: a package directory, a git URI, a runner file or workflow document (installed ad hoc), or a workflow name known here; a git URI without `#SUBDIR` whose repository root carries `httk_plugin.toml` installs every workflow that plugin lists; declared calls are installed too and a `[workflow.build]` package is built | `--workspace`, `--no-calls`, `--no-build`, `--format`, `--json`, `--adapter-timeout` |
+| `workflow install SOURCE...` | install into a workspace: a package directory, a git URI, a runner file or workflow document (installed ad hoc), or a workflow name known here; a git URI without `#SUBDIR` whose repository root carries `httk_plugin.toml` installs every workflow that plugin lists; declared calls are installed too (call slot defaults never are: a `notice:` names each one not installed) and a `[workflow.build]` package is built | `--workspace`, `--no-calls`, `--no-build`, `--format`, `--json`, `--adapter-timeout` |
 | `workflow uninstall SELECTOR...` | remove installed workflows by id, short name or `NAME@REF`; a selector several installations share is refused | `--workspace`, `--check` (warn about unfinished jobs using it), `--json` |
 
 ```console
@@ -266,8 +266,9 @@ selects the newest installation of that name) that declare
 artifacts in the installation's `builds/<platform>/`; a `REMOTE:WS` workspace
 builds on the remote. `install` already builds for the platform it runs on; run
 `build` on each other platform whose managers serve the workspace. `--list`
-prints the registered builds. A target's call slot defaults, and the workflows
-they call, are built with it. The exit status is `1` when any target failed.
+prints the registered builds. A target's installed call slot defaults, and the
+workflows they call, are built with it; a default that is not installed is
+skipped. The exit status is `1` when any target failed.
 The manager passes the artifacts to the runner through
 `HTTK_WORKFLOW_RUNNER_ARTIFACTS`, and a job whose workflow is not built for the
 manager's platform stays `ready` and unclaimed there.
@@ -348,7 +349,8 @@ Other options:
 - `--environment NAME=VALUE` overrides one declared workflow environment entry.
 - `--call ALIAS=WORKFLOW` binds the workflow's call slot ALIAS to WORKFLOW
   (a workflow name or commit-pinned git URI, like a `[workflow.calls]`
-  reference (never a path), installed first with `--install`) instead of its
+  reference (never a path), installed first with `--install`, which also
+  installs an unbound slot's default) instead of its
   default; `--call-parameter ALIAS NAME=VALUE` gives the bound workflow one
   parameter, spelled as for `--parameter`. Both repeat. See
   [call slots](composing_workflows.md#call-slots).

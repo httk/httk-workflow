@@ -2,8 +2,10 @@
 
 import json
 import logging
+import re
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httk.core.cli import CLIContext
@@ -51,7 +53,7 @@ def _callee(root: Path, name: str = "tests.binding.pair", *, product_of: str = "
         f'\n[workflow.inputs.structure]\ndestination = "POSCAR"\nentry_type = "structures"\nref = "{STRUCTURE}"\n'
         '\n[workflow.outputs.relaxed]\nentry_type = "structures"\nproduct_of = "structure"\n'
         f'\n[workflow.outputs.forces]\nentry_type = "records"\nref = "{FORCES}"\nproduct_of = "{product_of}"\n'
-        '\n[workflow.parameters.cutoff]\ntype = "number"\n',
+        '\n[workflow.parameters.cutoff]\ntype = "number"\n\n[workflow.parameters.kpoints]\ntype = "integer"\n',
     )
 
 
@@ -409,3 +411,70 @@ def test_a_slot_is_fitted_once_per_installed_tree(
     assert _install(workspace, tmp_path / "other").id == other.id
     attempt._slot_callee("forces.dft")
     assert fitted == [other.id, other.id]
+
+
+def test_an_uninstalled_default_refuses_creation_unless_installing(tmp_path: Path, workspace: Workspace) -> None:
+    scaffold.register_workflow(parse_workflow_manifest(_callee(tmp_path / "pair")))
+    caller = _install(workspace, _caller(tmp_path / "caller", default="tests.binding.pair"))
+    assert caller.record["slots"] == {"forces.dft": "tests.binding.pair"}
+    message = (
+        "call slot 'forces.dft' of local:tests.binding.caller defaults to tests.binding.pair, which is not "
+        "installed; install it (httk workflow install tests.binding.pair) or bind another with --call forces.dft=WORKFLOW"
+    )
+    with pytest.raises(ValueError, match=re.escape(message)):
+        new_job(workspace, caller.id)
+    job = new_job(workspace, caller.id, install=True)
+    assert _definition(job).as_mapping()["calls"] == {
+        "forces.dft": {"workflow": "local:tests.binding.pair", "parameters": {}}
+    }
+
+
+def test_default_parameters_go_with_the_default(tmp_path: Path, workspace: Workspace) -> None:
+    pair = _install(workspace, _callee(tmp_path / "pair"))
+    other = _install(workspace, _callee(tmp_path / "other", "tests.binding.other"))
+    extra = "default_parameters = {cutoff = 400.0, kpoints = 4}\n"
+    caller = _install(workspace, _caller(tmp_path / "caller", default="tests.binding.pair", extra=extra))
+
+    def bound(**options: object) -> object:
+        return _definition(new_job(workspace, caller.id, **options)).as_mapping()["calls"]["forces.dft"]  # type: ignore[arg-type,index]
+
+    defaulted = {"workflow": pair.id, "parameters": {"cutoff": 400.0, "kpoints": 4}}
+    assert bound() == defaulted
+    assert bound(calls={"forces.dft": "tests.binding.pair"}) == defaulted
+    overridden = bound(call_parameters={"forces.dft": {"kpoints": 8}})
+    assert overridden == {"workflow": pair.id, "parameters": {"cutoff": 400.0, "kpoints": 8}}
+    assert bound(calls={"forces.dft": other.id}) == {"workflow": other.id, "parameters": {}}
+    with pytest.raises(ValueError, match="'kpoints' does not match type 'integer'"):
+        bound(call_parameters={"forces.dft": {"kpoints": "many"}})
+
+
+def test_a_binding_never_takes_a_name_for_a_path_where_the_job_is_created(
+    tmp_path: Path, workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = _install(workspace, _callee(tmp_path / "real", "pair"))
+    caller = _install(workspace, _caller(tmp_path / "caller", default="pair"))
+    ghostly = _install(workspace, _caller(tmp_path / "ghostly", name="tests.binding.ghostly", default="ghost"))
+    # Where the job is created, a package directory and an executable file carry the same names.
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    _callee(cwd / "pair", "tests.binding.decoy")
+    _callee(cwd / "ghost", "tests.binding.decoy")
+    marker = tmp_path / "executed"
+    (cwd / "run").write_text(f"#!/bin/sh\ntouch {marker}\n", encoding="utf-8")
+    (cwd / "run").chmod(0o755)
+    monkeypatch.chdir(cwd)
+    installed = {item.id for item in _store.list_installed(workspace)}
+
+    cases: list[dict[str, Any]] = [{}, {"install": True}, {"calls": {"forces.dft": "pair"}}]
+    for options in cases:
+        job = new_job(workspace, caller.id, **options)
+        assert _definition(job).as_mapping()["calls"]["forces.dft"]["workflow"] == real.id  # type: ignore[index]
+    for install in (False, True):
+        with pytest.raises(ValueError, match="call slot 'forces.dft'"):
+            new_job(workspace, caller.id, calls={"forces.dft": "run"}, install=install)
+    with pytest.raises(ValueError, match="defaults to ghost, which is not installed"):
+        new_job(workspace, ghostly.id)
+    with pytest.raises(ValueError, match="installing its default failed: .*no workflow package, git URI"):
+        new_job(workspace, ghostly.id, install=True)
+    assert not marker.exists()
+    assert {item.id for item in _store.list_installed(workspace)} == installed

@@ -71,6 +71,21 @@ def test_a_calls_table_is_a_slot_and_a_string_stays_a_fixed_call(tmp_path: Path)
         ('declaration_file = "calls/forces.json"\ndefault = "../x"\n', "", "not a path"),
         ('declaration_file = "calls/forces.json"\ndefault = "child"\n', 'child = "tests.child"\n', "alias 'child'"),
         ('declaration_file = "calls/forces.json"\n', 'child = "forces"\n', "alias 'forces' is also another call's"),
+        (
+            'declaration_file = "calls/forces.json"\ndefault_parameters = {cutoff = 1}\n',
+            "",
+            r"\[workflow\.calls\.forces\]\.default_parameters needs a default",
+        ),
+        (
+            'declaration_file = "calls/forces.json"\ndefault = "tests.ase"\ndefault_parameters = 3\n',
+            "",
+            r"default_parameters must be a table",
+        ),
+        (
+            'declaration_file = "calls/forces.json"\ndefault = "tests.ase"\ndefault_parameters = {cutoff = nan}\n',
+            "",
+            r"default_parameters must hold finite values",
+        ),
     ],
 )
 def test_a_malformed_slot_table_is_refused(tmp_path: Path, table: str, calls: str, message: str) -> None:
@@ -245,6 +260,7 @@ def test_describe_shows_fixed_calls_and_slots(tmp_path: Path) -> None:
             "forces": {
                 "description": "forces on every site",
                 "default": None,
+                "default_parameters": None,
                 "interface": {
                     "$id": INTERFACE["$id"],
                     "title": "structure to forces",
@@ -270,3 +286,16 @@ def test_an_implicitly_required_typed_input_must_be_supplied(tmp_path: Path) -> 
     bare = replace(callee, inputs={**callee.inputs, "cell": "cell.vasp"}, _input_metadata=metadata)
     with pytest.raises(SlotMismatch, match="required input 'cell' is supplied by no interface input"):
         fit(INTERFACE, bare)
+
+
+def test_describe_shows_default_parameters(tmp_path: Path) -> None:
+    root = _slot_package(
+        tmp_path / "caller",
+        'declaration_file = "calls/forces.json"\ndefault = "tests.ase"\n'
+        'default_parameters = {calculator = "emt", cutoff = 4.5}\n',
+    )
+    slot = parse_workflow_manifest(root).slots["forces"]  # type: ignore[index]
+    assert slot.default_parameters == {"calculator": "emt", "cutoff": 4.5}
+    description = _workflow_description(str(root))
+    assert description["calls"]["slots"]["forces"]["default_parameters"] == {"calculator": "emt", "cutoff": 4.5}  # type: ignore[index]
+    assert '    default parameters: {"calculator": "emt", "cutoff": 4.5}' in _render_text(description)

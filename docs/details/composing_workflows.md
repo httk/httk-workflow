@@ -185,6 +185,7 @@ relax = "vasp.relax"                       # a fixed call
 description = "computes the forces on every site of one structure"
 declaration_file = "calls/structure-forces.json"
 default = "ase.static"                     # optional
+default_parameters = { calculator = "ase.calculators.emt:EMT" }   # optional, only with default
 ```
 
 `declaration_file` names the slot's **interface declaration**, a package member
@@ -221,8 +222,14 @@ IRIs compare exactly, versions included. A refusal lists every reason at once.
 ### Binding a slot
 
 Every job binds each slot of its workflow when it is created: to the workflow
-the creator names, or else to the slot's `default` as installed. A slot without
-either refuses the job.
+the creator names, or else to the slot's `default`. A slot without either
+refuses the job. Installing a workflow never installs its defaults (it prints a
+notice for each one that is not installed), so a default must be installed
+before a job relies on it, or `job new --install` installs it. When the binding
+resolves to the same installation the recorded default resolves to (a short
+name resolves to its newest installation), a slot passes its
+`default_parameters`, which `--call-parameter` overrides entry by entry; bound
+to another installation, they are ignored.
 
 ```bash
 httk job new --workflow phonopy.phonons --input structure=POSCAR \
@@ -236,8 +243,7 @@ a parameter, spelled as for `--parameter`. In Python these are the `calls=` and
 `call_parameters=` arguments of {py:func}`~httk.workflow.scaffold.new_job`. The
 binding is fitted and its parameters type-checked at creation, recorded in the
 job's `job.json`, and the job waits until the bound workflow is installed;
-installing a workflow installs its slot defaults too, and `workflow build`
-builds them.
+`workflow build` also builds the installed defaults.
 
 ### Calling through a slot
 

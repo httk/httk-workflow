@@ -239,20 +239,36 @@ def _slotted(root: Path, *, default: bool = True, extra: str = "") -> Path:
     return root
 
 
-def test_a_slot_default_is_installed_and_recorded_apart_from_fixed_calls(tmp_path: Path, workspace: Workspace) -> None:
+def test_a_slot_default_is_never_installed_and_an_absent_one_gets_a_notice(
+    tmp_path: Path, workspace: Workspace, capsys: pytest.CaptureFixture[str]
+) -> None:
     root = _slotted(tmp_path / "packages")
-    parent = _install(workspace, root / "parent", build=False)
-    child = _store.lookup(workspace, "tests.calls.child")
-    assert child is not None and parent.record["calls"] == {} and parent.record["slots"] == {"forces": child.id}
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "w")
+    assert command(["install", "--workspace", name, "--no-build", str(root / "parent")], context) == 0
+    notice = (
+        "notice: the default workflow tests.calls.child of call slot 'forces' (tests.calls.parent) is not "
+        "installed; install it (httk workflow install tests.calls.child) or bind another with --call forces=WORKFLOW"
+    )
+    assert notice in capsys.readouterr().err
+    parent = _store.lookup(workspace, "tests.calls.parent")
+    assert (
+        parent is not None
+        and parent.record["calls"] == {}
+        and parent.record["slots"] == {"forces": "tests.calls.child"}
+    )
+    assert [installed.id for installed in _store.list_installed(workspace)] == [parent.id]
+
+    # Installed first, the default is recorded by its id, with no notice.
+    child = _install(workspace, root / "child", build=False)
+    assert command(["install", "--workspace", name, "--no-build", str(root / "parent")], context) == 0
+    assert "notice:" not in capsys.readouterr().err
+    parent = _store.lookup(workspace, "tests.calls.parent")
+    assert parent is not None and parent.record["slots"] == {"forces": child.id}
     # A job may rebind the slot, so the default is no dependency: the unbuilt child does not block the parent.
     assert set(_store.resolve_calls(workspace, [parent.id])) == {parent.id}
     assert set(_store.resolve_calls(workspace, [parent.id], include_slot_defaults=True)) == {parent.id, child.id}
     assert _store.closure(workspace, parent.id, check_builds=True).ok
-
-    other = Workspace.initialize(tmp_path / "other", durable=False)
-    skipped = _install(other, root / "parent", calls=False)
-    assert skipped.record["slots"] == {"forces": "tests.calls.child"}
-    assert [installed.id for installed in _store.list_installed(other)] == [skipped.id]
 
 
 def test_a_slot_without_a_default_is_recorded_as_null(tmp_path: Path, workspace: Workspace) -> None:
@@ -264,13 +280,17 @@ def test_a_slot_without_a_default_is_recorded_as_null(tmp_path: Path, workspace:
     assert [installed.id for installed in _store.list_installed(workspace)] == [parent.id]
 
 
-def test_workflow_build_also_builds_slot_defaults(tmp_path: Path, workspace: Workspace) -> None:
+def test_workflow_build_also_builds_installed_slot_defaults(tmp_path: Path, workspace: Workspace) -> None:
     root = _slotted(tmp_path / "packages", extra=_BUILD)
-    parent = _install(workspace, root / "parent", build=False)
-    child = _store.lookup(workspace, "tests.calls.child")
-    assert child is not None and _store.built(child) is False
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, workspace.root, "w")
+    # A default that is not installed is skipped.
+    parent = _install(workspace, root / "parent", build=False)
+    assert command(["build", "--workspace", name, parent.id], context) == 0
+    assert _store.built(parent) is True and _store.list_installed(workspace) == [parent]
+    child = _install(workspace, root / "child", build=False)
+    parent = _install(workspace, root / "parent", build=False)
+    assert _store.built(child) is False
     assert command(["build", "--workspace", name, parent.id], context) == 0
     assert _store.built(child) is True and _store.built(parent) is True
 
@@ -302,9 +322,8 @@ def test_a_copied_slot_workflow_installs_and_an_old_record_without_slots_still_r
     tmp_path: Path, workspace: Workspace
 ) -> None:
     root = _slotted(tmp_path / "packages")
+    child = _install(workspace, root / "child", build=False)
     parent = _install(workspace, root / "parent", build=False)
-    child = _store.lookup(workspace, "tests.calls.child")
-    assert child is not None
     landing = tmp_path / "landing"
     for installed in (parent, child):
         shutil.copytree(installed.directory, landing / installed.directory.name)

@@ -1256,8 +1256,10 @@ file or a bare workflow document.
 ```
 
 `calls` maps each fixed-call alias to the installed id it resolved to, and
-`slots` each call slot alias to its installed default id, or `null` without a
-default; a default is installed with the workflow but is no dependency of a job.
+`slots` each call slot alias to its default's installed id, the default as
+written when it was not installed then (a later install of it resolves by that
+name), or `null` without a default; a default is never installed with the
+workflow and is no dependency of a job.
 `runner` names exactly one of `command` (an argv with `{package}` and
 `{artifacts}` placeholders), `entry` (an executable package member) or
 `builtin` (`cwl`, `pwd`, `jobflow`, `httk-v1`, run by the manager's own

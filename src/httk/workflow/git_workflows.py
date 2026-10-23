@@ -143,7 +143,10 @@ def fetch_workflows(reference: str) -> tuple[WorkflowProvider, ...]:
 
 
 def _ordered(providers: list[WorkflowProvider]) -> tuple[WorkflowProvider, ...]:
-    """Order providers callees (and call slot defaults) first, stably, so installing them in turn installs none twice.
+    """Order providers callees first, stably, so installing them in turn installs none twice.
+
+    A call slot default among them is ordered first too, though never installed for its slot: installed
+    first, it is recorded by its pinned id rather than by the name as written.
 
     Calls bind by the store's sibling mapping, not by this order; members in a cycle keep the given
     order and the store reports the cycle.

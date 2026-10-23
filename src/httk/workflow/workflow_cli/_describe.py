@@ -174,7 +174,12 @@ def _calls_document(workflow: ResolvedWorkflow) -> dict[str, object]:
         ):
             entries = cast(list[Mapping[str, object]], slot.interface[kind])
             interface[kind] = [{key: entry[key] for key in keys} for entry in entries]
-        slots[alias] = {"description": slot.description, "default": slot.default, "interface": interface}
+        slots[alias] = {
+            "description": slot.description,
+            "default": slot.default,
+            "default_parameters": None if slot.default_parameters is None else dict(slot.default_parameters),
+            "interface": interface,
+        }
     return {"fixed": dict(workflow.calls or {}), "slots": slots}
 
 
@@ -299,6 +304,8 @@ def _calls_text(calls: Any) -> list[str]:
             f"  {alias}: slot{f' {name!r}' if name else ''}, default={slot['default'] or '-'}"
             + (f" — {slot['description']}" if slot["description"] else "")
         )
+        if slot.get("default_parameters"):
+            lines.append(f"    default parameters: {_value(slot['default_parameters'])}")
         lines.extend(f"    in {entry['name']}: {entry['entry_type']} {entry['ref']}" for entry in interface["inputs"])
         lines.extend(
             f"    out {entry['name']}: {entry['entry_type']} {entry['ref']} (product_of {entry['product_of']})"
@@ -732,6 +739,7 @@ def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
         return _install_remote(binding, context, arguments)
     workspace = _modifiable(arguments, context, action="install workflows into it")
     rows: list[dict[str, object]] = []
+    done: list[_store.Installed] = []
     failed = False
     with _kernel.register_owner(
         workspace, kind="cli", label="workflow install", allocation=None, advertised={}
@@ -754,12 +762,17 @@ def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
                             reference=reference,
                         )
                     rows.append(_installed_row(installed))
+                    done.append(installed)
             except _ERRORS as exc:
                 failed = True
                 print(f"{source}: {exc}", file=sys.stderr)
             finally:
                 if arguments.consume:
                     _consume(workspace, source)
+    # After every source, so a default installed by a later one gets no notice.
+    for installed in done:
+        for notice in _store.slot_default_notices(workspace, installed):
+            print(f"notice: {notice}", file=sys.stderr)
     _print_rows(rows, arguments, lambda row: f"{row['id']}\t{row['name']}")
     return 1 if failed else 0
 
@@ -973,7 +986,8 @@ def build_install_parser(subparsers: argparse._SubParsersAction[argparse.Argumen
         description=(
             "Install each SOURCE into the workspace's store: a package directory, a git+https://HOST/PATH[@REF]"
             "[#SUBDIR] URI, a runner file or workflow document (installed ad hoc), or a workflow name known on "
-            "this machine. Its declared calls are installed too, and a [workflow.build] package is built for "
+            "this machine. Its declared calls are installed too (call slot defaults are not; a notice names each one "
+            "not installed), and a [workflow.build] package is built for "
             "this platform. A REMOTE:WS workspace gets the source pushed through the remote's adapter (a git "
             "source is fetched there by its pinned URI). A git URI without #SUBDIR whose repository root carries "
             "httk_plugin.toml installs every workflow that plugin lists. Without --workspace, a git URI is only "
@@ -984,9 +998,7 @@ def build_install_parser(subparsers: argparse._SubParsersAction[argparse.Argumen
     install.add_argument("sources", metavar="SOURCE", nargs="*", help="what to install")
     _add_store_options(install, "the workspace to install into (without it: fetch git URIs on this machine)")
     _add_by_path_argument(install)
-    install.add_argument(
-        "--no-calls", action="store_true", help="do not install the declared calls or call slot defaults"
-    )
+    install.add_argument("--no-calls", action="store_true", help="do not install the declared calls")
     install.add_argument("--no-build", action="store_true", help="do not build a [workflow.build] package")
     install.add_argument("--format", metavar="FORMAT", help="force FORMAT for a bare workflow document or directory")
     install.add_argument("--consume", action="store_true", help=argparse.SUPPRESS)

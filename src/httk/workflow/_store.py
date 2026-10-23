@@ -74,6 +74,7 @@ __all__ = [
     "lookup",
     "platform_tag",
     "resolve_calls",
+    "slot_default_notices",
     "stale_replacements",
     "uninstall",
 ]
@@ -720,6 +721,7 @@ def install(
     language: str | None = None,
     siblings: Mapping[str, WorkflowProvider] | None = None,
     reference: str | None = None,
+    by_name: bool = False,
 ) -> Installed:
     """Install (or reinstall, replacing) a workflow package in the workspace.
 
@@ -734,8 +736,9 @@ def install(
     :param workspace: The workspace.
     :param owner: The registered owner whose scratch assembles the installation.
     :param source: The source.
-    :param calls: Install every ``[workflow.calls]`` reference and call slot default first (recursively)
-        unless already installed.
+    :param calls: Install every ``[workflow.calls]`` reference first (recursively) unless already installed. A
+        call slot's default is never installed: ``install.json`` ``slots`` records its installed id when it is
+        installed, else the reference as written (see :func:`slot_default_notices`).
     :param build: Build for the current platform when the package declares ``[workflow.build]``.
     :param initial_step: The default step of an ad hoc package (runner file sources only); required
         when the runner registers several steps and none of them is ``start``.
@@ -744,6 +747,7 @@ def install(
         or call reference among the keys is that provider, so calls among them bind to each other.
     :param reference: Record this tag or branch as the one the source was installed from (``NAME@REF``
         selects by it); by default that of a ``git+…@REF`` source, ``None`` for a commit or no ref.
+    :param by_name: Take *source* as a workflow name or git URI only, never as a path where the install runs.
     :return: The installation.
     :raises ValueError: For an unresolvable or invalid source, a symlink or special file in the
         package, a package registered in-process only, a call cycle, or a fixed-call target with a
@@ -761,6 +765,7 @@ def install(
         language=language,
         siblings=siblings or {},
         reference=reference,
+        by_name=by_name,
     )
 
 
@@ -777,6 +782,7 @@ def _install(
     siblings: Mapping[str, WorkflowProvider],
     reference: str | None = None,
     caller: str | None = None,
+    by_name: bool = False,
 ) -> Installed:
     with _scratch(owner) as work:
         sibling = siblings.get(os.fspath(source))
@@ -785,7 +791,7 @@ def _install(
             origin = os.fspath(source)
         else:
             workflow_id, name, provider, origin = _resolve(
-                source, work, initial_step, by_name=bool(stack), language=language
+                source, work, initial_step, by_name=by_name or bool(stack), language=language
             )
         if reference is None:
             reference = _git_reference(origin)
@@ -798,7 +804,7 @@ def _install(
         if stack and (installed := lookup(workspace, workflow_id)) is not None and installed.id == workflow_id:
             return installed  # a callee already installed under its resolved id is kept
 
-        def installed_callee(written: str, caller: str | None) -> str:
+        def installed_callee(written: str, caller: str) -> str:
             # A sibling binds by its pinned id, so another installation of its name never answers.
             bound = written if (callee := siblings.get(written)) is None else callee.workflow_id
             found = lookup(workspace, bound)
@@ -815,7 +821,7 @@ def _install(
                     reference=None if callee is None else reference,
                     caller=caller,
                 )
-            elif found is not None and caller is not None:
+            elif found is not None:
                 _require_defaults(found.id, found.record.get("slots"), caller)
             # Without calls, an uninstalled reference is recorded as written; closure() reports it missing.
             return written if found is None else found.id
@@ -824,8 +830,14 @@ def _install(
             alias: installed_callee(written, f"[workflow.calls].{alias} of {workflow_id}")
             for alias, written in (provider.calls or {}).items()
         }
+
+        def installed_default(written: str) -> str:
+            # Never installed here: a default is the job creator's convenience, not a dependency.
+            found = lookup(workspace, written if (callee := siblings.get(written)) is None else callee.workflow_id)
+            return written if found is None else found.id
+
         defaults = {
-            alias: None if slot.default is None else installed_callee(slot.default, None)
+            alias: None if slot.default is None else installed_default(slot.default)
             for alias, slot in (provider.slots or {}).items()
         }
         assert provider.directory is not None  # _resolve refuses providers without a package directory
@@ -850,6 +862,23 @@ def _install(
             _fs.move_owned(_fs.loc(old), _fs.loc(work / "old"), durable=workspace.durable)
     _LOGGER.info("installed workflow %s in %s", workflow_id, target)
     return Installed(workflow_id, name, target, record)
+
+
+def slot_default_notices(workspace: KernelWorkspace, installed: Installed) -> list[str]:
+    """Return a notice for each call slot default of an installation that is not installed in the workspace.
+
+    :param workspace: The workspace.
+    :param installed: The installation.
+    :return: The notices, without a ``notice:`` prefix.
+    """
+
+    slots = installed.record.get("slots")
+    return [
+        f"the default workflow {default} of call slot {alias!r} ({installed.name}) is not installed; "
+        f"install it (httk workflow install {default}) or bind another with --call {alias}=WORKFLOW"
+        for alias, default in (slots.items() if isinstance(slots, dict) else ())
+        if isinstance(default, str) and lookup(workspace, default) is None
+    ]
 
 
 def _require_defaults(workflow_id: str, slots: object, caller: str) -> None:

@@ -32,6 +32,7 @@ from .models import (
     validate_calls,
     validate_declarations,
     validate_label,
+    validate_parameters,
     validate_runner_command,
 )
 from .postprocessing import _valid_output_pattern
@@ -307,14 +308,32 @@ def _calls(raw: object, root: Path) -> tuple[dict[str, str], dict[str, CallSlot]
     slots: dict[str, CallSlot] = {}
     for alias, value in tables.items():
         path = f"[workflow.calls.{alias}]"
-        _unknown(value, {"declaration_file", "description", "default"}, path, root)
+        _unknown(value, {"declaration_file", "description", "default", "default_parameters"}, path, root)
+        default_parameters: dict[str, object] | None = None
+        if "default_parameters" in value:
+            if "default" not in value:
+                raise _error(root, f"{path}.default_parameters needs a default")
+            raw_parameters = value["default_parameters"]
+            if not isinstance(raw_parameters, Mapping):
+                raise _error(root, f"{path}.default_parameters must be a table")
+            try:
+                default_parameters = validate_parameters(raw_parameters, f"{path}.default_parameters")
+                json.dumps(default_parameters, allow_nan=False)
+            except (FormatError, ValueError) as exc:
+                raise _error(root, f"{path}.default_parameters must hold finite values: {exc}") from exc
         member = _member(root, value.get("declaration_file"), f"{path}.declaration_file")
         try:
             interface = validate_interface(json.loads((root / member).read_text(encoding="utf-8")))
         except (OSError, UnicodeError, ValueError) as exc:
             raise _error(root, f"{path}.declaration_file {member!r}: {exc}") from exc
         description = _optional_string(value, "description", path, root)
-        slots[alias] = CallSlot(MappingProxyType(interface), member, description, checked.get(alias))
+        slots[alias] = CallSlot(
+            MappingProxyType(interface),
+            member,
+            description,
+            checked.get(alias),
+            None if default_parameters is None else MappingProxyType(default_parameters),
+        )
     return {alias: checked[alias] for alias in fixed}, slots or None
 
 

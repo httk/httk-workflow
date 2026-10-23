@@ -182,16 +182,21 @@ creator binds (see [call slots](composing_workflows.md#call-slots)):
 declaration_file = "calls/structure-forces.json"   # required: the interface declaration
 description = "computes the forces on every site of one structure"
 default = "ase.static"                             # optional, a reference like a fixed call's
+default_parameters = { calculator = "ase.calculators.emt:EMT" }   # optional, only with default
 ```
 
 Unknown keys are refused, and the interface document is validated when the
 manifest is parsed (see
 [interface declarations](declarations.md#interface-declarations)). A slot's
-`default` follows the alias rules of a fixed call. `install.json` records the
-fixed calls in `calls` and the slots in `slots`, alias to the installed default
-id or `null`. Installing installs each default as it installs a fixed call (not
-with `--no-calls`), and `httk workflow build` also builds the workflows the
-defaults bring in. A default is not a dependency of a job that bound another
+`default` follows the alias rules of a fixed call, and `default_parameters`
+(job-parameter rules: string keys, finite values, the size limit) are passed
+when a job binds the slot to its default. `install.json` records the fixed
+calls in `calls` and the slots in `slots`, alias to the default's installed id,
+the default as written when it is not installed, or `null`. Installing never
+installs a default: `httk workflow install` prints a notice for each one that
+is not installed, job creation refuses to rely on it until it is (except with
+`job new --install`), and `httk workflow build` also builds the installed
+defaults and the workflows they call. A default is not a dependency of a job that bound another
 workflow: readiness follows the job's own bindings. A workflow installed as the
 target of a fixed call must give every slot a default.
 

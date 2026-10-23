@@ -171,12 +171,15 @@ class CallSlot:
     :param declaration_file: Name the package member holding the interface declaration.
     :param description: Describe what the called workflow must do.
     :param default: Give the workflow reference bound when the job creator chooses none.
+    :param default_parameters: Give the parameters the default is called with, which a job's creator may
+        override per entry.
     """
 
     interface: Mapping[str, object]
     declaration_file: str
     description: str | None = None
     default: str | None = None
+    default_parameters: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -1784,6 +1787,30 @@ def _installed(
     )
 
 
+def _installed_by_name(
+    workspace: Workspace, reference: str, *, owner: _kernel.Owner | None, install: bool
+) -> Installed:
+    """Return the installation a workflow name, id or git URI names, as :func:`_installed` does for one.
+
+    Never a path: a call slot binding must not pick up a directory or file of that name where the job is created.
+    """
+
+    from . import _store
+
+    found = _store.lookup(workspace, reference)
+    if found is None and (provider := workflow_provider(reference)) is not None:
+        found = _store.lookup(workspace, provider.definition_uri or f"local:{provider.workflow_id}")
+    if found is not None:
+        return found
+    if owner is not None and install:
+        return _store.install(workspace, owner, reference, by_name=True)
+    raise ValueError(
+        f"workflow {reference!r} is not installed in the workspace {workspace.root}; "
+        f"install it first with `httk workflow install --workspace {shlex.quote(str(workspace.root))} "
+        f"{shlex.quote(reference)}`, or create the job with `httk job new --install` (install=True)"
+    )
+
+
 def _prepare(installed: Installed, *, step: str | None) -> _Prepared:
     """Resolve one installed workflow for job creation, exactly once per campaign.
 
@@ -2102,7 +2129,8 @@ def _bind_slots(
 
     A slot is bound to the reference *calls* gives it, else to the default its installation recorded; the bound
     workflow is looked up (or, with an *owner* and *install*, installed) like the job's own, must fit the slot's
-    interface, and is given *call_parameters* checked against its declared parameter types.
+    interface, and is given *call_parameters* checked against its declared parameter types. Bound to its default,
+    a slot's ``default_parameters`` come first and *call_parameters* override them per entry.
     """
 
     from ._slots import SlotMismatch, fit
@@ -2129,7 +2157,8 @@ def _bind_slots(
     defaults = recorded if isinstance(recorded, dict) else {}
     bindings: dict[str, dict[str, object]] = {}
     for alias, slot in slots.items():
-        reference = chosen.get(alias, defaults.get(alias))
+        default = defaults.get(alias)
+        reference = chosen.get(alias, default)
         if not isinstance(reference, str):
             raise ValueError(
                 f"call slot {alias!r} of {installed.id} has no default; bind it (httk job new --call {alias}=WORKFLOW)"
@@ -2138,14 +2167,34 @@ def _bind_slots(
             # A binding names a workflow like a [workflow.calls] reference: never a path, so nothing is installed
             # from one.
             validate_calls({alias: reference}, "calls")
-            bound = _installed(workspace, reference, owner=owner, install=install, step=None)
+            bound = _installed_by_name(workspace, reference, owner=owner, install=install)
         except ValueError as exc:
+            if alias not in chosen and owner is not None and install:
+                raise ValueError(
+                    f"call slot {alias!r} of {installed.id}: installing its default failed: {exc}"
+                ) from exc
+            if alias not in chosen:
+                # Installing a workflow never installs its slot defaults; only an explicit --install does.
+                raise ValueError(
+                    f"call slot {alias!r} of {installed.id} defaults to {reference}, which is not installed; "
+                    f"install it (httk workflow install {reference}) or bind another with --call {alias}=WORKFLOW"
+                ) from exc
             raise ValueError(f"call slot {alias!r}: {exc}") from exc
         try:
             fit(slot.interface, bound.provider())
         except SlotMismatch as exc:
             raise ValueError(f"call slot {alias!r} bound to {bound.id}: {exc}") from exc
         parameters = dict(given_parameters.get(alias, {}))
+        if slot.default_parameters and isinstance(default, str):
+            # The default's parameters go with the default, whether bound implicitly or named again.
+            same = alias not in chosen
+            if not same:
+                try:
+                    same = _installed_by_name(workspace, default, owner=None, install=False).id == bound.id
+                except ValueError:
+                    same = False
+            if same:
+                parameters = {**slot.default_parameters, **parameters}
         declared_parameters = bound.provider().parameters
         if declared_parameters:
             _check_parameter_types(parameters, declared_parameters)
