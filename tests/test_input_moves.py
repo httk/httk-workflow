@@ -200,10 +200,13 @@ def test_moves_are_refused_outside_succeeded_jobs_and_for_reserved_members_and_s
     outside = tmp_path / "outside.dat"
     outside.write_bytes(_FRAMES)
     (origin / "run" / "link.dat").symlink_to(origin / "run" / "traj.dat")
+    (origin / "workflow").mkdir()
+    (origin / "workflow" / "run").write_bytes(_FRAMES)
 
     _refused(ws, outside, "not a regular file inside a succeeded job")
     _refused(ws, origin / "job.json", "reserved member")
     _refused(ws, origin / ".httk-job" / "seal.json", "reserved member")
+    _refused(ws, origin / "workflow" / "run", "reserved member")
     _refused(ws, origin / "run" / "link.dat", "not a regular file inside a succeeded job")
     _refused(ws, origin / "run", "not a regular file inside a succeeded job")
     assert (origin / "run" / "traj.dat").read_bytes() == _FRAMES and not job_releases_path(origin).exists()

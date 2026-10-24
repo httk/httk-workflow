@@ -135,6 +135,7 @@ _DIGEST = {"size": 3, "sha256": "0" * 64}
         ("staged_files", [{"path": "attempts/1/x"}]),
         ("staged_files", [{"path": ".httk-job/seal.json"}]),
         ("staged_files", [{"path": "logs/run.log"}]),
+        ("staged_files", [{"path": "workflow/run"}]),
         ("staged_files", [{"path": "job.json/x"}]),
         ("staged_files", [{"path": "files/INCAR", "size": 3}]),
         ("staged_files", [{"path": "files/INCAR", "sha256": _DIGEST["sha256"]}]),

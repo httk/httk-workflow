@@ -545,9 +545,10 @@ it to establish ownership and the jobs' claim pool. Every confined manager that
 serves the exchange adopts bundles from `inbox` itself: it takes the entry, copies it anchored at directory descriptors
 into its own scratch, and validates, rekeys and publishes only that copy. An
 inbox bundle is untrusted input: it must hold only fresh jobs (never run, no
-`state.json`, logs, attempts or seal) in state `ready`, with no symlink, special
+`state.json`, logs, attempts, seal or `workflow/` runner copy) in state `ready`, with no symlink, special
 file or hard-linked file, and a root without a parent. The job's workflow must
-be installed in the workspace (an operator task); until then the adopted job
+be installed in the workspace (an operator task), since exchange jobs run only
+pre-installed workflows; until then the adopted job
 waits, and `status.json` shows it `ready`. A client that keeps
 descriptors open on its entry can change its bytes only until the copy
 completes; such a change affects only its own job. A refused bundle appears in

@@ -763,6 +763,7 @@ def test_a_staged_name_lands_where_the_runner_reads_it(workspace: Workspace, str
     assert payload_relative("inputs/potcars/POTCAR").as_posix() == "inputs/potcars/POTCAR"
     assert payload_relative("files/logs/x").as_posix() == "files/logs/x"
     assert payload_relative("files/job.json").as_posix() == "files/job.json"
+    assert payload_relative("workflow").as_posix() == "files/workflow"
     for refused in (
         "",
         "../escape",
@@ -771,6 +772,7 @@ def test_a_staged_name_lands_where_the_runner_reads_it(workspace: Workspace, str
         "attempts/attempt",
         "logs/x",
         "attempts/x",
+        "workflow/run",
     ):
         with pytest.raises(ValueError):
             payload_relative(refused)

@@ -41,6 +41,9 @@ EXCHANGE_DIRECTORY = "exchange"
 #: The daemon's private directory below ``WORKSPACE_DIRECTORY``.
 DAEMON_DIRECTORY = "daemon"
 JOB_STATE_DIRECTORY = ".httk-job"
+#: The payload member an unlocked job keeps its own runner copy in. Reserved, so a workflow's inputs or
+#: staged files never land there; an untrusted exchange bundle may not carry it.
+JOB_WORKFLOW_DIRECTORY = "workflow"
 # The envelope a detached or ejected job carries while it is out of every
 # workspace: its manifest, its marker, and any shared runner it pins. It
 # describes the bundle rather than the job, so no payload digest or seal covers it.
@@ -78,7 +81,7 @@ MAXIMUM_DECLARED_BYTES = 262144
 def _reserved_payload_member(first: str) -> bool:
     """Report whether *first*, the first segment of a payload path, is owned by the job or its runner."""
 
-    return first in {"job.json", ATTEMPTS_DIRECTORY, LOGS_DIRECTORY, JOB_STATE_DIRECTORY}
+    return first in {"job.json", ATTEMPTS_DIRECTORY, LOGS_DIRECTORY, JOB_STATE_DIRECTORY, JOB_WORKFLOW_DIRECTORY}
 
 
 _UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")

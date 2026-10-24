@@ -23,8 +23,8 @@ from httk.workflow import _fs
 from httk.workflow._kernel import OwnedJob
 from httk.workflow.errors import FormatError, WorkflowError
 
-#: Payload entries a transaction may never name at its top level.
-RESERVED = frozenset({"job.json", "state.json", "seal.json", "logs", "attempts"})
+#: Payload entries a transaction may never name at its top level (``workflow`` is an unlocked job's runner copy).
+RESERVED = frozenset({"job.json", "state.json", "seal.json", "logs", "attempts", "workflow"})
 
 _COMMITTED = re.compile(r"[0-9]{6}")
 _STAGING = re.compile(r"[0-9]{6}\.tmp")

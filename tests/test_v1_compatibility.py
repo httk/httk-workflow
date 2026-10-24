@@ -735,6 +735,15 @@ def test_v1_language_rejects_symlinked_package_members(tmp_path: Path) -> None:
         new_job(workspace, package, format="httk-v1")
 
 
+def test_v1_language_rejects_a_reserved_workflow_member(tmp_path: Path) -> None:
+    package = _v1_package(tmp_path / "package", _V1_MANIFEST, _V1_PROGRAM)
+    (package / "collect.py").write_text("def collect(record): return {}\n", encoding="utf-8")
+    (package / "workflow").mkdir()
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(ValueError, match=r"workflow is a reserved job payload member"):
+        new_job(workspace, package, inputs={"value": "value"})
+
+
 def test_v1_ht_instantiate_contract_runs_and_unlinks_script(tmp_path: Path) -> None:
     manifest = _V1_MANIFEST.replace("tests.v1.package", "tests.v1.instantiate")
     package = _v1_package(

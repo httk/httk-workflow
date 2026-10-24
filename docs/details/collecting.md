@@ -305,7 +305,7 @@ unless told to:
   the same text, which makes the command exit 1.
 - `collect(..., force=True)` (`httk collect --force`) collects it, also with
   `--postprocess`. The job's registered provider's collector is used as for any
-  job; the collect hook of the runner copy (`.httk-job/workflow/`) runs,
+  job; the collect hook of the runner copy (`workflow/` in the job directory) runs,
   unverified and without a pin check, only with `--allow-job-collector` and
   only when no in-process registered provider supplies a collector. With `--into`, the run is stored with no mark that the job
   was unlocked: whoever forces the collection takes the responsibility.

@@ -85,8 +85,9 @@ _MANIFEST_MEMBERS = frozenset(
 _DESTINATION_MEMBERS = frozenset({"workspace_id", "locator"})
 _MEMBER_MEMBERS = frozenset({"job_id", "job_key", "placement", "state", "priority", "parent_job_id"})
 _REKEY_MEMBERS = frozenset({"format", "format_version", "manifest", "exchange_names"})
-# Entries that only an owner writes: a fresh job from an untrusted client carries none of them.
-_NOT_FRESH = frozenset({"state.json", "seal.json", "logs", "attempts", ".httk-job"})
+# Entries that only an owner writes, and a runner copy (an untrusted job runs only pre-installed
+# workflows): a fresh job from an untrusted client carries none of them.
+_NOT_FRESH = frozenset({"state.json", "seal.json", "logs", "attempts", ".httk-job", "workflow"})
 _MANIFEST_NAME = PurePosixPath("bundle.json")
 _JOBS = PurePosixPath("jobs")
 

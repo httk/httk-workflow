@@ -997,7 +997,7 @@ of `DIR` have changed since the installation (compared by the installed
 digest's rules, ignoring `.git` and declared build artifacts), so an
 edited package directory is picked up by the next job. To iterate on a runner
 for one job only, without reinstalling, unlock the job: it gets its own copy of
-the installed `package/` at `.httk-job/workflow/` to edit and rerun (see
+the installed `package/` at `workflow/` in the job directory to edit and rerun (see
 {doc}`/restarting_jobs`). `httk workflow list --workspace WS` and
 `httk workflow describe --workspace WS ID` show installations; the manager
 records the id and tree digest it launched in `state.json` `workflow_pin`.

@@ -26,7 +26,7 @@ from ._kernel import JobRef, ListingCache, OwnedJob, Release
 from ._manager_scheduling import current_step, effective_workflow
 from ._state import TERMINAL_STATES, StateDoc, _thaw, read_state_unowned
 from .errors import FormatError, WorkflowError
-from .models import canonical_uuid
+from .models import JOB_STATE_DIRECTORY, canonical_uuid
 from .scaffold import WorkflowProvider, _check_parameter_types
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -409,7 +409,9 @@ def refusal(
             return f"rule 1 (installed): workflow {workflow_id} is not installed in the job's workspace"
         unlocked = doc is not None and doc.unlocked is not None
         if unlocked and payload is not None and os.path.lexists(payload / _store.RUNNER_COPY):
-            return f"the job runs its own workflow copy at {_store.RUNNER_COPY}; edit or remove it instead of switching"
+            return (
+                f"the job runs its own workflow copy at {_store.RUNNER_COPY}/; edit or remove it instead of switching"
+            )
         return workflow_switch_problem(workspace, job, doc, candidate)
     if request.action in ("continue", "restart", "override_step"):
         return _joins.consumed_by_decided_join(workspace, job, cache=cache)
@@ -554,15 +556,21 @@ def _unlock(
         return dropped(f"workflow {workflow_id} cannot be read: {exc}")
     if provider.language is not None or job.parameters.get("workflow_realization") == "language":
         return applied  # a builtin language runner: nothing to copy
-    state_dir, name = _store.RUNNER_COPY.split("/")
+    name = _store.RUNNER_COPY
+    # Built in the protocol-owned state directory, so no job file shares the temporary name space.
     temporary = f"{name}.{_fs.fresh_token()}"
     try:
-        anchor = _fs.open_dir_under(owned.path, state_dir, create=True, mode=0o777)
+        anchor = _fs.open_dir(owned.path)
         try:
-            for leftover in os.listdir(anchor):
+            state = _fs.open_dir_under(anchor, JOB_STATE_DIRECTORY, create=True, mode=0o777)
+        except BaseException:
+            os.close(anchor)
+            raise
+        try:
+            for leftover in os.listdir(state):
                 # A copy an earlier crash left unfinished (the job is owned and idle here).
                 if re.fullmatch(rf"{re.escape(name)}\.[a-z2-7]{{16}}", leftover):
-                    owned.discard_subtree(f"{state_dir}/{leftover}")
+                    owned.discard_subtree(f"{JOB_STATE_DIRECTORY}/{leftover}")
             if _fs.lstat(_fs.anchored(anchor, name)) is not None:
                 # An existing copy is never overwritten: a first unlock keeps one the operator placed.
                 if doc.unlocked is not None:
@@ -572,18 +580,19 @@ def _unlock(
             try:
                 # ponytail: the copied files are not fsynced; after a power loss the copy may be torn (remove it
                 # and unlock again).
-                _store._copy_package(installed.package, owned.path / state_dir / temporary, provider.build)
+                _store._copy_package(installed.package, owned.path / JOB_STATE_DIRECTORY / temporary, provider.build)
                 # Never a half copy at the final name.
                 _fs.move_owned(
-                    _fs.anchored(anchor, temporary),
+                    _fs.anchored(state, temporary),
                     _fs.anchored(anchor, name),
                     durable=owned.owner.workspace.durable,
                     create_parents=False,
                 )
             except BaseException:
-                owned.discard_subtree(f"{state_dir}/{temporary}")
+                owned.discard_subtree(f"{JOB_STATE_DIRECTORY}/{temporary}")
                 raise
         finally:
+            os.close(state)
             os.close(anchor)
     except (ValueError, OSError, WorkflowError) as exc:
         return dropped(f"cannot copy the runner of workflow {workflow_id}: {exc}")

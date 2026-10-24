@@ -426,8 +426,8 @@ a.succeed()
 directory (`data/result` lands in `data/`), then `commit()`. The manager
 applies every committed transaction at the next attempt boundary, before any
 later attempt starts, whatever the outcome; an uncommitted one is discarded.
-Destinations below `job.json`, `state.json`, `seal.json`, `logs` and
-`attempts` are refused, and there is no removal operation:
+Destinations below `job.json`, `state.json`, `seal.json`, `logs`,
+`attempts` and `workflow` are refused, and there is no removal operation:
 
 ```python
 checkpoint = a.transaction()

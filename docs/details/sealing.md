@@ -111,8 +111,9 @@ the setting. A ref that cannot be resolved is skipped with a warning.
   sealed (its `seal` is `{"disabled": true}`) and `job seal` refuses it; it may
   be revived by `continue`, `restart` or `override_step`, and `job delete`
   needs no `unseal`. A succeeded job with a live seal must be unsealed before
-  it can be unlocked. `.httk-job/` is outside the seal, so the runner copy of an
-  unlocked job (`.httk-job/workflow/`) is not sealed either.
+  it can be unlocked. The runner copy of an unlocked job (`workflow/` at the top
+  of the payload) is an ordinary payload member, so a seal would cover it; an
+  unlocked job is never sealed, so this matters only for the documented layout.
 - **Sealed workspace or project:** modifying CLI commands (job creation,
   requests, deletion, eject, adopt, transfer, installs) are refused until it is
   unsealed; managers and jobs do not check it. A workspace cannot be unsealed
@@ -168,8 +169,8 @@ Resealing a job keeps its release records as history; they amend the old seal
 and are ignored against the new one.
 
 The move is refused unless PATH is a regular file of the payload (not a
-symlink, `job.json`, `state.json`, or anything below `attempts/`, `logs/` or
-`.httk-job/`) on the same filesystem as the workspace, so the rename is
+symlink, `job.json`, `state.json`, `workflow/` or anything below `attempts/`,
+`logs/` or `.httk-job/`) on the same filesystem as the workspace, so the rename is
 atomic, and unless a sealed job's seal is the one its `state.json` records and
 records the file. The move checks the file's size, not its content, against
 the seal: a same-size change made in place after sealing is caught at the

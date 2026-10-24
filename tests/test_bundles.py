@@ -709,6 +709,7 @@ NOT_FRESH: dict[str, str] = {
     "attempts": "attempts/a/outcome.json",
     "seal": ".httk-job/seal.json",
     "empty logs": "logs/",
+    "runner copy": "workflow/run",
 }
 
 

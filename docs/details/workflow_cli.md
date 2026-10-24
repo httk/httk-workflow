@@ -370,7 +370,7 @@ the job moves between states.
 - `--input-move-from-job NAME=PATH` moves (renames, never copies) PATH into
   the declared input NAME's destination. PATH must be a regular file (not a
   symlink) inside the payload of a succeeded job of the same workspace, not
-  `job.json`, `state.json` or anything below `attempts/`, `logs/` or
+  `job.json`, `state.json`, `workflow/` or anything below `attempts/`, `logs/` or
   `.httk-job/`, and on the workspace's filesystem; anything else is refused.
   A sealed job keeps its seal: a signed release record amends it (see
   {doc}`sealing`), and the file's `staged_files` digest is the one the seal
@@ -574,8 +574,9 @@ Ancestor lines end with ` (ancestor)`; an ancestor already unlocked prints
 found prints `<job_id>` `parent <key> not found; not unlocked` without changing
 the exit status. It exits `1` when a request of a selected job or ancestor is
 refused or uncertain. `job request unlock` does the same on a local workspace, ancestors included, with the same lines and exit rules. Without `--no-copy`
-it copies the job's installed `package/` to `.httk-job/workflow/`, where the
-manager then runs the runner from and the operator edits it. The marker cannot
+it copies the job's installed `package/` to `workflow/` in the job directory
+(a reserved payload name), where the manager then runs the runner from, while
+the job is unlocked, and the operator edits it. The marker cannot
 be cleared by any request. A succeeded job with a live seal is refused until
 `job unseal`, and a cancelled job is refused. `job unlock` refuses a remote
 workspace as `job detach` does; `job request unlock` reaches an ssh remote
@@ -584,7 +585,7 @@ unlock spawned jobs on the workspace host with `httk job unlock`, which also
 unlocks their ancestors), and a
 workspace daemon refuses it (the daemon does not carry `unlock`; run it on the
 daemon host). `job show` prints an `unlocked` row, `job why` a "debug mode"
-check, and the JSON report gains `unlocked` and `paths.runner_copy`. The jobs
+check, and the JSON report gains `unlocked` and `paths.runner_copy` (`<payload>/workflow`). The jobs
 are collected only with `httk collect --force`.
 
 ### Ejecting and adopting jobs

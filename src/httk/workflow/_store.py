@@ -52,7 +52,7 @@ from httk.core.git_sources import parse_git_uri
 from httk.workflow import _fs, git_workflows, scaffold
 from httk.workflow._kernel import KernelWorkspace, Owner, reconcile_scratch
 from httk.workflow.errors import RunnerResolutionError, WorkflowError
-from httk.workflow.models import WORKFLOW_ID_PREFIXES, is_workflow_id
+from httk.workflow.models import JOB_WORKFLOW_DIRECTORY, WORKFLOW_ID_PREFIXES, is_workflow_id
 from httk.workflow.packages import (
     MANIFEST_NAME,
     artifact_excluder,
@@ -94,8 +94,8 @@ _PROBE_STDERR_TAIL = 1024
 _PLATFORM_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], str] = {}
 _INSTALLATION = re.compile(r"[a-z0-9._-]*--[0-9a-f]{16}")
 _REPLACED = re.compile(r"[a-z0-9._-]*--[0-9a-f]{16}\.old\.[a-z2-7]{16}")
-#: Where an unlocked job keeps its own copy of its installation's package, below its payload.
-RUNNER_COPY = ".httk-job/workflow"
+#: Where an unlocked job keeps its own copy of its installation's package: a top-level payload member.
+RUNNER_COPY = JOB_WORKFLOW_DIRECTORY
 
 
 @dataclass(frozen=True)
@@ -157,7 +157,7 @@ def runner_copy(installed: Installed, payload: Path) -> Installed | None:
     :param installed: The job's effective installation.
     :param payload: The job directory.
     :return: The installation with its package overridden by the copy, or ``None`` without a copy (or when
-        ``.httk-job`` or the copy is a symlink or not a directory: never followed).
+        the copy is a symlink or not a directory: never followed).
     """
 
     try:

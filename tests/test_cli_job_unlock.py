@@ -223,5 +223,5 @@ def test_set_workflow_of_a_job_running_its_copy_is_refused_before_posting(
     configure_identity()
     request = ["job", "request", "set_workflow", "--workflow", other.id, "--reason", "r", ref.job_id]
     assert command(request, CLIContext("httk", workspace.root)) == 2
-    assert f"the job runs its own workflow copy at {COPY}; edit or remove it" in capsys.readouterr().err
+    assert f"the job runs its own workflow copy at {COPY}/; edit or remove it" in capsys.readouterr().err
     assert not list(workspace.control.glob("requests/*.json"))

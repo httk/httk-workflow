@@ -36,6 +36,11 @@ def test_eject_and_adopt_round_trip(tmp_path: Path, capsys: pytest.CaptureFixtur
     target, target_name = registered(tmp_path, "b")
     plan = tree(source)
     root_id = str(plan[0][0]["id"])
+    # A trusted transfer keeps a runner copy (an untrusted exchange bundle may not carry one).
+    planted = find(source, root_id)
+    assert planted is not None
+    (planted.path / "workflow").mkdir()
+    (planted.path / "workflow" / "run").write_text("mine", encoding="utf-8")
     # A relative destination is taken from the working directory.
     argv = ["job", "eject", "--workspace", source_name, root_id, "out", "--tree", "--json"]
     assert command(argv, context(tmp_path)) == 0
@@ -48,6 +53,8 @@ def test_eject_and_adopt_round_trip(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert len(captured.out.splitlines()) == 4
     assert "not installed" in captured.err
     assert_in(target, plan)
+    adopted = find(target, root_id)
+    assert adopted is not None and (adopted.path / "workflow" / "run").read_text(encoding="utf-8") == "mine"
     # A second adoption finds no bundle there any more.
     assert command(["job", "adopt", "--workspace", target_name, str(bundle)], context(tmp_path)) == 1
 

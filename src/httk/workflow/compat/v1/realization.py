@@ -14,6 +14,7 @@ from string import Template
 from typing import TYPE_CHECKING, cast
 
 from httk.workflow.compat import LanguagePorts, LanguageRequest, LanguageScaffold, WorkflowLanguage
+from httk.workflow.models import JOB_WORKFLOW_DIRECTORY
 from httk.workflow.protocol import validate_label
 
 if TYPE_CHECKING:
@@ -82,6 +83,9 @@ def _snapshot_package(root: Path, excluded: tuple[str, ...]) -> tuple[dict[str, 
                 member = relative.as_posix()
                 if entry.is_symlink():
                     raise ValueError(f"httk-v1 package member must not be a symlink: {member}")
+                if member == JOB_WORKFLOW_DIRECTORY and member not in excluded_set:
+                    # The snapshot lands at the payload root, where workflow/ is an unlocked job's runner copy.
+                    raise ValueError(f"httk-v1 package member {member} is a reserved job payload member")
                 if entry.is_dir(follow_symlinks=False):
                     directories[member] = stat.S_IMODE(entry.stat(follow_symlinks=False).st_mode)
                     visit(Path(entry.path), relative)

@@ -32,6 +32,7 @@ The job directory holds:
 | `logs/` | The run log. |
 | `data/` | The results the job committed. |
 | `.httk-job/` | The runner's own state, `a.state`, and the seal. |
+| `workflow/` | Only in an unlocked job: its own copy of the workflow's runner (see [Debug mode](#debug-mode-unlocked-jobs)). |
 
 ## What you may edit
 
@@ -313,7 +314,7 @@ operator and the reason. No request clears it, and it survives the repair of a
 damaged `state.json`. `job show` prints an `unlocked` row (since and by, or inherited from, whether
 it runs its own runner copy, and that collection needs `--force`), `job why`
 has a "debug mode" check, and the JSON report carries `unlocked` and
-`paths.runner_copy`. To get an ordinary job
+`paths.runner_copy` (`<payload>/workflow`). To get an ordinary job
 again, make a new one.
 
 **Ancestors and children.** `job unlock` also posts a marker-only request to
@@ -343,13 +344,19 @@ copy.
 
 ### Editing the runner
 
-The default `unlock` copies the job's installed `package/` to
-`.httk-job/workflow/` in the job directory. An existing copy is never
+The default `unlock` copies the job's installed `package/` to `workflow/` at
+the top of the job directory, next to `job.json`, `run/` and `data/`, so that a
+listing shows that the job carries its own code. `workflow` is a reserved
+payload name: inputs, `staged_files` and `--input-move-from-job` paths cannot
+target it, and a v1 template package with a top-level `workflow` member is
+refused at job preparation. An existing copy is never
 overwritten (a first unlock that finds one keeps it and reports `job unlocked;
 existing runner copy kept`, so you may place your own runner tree there before
 unlocking), and a language realization (CWL, PWD, jobflow, httk v1) gets none.
 From then on, while the job is unlocked, the manager launches the runner from
-that copy (a `.httk-job/workflow` in a locked job is ignored), and `workflow_pin`
+that copy (execution from `workflow/` is not automatic: only an unlocked job
+that has the directory runs from it, and a `workflow/` in a locked job is
+inert), and `workflow_pin`
 records the digest of the copy at launch, without the installation's declared
 build artifacts. Only the runner itself comes from the copy: the build spec,
 platform probe and build artifacts of a compiled workflow still come from the
@@ -359,14 +366,14 @@ the job:
 
 ```console
 httk job unlock silicon
-$EDITOR "$(httk job show silicon)/.httk-job/workflow/run.py"
+$EDITOR "$(httk job show silicon)/workflow/run.py"
 httk job request restart --reason "try the fix" silicon
 ```
 
 The installed workflow is untouched, so other jobs of it are not affected, and
 `set_workflow` is refused while the copy exists, by the CLI before anything is
 posted: edit or remove the copy instead. The copy is not fsynced, so after a
-power loss it may be torn: remove `.httk-job/workflow` and run `job unlock`
+power loss it may be torn: remove `workflow/` and run `job unlock`
 again. `--no-copy` is for debugging with data and `job.json` only.
 
 ### What stays yours

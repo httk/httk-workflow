@@ -626,7 +626,7 @@ def _switch_target(workspace: Workspace, refs: Sequence[JobRef], workflow: str) 
                 and os.path.lexists(ref.path / _store.RUNNER_COPY)
             ):
                 # As the owner refuses it: the copy, not an installation, is what the job runs.
-                problem = f"the job runs its own workflow copy at {_store.RUNNER_COPY}; edit or remove it instead of switching"
+                problem = f"the job runs its own workflow copy at {_store.RUNNER_COPY}/; edit or remove it instead of switching"
             problem = problem or workflow_switch_problem(workspace, job, doc, candidate, providers)
         if problem is not None:
             hint = "; narrow the selection with --placement or JOB ids" if len(refs) > 1 and "rule 2" in problem else ""
@@ -2316,7 +2316,7 @@ def build_job_parser(
         summary="lift a job's integrity policies for debugging (debug mode), permanently",
         description=(
             "Lift a job's integrity policies for debugging (debug mode), permanently: an unlock request, applied now "
-            "to an unowned job, that copies the job's runner to .httk-job/workflow/; every ancestor of the job gets a "
+            "to an unowned job, that copies the job's runner to its workflow/ directory; every ancestor of the job gets a "
             "marker-only unlock request too"
         ),
         handler=handle_job_unlock,

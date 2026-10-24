@@ -63,7 +63,7 @@ def test_unlock_copies_the_runner_once(tmp_path: Path) -> None:
     assert job.state == "failed" and doc.unlocked is not None and doc.unlocked["operator"] == "cli"
     runner = job.path / COPY / "run"
     assert runner.read_bytes() == (installed.package / "run").read_bytes() and os.access(runner, os.X_OK)
-    assert not [name for name in os.listdir(job.path / ".httk-job") if name.startswith("workflow.")]
+    assert not [name for name in os.listdir(job.path / ".httk-job") if name.startswith(f"{COPY}.")]
     assert _request(workspace, ref.job_id, "unlock") == "already unlocked"
     assert _request(workspace, ref.job_id, "unlock", no_copy=True) == "already unlocked"
     assert v3.state_of(v3.find(workspace, ref.job_id)).unlocked == doc.unlocked
@@ -214,7 +214,7 @@ def test_set_workflow_of_an_unlocked_job(tmp_path: Path) -> None:
     (v3.find(workspace, bare.job_id).path / COPY).rmdir()
     assert _request(workspace, copied.job_id, "unlock") is None
     assert _request(workspace, copied.job_id, "set_workflow", workflow=other.id) == (
-        f"the job runs its own workflow copy at {COPY}; edit or remove it instead of switching"
+        f"the job runs its own workflow copy at {COPY}/; edit or remove it instead of switching"
     )
     assert _request(workspace, bare.job_id, "unlock", no_copy=True) is None
     assert _request(workspace, bare.job_id, "set_workflow", workflow=other.id) is None
@@ -280,6 +280,7 @@ def test_a_failed_copy_leaves_neither_marker_nor_copy(tmp_path: Path, monkeypatc
     assert reason == f"cannot copy the runner of workflow {installed.id}: the package holds a special file"
     job = v3.find(workspace, ref.job_id)
     assert v3.state_of(job).unlocked is None and os.listdir(job.path / ".httk-job") == []
+    assert not (job.path / COPY).exists()
 
 
 def test_a_built_runner_copy_runs_with_the_store_build_and_its_manifest_is_never_read(tmp_path: Path) -> None:
@@ -333,11 +334,15 @@ def test_a_first_unlock_keeps_a_placed_copy_and_clears_crash_leftovers(tmp_path:
     job = v3.find(workspace, placed.job_id)
     assert (job.path / COPY / "run").read_text(encoding="utf-8") == "mine" and "runner_copy_kept" in v3.events(job)
 
-    leftover = v3.find(workspace, crashed.job_id).path / ".httk-job" / "workflow.abcdefghijklmnop"
+    leftover = v3.find(workspace, crashed.job_id).path / ".httk-job" / f"{COPY}.abcdefghijklmnop"
+    # A job file of the same shape at the payload root is the job's own, never a leftover.
+    (leftover.parent.parent / f"{COPY}.abcdefghijklmnop").write_text("job data", encoding="utf-8")
     leftover.mkdir(parents=True)
     (leftover / "run").write_text("half", encoding="utf-8")
     assert _request(workspace, crashed.job_id, "unlock") is None
-    assert sorted(os.listdir(v3.find(workspace, crashed.job_id).path / ".httk-job")) == ["workflow"]
+    crashed_path = v3.find(workspace, crashed.job_id).path
+    assert os.listdir(crashed_path / ".httk-job") == [] and (crashed_path / COPY / "run").is_file()
+    assert (crashed_path / f"{COPY}.abcdefghijklmnop").read_text(encoding="utf-8") == "job data"
 
 
 def test_a_damaged_state_keeps_the_unlocked_marker(tmp_path: Path) -> None:

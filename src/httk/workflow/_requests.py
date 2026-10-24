@@ -179,7 +179,7 @@ class Unlock:
     """Release the job with ``state.json`` ``unlocked`` set, after copying its runner when *copy* asks for it.
 
     :param release: Where the job goes afterwards (where it was claimed from), with the request id.
-    :param copy: Copy the effective installation's package to ``.httk-job/workflow/`` first (unless the request
+    :param copy: Copy the effective installation's package to ``workflow/`` in the payload first (unless the request
         carries ``no_copy``).
     """
 

@@ -731,9 +731,17 @@ untrusted (format `httk-workflow-runlog-event` version 2: `timestamp`, `kind`,
 `message`, `files`). `job log` and the collectors read both logs; the owner
 events form the timeline and the runner records annotate it.
 
-`.httk-job/workflow/` exists only in an unlocked job made with a runner copy:
-the copy of the installed `package/` the manager launches the runner from
-(§Unlocked jobs). Like the rest of `.httk-job/` it is outside the job seal.
+`workflow/` at the top of the payload exists only in an unlocked job made with
+a runner copy: the copy of the installed `package/` the manager launches the
+runner from (§Unlocked jobs). `workflow` is a protocol-reserved top-level
+payload name (with `job.json`, `state.json`, `attempts/`, `logs/` and
+`.httk-job/`): input destinations, `staged_files` and `--input-move-from-job`
+paths may not target it, and an httk-v1 template package with a top-level
+`workflow` member is refused at job preparation. Execution from `workflow/` is
+not automatic: only an unlocked job (`state.json` `unlocked`) that has the
+directory runs from it, and the `workflow/` of a locked job is inert. Being a
+top-level payload member, it is covered by the job seal if one is written;
+unlocked jobs are never sealed.
 
 ## Jobs
 
@@ -996,7 +1004,7 @@ modes.
   attempt) and commits by renaming it to `txn/<seq>/`. `Attempt.put` stages
   into the attempt's implicit transaction below `data/`, which commits with
   the outcome. A staged path MUST NOT start with `job.json`, `state.json`,
-  `seal.json`, `logs` or `attempts`.
+  `seal.json`, `logs`, `attempts` or `workflow`.
 - **Manager side** (quiescent; at every commit and reconcile): uncommitted
   `*.tmp` staging is discarded; committed transactions are applied in seq
   order, for every action, because the job committed them by its own choice.
@@ -1172,7 +1180,7 @@ at and the request, giving the new document and one effect:
 | `override_step` | `failed` or `paused` (an unlocked job also `succeeded`), revival guard | The declared allowance restored; `Release(ready)` with a new activation of `step`, dropping a retained `join`; `failed`/`retry_exhausted` or `budget_exhausted` past an effective budget, as `restart` |
 | `set_priority` | always | `Release(<current state>, priority)` |
 | `set_budget` | not `succeeded` (unless unlocked) or `cancelled` | `Release(<current state>, priority)` with `budget` merged into `budget_override` (a later value for a key wins); no new attempt, no revival guard |
-| `set_workflow` | not `succeeded` (unless unlocked) or `cancelled`; no runner copy in the job; the workflow check (below) | `Release(<current state>, priority)` with `workflow_override: {id, name}` (the name from the installation with exactly that id) and `runner_steps: null`; the `request_applied` entry carries `workflow: {from, to}`; no new attempt, no `force` |
+| `set_workflow` | not `succeeded` (unless unlocked) or `cancelled`; no `workflow/` runner copy in the job; the workflow check (below) | `Release(<current state>, priority)` with `workflow_override: {id, name}` (the name from the installation with exactly that id) and `runner_steps: null`; the `request_applied` entry carries `workflow: {from, to}`; no new attempt, no `force` |
 | `detach` | the job has a parent link not yet detached | `Release(<current state>)` with `detached: {at, operator}` |
 | `unlock` | not `cancelled`; not already unlocked with its copy made (or `no_copy`; dropped as "already unlocked"); a `succeeded` job has no live seal ("run `job unseal` first"); the effective workflow is installed when a copy is made | `Release(<current state>)` with `unlocked: {at, operator, reason}`; unless `no_copy`, the package copy is made first (§Unlocked jobs) |
 | `eject` | the destination is usable; for an unlocked job not into an exchange inbox | `Eject(destination, tree)` (§Eject) |
@@ -1265,8 +1273,9 @@ protocol does not carry it.
   nearest first; `job request unlock` on a local workspace does the same. Through an
   ssh remote's request envelope `unlock` is refused for a spawned job.
 - **The runner copy.** Applying `unlock` without `no_copy` copies the effective
-  installation's `package/` to `<payload>/.httk-job/workflow/`, the way the
-  store copies a package (no symlinks, modes kept). An existing copy is never
+  installation's `package/` to `<payload>/workflow/`, the way the
+  store copies a package (no symlinks, modes kept; the crash-temporary name is
+  `.httk-job/workflow.<token>`, renamed into place). An existing copy is never
   overwritten (a first unlock that finds one keeps it), and a job that runs a
   language realization copies nothing. The copy is not fsynced and may be torn
   after a power loss; remove it and unlock again, which makes a fresh copy. If
@@ -1277,12 +1286,18 @@ protocol does not carry it.
   called workflows, and the build spec, platform probe and build artifacts of a
   compiled workflow, still come from the store. The launch digest of the copy
   excludes the installation's declared build artifacts. The copy is used only while
-  the job is unlocked: a `.httk-job/workflow` in a locked job is ignored. The copy lives under
-  `.httk-job/`, so it is outside the job seal like the rest of that directory;
-  the operator edits it in place.
+  the job is unlocked: a `workflow/` in a locked job is inert, and execution
+  from it is never automatic. The copy is a top-level payload member
+  and the reserved name `workflow` keeps the protocol's own routes (transactions,
+  staged inputs, input moves, bundles) from writing it; a runner can still create
+  it, which is inert while the job is locked. Unlocked jobs are never sealed, so the seal covering `workflow/` matters only
+  for the layout. The operator edits it in place. An untrusted exchange bundle
+  may not carry it (§Adopt: exchange jobs run only pre-installed
+  workflows); trusted bundles (`job transfer`, `job adopt`, `job eject`) carry it
+  along.
 - **Relaxed.** A different `job.json` digest is pinned again (§`job.json`);
   `continue`, `restart`, `override_step`, `set_budget` and `set_workflow`
-  apply to a `succeeded` job; `set_workflow` (refused by the CLI too while a copy exists) skips its compatibility rules
+  apply to a `succeeded` job; `set_workflow` (refused by the CLI too while a `workflow/` copy exists) skips its compatibility rules
   except the installation and language-realization checks (§Application); no seal is written for a succeeded job (`seal` is
   `{"disabled": true}`) and `seal` is refused; `delete` needs no `unseal`.
   `persist_outputs` skips the pinned-tree digest check and loads the collect
@@ -1491,8 +1506,8 @@ never empty while a delivery is in doubt, so it always runs.
    payloads, with no structural entry a symlink or special file, and every
    member's `job.json` agrees with the manifest. An **untrusted** bundle's
    whole tree also passes `walk_untrusted`, holds no symlink at all, holds only
-   fresh jobs (no `state.json`, `seal.json`, `logs`, `attempts` or
-   `.httk-job`) in state `ready`, and its root has no parent. A trusted root
+   fresh jobs (no `state.json`, `seal.json`, `logs`, `attempts`,
+   `workflow` or `.httk-job`) in state `ready`, and its root has no parent. A trusted root
    may keep a parent outside the bundle.
 3. **Rekey** an untrusted bundle: each member gets the id whose first group
    (eight hex digits) is the client id's and whose rest is that of
@@ -1719,8 +1734,9 @@ confined job.
 ## Seals
 
 A job seal is `<payload>/.httk-job/seal.json`: a signed record of the
-payload's files (excluding `attempts/`, `logs/`, `.httk-job/`, which also holds
-the runner copy of an unlocked job (§Unlocked jobs), and `state.json`) whose subject is only `{job_id, job_key}`, so it stays true
+payload's files (excluding `attempts/`, `logs/`, `.httk-job/` and `state.json`; a
+`workflow/` runner copy of an unlocked job (§Unlocked jobs) is a payload member
+and so would be covered, though unlocked jobs are never sealed) whose subject is only `{job_id, job_key}`, so it stays true
 wherever the job moves. It is written at
 
 commit step 5 for a `succeed` when the job's `seal_succeeded`, or else the

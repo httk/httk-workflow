@@ -32,7 +32,7 @@ def describe_job(workspace: Workspace, ref: JobRef, *, include_children: bool = 
     unlocked = None if doc is None else doc.unlocked
     # Used only while the job is unlocked, as the manager uses it (never through a symlink).
     copy = ref.path / RUNNER_COPY
-    has_copy = unlocked is not None and copy.is_dir() and not copy.is_symlink() and not copy.parent.is_symlink()
+    has_copy = unlocked is not None and copy.is_dir() and not copy.is_symlink()
     report: dict[str, Any] = {
         "format": JOB_REPORT_FORMAT,
         "format_version": 3,

@@ -160,7 +160,7 @@ def test_data_conflicts(
     assert any(name.endswith("/txn/000001") for name in staging_left(job))
 
 
-@pytest.mark.parametrize("name", ["job.json", "logs/x", "attempts/x", "seal.json"])
+@pytest.mark.parametrize("name", ["job.json", "logs/x", "attempts/x", "seal.json", "workflow/run"])
 def test_reserved_names_are_a_protocol_error(job: OwnedJob, name: str) -> None:
     transaction = Transaction(job.path / ATTEMPT, durable=False)
     path = transaction.path / name
@@ -226,7 +226,7 @@ def test_job_side_transaction(job: OwnedJob, tmp_path: Path) -> None:
     assert transaction.path.name == "000001.tmp"
     transaction.put(source / "file", "out/file")
     transaction.put(str(source / "tree"), PurePosixPath("out/tree"))
-    for bad in ["/abs", "../up", "a/../../b", "", ".", "logs/x", "job.json"]:
+    for bad in ["/abs", "../up", "a/../../b", "", ".", "logs/x", "job.json", "workflow/run"]:
         with pytest.raises(ValueError):
             transaction.put(source / "file", bad)
     with pytest.raises(IsADirectoryError):
