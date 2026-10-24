@@ -190,7 +190,7 @@ def runner_environment(
             "HTTK_WORKFLOW_BASH_API": str(_LANGUAGES / "bash" / "httk-workflow.sh"),
             "HTTK_WORKFLOW_LANGUAGES_DIR": str(_LANGUAGES),
             "HTTK_WORKFLOW_PERL_API": str(_LANGUAGES / "perl"),
-            # No bytecode next to the sources: a job's carried workflow/ must stay as its digest pinned it.
+            # No bytecode next to the sources: a job's embedded workflow/ must stay as its digest pinned it.
             "PYTHONDONTWRITEBYTECODE": "1",
         }
     )

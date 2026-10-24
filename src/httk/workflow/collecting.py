@@ -61,7 +61,7 @@ from httk.core.digests import sha256_file, tree_digest
 from httk.core.storage import content_id
 
 from . import _fs, _kernel, _store, compat
-from ._carried import carried_digest
+from ._embedded import embedded_digest
 from ._job import JobDefinition
 from ._kernel import JobRef
 from ._manager_scheduling import current_step
@@ -72,7 +72,7 @@ from .hookapi import COLLECT_STREAM_FORMAT, COLLECT_STREAM_VERSION, Collected
 from .introspection import JobSelectorResolver, iter_jobs, job_events, read_job, read_state
 from .introspection._reading import JSON_LIMIT, read_job_file
 from .models import (
-    CARRIED_WORKFLOW_PREFIX,
+    EMBEDDED_WORKFLOW_PREFIX,
     JOB_STATE_DIRECTORY,
     Failure,
     canonical_uuid,
@@ -369,8 +369,8 @@ def _job_mapping(job: JobDefinition, doc: StateDoc | None) -> dict[str, object]:
     workflow's id and ``workflow_name`` its short name; ``workflow_override``,
     present only after an operator's ``set_workflow``, is the ``{id, name}``
     from ``state.json`` the job ran instead; ``unlocked``, present only for a
-    job in debug mode, is ``state.json``'s ``unlocked`` marker; ``carried``, present
-    only for a job that carries its workflow, is ``job.json``'s ``carried`` member.
+    job in debug mode, is ``state.json``'s ``unlocked`` marker; ``embedded``, present
+    only for a job that embeds its workflow, is ``job.json``'s ``embedded`` member.
     """
 
     policy = job.retry_policy
@@ -408,8 +408,8 @@ def _job_mapping(job: JobDefinition, doc: StateDoc | None) -> dict[str, object]:
         result["calls"] = _thaw(job.calls)
     if job.persist_outputs is not None:
         result["persist_outputs"] = _thaw(job.persist_outputs)
-    if job.carried is not None:
-        result["carried"] = _thaw(job.carried)
+    if job.embedded is not None:
+        result["embedded"] = _thaw(job.embedded)
     return result
 
 
@@ -1728,12 +1728,12 @@ def _job_collector(
 ) -> tuple[Callable[[JobRecord], Mapping[str, object]] | None, WorkflowProvider | None, str | None]:
     """Resolve a collector from the job's installed workflow package, verified against the job's pin.
 
-    A collector from the job's own payload (a carried ``workflow/``, or an unlocked job's runner copy) never runs
+    A collector from the job's own payload (an embedded ``workflow/``, or an unlocked job's runner copy) never runs
     there: the tree is copied into a snapshot (added to *snapshots*, which the caller removes) and the snapshot is
-    verified against the job's pin, so nothing the job changes afterwards is run. A locked carried job's pin must
-    be its launch from ``workflow/`` exactly as ``job.json`` froze it. An unlocked job collects from its tree only
-    when its last attempt launched from it with the digest pinned then. An unlocked job of an installed workflow
-    without a copy collects, unverified, from the installed tree (operator-controlled, never job-writable).
+    verified against the job's pin, so nothing the job changes afterwards is run. A locked embedded-workflow
+    job's pin must be its launch from ``workflow/`` exactly as ``job.json`` froze it. An unlocked job collects from
+    its tree only when its last attempt launched from it with the digest pinned then. An unlocked job of an installed
+    workflow without a copy collects, unverified, from the installed tree (operator-controlled, never job-writable).
     """
 
     unlocked = record.job.get("unlocked") is not None
@@ -1741,11 +1741,11 @@ def _job_collector(
     pinned = pin.get("tree_sha256")
     if not unlocked and not isinstance(pinned, str):
         return None, None, "the job records no pinned installed workflow"
-    carried = record.job.get("carried")
-    if isinstance(carried, Mapping):
+    embedded = record.job.get("embedded")
+    if isinstance(embedded, Mapping):
         source = pin.get("source")
-        modified = "carried workflow modified since the job was created"
-        if unlocked and pinned is None and source in {"copy", "carried"}:
+        modified = "embedded workflow modified since the job was created"
+        if unlocked and pinned is None and source in {"copy", "embedded"}:
             return (
                 None,
                 None,
@@ -1754,11 +1754,11 @@ def _job_collector(
                     "fix it and restart before collecting"
                 ),
             )
-        if not isinstance(pinned, str) or source not in ({"copy", "carried"} if unlocked else {"carried"}):
+        if not isinstance(pinned, str) or source not in ({"copy", "embedded"} if unlocked else {"embedded"}):
             return None, None, "the job's last attempt did not run from its workflow/; restart it before collecting"
-        if not unlocked and pinned != carried.get("tree_sha256"):
-            return None, None, f"{modified}: the last launch pinned {pinned}, job.json {carried.get('tree_sha256')}"
-        snapshot, reason = _snapshot(record.payload / _store.RUNNER_COPY, carried_digest, pinned, modified, snapshots)
+        if not unlocked and pinned != embedded.get("tree_sha256"):
+            return None, None, f"{modified}: the last launch pinned {pinned}, job.json {embedded.get('tree_sha256')}"
+        snapshot, reason = _snapshot(record.payload / _store.RUNNER_COPY, embedded_digest, pinned, modified, snapshots)
         if snapshot is None:
             return None, None, reason
         name = record.job.get("workflow_name")
@@ -1766,15 +1766,15 @@ def _job_collector(
             workflow_id,
             name if isinstance(name, str) else workflow_id,
             snapshot,
-            {**carried, "build": False},
+            {**embedded, "build": False},
             package_override=snapshot,
-            carried=True,
+            embedded=True,
         )
     elif (found := _store.lookup(workspace, workflow_id)) is None or found.id != workflow_id:
         return None, None, f"job workflow {workflow_id!r} is not installed in this workspace"
     else:
         installed = found
-    if installed.carried:
+    if installed.embedded:
         pass  # its snapshot was verified above
     elif unlocked:
         if (copy := _store.runner_copy(installed, record.payload)) is not None:
@@ -1827,9 +1827,9 @@ def _job_collector(
         return None, provider, None
     from .packages import _source_hook, _tree_hook
 
-    if installed.carried:
+    if installed.embedded:
         # Verified again at the call, and loaded as a module of this snapshot only.
-        hook = _tree_hook(installed.package, str(pinned), provider.collect_file, "collect", carried=True)
+        hook = _tree_hook(installed.package, str(pinned), provider.collect_file, "collect", embedded=True)
     elif unlocked:
         # A snapshot of a verified runner copy, or the installed tree; a snapshot's module is its own.
         hook = _source_hook(installed.package, provider.collect_file, "collect")
@@ -2479,7 +2479,7 @@ def _registered_provider(record: JobRecord) -> WorkflowProvider | None:
     from .scaffold import workflow_provider
 
     workflow_id, name = _producing_workflow(record)
-    if workflow_id.startswith(CARRIED_WORKFLOW_PREFIX):
+    if workflow_id.startswith(EMBEDDED_WORKFLOW_PREFIX):
         return None  # a job's own workflow: a registered one of the same name is another workflow
     if isinstance(workflow_id, str) and workflow_id.startswith("git+"):
         return workflow_provider(workflow_id)

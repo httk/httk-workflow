@@ -14,8 +14,8 @@ from typing import cast
 
 from .. import _death, _kernel, _moving, _requests, _store
 from .._bundles import read_manifest
-from .._carried import carried_problem
 from .._durations import format_duration
+from .._embedded import embedded_problem
 from .._job import JobDefinition
 from .._kernel import OWNED, JobRef, OwnerRecord
 from .._manager_commit import attempt_budget_failure
@@ -563,26 +563,26 @@ def _workflow_checks(
     workspace: Workspace, job: JobDefinition, doc: StateDoc | None, payload: Path, report: _Diagnosing
 ) -> bool:
     """Record whether the job's effective workflow and its calls are installed and built here, and its ``requires``
-    met; a carried workflow's ``workflow/`` is checked (read only) against ``job.json`` as a launch checks it."""
+    met; an embedded workflow's ``workflow/`` is checked (read only) against ``job.json`` as a launch checks it."""
 
     workflow_id, _name = effective_workflow(job, doc)
-    carried = _store.carried(job, payload, require_tree=False)
+    embedded = _store.embedded(job, payload, require_tree=False)
     try:
         closure = _store.closure(workspace, workflow_id, check_builds=True, also=bound_workflows(job))
-        installed = carried or _store.lookup(workspace, workflow_id)
+        installed = embedded or _store.lookup(workspace, workflow_id)
     except (RunnerResolutionError, ValueError) as exc:
         report.check("installed workflow", False, f"workflow {workflow_id} cannot be checked: {exc}")
         return False
     tree_ok = True
-    if carried is not None:
-        tree_sha256 = str(carried.record.get("tree_sha256"))
+    if embedded is not None:
+        tree_sha256 = str(embedded.record.get("tree_sha256"))
         if doc is not None and doc.unlocked is not None:
-            report.check("carried workflow", None, "the job is unlocked: its workflow/ launches unverified")
+            report.check("embedded workflow", None, "the job is unlocked: its workflow/ launches unverified")
         else:
-            problem = carried_problem(payload / _store.RUNNER_COPY, tree_sha256)
+            problem = embedded_problem(payload / _store.RUNNER_COPY, tree_sha256)
             tree_ok = problem is None
             report.check(
-                "carried workflow", tree_ok, problem or f"workflow/ has the digest {tree_sha256[:12]} job.json froze"
+                "embedded workflow", tree_ok, problem or f"workflow/ has the digest {tree_sha256[:12]} job.json froze"
             )
     binding = None if installed is None else binding_problem(job, installed.id, installed.record)
     if binding is not None:
@@ -594,7 +594,7 @@ def _workflow_checks(
         report.check("built workflow", False, f"not built for this platform: {', '.join(closure.unbuilt)}")
         report.hint("build it with 'httk workflow build --workspace WORKSPACE WORKFLOW'")
     if closure.ok:
-        installed_text = "its calls are" if carried is not None else f"{workflow_id} and its calls are"
+        installed_text = "its calls are" if embedded is not None else f"{workflow_id} and its calls are"
         report.check("installed workflow", True, f"{installed_text} installed and built here")
     requires = () if installed is None else _strings(installed.record.get("requires"))
     if requires:

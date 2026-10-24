@@ -55,7 +55,7 @@ from httk.workflow._kernel import KernelWorkspace, Owner, reconcile_scratch
 from httk.workflow._state import _thaw
 from httk.workflow.errors import RunnerResolutionError, WorkflowError
 from httk.workflow.models import (
-    CARRIED_WORKFLOW_PREFIX,
+    EMBEDDED_WORKFLOW_PREFIX,
     JOB_WORKFLOW_DIRECTORY,
     WORKFLOW_ID_PREFIXES,
     is_workflow_id,
@@ -75,8 +75,8 @@ __all__ = [
     "Installed",
     "build",
     "built",
-    "carried",
     "closure",
+    "embedded",
     "install",
     "install_copy",
     "list_installed",
@@ -116,7 +116,7 @@ class Installed:
     :param record: The ``install.json`` content.
     :param package_override: The package tree used instead of the installed one (an unlocked job's runner
         copy, see :func:`runner_copy`), or ``None``; builds stay the installation's.
-    :param carried: Whether this is a job's carried workflow (see :func:`carried`), which has no store tree or
+    :param embedded: Whether this is a job's embedded workflow (see :func:`embedded`), which has no store tree or
         builds: :attr:`installed_package` and :meth:`build_dir` raise ``ValueError``.
     """
 
@@ -125,15 +125,15 @@ class Installed:
     directory: Path
     record: Mapping[str, object]
     package_override: Path | None = None
-    carried: bool = False
+    embedded: bool = False
     _cache: dict[str, WorkflowProvider] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @property
     def installed_package(self) -> Path:
         """The installed package tree in the store, also under an override: the only one a manager reads."""
 
-        if self.carried:
-            raise ValueError(f"the carried workflow {self.id} has no store installation")
+        if self.embedded:
+            raise ValueError(f"the embedded workflow {self.id} has no store installation")
         return self.directory / "package"
 
     @property
@@ -158,11 +158,11 @@ class Installed:
 
         :param platform: The platform tag (see :func:`platform_tag`).
         :return: The build directory, or ``None`` when not built.
-        :raises ValueError: For a carried workflow, which is never built.
+        :raises ValueError: For an embedded workflow, which is never built.
         """
 
-        if self.carried:
-            raise ValueError(f"the carried workflow {self.id} is never built")
+        if self.embedded:
+            raise ValueError(f"the embedded workflow {self.id} is never built")
         path = self.directory / "builds" / platform
         return path if (path / "build.json").is_file() and not path.is_symlink() else None
 
@@ -183,23 +183,23 @@ def runner_copy(installed: Installed, payload: Path) -> Installed | None:
     return replace(installed, package_override=payload / RUNNER_COPY)
 
 
-def carried(job: JobDefinition, payload: Path, *, require_tree: bool = True) -> Installed | None:
-    """Return the view of the workflow *job* carries in its own ``workflow/``, when it carries one.
+def embedded(job: JobDefinition, payload: Path, *, require_tree: bool = True) -> Installed | None:
+    """Return the view of the workflow *job* embeds in its own ``workflow/``, when it embeds one.
 
     The view is derived from *job* and *payload* alone: its ``directory`` and package are ``<payload>/workflow``,
-    its ``record`` is a plain copy of ``job.json``'s ``carried`` member with ``build: false``, and it has no store
-    tree or builds. Two jobs may carry different trees under one id, so a view is never cached or looked up by id.
-    Nothing is read from the tree here; verify it with :func:`httk.workflow._carried.carried_digest` before any
+    its ``record`` is a plain copy of ``job.json``'s ``embedded`` member with ``build: false``, and it has no store
+    tree or builds. Two jobs may embed different trees under one id, so a view is never cached or looked up by id.
+    Nothing is read from the tree here; verify it with :func:`httk.workflow._embedded.embedded_digest` before any
     trusted use.
 
     :param job: The job.
     :param payload: Its payload directory.
     :param require_tree: Return ``None`` when ``workflow/`` is missing, a symlink or not a directory (never
         followed); without it, the view of the record alone is returned whatever the tree.
-    :return: The view, or ``None`` when the job carries no workflow (or the tree is required and unusable).
+    :return: The view, or ``None`` when the job embeds no workflow (or the tree is required and unusable).
     """
 
-    if job.carried is None:
+    if job.embedded is None:
         return None
     try:
         if require_tree:
@@ -207,8 +207,8 @@ def carried(job: JobDefinition, payload: Path, *, require_tree: bool = True) -> 
     except (FileNotFoundError, _fs.UnsafePath):
         return None
     tree = payload / RUNNER_COPY
-    record = {**cast(dict[str, object], _thaw(job.carried)), "build": False}
-    return Installed(job.workflow_id, job.workflow_name, tree, record, package_override=tree, carried=True)
+    record = {**cast(dict[str, object], _thaw(job.embedded)), "build": False}
+    return Installed(job.workflow_id, job.workflow_name, tree, record, package_override=tree, embedded=True)
 
 
 @dataclass(frozen=True)
@@ -382,8 +382,8 @@ def _candidates(installed: list[Installed], text: str) -> list[Installed]:
 def lookup(workspace: KernelWorkspace, id_or_name: str) -> Installed | None:
     """Return the installation with this exact id, else the newest one with this short name.
 
-    Id-shaped text (``local:``, ``adhoc:``, ``git+``) only ever matches an id, and a job's ``carried:`` id never
-    matches anything: a carried workflow is never installed. Text that no installation
+    Id-shaped text (``local:``, ``adhoc:``, ``git+``) only ever matches an id, and a job's ``embedded:`` id never
+    matches anything: an embedded workflow is never installed. Text that no installation
     has as its short name is read as ``NAME@REF``, which selects among the installations of ``NAME`` by the
     tag or branch an installation was made from, or by a prefix of at least seven characters of its pinned
     commit. Several installations selected alike resolve to the most recently installed one.
@@ -393,7 +393,7 @@ def lookup(workspace: KernelWorkspace, id_or_name: str) -> Installed | None:
     :return: The installation, or ``None``.
     """
 
-    if id_or_name.startswith(CARRIED_WORKFLOW_PREFIX):
+    if id_or_name.startswith(EMBEDDED_WORKFLOW_PREFIX):
         return None
     # The slug of a git id's short name is not derivable from the id, so the
     # listing is scanned for the h16 suffix; only matching install.json files are read.
@@ -417,7 +417,7 @@ def closure(
     packages differ in their platform probe.
 
     :param workspace: The workspace.
-    :param workflow_id: The root workflow id (or name); a job's ``carried:`` id is never reported missing (its
+    :param workflow_id: The root workflow id (or name); a job's ``embedded:`` id is never reported missing (its
         fixed calls belong in *also*).
     :param check_builds: Also report packages without a build for this platform.
     :param also: Further roots whose closures are joined in, such as the workflows a job's call slots are bound to.
@@ -430,7 +430,7 @@ def closure(
     unbuilt: list[str] = []
     for reference, found in resolve_calls(workspace, [workflow_id, *also]).items():
         if found is None:
-            if not reference.startswith(CARRIED_WORKFLOW_PREFIX):  # a job's own workflow, never in the store
+            if not reference.startswith(EMBEDDED_WORKFLOW_PREFIX):  # a job's own workflow, never in the store
                 missing.append(reference)
             continue
         spec = read_build_spec(found.package) if check_builds and found.record.get("build") is True else None
@@ -849,13 +849,13 @@ def install(
         selects by it); by default that of a ``git+…@REF`` source, ``None`` for a commit or no ref.
     :param by_name: Take *source* as a workflow name or git URI only, never as a path where the install runs.
     :return: The installation.
-    :raises ValueError: For an unresolvable or invalid source, a job's ``carried:`` id, a symlink or special file
+    :raises ValueError: For an unresolvable or invalid source, a job's ``embedded:`` id, a symlink or special file
         in the package, a package registered in-process only, a call cycle, or a fixed-call target with a
         call slot that has no default.
     """
 
-    if os.fspath(source).startswith(CARRIED_WORKFLOW_PREFIX):
-        raise ValueError(f"a carried workflow lives in its job's workflow/ and is never installed: {source}")
+    if os.fspath(source).startswith(EMBEDDED_WORKFLOW_PREFIX):
+        raise ValueError(f"an embedded workflow lives in its job's workflow/ and is never installed: {source}")
     return _install(
         workspace,
         owner,
@@ -1010,8 +1010,8 @@ def _copied_record(entry: Path) -> tuple[str, str | None, dict[str, str], dict[s
     workflow_id, reference, calls, digest = (record.get(key) for key in ("id", "reference", "calls", "tree_sha256"))
     if not isinstance(workflow_id, str) or not is_workflow_id(workflow_id):
         raise ValueError(f"{entry}: not a workflow id: {workflow_id!r}")
-    if workflow_id.startswith(CARRIED_WORKFLOW_PREFIX):
-        raise ValueError(f"{entry}: a carried workflow id is never installed: {workflow_id}")
+    if workflow_id.startswith(EMBEDDED_WORKFLOW_PREFIX):
+        raise ValueError(f"{entry}: an embedded workflow id is never installed: {workflow_id}")
     if workflow_id.startswith("git+") and not parse_git_uri(workflow_id).pinned:
         raise ValueError(f"{entry}: the git workflow id is not pinned to a commit: {workflow_id}")
     if reference is not None and not isinstance(reference, str):
@@ -1049,7 +1049,7 @@ def install_copy(workspace: KernelWorkspace, owner: Owner, entry: Path, *, sourc
     :param source_label: The ``source`` to record, such as ``"transfer from WS"``.
     :return: ``"installed"``, ``"present"`` or ``"mismatch"``, and the installation now under the id.
     :raises ValueError: If the copy is refused: an unreadable or invalid record, an id without a known prefix, a
-        ``carried:`` id or a git id not pinned to a commit, calls or call slots other than the manifest's, a symlink
+        ``embedded:`` id or a git id not pinned to a commit, calls or call slots other than the manifest's, a symlink
         or special file in the package, or a tree digest other than the recorded one.
     """
 

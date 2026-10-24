@@ -95,11 +95,11 @@ def _definition_uri(workflow: object) -> str | None:
 
 
 def _record_definition_uri(record: JobRecord) -> str | None:
-    """Return the definition URI of the workflow that produced *record*: a carried workflow's pinned ``source``."""
+    """Return the definition URI of the workflow that produced *record*: an embedded workflow's pinned ``source``."""
 
-    carried = record.job.get("carried")
-    if isinstance(carried, Mapping):
-        return _definition_uri(carried.get("source"))
+    embedded = record.job.get("embedded")
+    if isinstance(embedded, Mapping):
+        return _definition_uri(embedded.get("source"))
     return _definition_uri(_producing_workflow(record)[0])
 
 

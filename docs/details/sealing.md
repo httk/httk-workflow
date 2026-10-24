@@ -106,9 +106,9 @@ the setting. A ref that cannot be resolved is skipped with a warning.
   succeeded job that has none. Both are requests applied by the job's owner.
   The one sanctioned change is moving a file out to a new job (see
   [Release records](#release-records)).
-- **Carried workflows:** a job created with `job new --carry` carries its
+- **Embedded workflows:** a job created with `job new --embed-workflow` embeds its
   workflow in `<payload>/workflow/`, an ordinary payload member, so the seal
-  covers the carried tree (and `seal verify` detects a modified tree) as it does
+  covers the embedded tree (and `seal verify` detects a modified tree) as it does
   `data/`. Unlocking such a job lifts the seal like any other.
 - **Unlocked jobs:** a job in debug mode (`httk job unlock`, see
   {doc}`/restarting_jobs`) is the exception. A succeeded unlocked job is not

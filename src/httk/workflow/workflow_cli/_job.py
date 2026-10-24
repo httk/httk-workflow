@@ -445,7 +445,7 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
             "format": arguments.format,
             "name": arguments.name,
             "install": arguments.install,
-            "carry": arguments.carry,
+            "embed_workflow": arguments.embed_workflow,
             "calls": calls,
             "call_parameters": call_parameters,
         }
@@ -622,7 +622,7 @@ def _switch_target(workspace: Workspace, refs: Sequence[JobRef], workflow: str) 
             doc, problem = read_state(ref)
             if (
                 problem is None
-                and job.carried is None
+                and job.embedded is None
                 and doc is not None
                 and doc.unlocked is not None
                 and os.path.lexists(ref.path / _store.RUNNER_COPY)
@@ -2009,9 +2009,9 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
         "is not installed",
     )
     new.add_argument(
-        "--carry",
+        "--embed-workflow",
         action="store_true",
-        help="carry the workflow in the job's workflow/ instead of using a workspace installation; "
+        help="embed the workflow in the job's workflow/ instead of using a workspace installation; "
         "nothing is installed",
     )
     new.add_argument(

@@ -6,7 +6,7 @@ from importlib.machinery import ModuleSpec, PathFinder
 from pathlib import Path, PurePosixPath
 
 from . import _store, compat
-from ._carried import carried_problem
+from ._embedded import embedded_problem
 from ._job import JobDefinition
 from ._kernel import JobRef
 from ._manager_scheduling import binding_problem, bound_workflows, effective_workflow, unmet_job_requirements
@@ -122,28 +122,28 @@ def _workflow_problems(
     """Check the job's workflow and its call closure: installed here, and built for this platform.
 
     With *job*, the workflows its call slots are bound to join the closure, and its bindings must be exactly
-    the call slots of the installed workflow. A job that carries its workflow (*payload* given) is checked
+    the call slots of the installed workflow. A job that embeds its workflow (*payload* given) is checked
     against its ``job.json`` instead, and a locked one's ``workflow/`` must have the digest frozen there.
 
     :param workspace: The workspace.
     :param workflow_id: The job's effective workflow id.
     :param job: The job whose call slot bindings to check.
-    :param payload: The job's directory, for a carried workflow's tree.
-    :param doc: The job's ``state.json`` (an unlocked carried job launches its tree unverified).
+    :param payload: The job's directory, for an embedded workflow's tree.
+    :param doc: The job's ``state.json`` (an unlocked embedded-workflow job launches its tree unverified).
     :return: The root workflow's ``(status, problem)`` or ``None``, one problem per callee, and the installation
-        (the record-only view of a carried workflow).
+        (the record-only view of an embedded workflow).
     """
 
-    carried = None if job is None or payload is None else _store.carried(job, payload, require_tree=False)
+    embedded = None if job is None or payload is None else _store.embedded(job, payload, require_tree=False)
     try:
         bound = () if job is None else bound_workflows(job)
         closure = _store.closure(workspace, workflow_id, check_builds=True, also=bound)
-        installed = carried or _store.lookup(workspace, workflow_id)
+        installed = embedded or _store.lookup(workspace, workflow_id)
     except (RunnerResolutionError, ValueError) as exc:
         return ("problem", f"workflow {workflow_id} cannot be checked: {exc}"), [], None
     root: tuple[str, str] | None = None
-    if carried is not None and payload is not None and (doc is None or doc.unlocked is None):
-        problem = carried_problem(payload / _store.RUNNER_COPY, str(carried.record.get("tree_sha256")))
+    if embedded is not None and payload is not None and (doc is None or doc.unlocked is None):
+        problem = embedded_problem(payload / _store.RUNNER_COPY, str(embedded.record.get("tree_sha256")))
         root = None if problem is None else ("problem", problem)
     calls: list[str] = []
     if (

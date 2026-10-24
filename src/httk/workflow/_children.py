@@ -21,7 +21,7 @@ from typing import Self
 
 from httk.workflow import _fs, _kernel
 from httk.workflow._bundles import EXCHANGE_POOL_PREFIX
-from httk.workflow._carried import carried_digest
+from httk.workflow._embedded import embedded_digest
 from httk.workflow._job import _SHA256, JobDefinition
 from httk.workflow._state import StateDoc, _thaw, encode_state
 from httk.workflow._util import json_bytes, require_mapping, require_string
@@ -43,16 +43,17 @@ SPAWN_FORMAT_VERSION = 2
 MAX_SPAWN_BYTES = 16 << 20
 #: Path bytes kept free below a child's job directory: room for the protocol files read inside an unowned job.
 _PATH_HEADROOM = 256
-#: Where publication assembles a carried child's copy of its parent's ``workflow/`` before renaming it into place.
+#: Where publication assembles an embedded-workflow child's copy of its parent's ``workflow/`` before renaming it
+#: into place.
 _PARTIAL_WORKFLOW = "workflow.partial"
 #: Names only owners write at a job's root (``workflow`` is an unlocked job's runner copy, placed by an
-#: operator, or a carried workflow, copied by publication); a proposed child may not carry them.
+#: operator, or an embedded workflow, copied by publication); a proposed child may not carry them.
 TRUSTED_NAMES = frozenset({"state.json", "seal.json", "logs", "attempts", JOB_WORKFLOW_DIRECTORY, _PARTIAL_WORKFLOW})
 
 _ENTRY_REQUIRED = frozenset({"job_key", "label", "placement"})
 _ENTRY_MEMBERS = _ENTRY_REQUIRED | {"workspace_id", "job_id", "spawn_id"}
 _PLAN_MEMBERS = frozenset(
-    {"job_id", "job_key", "label", "spawn_id", "placement", "priority", "staged", "initial_state", "carried_sha256"}
+    {"job_id", "job_key", "label", "spawn_id", "placement", "priority", "staged", "initial_state", "embedded_sha256"}
 )
 
 
@@ -68,7 +69,7 @@ class ChildPlan:
     :param priority: The child's priority.
     :param staged: The payload-relative ``attempts/<A>/outcome.ready/children/jobs/<key>``.
     :param initial_state: The child ``state.json`` mapping written before its submit.
-    :param carried_sha256: For a child carrying its parent's workflow, the carried digest of the parent's
+    :param embedded_sha256: For a child embedding its parent's workflow, the embedded digest of the parent's
         ``workflow/`` at its launch, which the child's copy must have; ``None`` otherwise.
     """
 
@@ -80,7 +81,7 @@ class ChildPlan:
     priority: int
     staged: str
     initial_state: Mapping[str, object]
-    carried_sha256: str | None = None
+    embedded_sha256: str | None = None
 
     def as_mapping(self) -> dict[str, object]:
         """Return the JSON-ready ``commit.children`` entry.
@@ -97,7 +98,7 @@ class ChildPlan:
             "priority": self.priority,
             "staged": self.staged,
             "initial_state": _thaw(self.initial_state),
-            "carried_sha256": self.carried_sha256,
+            "embedded_sha256": self.embedded_sha256,
         }
 
     @classmethod
@@ -137,11 +138,11 @@ class ChildPlan:
         assert isinstance(initial, dict)
         if StateDoc.from_mapping(initial).job_id != job_id:
             raise FormatError("commit.children initial_state names another job")
-        carried_sha256 = entry["carried_sha256"]
-        if carried_sha256 is not None and (
-            not isinstance(carried_sha256, str) or not _SHA256.fullmatch(carried_sha256)
+        embedded_sha256 = entry["embedded_sha256"]
+        if embedded_sha256 is not None and (
+            not isinstance(embedded_sha256, str) or not _SHA256.fullmatch(embedded_sha256)
         ):
-            raise FormatError("commit.children carried_sha256 must be 64 lowercase hex digits or null")
+            raise FormatError("commit.children embedded_sha256 must be 64 lowercase hex digits or null")
         return cls(
             job_id=job_id,
             job_key=job_key,
@@ -151,7 +152,7 @@ class ChildPlan:
             priority=priority,
             staged=staged,
             initial_state=initial,
-            carried_sha256=carried_sha256,
+            embedded_sha256=embedded_sha256,
         )
 
 
@@ -168,21 +169,21 @@ def _real_dir(path: Path, name: str) -> bool:
 
 
 def _launched_tree(job: _kernel.OwnedJob, parent_doc: StateDoc) -> str:
-    """Return the digest of the parent's ``workflow/`` its carried children get.
+    """Return the digest of the parent's ``workflow/`` its embedded-workflow children get.
 
     A locked parent's tree must still be the one its last attempt launched (verified against ``job.json`` then);
     an unlocked parent's children are unlocked too and launch unverified, so they get its tree as it is now.
     """
 
     try:
-        actual = carried_digest(job.path / JOB_WORKFLOW_DIRECTORY)
+        actual = embedded_digest(job.path / JOB_WORKFLOW_DIRECTORY)
     except (FormatError, OSError) as exc:
         raise FormatError(f"the parent's workflow/ cannot be copied into its children: {exc}") from exc
     if parent_doc.unlocked is not None:
         return actual
     pin = parent_doc.workflow_pin or {}
     pinned = pin.get("tree_sha256")
-    if pin.get("source") != "carried" or not isinstance(pinned, str):
+    if pin.get("source") != "embedded" or not isinstance(pinned, str):
         raise FormatError("the parent's last launch pinned no workflow/ tree to copy into its children")
     if actual != pinned:
         raise FormatError(
@@ -262,7 +263,9 @@ def validate_children(
     labels: set[str] = set()
     keys: set[str] = set()
     plans: list[ChildPlan] = []
-    launched: str | None = None  # the parent's launched workflow/ digest, checked once for its carried children
+    launched: str | None = (
+        None  # the parent's launched workflow/ digest, checked once for its embedded-workflow children
+    )
     for entry in entries:
         job_key = require_string(entry["job_key"], "spawn child job_key")
         _, child_id = parse_job_key(job_key)
@@ -289,16 +292,16 @@ def validate_children(
         child = JobDefinition.from_path(child_dir / "job.json")
         if child.job_key != job_key:
             raise FormatError(f"spawned child job.json names {child.job_key}, not {job_key}")
-        carried_sha256 = None
-        if child.carried is not None:
+        embedded_sha256 = None
+        if child.embedded is not None:
             if (
-                parent.carried is None
+                parent.embedded is None
                 or (child.workflow_id, child.workflow_name) != (parent.workflow_id, parent.workflow_name)
-                or json_bytes(_thaw(child.carried)) != json_bytes(_thaw(parent.carried))
+                or json_bytes(_thaw(child.embedded)) != json_bytes(_thaw(parent.embedded))
             ):
-                raise FormatError(f"spawned child {job_key} names a carried workflow its parent does not carry")
+                raise FormatError(f"spawned child {job_key} names an embedded workflow its parent does not embed")
             launched = launched or _launched_tree(job, parent_doc)
-            carried_sha256 = launched
+            embedded_sha256 = launched
         placement = placement_text(child.placement)
         if entry["placement"] != placement:
             raise FormatError(f"spawned child {job_key} placement disagrees with its job.json")
@@ -337,7 +340,7 @@ def validate_children(
                 priority=child.priority,
                 staged=(PurePosixPath(*relative.parts) / "children" / "jobs" / job_key).as_posix(),
                 initial_state=state.as_mapping(),
-                carried_sha256=carried_sha256,
+                embedded_sha256=embedded_sha256,
             )
         )
     if plans:
@@ -388,7 +391,7 @@ def publish_children(job: _kernel.OwnedJob, plans: Sequence[ChildPlan]) -> list[
         staged = job.path / plan.staged
         if not _fs.exists(_fs.loc(staged)):
             continue
-        if plan.carried_sha256 is not None:
+        if plan.embedded_sha256 is not None:
             _place_workflow(job, plan, durable=durable)
         _fs.write_file(
             _fs.loc(staged / "state.json"), encode_state(StateDoc.from_mapping(plan.initial_state)), durable=durable
@@ -398,25 +401,25 @@ def publish_children(job: _kernel.OwnedJob, plans: Sequence[ChildPlan]) -> list[
 
 
 def _place_workflow(job: _kernel.OwnedJob, plan: ChildPlan, *, durable: bool) -> None:
-    """Copy the parent's ``workflow/`` into a staged carried child, verified; replay-safe.
+    """Copy the parent's ``workflow/`` into a staged embedded-workflow child, verified; replay-safe.
 
     The copy is assembled at :data:`_PARTIAL_WORKFLOW` (a name validation refuses in a proposed child) and renamed
     to ``workflow``, so a ``workflow/`` with the planned digest is complete and kept; anything else is recopied.
     """
 
-    assert plan.carried_sha256 is not None
+    assert plan.embedded_sha256 is not None
     target = job.path / plan.staged / JOB_WORKFLOW_DIRECTORY
     job.discard_subtree(f"{plan.staged}/{_PARTIAL_WORKFLOW}")  # what a crash during a copy left
     if os.path.lexists(target):
         try:
-            if carried_digest(target) == plan.carried_sha256:
+            if embedded_digest(target) == plan.embedded_sha256:
                 return
         except (FormatError, OSError):
             pass
         job.discard_subtree(f"{plan.staged}/{JOB_WORKFLOW_DIRECTORY}")
     partial = job.path / plan.staged / _PARTIAL_WORKFLOW
     _fs.copy_tree(job.path / JOB_WORKFLOW_DIRECTORY, partial, durable=durable, limits=_fs.DEFAULT_LIMITS)
-    if (actual := carried_digest(partial)) != plan.carried_sha256:
+    if (actual := embedded_digest(partial)) != plan.embedded_sha256:
         # ponytail: the parent is owned and quiescent from validation on, so only an operator changes its tree in
         # between; the commit then fails here on every pass (reported) instead of failing the job.
         raise FormatError(f"the parent's workflow/ changed since its children were validated (digest {actual})")

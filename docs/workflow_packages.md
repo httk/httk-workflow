@@ -99,22 +99,22 @@ Results flow back through `a.children`; input files are copied into the child
 or, for large shared files, read from the parent's workdir in place. See
 {doc}`details/composing_workflows`.
 
-## Self-carried workflows
+## Embedded workflows
 
-A job can carry its own workflow instead of naming an installation. With
-`job new --carry` the workflow's package is copied into the job's own
+A job can embed its own workflow instead of naming an installation. With
+`job new --embed-workflow` the workflow's package is copied into the job's own
 `workflow/` directory and nothing is installed in the workspace store, which
 suits one-off jobs (`--from-command`, a runner file, a package directory under
 development) and jobs whose code must travel and be sealed with them:
 
 ```console
-httk job new --workspace WS --carry --workflow-dir ./my_relax --input structure=POSCAR
-httk job new --workspace WS --carry --from-command 'my_executable {input}' --file input=a.dat
+httk job new --workspace WS --embed-workflow --workflow-dir ./my_relax --input structure=POSCAR
+httk job new --workspace WS --embed-workflow --from-command 'my_executable {input}' --file input=a.dat
 ```
 
-`--carry` works with `--workflow`, `--workflow-dir`, `--from-runner` and
+`--embed-workflow` works with `--workflow`, `--workflow-dir`, `--from-runner` and
 `--from-command`, and is refused together with `--install`. The job records the
-id `carried:<name>@<first 12 hex digits of the tree digest>` and the tree digest
+id `embedded:<name>@<first 12 hex digits of the tree digest>` and the tree digest
 in `job.json`, together with the runner entry or command, the steps, the
 fixed calls, the call-slot interfaces and `requires`, all read from the manifest
 when the job is created. The manager, the workspace daemon, launch templates
@@ -122,14 +122,14 @@ and build steps never read or run anything from `workflow/`: the code runs only
 inside the job's own sandbox, and the manager checks the tree against the
 recorded digest before every launch. Language realizations, packages with
 `[workflow.build]` and calls to workflows that are not installed are refused,
-because a carried tree has no store build and callees are never carried. The
+because an embedded tree has no store build and callees are never embedded. The
 tree must not contain symlinks, special files, hard-linked files or a
 `__pycache__` directory (remove it first).
 
-A carried job is sealed with its tree. To edit the code of one job, unlock it
+A job with an embedded workflow is sealed with its tree. To edit the code of one job, unlock it
 and change `workflow/` (see {doc}`restarting_jobs`). Full reference, including
 what is guaranteed and what is not: {doc}`details/workflow_packages`
-(*Self-carried workflows*).
+(*Embedded workflows*).
 
 ## Further reading
 

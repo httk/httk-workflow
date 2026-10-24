@@ -862,7 +862,7 @@ def _not_installable(selector: str) -> str | None:
 
 def _users(workspace: Workspace, workflow_id: str) -> list[str]:
     """Return the keys of the unfinished jobs that use one workflow: run it (their effective workflow, after
-    set_workflow), bind a call slot to it, or call it from the workflow they carry."""
+    set_workflow), bind a call slot to it, or call it from the workflow they embed."""
 
     states = ("ready", "waiting", "paused", "owned")
     return [

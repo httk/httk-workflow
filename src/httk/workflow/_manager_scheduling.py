@@ -70,15 +70,15 @@ def effective_workflow(job: JobDefinition, doc: StateDoc | None) -> tuple[str, s
 def bound_workflows(job: JobDefinition) -> tuple[str, ...]:
     """Return the installed ids the job depends on beside its workflow's own calls.
 
-    Those are the workflows its call slot bindings name and, for a job that carries its workflow (which no store
-    installation records), the fixed calls ``job.json``'s ``carried`` member froze.
+    Those are the workflows its call slot bindings name and, for a job that embeds its workflow (which no store
+    installation records), the fixed calls ``job.json``'s ``embedded`` member froze.
 
     :param job: The job.
     :return: The ids, sorted and distinct.
     """
 
     bindings = (cast(Mapping[str, object], binding) for binding in (job.calls or {}).values())
-    fixed = () if job.carried is None else cast(Mapping[str, object], job.carried["calls"]).values()
+    fixed = () if job.embedded is None else cast(Mapping[str, object], job.embedded["calls"]).values()
     return tuple(sorted({*(str(binding["workflow"]) for binding in bindings), *(str(callee) for callee in fixed)}))
 
 
@@ -89,7 +89,7 @@ def binding_problem(job: JobDefinition, workflow_id: str, record: Mapping[str, o
 
     :param job: The job.
     :param workflow_id: The job's effective workflow id.
-    :param record: That workflow's ``install.json`` record, or a carried job's ``carried`` member.
+    :param record: That workflow's ``install.json`` record, or an embedded-workflow job's ``embedded`` member.
     :return: The problem, or ``None``.
     """
 
@@ -250,9 +250,9 @@ def assess(
         return None, ("capability", min(missing))
     workflow_id, _name = effective_workflow(job, doc)
     record: Mapping[str, object]
-    if job.carried is not None:
+    if job.embedded is not None:
         # The job's own workflow/ is read only once the job is owned: here job.json's frozen settings alone.
-        workflow_id, record = job.workflow_id, job.carried
+        workflow_id, record = job.workflow_id, job.embedded
     else:
         installed, problem = manager._workflow(workflow_id)
         if installed is None:

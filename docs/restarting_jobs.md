@@ -327,14 +327,14 @@ request was refused. Children that an unlocked parent publishes later start out
 unlocked too (`unlocked.inherited_from` names the parent); they get no runner
 copy.
 
-**Carried jobs.** A job created with `job new --carry` (see
+**Jobs with an embedded workflow.** A job created with `job new --embed-workflow` (see
 {doc}`details/workflow_packages`) already has its workflow in `workflow/`, so
 `job unlock` keeps that tree (`existing runner copy kept`; `--no-copy` is the
 same) and never looks anything up in the store; with the tree missing, a copying
-unlock is dropped (`the carried workflow/ is missing; nothing to copy`). Edit `workflow/` and restart.
+unlock is dropped (`the embedded workflow/ is missing; nothing to copy`). Edit `workflow/` and restart.
 From then on the job launches the tree unverified and the manager re-pins its
 digest with `source` `"copy"`, like any unlocked copy. `set_workflow` is refused
-for a carried job, with or without the unlock: change `workflow/` instead.
+for an embedded-workflow job, with or without the unlock: change `workflow/` instead.
 
 ### What it relaxes
 

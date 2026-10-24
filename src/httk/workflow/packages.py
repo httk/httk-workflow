@@ -21,7 +21,7 @@ from httk.core.digests import tree_digest
 from httk.core.requirements import Requirement, parse_requirements
 
 from . import compat
-from ._carried import carried_digest
+from ._embedded import embedded_digest
 from ._slots import validate_interface
 from ._util import validate_inputs
 from .errors import FormatError
@@ -1360,21 +1360,21 @@ def _exec_hook(module_name: str, source: Path) -> ModuleType:
 
 
 def _tree_hook(
-    store_tree: Path, pinned_sha256: str, member: str, function_name: str, *, carried: bool = False
+    store_tree: Path, pinned_sha256: str, member: str, function_name: str, *, embedded: bool = False
 ) -> Callable[..., object]:
     """Return a hook that verifies and executes one member of a pinned tree.
 
-    A *carried* tree (a job's ``workflow/`` or a snapshot of it) is verified with
-    :func:`~httk.workflow._carried.carried_digest`, and its module is keyed by the tree's path as well, so it is never
+    An *embedded* tree (a job's ``workflow/`` or a snapshot of it) is verified with
+    :func:`~httk.workflow._embedded.embedded_digest`, and its module is keyed by the tree's path as well, so it is never
     shared with another tree.
     """
 
     relative = PurePosixPath(member)
     member_key = hashlib.sha256(relative.as_posix().encode()).hexdigest()
     module_name = f"httk_workflow_pkg_{pinned_sha256}_{member_key}"
-    if carried:
-        module_name = f"httk_workflow_carried_{hashlib.sha256(os.fsencode(store_tree)).hexdigest()}_{module_name}"
-    digest = carried_digest if carried else tree_digest
+    if embedded:
+        module_name = f"httk_workflow_embedded_{hashlib.sha256(os.fsencode(store_tree)).hexdigest()}_{module_name}"
+    digest = embedded_digest if embedded else tree_digest
 
     def hook(*args: object, **kwargs: object) -> object:
         try:

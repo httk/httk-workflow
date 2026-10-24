@@ -86,8 +86,8 @@ def describe_job(workspace: Workspace, ref: JobRef, *, include_children: bool = 
             report["calls"] = _thaw(job.calls)
         if job.persist_outputs is not None:
             report["persist_outputs"] = _thaw(job.persist_outputs)
-        if job.carried is not None:
-            report["carried"] = _thaw(job.carried)
+        if job.embedded is not None:
+            report["embedded"] = _thaw(job.embedded)
     join = None if doc is None else doc.join
     # A waiting parent's join, or the one a parent that failed at its wait keeps for `continue`.
     if ref.state == "waiting" or join is not None:
@@ -115,9 +115,9 @@ def render_job(report: Mapping[str, Any]) -> str:
 
     workflow, override = report.get("workflow"), report.get("workflow_override")
     declared = f"{workflow['name']} ({workflow['id']})" if isinstance(workflow, Mapping) else None
-    carried = report.get("carried")
-    if isinstance(carried, Mapping):
-        declared = f"{declared or '-'}; carried, digest {str(carried.get('tree_sha256'))[:12]}"
+    embedded = report.get("embedded")
+    if isinstance(embedded, Mapping):
+        declared = f"{declared or '-'}; embedded, digest {str(embedded.get('tree_sha256'))[:12]}"
     if isinstance(override, Mapping):
         # set_workflow: job.json keeps the declared workflow; the job runs the override.
         declared = f"{declared or '-'} -> {override.get('name')} ({override.get('id')}) by set_workflow"

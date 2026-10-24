@@ -71,8 +71,8 @@ if TYPE_CHECKING:
     from .seals import Release
 
 from . import _fs, _kernel
-from ._carried import carried_digest, carried_id
 from ._durations import cap_maxtime
+from ._embedded import embedded_digest, embedded_id
 from ._job import JobDefinition
 from ._util import interpreter_first_path, validate_inputs
 from .codes import code_environment
@@ -1419,7 +1419,7 @@ def new_job(
     move_inputs: Mapping[str, str | os.PathLike[str]] | None = None,
     calls: Mapping[str, str] | None = None,
     call_parameters: Mapping[str, Mapping[str, object]] | None = None,
-    carry: bool = False,
+    embed_workflow: bool = False,
 ) -> ScaffoldedJob:
     """Scaffold, submit, and describe one job of an installed *workflow*.
 
@@ -1478,13 +1478,13 @@ def new_job(
         bound workflow must fit the slot's interface. Fixed ``[workflow.calls]`` cannot be rebound.
     :param call_parameters: Give the parameters a slot's bound workflow is called with, alias to parameters,
         checked against that workflow's declared parameter types.
-    :param carry: Carry the workflow in the job's own ``workflow/`` instead of using a workspace installation;
-        nothing is installed. *workflow* is resolved as for an install (an installed id or name, a package
+    :param embed_workflow: Embed the workflow in the job's own ``workflow/`` instead of using a workspace
+        installation; nothing is installed. *workflow* is resolved as for an install (an installed id or name, a package
         directory, a git URI fetched into the fetch cache, a runner file) and its package copied into the job,
-        pinned in ``job.json`` (workflow id ``carried:<name>@<sha12>``). Refused for workflow format realizations,
+        pinned in ``job.json`` (workflow id ``embedded:<name>@<sha12>``). Refused for workflow format realizations,
         ``[workflow.build]``, fixed ``[workflow.calls]`` not installed in the workspace, and with *install*.
     :return: The submitted job description.
-    :raises ValueError: If the workflow is not installed (and *install* and *carry* are false), or workflow,
+    :raises ValueError: If the workflow is not installed (and *install* and *embed_workflow* are false), or workflow,
         inputs, placement, or job settings are invalid, or a file to move is not a regular file
         inside a succeeded job of *workspace* on its filesystem, or a call slot is unbound, bound to a
         workflow that does not fit it, or given parameters of the wrong type.
@@ -1508,7 +1508,7 @@ def new_job(
         install=install,
         calls=calls,
         call_parameters=call_parameters,
-        carry=carry,
+        embed_workflow=embed_workflow,
     )
     return job
 
@@ -1532,7 +1532,7 @@ def new_jobs(
     install: bool = False,
     calls: Mapping[str, str] | None = None,
     call_parameters: Mapping[str, Mapping[str, object]] | None = None,
-    carry: bool = False,
+    embed_workflow: bool = False,
 ) -> Generator[ScaffoldedJob, None, None]:
     """Scaffold and submit one job per member of *items*, lazily.
 
@@ -1569,7 +1569,8 @@ def new_jobs(
     :param install: Install *workflow* into the workspace first when it is not installed.
     :param calls: Bind call slots of the workflow for every job; see :func:`new_job`.
     :param call_parameters: Give the parameters of the bound workflows; see :func:`new_job`.
-    :param carry: Carry the workflow in each job's own ``workflow/``, nothing installed; see :func:`new_job`.
+    :param embed_workflow: Embed the workflow in each job's own ``workflow/``, nothing installed; see
+        :func:`new_job`.
         The package is resolved and snapshotted once; every job gets its own copy.
     :return: An iterator yielding each submitted job description.
     :yield: Each submitted job description.
@@ -1589,12 +1590,12 @@ def new_jobs(
     owner = _kernel.register_owner(workspace, kind="cli", label="job new", allocation=None, advertised={})
     snapshot: Path | None = None
     try:
-        if carry:
+        if embed_workflow:
             if install:
-                raise ValueError("a carried workflow installs nothing; do not combine carry with install")
+                raise ValueError("an embedded workflow installs nothing; do not combine embed_workflow with install")
             # Discarded when the owner closes, after the last job.
             snapshot = owner.scratch("build")
-            installed = _carried_snapshot(workspace, workflow, snapshot, step=step, language=format)
+            installed = _embedded_snapshot(workspace, workflow, snapshot, step=step, language=format)
         else:
             installed = _installed(workspace, workflow, owner=owner, install=install, step=step, language=format)
         prepared = _prepare(installed, step=step)
@@ -1828,14 +1829,14 @@ def _lookup_by_name(workspace: Workspace, reference: str) -> Installed | None:
     return found
 
 
-def _carried_snapshot(
+def _embedded_snapshot(
     workspace: Workspace, workflow: str | os.PathLike[str], work: Path, *, step: str | None, language: str | None
 ) -> Installed:
-    """Resolve *workflow* without installing it and snapshot its package for jobs that carry it.
+    """Resolve *workflow* without installing it and snapshot its package for jobs that embed it.
 
     The source is an installed workflow's store tree, a package directory, a git tree fetched into the fetch
     cache, a known package, or an ad hoc package of a runner file built in *work*. The snapshot is one copy in
-    *work*, pinned by :func:`~httk.workflow._carried.carried_digest`; its view (:attr:`Installed.carried`) holds
+    *work*, pinned by :func:`~httk.workflow._embedded.embedded_digest`; its view (:attr:`Installed.embedded`) holds
     exactly the trusted settings ``job.json`` freezes: those :func:`httk.workflow._store.install` would record.
     """
 
@@ -1851,10 +1852,10 @@ def _carried_snapshot(
         )
     if provider.language is not None:
         raise ValueError(
-            f"{workflow_id} is a {provider.language} workflow realization, which a job cannot carry; install it"
+            f"{workflow_id} is a {provider.language} workflow realization, which a job cannot embed; install it"
         )
     if provider.build is not None:
-        raise ValueError(f"{workflow_id} declares [workflow.build]; a carried workflow is never built, install it")
+        raise ValueError(f"{workflow_id} declares [workflow.build]; an embedded workflow is never built, install it")
     if not provider.runnable:
         raise ValueError(f"{workflow_id} recognizes calculations and cannot be run")
     calls: dict[str, str] = {}
@@ -1863,7 +1864,7 @@ def _carried_snapshot(
         callee = _store.lookup(workspace, written)
         if callee is None:
             raise ValueError(
-                f"{caller} names {written}, which is not installed; a carried workflow never carries its callees: "
+                f"{caller} names {written}, which is not installed; an embedded workflow never embeds its callees: "
                 f"install it first (httk workflow install {written})"
             )
         _store._require_defaults(callee.id, callee.record.get("slots"), caller)
@@ -1874,9 +1875,9 @@ def _carried_snapshot(
         default = None if slot.default is None else _store.lookup(workspace, slot.default)
         slots[alias] = default.id if default is not None else slot.default
     assert provider.directory is not None  # _resolve refuses providers without a package directory
-    snapshot = work / "carried"
+    snapshot = work / "embedded"
     _store._copy_package(provider.directory, snapshot, None)
-    tree_sha256 = carried_digest(snapshot)  # also refuses __pycache__: the creator removes it
+    tree_sha256 = embedded_digest(snapshot)  # also refuses __pycache__: the creator removes it
     runner = _store._runner(provider)
     record: dict[str, object] = {
         "tree_sha256": tree_sha256,
@@ -1890,7 +1891,7 @@ def _carried_snapshot(
         "build": False,
     }
     return _store.Installed(
-        carried_id(name, tree_sha256), name, snapshot, record, package_override=snapshot, carried=True
+        embedded_id(name, tree_sha256), name, snapshot, record, package_override=snapshot, embedded=True
     )
 
 
@@ -1920,7 +1921,7 @@ def _prepare(installed: Installed, *, step: str | None) -> _Prepared:
     """Resolve one installed workflow for job creation, exactly once per campaign.
 
     An instantiate hook runs from the installed package, verified against the
-    installed tree digest (a carried workflow's snapshot against its carried
+    installed tree digest (an embedded workflow's snapshot against its embedded
     digest). A language workflow is prepared by its realization,
     whose runner is the manager's own built-in, so only its payload members,
     parameters and hooks are taken.
@@ -1967,7 +1968,7 @@ def _prepare(installed: Installed, *, step: str | None) -> _Prepared:
             workflow=resolved,
             instantiate_exec=(installed.package, digest, resolved.instantiate_exec),
         )
-    hook = _tree_hook(installed.package, digest, resolved.instantiate_file, "instantiate", carried=installed.carried)
+    hook = _tree_hook(installed.package, digest, resolved.instantiate_file, "instantiate", embedded=installed.embedded)
     return _Prepared(
         installed=installed, workflow=resolved, instantiate=cast(Callable[[InstantiateContext], object], hook)
     )
@@ -2811,7 +2812,7 @@ def _build_payload(
             defaults,
             hook_inputs,
             workspace.root,
-            carried=prepared.installed.carried,
+            embedded=prepared.installed.embedded,
         )
         job_parameters = {**job_parameters, **hook_parameters}
         if caller_tag is None and hook_tag is not None:
@@ -2838,10 +2839,10 @@ def _build_payload(
     # Always written, even empty: set_workflow verifies a switch against the inputs the job was made with.
     declared_member["inputs"] = declared_input_metadata
     installed = prepared.installed
-    frozen_carried = None
-    if installed.carried:
-        _place_carried(installed, destination)
-        frozen_carried = {key: value for key, value in installed.record.items() if key != "build"}
+    frozen_embedded = None
+    if installed.embedded:
+        _place_embedded(installed, destination)
+        frozen_embedded = {key: value for key, value in installed.record.items() if key != "build"}
     spec = JobSpec(
         name=name or f"{installed.name}: {tag or 'job'}",
         workflow_id=installed.id,
@@ -2873,7 +2874,7 @@ def _build_payload(
         job_id=job_id,
         calls=calls,
         persist_outputs=persist_outputs,
-        carried=frozen_carried,
+        embedded=frozen_embedded,
     )
     if prepared.finalize is not None:
         spec = prepared.finalize(spec)
@@ -2904,15 +2905,15 @@ def _build_payload(
     return definition
 
 
-def _place_carried(snapshot: Installed, payload: Path) -> None:
-    """Copy a carried workflow's snapshot into a staged payload's ``workflow/``, verified against its digest."""
+def _place_embedded(snapshot: Installed, payload: Path) -> None:
+    """Copy an embedded workflow's snapshot into a staged payload's ``workflow/``, verified against its digest."""
 
     tree = payload / JOB_WORKFLOW_DIRECTORY
     if os.path.lexists(tree):
-        raise ValueError(f"an instantiate hook created {JOB_WORKFLOW_DIRECTORY}/, reserved for the carried workflow")
+        raise ValueError(f"an instantiate hook created {JOB_WORKFLOW_DIRECTORY}/, reserved for the embedded workflow")
     _fs.copy_tree(snapshot.package, tree, durable=False, limits=_fs.DEFAULT_LIMITS)
-    if carried_digest(tree) != snapshot.record["tree_sha256"]:
-        raise ValueError(f"the carried workflow {snapshot.id} changed since it was snapshotted for the job")
+    if embedded_digest(tree) != snapshot.record["tree_sha256"]:
+        raise ValueError(f"the embedded workflow {snapshot.id} changed since it was snapshotted for the job")
 
 
 def _check_parameter_types(values: Mapping[str, object], declared: Mapping[str, Mapping[str, object]]) -> None:
@@ -3083,12 +3084,12 @@ def _run_executable_instantiate(
     inputs: Mapping[str, Mapping[str, object]],
     workspace_root: Path,
     *,
-    carried: bool = False,
+    embedded: bool = False,
 ) -> tuple[dict[str, object], str | None]:
-    """Run an instantiate executable from its digest-pinned runner tree (*carried*: pinned by its carried digest)."""
+    """Run an instantiate executable from its digest-pinned runner tree (*embedded*: pinned by its embedded digest)."""
 
     tree, pinned_sha256, member = hook
-    actual = (carried_digest if carried else tree_digest)(tree)
+    actual = (embedded_digest if embedded else tree_digest)(tree)
     if actual != pinned_sha256:
         raise ValueError(
             f"published workflow tree {tree} changed: digest {actual} does not match pinned {pinned_sha256}"

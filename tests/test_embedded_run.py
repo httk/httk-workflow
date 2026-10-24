@@ -1,4 +1,4 @@
-"""Self-carried workflows at run time: launch verification, unlock, calls, spawned children and their copies."""
+"""Embedded workflows at run time: launch verification, unlock, calls, spawned children and their copies."""
 
 import json
 import os
@@ -12,7 +12,7 @@ import v3_helpers as v3
 from attempt_fixtures import package, sub_package
 from fake_bwrap import write_wrapper
 from httk.workflow import TaskManager, Workspace, _confine, _kernel, _requests, _store, removal, scaffold
-from httk.workflow._carried import carried_digest
+from httk.workflow._embedded import embedded_digest
 from httk.workflow._job import JobDefinition
 from httk.workflow.introspection import explain_job
 from httk.workflow.precheck import precheck_jobs
@@ -26,15 +26,15 @@ _RUNNER = v3.RUNNER.replace(
 )
 
 
-def _package(root: Path, name: str = "tests.carried.run") -> Path:
+def _package(root: Path, name: str = "tests.embedded.run") -> Path:
     return package(root, name, list(v3.STEPS), runner=_RUNNER)
 
 
-def _carried_job(
+def _embedded_job(
     workspace: Workspace, source: Path, script: dict[str, str], *, placement: str = "project/c", **parameters: Any
 ) -> _kernel.JobRef:
     job = scaffold.new_job(
-        workspace, source, carry=True, placement=placement, parameters={"script": script, **parameters}
+        workspace, source, embed_workflow=True, placement=placement, parameters={"script": script, **parameters}
     )
     return v3.find(workspace, job.job_id)
 
@@ -49,23 +49,23 @@ def _request(workspace: Workspace, job_id: str, action: str, **options: Any) -> 
         return removal.request_now(workspace, owner, v3.find(workspace, job_id), action, "t", **options)
 
 
-def test_a_carried_job_runs_from_its_verified_workflow_directory(tmp_path: Path) -> None:
+def test_an_embedded_job_runs_from_its_verified_workflow_directory(tmp_path: Path) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
-    ref = _carried_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
+    ref = _embedded_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
     v3.run(workspace)
     done = v3.find(workspace, ref.job_id)
     assert done.state == "succeeded"
     job = JobDefinition.from_path(done.path / "job.json")
     root = (done.path / "run" / "root-start").read_text(encoding="utf-8")
     assert root.endswith("/workflow") and done.job_key in root
-    assert job.carried is not None
+    assert job.embedded is not None
     assert v3.state_of(done).workflow_pin == {
         "id": job.workflow_id,
-        "tree_sha256": job.carried["tree_sha256"],
-        "source": "carried",
+        "tree_sha256": job.embedded["tree_sha256"],
+        "source": "embedded",
         "workflow_present": True,
     }
-    assert carried_digest(done.path / "workflow") == job.carried["tree_sha256"]  # kept by the attempt end
+    assert embedded_digest(done.path / "workflow") == job.embedded["tree_sha256"]  # kept by the attempt end
     assert _store.list_installed(workspace) == []
 
 
@@ -78,9 +78,9 @@ def test_a_carried_job_runs_from_its_verified_workflow_directory(tmp_path: Path)
         ("symlink", "the job's workflow/ cannot be verified"),
     ],
 )
-def test_a_locked_carried_job_refuses_a_changed_tree(tmp_path: Path, damage: str, message: str) -> None:
+def test_a_locked_embedded_job_refuses_a_changed_tree(tmp_path: Path, damage: str, message: str) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
-    ref = _carried_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
+    ref = _embedded_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
     tree = ref.path / "workflow"
     if damage == "edit":
         (tree / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -97,12 +97,12 @@ def test_a_locked_carried_job_refuses_a_changed_tree(tmp_path: Path, damage: str
     assert message in _failure(done)["message"]
     assert not (done.path / "run" / "root-start").exists()
     if damage == "delete":
-        assert _request(workspace, ref.job_id, "unlock") == "the carried workflow/ is missing; nothing to copy"
+        assert _request(workspace, ref.job_id, "unlock") == "the embedded workflow/ is missing; nothing to copy"
 
 
-def test_an_unlocked_carried_job_keeps_and_runs_its_edited_tree(tmp_path: Path) -> None:
+def test_an_unlocked_embedded_job_keeps_and_runs_its_edited_tree(tmp_path: Path) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
-    ref = _carried_job(workspace, _package(tmp_path / "pkg"), {"start": "fail"})
+    ref = _embedded_job(workspace, _package(tmp_path / "pkg"), {"start": "fail"})
     v3.run(workspace)
     assert v3.find(workspace, ref.job_id).state == "failed"
     original = (v3.find(workspace, ref.job_id).path / "workflow" / "run").read_bytes()
@@ -117,13 +117,13 @@ def test_an_unlocked_carried_job_keeps_and_runs_its_edited_tree(tmp_path: Path) 
     done = v3.find(workspace, ref.job_id)
     assert done.state == "succeeded"
     pin = v3.state_of(done).workflow_pin
-    assert pin is not None and pin["source"] == "copy" and pin["tree_sha256"] == carried_digest(done.path / "workflow")
+    assert pin is not None and pin["source"] == "copy" and pin["tree_sha256"] == embedded_digest(done.path / "workflow")
 
 
 _CALLER = """#!/usr/bin/env python3
 from httk.workflow import Runner
 
-run = Runner("tests.carried.caller")
+run = Runner("tests.embedded.caller")
 
 
 @run.step
@@ -145,18 +145,18 @@ if __name__ == "__main__":
 """
 
 
-def test_a_carried_job_calls_an_installed_workflow(tmp_path: Path) -> None:
+def test_an_embedded_job_calls_an_installed_workflow(tmp_path: Path) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
     with v3.cli_owner(workspace) as owner:
         sub = _store.install(workspace, owner, sub_package(tmp_path / "sub"))
     caller = package(
         tmp_path / "caller",
-        "tests.carried.caller",
+        "tests.embedded.caller",
         ["start", "finish"],
         runner=_CALLER,
         extra='\n[workflow.calls]\nsub = "tests.sub"\n',
     )
-    job = scaffold.new_job(workspace, caller, carry=True, placement="project/caller")
+    job = scaffold.new_job(workspace, caller, embed_workflow=True, placement="project/caller")
     v3.run(workspace)
     assert v3.find(workspace, job.job_id).state == "succeeded"
     (child,) = [ref for ref in _kernel.list_jobs(workspace, "succeeded") if ref.job_id != job.job_id]
@@ -170,7 +170,7 @@ from pathlib import Path
 
 from httk.workflow import ChildSpec, Runner
 
-run = Runner("tests.carried.family")
+run = Runner("tests.embedded.family")
 
 
 @run.step
@@ -198,47 +198,47 @@ if __name__ == "__main__":
 """
 
 
-def test_a_spawned_child_of_a_carried_parent_gets_a_verified_copy(tmp_path: Path) -> None:
+def test_a_spawned_child_of_an_embedded_parent_gets_a_verified_copy(tmp_path: Path) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
-    source = package(tmp_path / "family", "tests.carried.family", ["start", "leaf", "finish"], runner=_FAMILY)
-    job = scaffold.new_job(workspace, source, carry=True, placement="project/family")
+    source = package(tmp_path / "family", "tests.embedded.family", ["start", "leaf", "finish"], runner=_FAMILY)
+    job = scaffold.new_job(workspace, source, embed_workflow=True, placement="project/family")
     v3.run(workspace)
     parent = v3.find(workspace, job.job_id)
     assert parent.state == "succeeded"
     (child,) = [ref for ref in _kernel.list_jobs(workspace, "succeeded") if ref.job_id != job.job_id]
     parent_job = JobDefinition.from_path(parent.path / "job.json")
     child_job = JobDefinition.from_path(child.path / "job.json")
-    assert (child_job.workflow_id, child_job.carried) == (parent_job.workflow_id, parent_job.carried)
-    assert parent_job.carried is not None
-    assert carried_digest(child.path / "workflow") == parent_job.carried["tree_sha256"]
+    assert (child_job.workflow_id, child_job.embedded) == (parent_job.workflow_id, parent_job.embedded)
+    assert parent_job.embedded is not None
+    assert embedded_digest(child.path / "workflow") == parent_job.embedded["tree_sha256"]
     assert os.stat(child.path / "workflow" / "run").st_ino != os.stat(parent.path / "workflow" / "run").st_ino
     root = (child.path / "run" / "root.txt").read_text(encoding="utf-8")
     assert root.endswith("/workflow") and f"/{child.job_key}~" in root
-    assert v3.state_of(child).workflow_pin["source"] == "carried"  # type: ignore[index]
+    assert v3.state_of(child).workflow_pin["source"] == "embedded"  # type: ignore[index]
     assert not (child.path / "workflow.partial").exists()
 
 
-def test_a_child_spec_carries_only_its_parents_carried_workflow(tmp_path: Path) -> None:
+def test_a_child_spec_embeds_only_its_parents_workflow(tmp_path: Path) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
-    ref = _carried_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
+    ref = _embedded_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
     parent = JobDefinition.from_path(ref.path / "job.json")
     own = ChildSpec(step="start")._job_spec(parent, (parent.workflow_id, parent.workflow_name), "kid")
-    assert own.carried == json.loads(json.dumps(parent.as_mapping()["carried"]))
+    assert own.embedded == json.loads(json.dumps(parent.as_mapping()["embedded"]))
     other = ChildSpec(step="start")._job_spec(parent, ("local:other", "other"), "kid")
-    assert other.carried is None
+    assert other.embedded is None
 
 
-def test_a_child_naming_a_carried_workflow_its_parent_does_not_carry_is_refused(tmp_path: Path) -> None:
+def test_a_child_naming_an_embedded_workflow_its_parent_does_not_embed_is_refused(tmp_path: Path) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
     installed = v3.install(workspace, tmp_path / "demo")
     elsewhere = v3.workspace(tmp_path / "elsewhere")
-    carried = scaffold.new_job(elsewhere, _package(tmp_path / "pkg"), carry=True, parameters={"script": {}})
-    foreign = JobDefinition.from_path(carried.payload / "job.json").as_mapping()
+    embedded = scaffold.new_job(elsewhere, _package(tmp_path / "pkg"), embed_workflow=True, parameters={"script": {}})
+    foreign = JobDefinition.from_path(embedded.payload / "job.json").as_mapping()
     child = {
         "label": "kid",
         "script": {"start": "succeed"},
         "workflow": foreign["workflow"],
-        "carried": foreign["carried"],
+        "embedded": foreign["embedded"],
     }
     ref = v3.submit(
         workspace, installed, {"start": "spawn"}, placement="project/p", parameters={"spawn": {"children": [child]}}
@@ -246,7 +246,7 @@ def test_a_child_naming_a_carried_workflow_its_parent_does_not_carry_is_refused(
     v3.run(workspace)
     done = v3.find(workspace, ref.job_id)
     assert done.state == "failed" and _failure(done)["code"] == "protocol_error"
-    assert "names a carried workflow its parent does not carry" in _failure(done)["message"]
+    assert "names an embedded workflow its parent does not embed" in _failure(done)["message"]
 
 
 @pytest.mark.parametrize("leftover", ["partial", "mismatch"])
@@ -254,7 +254,7 @@ def test_publication_replays_to_exactly_one_verified_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, leftover: str
 ) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
-    ref = _carried_job(
+    ref = _embedded_job(
         workspace,
         _package(tmp_path / "pkg"),
         {"start": "spawn", "gather": "succeed"},
@@ -283,15 +283,15 @@ def test_publication_replays_to_exactly_one_verified_copy(
     assert parent.state == "succeeded"
     (child,) = [item for item in _kernel.list_jobs(workspace, "succeeded") if item.job_id != ref.job_id]
     job = JobDefinition.from_path(parent.path / "job.json")
-    assert job.carried is not None and carried_digest(child.path / "workflow") == job.carried["tree_sha256"]
+    assert job.embedded is not None and embedded_digest(child.path / "workflow") == job.embedded["tree_sha256"]
     assert not (child.path / "workflow.partial").exists() and not (child.path / "workflow" / "stray.txt").exists()
 
 
-def test_a_confined_carried_attempt_sees_its_workflow_read_only(
+def test_a_confined_embedded_attempt_sees_its_workflow_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
-    ref = _carried_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
+    ref = _embedded_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
     (tmp_path / "bin").mkdir()
     bwrap = write_wrapper(tmp_path / "bin" / "bwrap", namespaces=False)
     argvs: list[list[str]] = []
@@ -314,9 +314,9 @@ def test_a_confined_carried_attempt_sees_its_workflow_read_only(
     assert overlay and argv[overlay[0] - 2] == "--ro-bind-fd"
 
 
-def test_children_of_an_unlocked_carried_parent_copy_its_current_tree(tmp_path: Path) -> None:
+def test_children_of_an_unlocked_embedded_parent_copy_its_current_tree(tmp_path: Path) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
-    ref = _carried_job(
+    ref = _embedded_job(
         workspace,
         _package(tmp_path / "pkg"),
         {"start": "spawn", "gather": "succeed"},
@@ -331,28 +331,28 @@ def test_children_of_an_unlocked_carried_parent_copy_its_current_tree(tmp_path: 
     parent = v3.find(workspace, ref.job_id)
     assert parent.state == "succeeded"
     (child,) = [item for item in _kernel.list_jobs(workspace, "succeeded") if item.job_id != ref.job_id]
-    edited = carried_digest(parent.path / "workflow")
-    assert carried_digest(child.path / "workflow") == edited and (child.path / "workflow" / "added.txt").is_file()
+    edited = embedded_digest(parent.path / "workflow")
+    assert embedded_digest(child.path / "workflow") == edited and (child.path / "workflow" / "added.txt").is_file()
     doc = v3.state_of(child)
     assert doc.unlocked is not None and doc.workflow_pin is not None
     assert (doc.workflow_pin["source"], doc.workflow_pin["tree_sha256"]) == ("copy", edited)
 
 
-def test_inspection_never_reports_a_carried_workflow_as_not_installed(tmp_path: Path) -> None:
+def test_inspection_never_reports_an_embedded_workflow_as_not_installed(tmp_path: Path) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
-    ref = _carried_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
+    ref = _embedded_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
     (finding,) = precheck_jobs(workspace)
     assert finding["runner"] == {"status": "ok", "ok": True} and finding["calls"] == []
     checks = {check.name: check for check in explain_job(workspace, ref).checks}
     assert checks["installed workflow"].satisfied is True
 
 
-def test_a_damaged_carried_job_keeps_its_workflow(tmp_path: Path) -> None:
+def test_a_damaged_embedded_job_keeps_its_workflow(tmp_path: Path) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
-    ref = _carried_job(workspace, _package(tmp_path / "pkg"), {"start": "fail"})
+    ref = _embedded_job(workspace, _package(tmp_path / "pkg"), {"start": "fail"})
     v3.run(workspace)
     failed = v3.find(workspace, ref.job_id)
-    digest = carried_digest(failed.path / "workflow")
+    digest = embedded_digest(failed.path / "workflow")
     # No readable pin: the tree stays (it is the only copy of the job's code).
     (failed.path / "state.json").write_text("{broken", encoding="utf-8")
     _requests.post(
@@ -367,7 +367,7 @@ def test_a_damaged_carried_job_keeps_its_workflow(tmp_path: Path) -> None:
     v3.run(workspace)
     damaged = v3.find(workspace, ref.job_id)
     assert damaged.state == "failed" and _failure(damaged)["code"] == "protocol_error"
-    assert carried_digest(damaged.path / "workflow") == digest
+    assert embedded_digest(damaged.path / "workflow") == digest
     assert _request(workspace, ref.job_id, "restart") is None
     v3.run(workspace)
     revived = v3.find(workspace, ref.job_id)
@@ -377,8 +377,8 @@ def test_a_damaged_carried_job_keeps_its_workflow(tmp_path: Path) -> None:
 
 def test_a_damaged_job_whose_job_json_is_unreadable_keeps_its_workflow(tmp_path: Path) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
-    ref = _carried_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
-    # Readable for the kernel's header, invalid as a definition: whether the job carries its workflow is unknown.
+    ref = _embedded_job(workspace, _package(tmp_path / "pkg"), {"start": "succeed"})
+    # Readable for the kernel's header, invalid as a definition: whether the job embeds its workflow is unknown.
     mapping = json.loads((ref.path / "job.json").read_text(encoding="utf-8"))
     (ref.path / "job.json").write_text(json.dumps({**mapping, "seal_succeeded": "maybe"}), encoding="utf-8")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:

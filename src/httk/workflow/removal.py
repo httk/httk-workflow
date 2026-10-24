@@ -204,8 +204,8 @@ def _types(declared: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-#: Why ``set_workflow`` refuses a job that carries its workflow in ``workflow/``.
-_CARRIED_SWITCH_REFUSAL = "a carried workflow cannot be switched; unlock the job and edit workflow/ instead"
+#: Why ``set_workflow`` refuses a job that embeds its workflow in ``workflow/``.
+_EMBEDDED_SWITCH_REFUSAL = "an embedded workflow cannot be switched; unlock the job and edit workflow/ instead"
 
 
 def workflow_switch_problem(
@@ -225,7 +225,7 @@ def workflow_switch_problem(
     value of its declared type; (6) declare the same environment names and types; and (7) declare the step
     the job runs next (for a waiting parent, the steps its join advances to); and (8) declare exactly the call
     slots the job binds, each binding fitting the candidate's slot as installed now. A language realization never
-    switches: its executed document lives in the payload, and neither does a job that carries its workflow. An unlocked job (debug mode) skips rules 2-8. A job made from an installed package (it stores
+    switches: its executed document lives in the payload, and neither does a job that embeds its workflow. An unlocked job (debug mode) skips rules 2-8. A job made from an installed package (it stores
     ``declarations.workflow``) records empty parameter, input and environment declarations by leaving them
     out; any other job without a snapshot (a spawned child) is compared with its current installation, and
     without that the switch is refused as unverifiable.
@@ -238,8 +238,8 @@ def workflow_switch_problem(
     :return: The refusal, or ``None`` when the switch is compatible.
     """
 
-    if job.carried is not None:
-        return _CARRIED_SWITCH_REFUSAL
+    if job.embedded is not None:
+        return _EMBEDDED_SWITCH_REFUSAL
     try:
         provider = candidate.provider()
     except ValueError as exc:
@@ -406,8 +406,8 @@ def refusal(
     if attribution_refusal is not None:
         return attribution_refusal
     if request.action == "set_workflow":
-        if job.carried is not None:
-            return _CARRIED_SWITCH_REFUSAL
+        if job.embedded is not None:
+            return _EMBEDDED_SWITCH_REFUSAL
         workflow_id = str(request.document["workflow"])
         found = {} if installations is None else installations
         if workflow_id not in found:
@@ -554,10 +554,10 @@ def _unlock(
 
     if not copy:
         return applied
-    if job.carried is not None:
-        # A carried workflow is the job's own workflow/: never looked up in the store, never replaced.
+    if job.embedded is not None:
+        # An embedded workflow is the job's own workflow/: never looked up in the store, never replaced.
         if _fs.lstat(_fs.loc(owned.path / _store.RUNNER_COPY)) is None:
-            return dropped("the carried workflow/ is missing; nothing to copy")
+            return dropped("the embedded workflow/ is missing; nothing to copy")
         if doc.unlocked is not None:
             return dropped("already unlocked")
         owned.append_log("runner_copy_kept", detail={"workflow": job.workflow_id, "request_id": request.request_id})

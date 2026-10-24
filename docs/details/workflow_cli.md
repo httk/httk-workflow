@@ -279,7 +279,7 @@ manager's platform stays `ready` and unclaimed there.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--carry`, `--call`, `--call-parameter`, `--parameter`, `--environment`, `--format`, `--input`, `--input-move-from-job`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--step`, `--json` |
+| `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--embed-workflow`, `--call`, `--call-parameter`, `--parameter`, `--environment`, `--format`, `--input`, `--input-move-from-job`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--step`, `--json` |
 | `job submit SOURCE...` | submit prepared payload directories | `--workspace`, `--move`, `--json` |
 | `job request ACTION JOB_ID...` | post one operator request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--operator`, required `--reason`, `--state`, `--step`, `--placement`, `--priority`, `--override-step`, `--destination`, `--max-attempts-per-activation`, `--max-total-attempts`, `--max-activations`, `--force`, `--keep-budget`, `--wait`, `--timeout`, `--adapter-timeout`, daemon-only `--request-id` |
 | `job delete JOB...` | delete terminal or paused jobs (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
@@ -344,11 +344,11 @@ STEP...` before any work.
 
 Other options:
 
-- `--carry` makes the job carry its workflow in `<job>/workflow/` instead of
-  naming an installation (see {doc}`workflow_packages`, *Self-carried workflows*).
+- `--embed-workflow` embeds the workflow in the job's `<job>/workflow/` instead
+  of naming an installation (see {doc}`workflow_packages`, *Embedded workflows*).
   It works with `--workflow`, `--workflow-dir`, `--from-runner` and
   `--from-command`, installs nothing, and is refused together with `--install`.
-  The job's workflow id is `carried:<name>@<sha12>`. Language realizations,
+  The job's workflow id is `embedded:<name>@<sha12>`. Language realizations,
   `[workflow.build]` packages and uninstalled fixed callees are refused, and the
   tree must hold no symlink, special file, hard-linked file or `__pycache__`.
 - `--parameter NAME=VALUE` supplies an implementation parameter; VALUE is JSON

@@ -77,7 +77,7 @@ from httk.workflow._state import TERMINAL_STATES, StateDoc, encode_state, read_s
 from httk.workflow._util import json_bytes, utc_now
 from httk.workflow.errors import FormatError, WorkflowError
 from httk.workflow.models import (
-    CARRIED_WORKFLOW_PREFIX,
+    EMBEDDED_WORKFLOW_PREFIX,
     EXCHANGE_DIRECTORY,
     WORKSPACE_DIRECTORY,
     canonical_uuid,
@@ -1079,11 +1079,11 @@ def _finish(
             _fs.write_file(_fs.loc(directory / "state.json"), encode_state(doc), durable=durable)
         published.append(_kernel.submit(workspace, owner, directory, state=member.state, priority=member.priority))
     owner.discard_scratch(scratch)
-    # A carried workflow travels in its job's workflow/; its fixed calls are among the bound workflows.
+    # An embedded workflow travels in its job's workflow/; its fixed calls are among the bound workflows.
     missing = {
         workflow
         for workflow in workflows
-        if not workflow.startswith(CARRIED_WORKFLOW_PREFIX) and _installed(workspace, workflow) is None
+        if not workflow.startswith(EMBEDDED_WORKFLOW_PREFIX) and _installed(workspace, workflow) is None
     }
     # Reported only, never installed: an untrusted binding blocks its job until an operator installs.
     missing.update(
@@ -1297,7 +1297,7 @@ def _needed_workflows(
         except ValueError as exc:
             _LOGGER.debug("no workflow of the held job %s: %s", member.job_key, exc)
             continue
-        if job.carried is None:  # a carried workflow travels in the job's workflow/, never in the store
+        if job.embedded is None:  # an embedded workflow travels in the job's workflow/, never in the store
             roots.add(effective_workflow(job, read_state_unowned(directory / "state.json")[0])[0])
         roots.update(bound_workflows(job))
     needed: dict[str, tuple[str, str | None, str | None]] = {}

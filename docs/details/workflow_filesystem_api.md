@@ -641,7 +641,7 @@ exchange bundle rewrites the client's ids and `claim.pool` before publication
 | `tag` | label or `null` | The job key tag. |
 | `name` | string | Display name. |
 | `placement` | canonical placement text | Authoritative and immutable (§Placement rules). |
-| `workflow` | `{id, name}` | The installed workflow's id (§The workflow store) and its name; for a carried job (§Carried workflows) the id `carried:<name>@<sha12>`. |
+| `workflow` | `{id, name}` | The installed workflow's id (§The workflow store) and its name; for a job with an embedded workflow (§Embedded workflows) the id `embedded:<name>@<sha12>`. |
 | `initial_step` | step name | The step of the first activation. |
 | `priority` | `0`–`999` | The submitted priority. |
 | `claim` | `{pool, required_capabilities}` | Eligibility labels; pool `default` needs no routing. A pool `exchange-<16 hex>` is an exchange pool (§Adopt). |
@@ -652,7 +652,7 @@ exchange bundle rewrites the client's ids and `claim.pool` before publication
 | `seal_succeeded` | boolean or `null` | Whether a succeeded job is sealed; `null` defers to the `seal.succeeded` setting. |
 | `staged_files` (optional) | array of `{path, size, sha256}`, sorted by `path` | The files `job new` staged (`--file`/`--files` and declared-input destinations), each with its payload-relative path and the size and lowercase hex SHA-256 computed when it was staged; `collect` records each as the run's file input exactly as staged. A runner-prepared payload may give only `{path}`, omitting `size` and `sha256` together. Absent when there are none. |
 | `calls` (optional) | object: call slot alias → exactly `{workflow, parameters}` | The binding of every call slot of the workflow: the installed id (non-empty, no whitespace) the slot calls and the parameters it is called with (finite JSON); at most 256 KiB serialized. Present exactly when the workflow has call slots; a manager claims the job only when its alias set is the installed workflow's slot set and each bound workflow and its fixed calls are installed (and built). |
-| `carried` (optional) | `{tree_sha256, runner, steps, initial_step, calls, slots, requires, source}` | Present exactly when `workflow.id` starts with `carried:` (§Carried workflows). `tree_sha256` is the carried digest of `<payload>/workflow`; `runner` is exactly `{entry}` (one member name) or `{command}` (a string list without `{artifacts}`); `steps` are strings including `initial_step`; `calls` values are installed workflow ids, never `carried:`; `slots` and `requires` are validated as in `install.json`; `source` is a commit-pinned git URI or `null`. The trusted subset of an installation, frozen by the creator from the manifest read at creation. |
+| `embedded` (optional) | `{tree_sha256, runner, steps, initial_step, calls, slots, requires, source}` | Present exactly when `workflow.id` starts with `embedded:` (§Embedded workflows). `tree_sha256` is the embedded digest of `<payload>/workflow`; `runner` is exactly `{entry}` (one member name) or `{command}` (a string list without `{artifacts}`); `steps` are strings including `initial_step`; `calls` values are installed workflow ids, never `embedded:`; `slots` and `requires` are validated as in `install.json`; `source` is a commit-pinned git URI or `null`. The trusted subset of an installation, frozen by the creator from the manifest read at creation. |
 | `persist_outputs` (optional) | object: interface output name → output role | Set on a job called through a call slot: on `succeed`, the job runs its own workflow's collect hook and records each role's property value in `.httk-job/outputs.json` as `{format: "httk-workflow-outputs", format_version: 1, outputs: {name: {role, definition, value}}}`, or fails with `workflow.outputs_unavailable`. The file is runner-private (outside the payload digest and the seal) and travels with a trusted bundle. |
 
 The **job digest** is the SHA-256 of the stored `job.json` bytes, exactly as
@@ -695,7 +695,7 @@ activation). It is strict except that an absent `job_digest`, `budget_override`,
 | `exchange_name` | UUID or `null` | The client's own id of an exchange job. |
 | `detached` | `{at, operator}` or `null` | Set by `detach`. |
 | `seal` | `null`, `{sha256, signed}`, `{disabled: true}` or `{released: true, at, request_id}` | The authoritative seal record (§Seals). |
-| `workflow_pin` | `{id, tree_sha256, source, workflow_present}` or `null` | The installation the last launch used. `source` is `"installed"` (the installation in the store), `"carried"` (a locked carried job's `workflow/`, verified against `job.json` before the launch) or `"copy"` (the job's own `workflow/` runner copy, for an unlocked job); `workflow_present` is a boolean: whether `workflow/` existed at launch. For a copy, `tree_sha256` is the digest of that copy at launch, or `null` when it cannot be digested. |
+| `workflow_pin` | `{id, tree_sha256, source, workflow_present}` or `null` | The installation the last launch used. `source` is `"installed"` (the installation in the store), `"embedded"` (a locked embedded-workflow job's `workflow/`, verified against `job.json` before the launch) or `"copy"` (the job's own `workflow/` runner copy, for an unlocked job); `workflow_present` is a boolean: whether `workflow/` existed at launch. For a copy, `tree_sha256` is the digest of that copy at launch, or `null` when it cannot be digested. |
 | `history_tail` | list, at most 32 | `{at, event, ...}` entries: `released`, `request_applied`, `request_dropped`, `join_decided`, `paused`, `unsealed`, `job_digest_repinned`. |
 | `job_digest` | 64 hex digits or `null` | The pinned job digest. |
 | `budget_override` | object or `null` | Optional. Set by `set_budget`: keys are a non-empty subset of `maximum_attempts_per_activation`, `maximum_total_attempts` and `maximum_activations`, each an integer of at least 1 or `null` (that limit lifted). Absent keys fall back to `job.json`. The effective policy is the `retry_policy` of `job.json` with these keys replaced. |
@@ -997,7 +997,7 @@ outcome is never relaunched.
 | `next_step`, `resources`, `join`, `pause` | Action details for the settled document. |
 | `failure`, `reason`, `unclean` | The failure, why a retried attempt runs, whether it follows an unclean end. |
 | `seal` | Whether to seal (decided at step 2, so a replay is deterministic). |
-| `children` | The publication plan: `{job_id, job_key, label, spawn_id, placement, priority, staged, initial_state, carried_sha256}`, `carried_sha256` being the 64-hex carried digest of a child that gets its parent's tree, else `null`, `staged` being `attempts/<A>/outcome.ready/children/jobs/<key>`. |
+| `children` | The publication plan: `{job_id, job_key, label, spawn_id, placement, priority, staged, initial_state, embedded_sha256}`, `embedded_sha256` being the 64-hex embedded digest of a child that gets its parent's tree, else `null`, `staged` being `attempts/<A>/outcome.ready/children/jobs/<key>`. |
 | `request_id`, `request` | The applied `cancel` request and its audit record. |
 | `transactions_failed`, `seal_failed` | The rewrites of steps 3 and 5. |
 
@@ -1149,7 +1149,7 @@ version 3, strict, at most 64 KiB:
 | `operator`, `reason`, `created_at` | yes | Attribution and ordering. |
 | `priority` | `set_priority` only, required | 0–999. |
 | `budget` | `set_budget` only, required | An object with the shape of `budget_override`: a non-empty subset of `maximum_attempts_per_activation`, `maximum_total_attempts` and `maximum_activations`, each an integer of at least 1 or `null` (lifted). |
-| `workflow` | `set_workflow` only, required | An installed workflow id (`local:`, `adhoc:` or `git+`), never a short name and never a `carried:` id. |
+| `workflow` | `set_workflow` only, required | An installed workflow id (`local:`, `adhoc:` or `git+`), never a short name and never a `embedded:` id. |
 | `step` | `override_step` only, required | The step to restart at. |
 | `no_copy` | `unlock` only, optional; only `true` | Mark the job without copying the installed package (`job unlock --no-copy`, and what the CLI posts to ancestors). Absent means the owner copies the runner (§Unlocked jobs). |
 | `destination` | `eject` only, required | An absolute directory, or a missing name in one. |
@@ -1336,17 +1336,17 @@ protocol does not carry it.
 - **Older readers.** An httk-workflow that predates `unlocked` treats such a
   `state.json` as damaged and rebuilds it without the marker; this is accepted.
 
-### Carried workflows
+### Embedded workflows
 
-A job created with `job new --carry` names no installation: its `workflow.id` is
-`carried:<name>@<sha12>` (the first 12 hex digits of the tree digest), its
-`job.json` has a `carried` member, and its workflow is the tree in
-`<payload>/workflow/`. Store installs and lookups refuse the `carried:` prefix,
-so no path confuses a carried job with an installation. The reserved `workflow/`
+A job created with `job new --embed-workflow` names no installation: its `workflow.id` is
+`embedded:<name>@<sha12>` (the first 12 hex digits of the tree digest), its
+`job.json` has an `embedded` member, and its workflow is the tree in
+`<payload>/workflow/`. Store installs and lookups refuse the `embedded:` prefix,
+so no path confuses an embedded workflow with an installation. The reserved `workflow/`
 name is the same one an unlocked job's runner copy uses; the difference is who
 vouches for it. An unlocked job's copy is whatever the operator left there, and
-the job is launched from it unverified (`source: "copy"`). A carried job's tree
-is pinned in `job.json` by the creator: the manager computes the **carried
+the job is launched from it unverified (`source: "copy"`). An embedded workflow's tree
+is pinned in `job.json` by the creator: the manager computes the **embedded
 digest** (sha256 over the sorted entries framed as `D\0<path>\n` and
 `F\0<path>\0<exec 0|1>\0<size>\0<sha256>\n`, descriptor-anchored, refusing
 symlinks, special files, hard-linked files and `__pycache__`) after the claim and
@@ -1354,42 +1354,42 @@ before every launch, and a locked job whose tree differs, or is missing, fails
 with `protocol_error` ("the job's workflow/ is missing"; "the job's workflow/
 cannot be verified: <reason>" for a symlink, special file, hard link or
 `__pycache__`, and for a `workflow/` that is a symlink or not a directory
-("carried workflow tree <path>: ... is a symlink or not a directory"), the
+("embedded workflow tree <path>: ... is a symlink or not a directory"), the
 "is missing" text being only for a `workflow/` that does not exist (the manager,
 precheck and `job why` use the same texts); "workflow/ changed since the job was created: digest X, created
 Y"); a match launches with `workflow_pin`
-`{id, tree_sha256, source: "carried", workflow_present: true}`. `assess` reads no
+`{id, tree_sha256, source: "embedded", workflow_present: true}`. `assess` reads no
 tree: `requires`, slot bindings and the installation of fixed callees and bound
-workflows come from `job.json`. An unlocked carried job launches unverified and pins the carried digest (`null`
+workflows come from `job.json`. An unlocked embedded-workflow job launches unverified and pins the embedded digest (`null`
 when it cannot be computed) with `source: "copy"`. The runner is launched from `job.json`'s
-`carried.runner`, with `{package}` expanded to `<payload>/workflow`. The carried
+`embedded.runner`, with `{package}` expanded to `<payload>/workflow`. The embedded
 view exists per job and never enters an id-keyed cache.
 
 The confinement of `workflow/` (read-only overlay for the attempt and its ranks;
 creating it voids the attempt) is unchanged and is what the guarantees rest on;
-an unconfined attempt already has the manager's authority. Children of a carried
-job must repeat the parent's `workflow` and `carried`; `publish_children` copies
+an unconfined attempt already has the manager's authority. Children of an embedded-workflow
+job must repeat the parent's `workflow` and `embedded`; `publish_children` copies
 the parent's launched `workflow/` into each spec-only child of the parent's own
-carried workflow (descriptor-anchored, into the temporary name `workflow.partial`,
+embedded workflow (descriptor-anchored, into the temporary name `workflow.partial`,
 which a proposed child may not contain, verified against the parent's launch pin,
 then renamed; a replay keeps a
 complete matching copy and recopies anything else), while a child payload that
-brings its own `workflow/` stays refused, and a child naming a carried workflow
-its parent does not carry is refused ("spawned child ... names a carried workflow
-its parent does not carry"). Children of an unlocked parent get the parent's current tree with its digest at
+brings its own `workflow/` stays refused, and a child naming an embedded workflow
+its parent does not embed is refused ("spawned child ... names an embedded workflow
+its parent does not embed"). Children of an unlocked parent get the parent's current tree with its digest at
 publication (editing it during the run is fine), inherit `unlocked` and pin
 `source: "copy"`; a locked parent's tree must still equal its launch pin, else
 the publication fails ("the parent's workflow/ changed since its attempt
 launched"). `a.call` of
 `[workflow.calls]` callees works (they must be installed), and `bound_workflows`
-(the dependencies checked at claim and precheck, and shipped by transfer) include a
-carried job's fixed calls. Untrusted exchange bundles are refused
-when any member, the root included, has a `carried` member (`member <id>: an
-untrusted bundle may not carry a workflow (job.json's carried)`); trusted
+(the dependencies checked at claim and precheck, and shipped by transfer) include an
+embedded workflow's fixed calls. Untrusted exchange bundles are refused
+when any member, the root included, has an `embedded` member (`member <id>: an
+untrusted bundle may not hold an embedded workflow (job.json's embedded)`); trusted
 eject, adopt and transfer carry the job, which runs at the destination with
-nothing installed, and a carried id is never reported as a missing workflow
-(its callees are). `JobRecord.job` carries `carried`, and the run's workflow
-definition URI is `carried.source` when set, else none. See
+nothing installed, and an embedded id is never reported as a missing workflow
+(its callees are). `JobRecord.job` holds `embedded`, and the run's workflow
+definition URI is `embedded.source` when set, else none. See
 {doc}`workflow_packages` for creation and the security model, and
 {doc}`collecting` for collection from a verified snapshot.
 

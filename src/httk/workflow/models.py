@@ -668,11 +668,11 @@ def validate_step(value: object, name: str = "step") -> str:
     return text
 
 
-#: The id prefix of a workflow a job carries in its own ``workflow/``: ``carried:<name>@<sha12>``, never installed.
-CARRIED_WORKFLOW_PREFIX = "carried:"
+#: The id prefix of a workflow a job embeds in its own ``workflow/``: ``embedded:<name>@<sha12>``, never installed.
+EMBEDDED_WORKFLOW_PREFIX = "embedded:"
 #: What every workflow id starts with: an installed ``local:<name>``, ``adhoc:<stem>@<sha12>`` or pinned ``git+``
-#: URI, or a job's ``carried:<name>@<sha12>``.
-WORKFLOW_ID_PREFIXES = ("local:", "adhoc:", "git+", CARRIED_WORKFLOW_PREFIX)
+#: URI, or a job's ``embedded:<name>@<sha12>``.
+WORKFLOW_ID_PREFIXES = ("local:", "adhoc:", "git+", EMBEDDED_WORKFLOW_PREFIX)
 
 
 def is_workflow_id(text: str) -> bool:
