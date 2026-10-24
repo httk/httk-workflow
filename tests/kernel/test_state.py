@@ -127,6 +127,7 @@ def test_document_is_immutable_all_the_way_down() -> None:
         ("workflow_override", {"id": "local:y", "name": "y", "tree_sha256": "ff"}),
         ("workflow_override", "local:y"),
         ("workflow_override", {"id": "demo", "name": "demo"}),
+        ("workflow_override", {"id": "carried:demo@0123456789ab", "name": "demo"}),
         ("workflow_override", {"id": "local:", "name": "demo"}),
         ("unlocked", {}),
         ("unlocked", {"operator": "op"}),

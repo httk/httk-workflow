@@ -482,7 +482,7 @@ def test_set_budget_merges_and_keeps_state_and_priority() -> None:
         assert effect == Drop(f"the job is already {state}") and new.budget_override == doc.budget_override
 
 
-@pytest.mark.parametrize("workflow", ["w2", "", 3, None, "demo@v2", "local:", "git+"])
+@pytest.mark.parametrize("workflow", ["w2", "", 3, None, "demo@v2", "local:", "git+", "carried:w@0123456789ab"])
 def test_set_workflow_envelope_names_an_installed_id(workflow: object) -> None:
     for valid in ("local:w2", "adhoc:run@0123456789ab", "git+https://example.org/r.git@" + "a" * 40):
         validate_envelope(_document("set_workflow", workflow=valid))

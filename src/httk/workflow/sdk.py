@@ -313,7 +313,8 @@ class ChildSpec:
 
         The child runs *workflow* (``(id, name)``), the installation the spawning attempt was launched from
         (the parent's effective workflow, not necessarily ``job.json``'s) with the parent's call slot
-        bindings. A child never inherits
+        bindings; a child of the parent's carried workflow carries it too (the manager copies the parent's
+        ``workflow/`` into it at publication). A child never inherits
         ``mintime``, and every ``maxtime`` it ends with is at most *maxtime_cap*, the spawning attempt's
         effective ``maxtime``.
         """
@@ -356,6 +357,11 @@ class ChildSpec:
             seal_succeeded=parent.seal_succeeded,
             # The child runs the parent's workflow, so it keeps the parent's call slot bindings.
             calls=None if parent.calls is None else cast(Mapping[str, Mapping[str, object]], _thaw(parent.calls)),
+            carried=(
+                cast(Mapping[str, object], _thaw(parent.carried))
+                if parent.carried is not None and workflow[0] == parent.workflow_id
+                else None
+            ),
         )
 
 
@@ -1260,15 +1266,14 @@ class Attempt:
         """Return the installed workflow *workflow* names among this job's declared calls.
 
         The calls are the ``[workflow.calls]`` of the installation this attempt was launched from (the job's
-        effective workflow), alias to installed id; *workflow* is one of the aliases or one of the ids.
+        effective workflow, or the ``calls`` a carried workflow's ``job.json`` froze), alias to installed id;
+        *workflow* is one of the aliases or one of the ids.
         """
 
         from . import _store
 
         workspace = self._workspace()
-        own = _store.lookup(workspace, self.context.workflow_id)
-        if own is None:
-            raise ValueError(f"this job's workflow {self.context.workflow_id} is not installed in the workspace")
+        own = self._own_installation()
         recorded = own.record.get("calls")
         calls = {str(alias): str(target) for alias, target in recorded.items()} if isinstance(recorded, dict) else {}
         target = calls.get(workflow, workflow if workflow in calls.values() else None)
@@ -1288,10 +1293,15 @@ class Attempt:
 
     def _own_installation(self) -> "Installed":
         """Return the installation this attempt was launched from (the job's effective workflow), viewed at the
-        job's own runner copy when the job is unlocked and has one."""
+        job's own runner copy when the job is unlocked and has one; a carried workflow's view of ``workflow/``."""
 
         from . import _store
 
+        if self._own is None and self.job.carried is not None:
+            carried = _store.carried(self.job, self.payload)
+            if carried is None:
+                raise ValueError(f"this job's carried workflow {self.job.workflow_id} has no workflow/ directory")
+            self._own = carried
         if self._own is None:
             own = _store.lookup(self._workspace(), self.context.workflow_id)
             if own is None:

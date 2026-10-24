@@ -889,6 +889,9 @@ products are emitted.
    must carry the job's workflow id, and its tree digest must match the one
    the job ran with (`state.json` `workflow_pin`). Refusal or tampering
    degrades that job instead of stopping the sweep.
+4. **Carried workflow.** A job created with `job new --carry` carries its tree in
+   `workflow/`; with `--allow-job-collector` its hooks are loaded from a
+   verified snapshot of that tree (see *Self-carried workflows* below).
 
 ## Git URI references
 
@@ -1051,3 +1054,130 @@ See {doc}`/details/declarations` for declaration carriage,
 {doc}`/details/provenance` for the tree-pinned provenance handoff,
 {doc}`/details/collecting` for collect-hook and fallback behavior, and
 {doc}`/details/workflow_cli` for the complete command reference.
+
+## Self-carried workflows
+
+`httk job new --carry` makes a job that carries its workflow in
+`<job>/workflow/` and names no installation. This section is the reference;
+the short version is in {doc}`/workflow_packages`.
+
+### Creating a carried job
+
+`--carry` combines with `--workflow ID|ALIAS|GIT-URI`, `--workflow-dir DIR`,
+`--from-runner FILE` and `--from-command CMD` (and the API's
+`new_job(..., carry=True)` / `new_jobs(..., carry=True)`), and is refused with
+`--install`. Nothing is installed; fetching a git URI into the fetch cache is
+allowed, as for `workflow describe`. The creator resolves the package, builds one
+scratch snapshot of it (no symlinks, special files, hard-linked files, `.git` or
+`__pycache__`), computes the carried digest, runs the instantiate hooks from that
+snapshot pinned to the digest, and copies the snapshot into each job's
+`workflow/`, re-verifying the digest. A hook that writes `workflow/` in the
+payload is refused. A package with `[workflow.build]`, a language realization
+(CWL, PWD, jobflow, httk v1) and a fixed callee that is not installed are refused
+for carry. Campaigns copy the tree per job.
+
+The job records:
+
+- `workflow = {id, name}` with the id `carried:<name>@<sha12>` (`sha12` the first
+  12 hex digits of the tree digest);
+- a `carried` member in `job.json`, frozen at creation:
+  `{tree_sha256, runner: {entry} | {command}, steps, initial_step, calls, slots, requires, source}`.
+  `runner` is exactly one of a single entry name or a command list without
+  `{artifacts}`, `calls` values are installed workflow ids (never `carried:`),
+  `slots` and `requires` have the shape of `install.json`, and `source` is a
+  commit-pinned git URI or `null`.
+
+Everything else `job.json` freezes for an installed workflow (declarations,
+parameters, inputs, resources, environment, call-slot bindings, seal policy) is
+frozen the same way.
+
+### The carried digest
+
+The tree digest is not the store's `tree_digest`. It is the SHA-256 over the
+sorted entries, each framed as `D\0<path>\n` for a directory or
+`F\0<path>\0<exec 0|1>\0<size>\0<sha256 of content>\n` for a file, walked
+through descriptors without following symlinks; it refuses symlinks, special
+files, files with more than one hard link and a `__pycache__` directory
+anywhere. `PYTHONDONTWRITEBYTECODE=1` is set for runners and for instantiate and
+collect executables, so running a carried job does not add bytecode to the tree.
+
+### Security model and what is guaranteed
+
+- **Job-local code runs only inside the job's sandbox.** The manager, the
+  workspace daemon, launch templates, build steps and platform probes never
+  execute or parse anything from `workflow/`.
+- **Privileged settings never come from `workflow/`.** The runner entry or
+  command, steps, calls, slot interfaces, `requires`, resources, environment
+  declarations, parameters and seal policy are in `job.json`, written by the job's
+  creator from the manifest read at creation. `job.json` is immutable,
+  digest-pinned and a read-only overlay in confined attempts.
+- **Read-only while running.** In a confined attempt and its ranks, `workflow/`
+  is a read-only overlay; an attempt that creates it fails.
+- **Pinned at a trusted moment, verified before trusted use.** The manager
+  compares the carried digest of `workflow/` with `carried.tree_sha256` after
+  the claim and before every launch (a mismatch fails the job with
+  `protocol_error`, "workflow/ changed since the job was created" or "the job's
+  workflow/ is missing") and records `workflow_pin` with `source: "carried"`.
+  Collection verifies it again from a snapshot.
+- **Trust follows the author of `job.json`.** An operator-created job carries
+  operator-trusted code. Children of a carried job get the parent's verified
+  tree from the manager, never from the runner. Untrusted exchange bundles never
+  carry a workflow.
+
+These guarantees hold for confined attempts and their ranks. An unconfined
+attempt already runs with the manager's uid and authority, so there is nothing
+for it to escape and the digest checks are integrity checks only. Anyone with
+filesystem access to the workspace, or with remote install rights, can already do
+anything; the model defends against the running job.
+
+### Children, collection, transfer
+
+- **Children.** A child of a carried job must name the parent's carried id and
+  carry the same `carried` member; the manager copies the parent's verified
+  `workflow/` into each child at publication (replay-safe: a complete copy
+  with the right digest is kept, a temporary or mismatching one is recopied). A
+  child payload that brings its own `workflow/` is refused. Children of a carried
+  job that name a store workflow are unaffected.
+- **Collection.** `collect` never runs a carried collector from the payload. With
+  `--allow-job-collector` (the same opt-in as for an installed tree, and only when
+  no registered provider supplies a collector) it copies `workflow/` into a private
+  snapshot in the system temporary directory, requires the snapshot's carried
+  digest to equal both `carried.tree_sha256` and the pin (`source == "carried"`),
+  runs the hooks and executable collectors from the snapshot (never from the
+  payload; Python hook modules are per snapshot) and removes it when the collect
+  window ends. A registered provider of the same short name is never used for a
+  carried job. A mismatch degrades that job (see {doc}`collecting`). The run's
+  definition URI is `carried.source` when set, else none, and `JobRecord.job`
+  carries `carried`. Postprocess scripts
+  never run from a payload.
+- **Damaged state.** Rebuilding a damaged `state.json` never deletes a carried
+  job's `workflow/`, and keeps `workflow/` whenever `job.json` cannot be read.
+- **Seals.** `workflow/` is a payload member, so the job seal covers it.
+- **Transfer.** `job transfer`, `job adopt` and `job eject` bundles carry
+  `workflow/` (trusted bundles); a carried id is never reported as a missing
+  workflow, while its fixed callees and slot-bound workflows are shipped or
+  required as for any job. Trusted bundles run the carried job at the destination with nothing installed.
+  An untrusted exchange bundle with a `carried` member is refused for every member,
+  root included ("member <id>: an untrusted bundle may not carry a workflow
+  (job.json's carried)").
+- **Switching and unlocking.** `set_workflow` is refused for a carried job and to
+  a `carried:` target ("a carried workflow cannot be switched; unlock the job and
+  edit workflow/ instead"), by the CLI and the owner. `unlock` never uses the store and keeps the tree ("job unlocked; existing runner
+  copy kept"; a request to copy when the tree is missing is dropped: "the carried
+  workflow/ is missing; nothing to copy"); an unlocked carried job launches unverified with `source: "copy"` and re-pins the
+  digest (see {doc}`/restarting_jobs`).
+- **Inspection.** `job show` appends "; carried, digest <sha12>" to the workflow
+  line (JSON member `carried`). `job why` has a "carried workflow" check
+  (`workflow/ has the digest <sha12> job.json froze`, or the launch texts; for an
+  unlocked job `the job is unlocked: its workflow/ launches unverified`), and its
+  installed-workflow check reads "its calls are installed and built here".
+  Precheck reports the launch texts as a runner problem. None of them reports a
+  carried job as not installed. `workflow uninstall --check` counts jobs whose
+  dependencies (carried fixed calls and slot bindings) include the workflow.
+
+### Limits
+
+A carried job has no store build and cannot carry callees; two jobs with the same
+tree are not deduplicated; an older httk-workflow rejects a `job.json` with
+`carried`; and a carried workflow shares the prelude of an installed workflow of
+the same name.

@@ -22,7 +22,7 @@ from httk.core.git_sources import GitUri, parse_git_uri
 
 from .. import _fs, _kernel, _store
 from .._durations import TIME_RESOURCES, format_duration
-from .._manager_scheduling import effective_workflow
+from .._manager_scheduling import bound_workflows, effective_workflow
 from .._pip_repositories import _pip_names, _pip_owner, _pip_provider, _pip_tag_uris
 from ..adapters import probe_remote_workspace, resolve_remote, run_adapter
 from ..git_workflows import _uninstall_workflows, fetch_workflows
@@ -861,13 +861,15 @@ def _not_installable(selector: str) -> str | None:
 
 
 def _users(workspace: Workspace, workflow_id: str) -> list[str]:
-    """Return the keys of the unfinished jobs that run one workflow (their effective workflow, after set_workflow)."""
+    """Return the keys of the unfinished jobs that use one workflow: run it (their effective workflow, after
+    set_workflow), bind a call slot to it, or call it from the workflow they carry."""
 
     states = ("ready", "waiting", "paused", "owned")
     return [
         ref.job_key
         for ref in iter_jobs(workspace, states)
-        if (job := read_job(ref)[0]) is not None and effective_workflow(job, read_state(ref)[0])[0] == workflow_id
+        if (job := read_job(ref)[0]) is not None
+        and (effective_workflow(job, read_state(ref)[0])[0] == workflow_id or workflow_id in bound_workflows(job))
     ]
 
 

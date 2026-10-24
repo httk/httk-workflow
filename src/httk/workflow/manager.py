@@ -55,6 +55,7 @@ from ._allocation import (
 from ._attempt_env import attempt_context, runner_environment
 from ._attempt_process import start_gated, write_marker
 from ._bundles import EXCHANGE_POOL_PREFIX
+from ._carried import carried_digest, carried_problem
 from ._durations import format_duration
 from ._exchange import ExchangeService
 from ._job import JobDefinition
@@ -378,6 +379,40 @@ class RunningAttempt:
 
     def __repr__(self) -> str:
         return f"RunningAttempt(attempt_id={self.attempt_id!r}, pid={self.process.pid})"
+
+
+def _carried_launch(job: JobDefinition, doc: StateDoc, payload: Path) -> tuple[_store.Installed, str | None, str]:
+    """Return the view a carried job launches from, the digest to pin and the pin's ``source``.
+
+    A locked job's ``workflow/`` must have exactly the digest ``job.json`` froze at creation (``source``
+    ``carried``); an unlocked job launches from whatever its ``workflow/`` holds, pinned by its digest then (``null``
+    when it cannot be digested) as a runner copy (``source`` ``copy``). Nothing in the tree is parsed or run here.
+
+    :param job: The owned job, which carries its workflow.
+    :param doc: Its ``state.json``.
+    :param payload: Its directory.
+    :return: The carried view, the digest to pin and the pin source.
+    :raises httk.workflow.errors.RunnerResolutionError: ``protocol_error`` when ``workflow/`` is missing, refused
+        or changed (locked jobs).
+    """
+
+    assert job.carried is not None
+    installed = _store.carried(job, payload, require_tree=False)
+    assert installed is not None
+    tree_sha256 = str(job.carried["tree_sha256"])
+    if doc.unlocked is None:
+        if (problem := carried_problem(installed.package, tree_sha256)) is not None:
+            raise RunnerResolutionError("protocol_error", problem)
+        return installed, tree_sha256, "carried"
+    if _store.carried(job, payload) is None:
+        # Unverified, yet launched only from a real directory: missing, a symlink or not a directory is refused.
+        problem = carried_problem(installed.package, tree_sha256) or "the job's workflow/ is missing"
+        raise RunnerResolutionError("protocol_error", problem)
+    try:
+        actual: str | None = carried_digest(installed.package)
+    except (FormatError, OSError):
+        actual = None
+    return installed, actual, "copy"
 
 
 def _created_runner_copy(owned: OwnedJob, pin: Mapping[str, object] | None) -> str | None:
@@ -999,8 +1034,13 @@ class TaskManager:
 
         doc = StateDoc.empty(owned.job_id).with_failure(failure("protocol_error", message))
         salvaged = salvage_state(owned.path / "state.json")
-        # A workflow/ no readable pin shows present at the last launch may be the job's own: not kept for later.
-        _created_runner_copy(owned, salvaged.get("workflow_pin"))
+        try:
+            carried = JobDefinition.from_path(owned.path / "job.json").carried is not None
+        except FormatError:
+            carried = True  # unknown: workflow/ may be a carried job's only copy of its code
+        if not carried:
+            # A workflow/ no readable pin shows present at the last launch may be the job's own: not kept for later.
+            _created_runner_copy(owned, salvaged.get("workflow_pin"))
         # An exchange job stays one (its client still asks for it by its name), and job.json stays pinned.
         doc = doc.updated(
             **{key: salvaged[key] for key in ("origin", "exchange_name", "job_digest", "unlocked") if key in salvaged}
@@ -1534,15 +1574,22 @@ class TaskManager:
         try:
             # The effective workflow: an operator's set_workflow override wins over job.json's.
             workflow_id, _name = _manager_scheduling.effective_workflow(job, doc)
-            installed, problem = self._workflow(workflow_id)
-            if installed is None:
-                raise RunnerResolutionError("runner_unavailable", problem or f"workflow {workflow_id} is gone")
-            tree_sha256 = installed.record.get("tree_sha256")
-            source = "installed"
+            if job.carried is not None:
+                installed, tree_sha256, source = _carried_launch(job, doc, owned.path)
+            elif (found := self._workflow(workflow_id))[0] is None:
+                raise RunnerResolutionError("runner_unavailable", found[1] or f"workflow {workflow_id} is gone")
+            else:
+                recorded = found[0].record.get("tree_sha256")
+                installed, source = found[0], "installed"
+                tree_sha256 = recorded if isinstance(recorded, str) else None
             # An unlocked job with its own runner copy launches from it (never a locked one: the payload is the
             # job's to write), pinned by the copy's digest at launch (null when it cannot be digested). Only the
             # runner entry, {package} and the runner root come from the copy: nothing in it is parsed or run here.
-            if doc.unlocked is not None and (copy := _store.runner_copy(installed, owned.path)) is not None:
+            if (
+                job.carried is None
+                and doc.unlocked is not None
+                and (copy := _store.runner_copy(installed, owned.path)) is not None
+            ):
                 installed, source = copy, "copy"
                 try:
                     tree_sha256 = _store.source_digest(copy.package, declared_by=copy.installed_package)

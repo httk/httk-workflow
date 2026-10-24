@@ -3,9 +3,10 @@
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from importlib.machinery import ModuleSpec, PathFinder
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from . import _store, compat
+from ._carried import carried_problem
 from ._job import JobDefinition
 from ._kernel import JobRef
 from ._manager_scheduling import binding_problem, bound_workflows, effective_workflow, unmet_job_requirements
@@ -112,28 +113,44 @@ def _strings(value: object) -> tuple[str, ...]:
 
 
 def _workflow_problems(
-    workspace: Workspace, workflow_id: str, job: JobDefinition | None = None
+    workspace: Workspace,
+    workflow_id: str,
+    job: JobDefinition | None = None,
+    payload: Path | None = None,
+    doc: StateDoc | None = None,
 ) -> tuple[tuple[str, str] | None, list[str], _store.Installed | None]:
     """Check the job's workflow and its call closure: installed here, and built for this platform.
 
     With *job*, the workflows its call slots are bound to join the closure, and its bindings must be exactly
-    the call slots of the installed workflow.
+    the call slots of the installed workflow. A job that carries its workflow (*payload* given) is checked
+    against its ``job.json`` instead, and a locked one's ``workflow/`` must have the digest frozen there.
 
     :param workspace: The workspace.
     :param workflow_id: The job's effective workflow id.
     :param job: The job whose call slot bindings to check.
-    :return: The root workflow's ``(status, problem)`` or ``None``, one problem per callee, and the installation.
+    :param payload: The job's directory, for a carried workflow's tree.
+    :param doc: The job's ``state.json`` (an unlocked carried job launches its tree unverified).
+    :return: The root workflow's ``(status, problem)`` or ``None``, one problem per callee, and the installation
+        (the record-only view of a carried workflow).
     """
 
+    carried = None if job is None or payload is None else _store.carried(job, payload, require_tree=False)
     try:
         bound = () if job is None else bound_workflows(job)
         closure = _store.closure(workspace, workflow_id, check_builds=True, also=bound)
-        installed = _store.lookup(workspace, workflow_id)
+        installed = carried or _store.lookup(workspace, workflow_id)
     except (RunnerResolutionError, ValueError) as exc:
         return ("problem", f"workflow {workflow_id} cannot be checked: {exc}"), [], None
     root: tuple[str, str] | None = None
+    if carried is not None and payload is not None and (doc is None or doc.unlocked is None):
+        problem = carried_problem(payload / _store.RUNNER_COPY, str(carried.record.get("tree_sha256")))
+        root = None if problem is None else ("problem", problem)
     calls: list[str] = []
-    if job is not None and installed is not None and (problem := binding_problem(job, installed)) is not None:
+    if (
+        job is not None
+        and installed is not None
+        and (problem := binding_problem(job, installed.id, installed.record)) is not None
+    ):
         calls.append(problem)
     for missing in closure.missing:
         problem = f"workflow {missing} is not installed in this workspace; run 'httk workflow install'"
@@ -345,7 +362,7 @@ def _finding(
     environment = environment_findings(job, settings)
     doc, _damage = read_state(ref)
     workflow_id, _name = effective_workflow(job, doc)
-    workflow_problem, call_problems, installed = _workflow_problems(workspace, workflow_id, job)
+    workflow_problem, call_problems, installed = _workflow_problems(workspace, workflow_id, job, ref.path, doc)
     runner: dict[str, object] = {"status": "ok", "ok": True}
     if workflow_problem is not None:
         status, problem = workflow_problem

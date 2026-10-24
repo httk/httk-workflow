@@ -14,6 +14,7 @@ from typing import cast
 
 from .. import _death, _kernel, _moving, _requests, _store
 from .._bundles import read_manifest
+from .._carried import carried_problem
 from .._durations import format_duration
 from .._job import JobDefinition
 from .._kernel import OWNED, JobRef, OwnerRecord
@@ -558,18 +559,32 @@ class _Diagnosing:
         self.hints.append(text)
 
 
-def _workflow_checks(workspace: Workspace, job: JobDefinition, doc: StateDoc | None, report: _Diagnosing) -> bool:
+def _workflow_checks(
+    workspace: Workspace, job: JobDefinition, doc: StateDoc | None, payload: Path, report: _Diagnosing
+) -> bool:
     """Record whether the job's effective workflow and its calls are installed and built here, and its ``requires``
-    met."""
+    met; a carried workflow's ``workflow/`` is checked (read only) against ``job.json`` as a launch checks it."""
 
     workflow_id, _name = effective_workflow(job, doc)
+    carried = _store.carried(job, payload, require_tree=False)
     try:
         closure = _store.closure(workspace, workflow_id, check_builds=True, also=bound_workflows(job))
-        installed = _store.lookup(workspace, workflow_id)
+        installed = carried or _store.lookup(workspace, workflow_id)
     except (RunnerResolutionError, ValueError) as exc:
         report.check("installed workflow", False, f"workflow {workflow_id} cannot be checked: {exc}")
         return False
-    binding = None if installed is None else binding_problem(job, installed)
+    tree_ok = True
+    if carried is not None:
+        tree_sha256 = str(carried.record.get("tree_sha256"))
+        if doc is not None and doc.unlocked is not None:
+            report.check("carried workflow", None, "the job is unlocked: its workflow/ launches unverified")
+        else:
+            problem = carried_problem(payload / _store.RUNNER_COPY, tree_sha256)
+            tree_ok = problem is None
+            report.check(
+                "carried workflow", tree_ok, problem or f"workflow/ has the digest {tree_sha256[:12]} job.json froze"
+            )
+    binding = None if installed is None else binding_problem(job, installed.id, installed.record)
     if binding is not None:
         report.check("call slot bindings", False, binding)
     if closure.missing:
@@ -579,7 +594,8 @@ def _workflow_checks(workspace: Workspace, job: JobDefinition, doc: StateDoc | N
         report.check("built workflow", False, f"not built for this platform: {', '.join(closure.unbuilt)}")
         report.hint("build it with 'httk workflow build --workspace WORKSPACE WORKFLOW'")
     if closure.ok:
-        report.check("installed workflow", True, f"{workflow_id} and its calls are installed and built here")
+        installed_text = "its calls are" if carried is not None else f"{workflow_id} and its calls are"
+        report.check("installed workflow", True, f"{installed_text} installed and built here")
     requires = () if installed is None else _strings(installed.record.get("requires"))
     if requires:
         unmet = unmet_job_requirements(requires)
@@ -591,7 +607,7 @@ def _workflow_checks(workspace: Workspace, job: JobDefinition, doc: StateDoc | N
             if unmet
             else f"{', '.join(requires)} met in this process's environment; each manager re-checks them in its own",
         )
-    return closure.ok and binding is None
+    return closure.ok and binding is None and tree_ok
 
 
 def _manager_checks(
@@ -866,7 +882,7 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
     if state == "ready":
         summary = "this job is ready and waiting to be claimed; every claim precondition is listed below"
         if job is not None:
-            _workflow_checks(workspace, job, doc, report)
+            _workflow_checks(workspace, job, doc, ref.path, report)
             manager_checks(claiming=True)
             _budget_checks(job, doc, report)
         _history_check(ref, report)

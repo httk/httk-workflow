@@ -17,7 +17,6 @@ from ._state import StateDoc, read_state_unowned
 from .errors import FormatError
 
 if TYPE_CHECKING:
-    from ._store import Installed
     from .manager import TaskManager, WorkCensus
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
@@ -69,32 +68,37 @@ def effective_workflow(job: JobDefinition, doc: StateDoc | None) -> tuple[str, s
 
 
 def bound_workflows(job: JobDefinition) -> tuple[str, ...]:
-    """Return the installed ids the job's call slot bindings name: dependencies of the job beside its workflow's.
+    """Return the installed ids the job depends on beside its workflow's own calls.
+
+    Those are the workflows its call slot bindings name and, for a job that carries its workflow (which no store
+    installation records), the fixed calls ``job.json``'s ``carried`` member froze.
 
     :param job: The job.
     :return: The ids, sorted and distinct.
     """
 
     bindings = (cast(Mapping[str, object], binding) for binding in (job.calls or {}).values())
-    return tuple(sorted({str(binding["workflow"]) for binding in bindings}))
+    fixed = () if job.carried is None else cast(Mapping[str, object], job.carried["calls"]).values()
+    return tuple(sorted({*(str(binding["workflow"]) for binding in bindings), *(str(callee) for callee in fixed)}))
 
 
-def binding_problem(job: JobDefinition, installed: "Installed") -> str | None:
-    """Return why the job's call slot bindings are not exactly the call slots of its installed workflow, or ``None``.
+def binding_problem(job: JobDefinition, workflow_id: str, record: Mapping[str, object]) -> str | None:
+    """Return why the job's call slot bindings are not exactly the call slots of its workflow, or ``None``.
 
     A job arriving through the exchange was never bound by job creation, so the whole binding set is checked here.
 
     :param job: The job.
-    :param installed: The job's effective installed workflow.
+    :param workflow_id: The job's effective workflow id.
+    :param record: That workflow's ``install.json`` record, or a carried job's ``carried`` member.
     :return: The problem, or ``None``.
     """
 
-    recorded = installed.record.get("slots")
-    slots = sorted(recorded) if isinstance(recorded, dict) else []
+    recorded = record.get("slots")
+    slots = sorted(recorded) if isinstance(recorded, Mapping) else []
     bound = sorted(job.calls or {})
     if bound == slots:
         return None
-    return f"the job binds call slots {bound or 'none'}, but workflow {installed.id} has call slots {slots or 'none'}"
+    return f"the job binds call slots {bound or 'none'}, but workflow {workflow_id} has call slots {slots or 'none'}"
 
 
 def effective_requirement(
@@ -245,18 +249,24 @@ def assess(
     if missing := job.required_capabilities - manager.capabilities:
         return None, ("capability", min(missing))
     workflow_id, _name = effective_workflow(job, doc)
-    installed, problem = manager._workflow(workflow_id)
-    if installed is None:
-        return None, ("calls", problem or f"workflow {workflow_id} is not installed")
-    if (problem := binding_problem(job, installed)) is not None:
+    record: Mapping[str, object]
+    if job.carried is not None:
+        # The job's own workflow/ is read only once the job is owned: here job.json's frozen settings alone.
+        workflow_id, record = job.workflow_id, job.carried
+    else:
+        installed, problem = manager._workflow(workflow_id)
+        if installed is None:
+            return None, ("calls", problem or f"workflow {workflow_id} is not installed")
+        record = installed.record
+    if (problem := binding_problem(job, workflow_id, record)) is not None:
         return None, ("calls", problem)
     for bound in bound_workflows(job):
         # Cached per workflow id: the facts about one installation, never the job-specific union.
         found, problem = manager._workflow(bound)
         if found is None:
             return None, ("calls", problem or f"workflow {bound} is not installed")
-    requires = installed.record.get("requires")
-    unmet = unmet_job_requirements(tuple(str(item) for item in requires) if isinstance(requires, list) else ())
+    requires = record.get("requires")
+    unmet = unmet_job_requirements(tuple(str(item) for item in requires) if isinstance(requires, list | tuple) else ())
     if unmet:
         return None, ("requirements", unmet[0])
     requirement = effective_requirement(

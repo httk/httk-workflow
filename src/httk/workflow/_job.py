@@ -1,7 +1,9 @@
 """The immutable ``job.json`` of a job (format ``httk-workflow-job``, version 3): :class:`JobDefinition`.
 
 Version 3 carries no runner, workdir, data, ``requires`` or fixed calls: the
-installed workflow supplies them. The optional ``calls`` member binds the
+installed workflow supplies them, except for a job that carries its own workflow in ``workflow/``, whose optional
+``carried`` member freezes them at creation (workflow id ``carried:<name>@<sha12>``). The optional ``calls`` member
+binds the
 workflow's call slots, and the optional ``persist_outputs`` member names the
 outputs a job called through a slot records for its caller. ``placement`` is authoritative and immutable.
 The job digest is the SHA-256 of the stored bytes, exactly as submitted.
@@ -15,22 +17,29 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Self
 
+from httk.core.git_sources import parse_git_uri
+from httk.core.requirements import parse_requirements
+
 from httk.workflow import _fs
 from httk.workflow._state import Frozen, _freeze, _thaw
 from httk.workflow._util import json_bytes, require_int, require_mapping, require_string
 from httk.workflow.errors import FormatError
 from httk.workflow.models import (
+    CARRIED_WORKFLOW_PREFIX,
     RetryPolicy,
     _reserved_payload_member,
     _validate_step_resources,
     canonical_uuid,
     check_job_placement,
+    is_workflow_id,
     job_digest,
     make_job_key,
     parse_job_key,
     parse_placement_text,
     placement_text,
+    runner_command_reference,
     validate_call_bindings,
+    validate_calls,
     validate_declarations,
     validate_declared,
     validate_environment,
@@ -38,6 +47,7 @@ from httk.workflow.models import (
     validate_parameters,
     validate_persist_outputs,
     validate_resources,
+    validate_runner_command,
     validate_step,
 )
 
@@ -72,9 +82,11 @@ _MEMBERS = frozenset(
         "staged_files",
         "calls",
         "persist_outputs",
+        "carried",
     }
 )
-_OPTIONAL_MEMBERS = frozenset({"staged_files", "calls", "persist_outputs"})
+_OPTIONAL_MEMBERS = frozenset({"staged_files", "calls", "persist_outputs", "carried"})
+_CARRIED_MEMBERS = frozenset({"tree_sha256", "runner", "steps", "initial_step", "calls", "slots", "requires", "source"})
 _RETRY_MEMBERS = frozenset(
     {"maximum_attempts_per_activation", "maximum_total_attempts", "maximum_activations", "retry_on"}
 )
@@ -147,6 +159,58 @@ def _parent(value: object) -> Mapping[str, Frozen] | None:
     return _frozen(parent)
 
 
+def _carried(value: object, workflow_id: str, workflow_name: str, initial_step: str) -> Mapping[str, Frozen]:
+    """Validate the ``carried`` member against the job's workflow id, short name and initial step."""
+
+    carried = _exact(value, "carried", _CARRIED_MEMBERS)
+    tree_sha256 = carried["tree_sha256"]
+    if not isinstance(tree_sha256, str) or not _SHA256.fullmatch(tree_sha256):
+        raise FormatError("carried.tree_sha256 is not 64 lowercase hex digits")
+    if workflow_id != f"{CARRIED_WORKFLOW_PREFIX}{workflow_name}@{tree_sha256[:12]}":
+        raise FormatError(f"workflow.id must be carried:<workflow.name>@<carried.tree_sha256[:12]>, not {workflow_id}")
+    runner = require_mapping(carried["runner"], "carried.runner")
+    if set(runner) == {"entry"}:
+        entry = require_string(runner["entry"], "carried.runner.entry")
+        if entry in {".", ".."} or "/" in entry or "\x00" in entry:
+            raise FormatError(f"carried.runner.entry must name one package member: {entry!r}")
+    elif set(runner) == {"command"}:
+        for element in validate_runner_command(runner["command"], "carried.runner.command"):
+            reference = runner_command_reference(element, "carried.runner.command")
+            if reference is not None and reference.name == "artifacts":
+                raise FormatError("carried.runner.command may not use {artifacts}: a carried workflow is never built")
+    else:
+        raise FormatError('carried.runner must be exactly {"entry": NAME} or {"command": [...]}')
+    steps = carried["steps"]
+    if not isinstance(steps, list) or not steps:
+        raise FormatError("carried.steps must be a nonempty array")
+    names = {validate_step(step, "carried.steps[]") for step in steps}
+    for name, step in (("carried.initial_step", carried["initial_step"]), ("initial_step", initial_step)):
+        if validate_step(step, name) not in names:
+            raise FormatError(f"{name} {step!r} is not in carried.steps")
+    for alias, callee in validate_calls(carried["calls"], "carried.calls").items():
+        if not is_workflow_id(callee) or callee.startswith(CARRIED_WORKFLOW_PREFIX):
+            raise FormatError(f"carried.calls.{alias} must be an installed workflow id, not {callee!r}")
+    for alias, default in require_mapping(carried["slots"], "carried.slots").items():
+        validate_label(alias, "carried.slots alias")
+        if default is not None and (
+            not isinstance(default, str) or not default or any(character.isspace() for character in default)
+        ):
+            raise FormatError(f"carried.slots.{alias} must be a workflow reference without whitespace, or null")
+    try:
+        parse_requirements(carried["requires"], "carried.requires")
+    except ValueError as exc:
+        raise FormatError(str(exc)) from exc
+    source = carried["source"]
+    if source is not None:
+        try:
+            pinned = isinstance(source, str) and source.startswith("git+") and parse_git_uri(source).pinned
+        except ValueError as exc:
+            raise FormatError(f"carried.source: {exc}") from exc
+        if not pinned:
+            raise FormatError(f"carried.source must be a git URI pinned to a commit, or null: {source!r}")
+    return _frozen(carried)
+
+
 @dataclass(frozen=True)
 class JobDefinition:
     """The immutable declaration of one job, as stored in ``job.json`` version 3.
@@ -177,6 +241,9 @@ class JobDefinition:
         the workflow has no call slots.
     :param persist_outputs: The call slot output names to the output roles this job records for its caller, or
         ``None`` (the member absent).
+    :param carried: The trusted settings of the workflow the job carries in its ``workflow/``, frozen at creation:
+        ``{tree_sha256, runner, steps, initial_step, calls, slots, requires, source}``; ``None`` (the member absent)
+        for a job of an installed workflow. Present exactly when ``workflow_id`` starts with ``carried:``.
     :param stored_digest: The SHA-256 of the stored bytes this definition was read from, if any.
     """
 
@@ -202,6 +269,7 @@ class JobDefinition:
     staged_files: tuple[Mapping[str, Frozen], ...] = ()
     calls: Mapping[str, Frozen] | None = None
     persist_outputs: Mapping[str, Frozen] | None = None
+    carried: Mapping[str, Frozen] | None = None
     stored_digest: str | None = field(default=None, compare=False, repr=False)
 
     @property
@@ -240,14 +308,19 @@ class JobDefinition:
         placement = _placement(doc["placement"], "placement")
         check_job_placement(placement)
         tag = doc["tag"]
+        workflow_id = require_string(workflow["id"], "workflow.id")
+        workflow_name = require_string(workflow["name"], "workflow.name")
+        initial_step = validate_step(doc["initial_step"], "initial_step")
+        if ("carried" in doc) != workflow_id.startswith(CARRIED_WORKFLOW_PREFIX):
+            raise FormatError("job.json carries a carried member exactly when workflow.id starts with carried:")
         return cls(
             id=canonical_uuid(doc["id"], "id"),
             tag=None if tag is None else validate_label(tag, "tag"),
             name=require_string(doc["name"], "name"),
             placement=placement,
-            workflow_id=require_string(workflow["id"], "workflow.id"),
-            workflow_name=require_string(workflow["name"], "workflow.name"),
-            initial_step=validate_step(doc["initial_step"], "initial_step"),
+            workflow_id=workflow_id,
+            workflow_name=workflow_name,
+            initial_step=initial_step,
             priority=require_int(doc["priority"], "priority", maximum=999),
             claim_pool=validate_label(claim["pool"], "claim.pool"),
             required_capabilities=frozenset(validate_label(item, "capability") for item in capabilities),
@@ -265,6 +338,7 @@ class JobDefinition:
             persist_outputs=(
                 _frozen(validate_persist_outputs(doc["persist_outputs"])) if "persist_outputs" in doc else None
             ),
+            carried=(_carried(doc["carried"], workflow_id, workflow_name, initial_step) if "carried" in doc else None),
         )
 
     @classmethod
@@ -342,6 +416,7 @@ class JobDefinition:
             **({"staged_files": [_thaw(entry) for entry in self.staged_files]} if self.staged_files else {}),
             **({"calls": _thaw(self.calls)} if self.calls is not None else {}),
             **({"persist_outputs": _thaw(self.persist_outputs)} if self.persist_outputs is not None else {}),
+            **({"carried": _thaw(self.carried)} if self.carried is not None else {}),
         }
 
     def encode(self) -> bytes:

@@ -311,6 +311,23 @@ unless told to:
   job with `the job's last attempt did not run from its runner copy; restart it before collecting`; the other reasons read `runner copy modified since the
   job ran: ... digest X does not match pinned Y` and `... could not be verified`. An unlocked job without a copy uses the installed tree as before. With `--into`, the run is stored with no mark that the job
   was unlocked: whoever forces the collection takes the responsibility.
+- A carried job (created with `job new --carry`, see
+  {doc}`workflow_packages`) is not degraded by its tree: with
+  `--allow-job-collector`, and only when no registered provider supplies a
+  collector, collection copies `workflow/` into a private snapshot in the system temporary
+  directory (removed when the collect window ends; unlocked runner copies are
+  collected the same way), computes the carried digest of the snapshot, requires
+  it to equal both `job.json`'s `carried.tree_sha256` and the launch pin (`source`
+  `carried`; an unlocked carried job needs `source` `copy` or `carried` and the pin
+  digest), loads Python hooks as modules private to the snapshot (identical trees
+  of two jobs never share a module) and runs executable collectors with the
+  snapshot as working directory. A registered provider with the same short name is
+  never used for a carried job. Otherwise the job degrades with `the job's last attempt did not run from its workflow/; restart it before collecting`, `carried workflow modified since the job was created: the last launch pinned <X>, job.json <Y>`, `... digest <X> does not match pinned <Y>` or `... <path> could not be verified: <error>`. An unlocked carried job whose launch pinned no digest is refused with `the job's
+  workflow/ could not be digested at launch (its launch pinned no digest); fix it
+  and restart before collecting`. Unlocked copies keep their existing texts. Only that job degrades. Nothing is ever executed from the payload itself, and without
+  `--allow-job-collector` a payload never causes code to run at collection.
+  `CollectedJob.workflow_id` is the carried id, and the definition URI is
+  `carried.source` when it is a commit-pinned git URI, else `None`.
 - Every per-job summary line of an unlocked job, degraded or forced, and the
   store report carry `"unlocked": true`, and
   `JobRecord.job["unlocked"]` carries the marker.

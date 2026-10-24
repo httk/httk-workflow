@@ -543,6 +543,9 @@ def _check_job(
     manifest: BundleManifest, index: int, job: JobDefinition, by_id: Mapping[str, BundleMember], *, untrusted: bool
 ) -> None:
     member = manifest.members[index]
+    if untrusted and job.carried is not None:
+        # An exchange job runs only workflows the workspace operator installed, every member alike.
+        raise BundleError(f"member {member.job_id}: an untrusted bundle may not carry a workflow (job.json's carried)")
     if job.id != member.job_id:
         raise BundleError(f"member {member.job_id}: job.json names job {job.id}")
     if job.job_key != member.job_key:

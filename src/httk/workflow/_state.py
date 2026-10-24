@@ -21,7 +21,13 @@ from typing import Any, NoReturn, Self
 from httk.workflow import _fs
 from httk.workflow._util import require_string
 from httk.workflow.errors import FormatError, WorkflowError
-from httk.workflow.models import canonical_uuid, is_workflow_id, validate_budget_override, validate_step
+from httk.workflow.models import (
+    CARRIED_WORKFLOW_PREFIX,
+    canonical_uuid,
+    is_workflow_id,
+    validate_budget_override,
+    validate_step,
+)
 
 __all__ = [
     "MAX_STATE_BYTES",
@@ -195,7 +201,8 @@ class StateDoc:
     :param detached: The detachment record, or ``None``.
     :param seal: The authoritative seal record, or ``None``.
     :param workflow_pin: The workflow the last attempt launched from (``id``, ``tree_sha256``, ``source``:
-        ``installed``, or ``copy`` for an unlocked job's runner copy, and ``workflow_present``: whether
+        ``installed``, ``carried`` for a locked job's verified carried ``workflow/``, or ``copy`` for an unlocked
+        job's runner copy or carried tree, and ``workflow_present``: whether
         ``workflow/`` existed at launch), or ``None``.
     :param history_tail: The last transitions (at most 32).
     :param job_digest: The digest of ``job.json`` pinned at the job's first activation, or ``None`` before it.
@@ -327,7 +334,8 @@ class StateDoc:
                 raise FormatError("state.json workflow_override must be {id, name} or null")
             for member in ("id", "name"):
                 require_string(workflow_override[member], f"state.json workflow_override.{member}")
-            if not is_workflow_id(str(workflow_override["id"])):
+            override_id = str(workflow_override["id"])
+            if not is_workflow_id(override_id) or override_id.startswith(CARRIED_WORKFLOW_PREFIX):
                 raise FormatError("state.json workflow_override.id must be an installed workflow id")
         return cls(
             job_id=canonical_uuid(doc["job_id"], "state.json job_id"),

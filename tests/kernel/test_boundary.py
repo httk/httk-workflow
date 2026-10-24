@@ -151,6 +151,8 @@ TEMPFILE_CALLERS = frozenset(
         "compat/cwl/__init__.py",
         # An anonymous file (no name anywhere) buffering a seal's manifest.
         "seals.py",
+        # Collect: a private snapshot of a job-writable workflow tree a collector runs from, removed afterwards.
+        "collecting.py",
         # CLI: a relay directory for a remote-to-remote transfer and the payload a job command is built in, both in
         # the system temporary directory.
         "workflow_cli/_transfer.py",

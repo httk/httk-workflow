@@ -668,12 +668,15 @@ def validate_step(value: object, name: str = "step") -> str:
     return text
 
 
-#: What every installed workflow id starts with: ``local:<name>``, ``adhoc:<stem>@<sha12>`` or a pinned ``git+`` URI.
-WORKFLOW_ID_PREFIXES = ("local:", "adhoc:", "git+")
+#: The id prefix of a workflow a job carries in its own ``workflow/``: ``carried:<name>@<sha12>``, never installed.
+CARRIED_WORKFLOW_PREFIX = "carried:"
+#: What every workflow id starts with: an installed ``local:<name>``, ``adhoc:<stem>@<sha12>`` or pinned ``git+``
+#: URI, or a job's ``carried:<name>@<sha12>``.
+WORKFLOW_ID_PREFIXES = ("local:", "adhoc:", "git+", CARRIED_WORKFLOW_PREFIX)
 
 
 def is_workflow_id(text: str) -> bool:
-    """Report whether *text* has the shape of an installed workflow id: a known prefix with something after it.
+    """Report whether *text* has the shape of a workflow id: a known prefix with something after it.
 
     :param text: The text.
     :return: Whether it is id-shaped.

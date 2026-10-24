@@ -94,6 +94,15 @@ def _definition_uri(workflow: object) -> str | None:
     return str(uri) if uri.pinned else None
 
 
+def _record_definition_uri(record: JobRecord) -> str | None:
+    """Return the definition URI of the workflow that produced *record*: a carried workflow's pinned ``source``."""
+
+    carried = record.job.get("carried")
+    if isinstance(carried, Mapping):
+        return _definition_uri(carried.get("source"))
+    return _definition_uri(_producing_workflow(record)[0])
+
+
 def _timestamp(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -180,7 +189,7 @@ def run_record(record: JobRecord) -> Run:
     finished_at = max(_attempt_times(record, "finished_at"), default=None)
     return Run(
         workflow_declaration_uri=workflow_uri,
-        workflow_definition_uri=_definition_uri(_producing_workflow(record)[0]),
+        workflow_definition_uri=_record_definition_uri(record),
         inputs=() if document is None else _edges(identity, document, "inputs"),
         artifacts=() if document is None else _edges(identity, document, "artifacts"),
         outputs=() if document is None else _edges(identity, document, "outputs"),

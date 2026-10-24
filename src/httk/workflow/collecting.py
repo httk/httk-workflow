@@ -61,6 +61,7 @@ from httk.core.digests import sha256_file, tree_digest
 from httk.core.storage import content_id
 
 from . import _fs, _kernel, _store, compat
+from ._carried import carried_digest
 from ._job import JobDefinition
 from ._kernel import JobRef
 from ._manager_scheduling import current_step
@@ -71,6 +72,7 @@ from .hookapi import COLLECT_STREAM_FORMAT, COLLECT_STREAM_VERSION, Collected
 from .introspection import JobSelectorResolver, iter_jobs, job_events, read_job, read_state
 from .introspection._reading import JSON_LIMIT, read_job_file
 from .models import (
+    CARRIED_WORKFLOW_PREFIX,
     JOB_STATE_DIRECTORY,
     Failure,
     canonical_uuid,
@@ -367,7 +369,8 @@ def _job_mapping(job: JobDefinition, doc: StateDoc | None) -> dict[str, object]:
     workflow's id and ``workflow_name`` its short name; ``workflow_override``,
     present only after an operator's ``set_workflow``, is the ``{id, name}``
     from ``state.json`` the job ran instead; ``unlocked``, present only for a
-    job in debug mode, is ``state.json``'s ``unlocked`` marker.
+    job in debug mode, is ``state.json``'s ``unlocked`` marker; ``carried``, present
+    only for a job that carries its workflow, is ``job.json``'s ``carried`` member.
     """
 
     policy = job.retry_policy
@@ -405,6 +408,8 @@ def _job_mapping(job: JobDefinition, doc: StateDoc | None) -> dict[str, object]:
         result["calls"] = _thaw(job.calls)
     if job.persist_outputs is not None:
         result["persist_outputs"] = _thaw(job.persist_outputs)
+    if job.carried is not None:
+        result["carried"] = _thaw(job.carried)
     return result
 
 
@@ -1431,6 +1436,7 @@ def _run_executable_collector(
         if variable.startswith("HTTK_WORKFLOW_"):
             environment.pop(variable)
     environment["HTTK_WORKFLOW_WORKSPACE_DIR"] = str(records[0].workspace_root)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"  # never bytecode beside a digest-pinned tree
     payload = "\n".join(
         [
             json.dumps(
@@ -1675,40 +1681,121 @@ def _run_executable_collector(
     return resolved, failures, exit_status
 
 
+def _snapshot(
+    tree: Path, digest: Callable[[Path], str], pinned: str, modified: str, snapshots: list[Path]
+) -> tuple[Path | None, str | None]:
+    """Copy a job-writable workflow tree into a fresh private directory and verify the copy against *pinned*.
+
+    The copy is made descriptor-anchored, refusing symlinks, hard links and special files, and is appended to
+    *snapshots* for the caller to remove (:func:`_remove_snapshots`), so nothing the job changes afterwards is run.
+
+    :param tree: The job-writable tree.
+    :param digest: The digest function the tree was pinned with.
+    :param pinned: The pinned digest.
+    :param modified: The reason prefix of a refused tree.
+    :param snapshots: The caller's snapshot list.
+    :return: The verified snapshot, or ``None`` and the reason (prefixed by *modified*).
+    """
+
+    import tempfile
+
+    snapshots.append(Path(tempfile.mkdtemp(prefix="httk-collect-")))
+    snapshot = snapshots[-1] / "tree"
+    try:
+        _fs.copy_tree(tree, snapshot, durable=False, limits=_fs.DEFAULT_LIMITS)
+        actual = digest(snapshot)
+    except Exception as exc:
+        return None, f"{modified}: {tree} could not be verified: {exc}"
+    if actual != pinned:
+        return None, f"{modified}: digest {actual} does not match pinned {pinned}"
+    return snapshot, None
+
+
+def _remove_snapshots(snapshots: list[Path]) -> None:
+    """Remove the collector snapshots :func:`_snapshot` made (read-only copied directories included)."""
+
+    from .packages import _evict_modules
+
+    for path in snapshots:
+        _evict_modules(path)
+        _store._writable(path)
+        _fs._remove_tree(_fs.loc(path))
+    snapshots.clear()
+
+
 def _job_collector(
-    workspace: Workspace, record: JobRecord, workflow_id: str
+    workspace: Workspace, record: JobRecord, workflow_id: str, snapshots: list[Path]
 ) -> tuple[Callable[[JobRecord], Mapping[str, object]] | None, WorkflowProvider | None, str | None]:
     """Resolve a collector from the job's installed workflow package, verified against the job's pin.
 
-    An unlocked job (debug mode) with its own runner copy collects from that copy only when the job's last
-    attempt launched from it and the copy still has the digest pinned then: the job may write its payload, so
-    nothing it changed afterwards is run here. Without a copy it collects, unverified, from the installed tree
-    (operator-controlled, never job-writable).
+    A collector from the job's own payload (a carried ``workflow/``, or an unlocked job's runner copy) never runs
+    there: the tree is copied into a snapshot (added to *snapshots*, which the caller removes) and the snapshot is
+    verified against the job's pin, so nothing the job changes afterwards is run. A locked carried job's pin must
+    be its launch from ``workflow/`` exactly as ``job.json`` froze it. An unlocked job collects from its tree only
+    when its last attempt launched from it with the digest pinned then. An unlocked job of an installed workflow
+    without a copy collects, unverified, from the installed tree (operator-controlled, never job-writable).
     """
 
     unlocked = record.job.get("unlocked") is not None
-    pinned = (record.runner_provenance or {}).get("tree_sha256")
+    pin = record.runner_provenance or {}
+    pinned = pin.get("tree_sha256")
     if not unlocked and not isinstance(pinned, str):
         return None, None, "the job records no pinned installed workflow"
-    installed = _store.lookup(workspace, workflow_id)
-    if installed is None or installed.id != workflow_id:
+    carried = record.job.get("carried")
+    if isinstance(carried, Mapping):
+        source = pin.get("source")
+        modified = "carried workflow modified since the job was created"
+        if unlocked and pinned is None and source in {"copy", "carried"}:
+            return (
+                None,
+                None,
+                (
+                    "the job's workflow/ could not be digested at launch (its launch pinned no digest); "
+                    "fix it and restart before collecting"
+                ),
+            )
+        if not isinstance(pinned, str) or source not in ({"copy", "carried"} if unlocked else {"carried"}):
+            return None, None, "the job's last attempt did not run from its workflow/; restart it before collecting"
+        if not unlocked and pinned != carried.get("tree_sha256"):
+            return None, None, f"{modified}: the last launch pinned {pinned}, job.json {carried.get('tree_sha256')}"
+        snapshot, reason = _snapshot(record.payload / _store.RUNNER_COPY, carried_digest, pinned, modified, snapshots)
+        if snapshot is None:
+            return None, None, reason
+        name = record.job.get("workflow_name")
+        installed = _store.Installed(
+            workflow_id,
+            name if isinstance(name, str) else workflow_id,
+            snapshot,
+            {**carried, "build": False},
+            package_override=snapshot,
+            carried=True,
+        )
+    elif (found := _store.lookup(workspace, workflow_id)) is None or found.id != workflow_id:
         return None, None, f"job workflow {workflow_id!r} is not installed in this workspace"
-    if unlocked:
+    else:
+        installed = found
+    if installed.carried:
+        pass  # its snapshot was verified above
+    elif unlocked:
         if (copy := _store.runner_copy(installed, record.payload)) is not None:
-            modified = "runner copy modified since the job ran"
-            if (record.runner_provenance or {}).get("source") != "copy" or not isinstance(pinned, str):
+            if pin.get("source") != "copy" or not isinstance(pinned, str):
                 return (
                     None,
                     None,
                     "the job's last attempt did not run from its runner copy; restart it before collecting",
                 )
-            try:
-                actual = _store.source_digest(copy.package, declared_by=copy.installed_package)
-            except Exception as exc:
-                return None, None, f"{modified}: {copy.package} could not be verified: {exc}"
-            if actual != pinned:
-                return None, None, f"{modified}: digest {actual} does not match pinned {pinned}"
-            installed = copy
+            # Verified with the digest the manager pinned the copy with at launch (the store's declaration).
+            store_declaration = copy.installed_package
+            snapshot, reason = _snapshot(
+                copy.package,
+                lambda tree: _store.source_digest(tree, declared_by=store_declaration),
+                pinned,
+                "runner copy modified since the job ran",
+                snapshots,
+            )
+            if snapshot is None:
+                return None, None, reason
+            installed = replace(copy, package_override=snapshot)
     elif installed.record.get("tree_sha256") != pinned:
         return (
             None,
@@ -1740,9 +1827,11 @@ def _job_collector(
         return None, provider, None
     from .packages import _source_hook, _tree_hook
 
-    if unlocked:
-        # ponytail: the hook module is cached per process by path, so an edit to the copy shows in the next
-        # process; evict it from sys.modules here if edit-and-recollect in one process matters.
+    if installed.carried:
+        # Verified again at the call, and loaded as a module of this snapshot only.
+        hook = _tree_hook(installed.package, str(pinned), provider.collect_file, "collect", carried=True)
+    elif unlocked:
+        # A snapshot of a verified runner copy, or the installed tree; a snapshot's module is its own.
         hook = _source_hook(installed.package, provider.collect_file, "collect")
     else:
         hook = _tree_hook(installed.package, str(pinned), provider.collect_file, "collect")
@@ -1765,7 +1854,17 @@ def _collect_outputs_strict(workspace: Workspace, record: JobRecord, roles: Iter
     workflow_id = (record.runner_provenance or {}).get("id")
     if not isinstance(workflow_id, str):
         raise ValueError("the job records no pinned installed workflow")
-    adapter, provider, reason = _job_collector(workspace, record, workflow_id)
+    snapshots: list[Path] = []
+    try:
+        return _collect_roles(workspace, record, workflow_id, roles, snapshots)
+    finally:
+        _remove_snapshots(snapshots)
+
+
+def _collect_roles(
+    workspace: Workspace, record: JobRecord, workflow_id: str, roles: Iterable[str], snapshots: list[Path]
+) -> dict[str, object]:
+    adapter, provider, reason = _job_collector(workspace, record, workflow_id, snapshots)
     if provider is None:
         raise ValueError(reason or "the job's collect hook is unavailable")
     if provider.collector_exec is not None:
@@ -2380,6 +2479,8 @@ def _registered_provider(record: JobRecord) -> WorkflowProvider | None:
     from .scaffold import workflow_provider
 
     workflow_id, name = _producing_workflow(record)
+    if workflow_id.startswith(CARRIED_WORKFLOW_PREFIX):
+        return None  # a job's own workflow: a registered one of the same name is another workflow
     if isinstance(workflow_id, str) and workflow_id.startswith("git+"):
         return workflow_provider(workflow_id)
     for candidate in (name, workflow_id):
@@ -2442,7 +2543,7 @@ def collect(
         *fail_fast* observes a per-job collection failure.
     """
 
-    from .provenance import _definition_uri, run_record
+    from .provenance import _record_definition_uri, run_record
 
     batch_size = _validate_batch_size(batch_size)
     # Fail-fast must not execute later collectors after observing a failed job.
@@ -2465,171 +2566,179 @@ def collect(
         return replace(collected, relocations=_relocations(record, url_prefix))
 
     while window := list(islice(records, batch_size)):
-        results: list[CollectedJob | None] = [None] * len(window)
-        executable_groups: dict[str, list[tuple[int, JobRecord, WorkflowProvider, httk.core.Run]]] = {}
+        snapshots: list[Path] = []  # collector trees copied out of job payloads, removed with the window
+        try:
+            results: list[CollectedJob | None] = [None] * len(window)
+            executable_groups: dict[str, list[tuple[int, JobRecord, WorkflowProvider, httk.core.Run]]] = {}
 
-        for index, record in enumerate(window):
-            identity = f"{record.workspace_id}:{record.job_id}"
-            workflow_id, _name = _producing_workflow(record)
-            provider = _registered_provider(record)
-            try:
-                run = run_record(record)
-            except ValueError as exc:
-                empty_run = _core().Run(
-                    workflow_declaration_uri=None,
-                    workflow_definition_uri=_definition_uri(workflow_id),
-                    inputs=(),
-                    artifacts=(),
-                    outputs=(),
-                    source_id=identity,
-                    last_modified=None,
-                )
-                results[index] = _degraded_job(
-                    record,
-                    provider,
-                    empty_run,
-                    f"{identity}: provenance declaration is unusable: {exc}; "
-                    f"inspect {record.payload}/.httk-job/declarations/provenance.json",
-                )
-                continue
-            if not force and record.job.get("unlocked") is not None:
-                results[index] = _degraded_job(record, provider, run, _UNLOCKED_REASON)
-                continue
-            fallback = False
-            if provider is not None and provider.collector_exec is not None:
-                if provider.directory is None:
-                    raise ValueError(f"{identity}: executable collector has no trusted package directory")
-                key = f"{provider.directory.resolve()}:{provider.collector_exec}"
-                executable_groups.setdefault(key, []).append((index, record, provider, run))
-                continue
-            try:
-                adapter = _collector(provider.collector if provider is not None else None)
-            except ImportError:
-                raise
-            except Exception as exc:
-                results[index] = _degraded_job(record, provider, run, f"{identity}: collector resolution failed: {exc}")
-                continue
-            if adapter is None:
-                parameters = record.job.get("parameters")
-                language_realization = False
-                language_name: object = None
-                if isinstance(parameters, Mapping):
-                    language_realization = parameters.get("workflow_realization") == "language"
-                    language_name = parameters.get("workflow_language")
-                package_collect = (
-                    language_realization
-                    and isinstance(parameters, Mapping)
-                    and parameters.get("workflow_collect") == "package"
-                )
-                if provider is None and package_collect:
+            for index, record in enumerate(window):
+                identity = f"{record.workspace_id}:{record.job_id}"
+                workflow_id, _name = _producing_workflow(record)
+                provider = _registered_provider(record)
+                try:
+                    run = run_record(record)
+                except ValueError as exc:
+                    empty_run = _core().Run(
+                        workflow_declaration_uri=None,
+                        workflow_definition_uri=_record_definition_uri(record),
+                        inputs=(),
+                        artifacts=(),
+                        outputs=(),
+                        source_id=identity,
+                        last_modified=None,
+                    )
                     results[index] = _degraded_job(
                         record,
                         provider,
-                        run,
-                        f"{identity}: workflow package collect hook is unavailable without its registered provider; "
-                        "collect while the package is registered",
+                        empty_run,
+                        f"{identity}: provenance declaration is unusable: {exc}; "
+                        f"inspect {record.payload}/.httk-job/declarations/provenance.json",
                     )
                     continue
-                if provider is None and language_realization and isinstance(language_name, str):
-                    try:
-                        lang = compat.language(language_name)
-                        if not lang.has_default_collector:
-                            results[index] = _degraded_job(
-                                record,
-                                provider,
-                                run,
-                                f"{identity}: workflow format {language_name!r} has no default collector; "
-                                "its package declares [workflow.collect]",
-                            )
-                            continue
-                        adapter = lang.collect
-                    except ImportError:
-                        raise
-                    except Exception as exc:
+                if not force and record.job.get("unlocked") is not None:
+                    results[index] = _degraded_job(record, provider, run, _UNLOCKED_REASON)
+                    continue
+                fallback = False
+                if provider is not None and provider.collector_exec is not None:
+                    if provider.directory is None:
+                        raise ValueError(f"{identity}: executable collector has no trusted package directory")
+                    key = f"{provider.directory.resolve()}:{provider.collector_exec}"
+                    executable_groups.setdefault(key, []).append((index, record, provider, run))
+                    continue
+                try:
+                    adapter = _collector(provider.collector if provider is not None else None)
+                except ImportError:
+                    raise
+                except Exception as exc:
+                    results[index] = _degraded_job(
+                        record, provider, run, f"{identity}: collector resolution failed: {exc}"
+                    )
+                    continue
+                if adapter is None:
+                    parameters = record.job.get("parameters")
+                    language_realization = False
+                    language_name: object = None
+                    if isinstance(parameters, Mapping):
+                        language_realization = parameters.get("workflow_realization") == "language"
+                        language_name = parameters.get("workflow_language")
+                    package_collect = (
+                        language_realization
+                        and isinstance(parameters, Mapping)
+                        and parameters.get("workflow_collect") == "package"
+                    )
+                    if provider is None and package_collect:
                         results[index] = _degraded_job(
                             record,
                             provider,
                             run,
-                            f"{identity}: workflow format {language_name!r} collector unavailable: {exc}",
+                            f"{identity}: workflow package collect hook is unavailable without its registered provider; "
+                            "collect while the package is registered",
                         )
                         continue
-            if (
-                adapter is None
-                and provider is not None
-                and not allow_job_collector
-                and _nothing_to_collect(record, provider)
-            ):
-                # A workflow without a collector or declared outputs completes
-                # collection with its run as the only product. With the pinned
-                # fallback enabled, the job's own pinned tree decides instead. Its staged files are its inputs.
-                results[index] = replace(assemble(identity, record, provider, run, {}), run_only=True)
-                continue
-            if adapter is None:
-                if not allow_job_collector:
-                    reason = (
-                        f"no provider for workflow {workflow_id!r}; pass allow_job_collector=True to use the "
-                        "job's installed workflow package"
-                        if provider is None
-                        else f"no collector registered for workflow {workflow_id!r}; pass "
-                        "allow_job_collector=True to use the job's installed workflow package"
-                    )
-                    results[index] = _degraded_job(record, provider, run, reason)
+                    if provider is None and language_realization and isinstance(language_name, str):
+                        try:
+                            lang = compat.language(language_name)
+                            if not lang.has_default_collector:
+                                results[index] = _degraded_job(
+                                    record,
+                                    provider,
+                                    run,
+                                    f"{identity}: workflow format {language_name!r} has no default collector; "
+                                    "its package declares [workflow.collect]",
+                                )
+                                continue
+                            adapter = lang.collect
+                        except ImportError:
+                            raise
+                        except Exception as exc:
+                            results[index] = _degraded_job(
+                                record,
+                                provider,
+                                run,
+                                f"{identity}: workflow format {language_name!r} collector unavailable: {exc}",
+                            )
+                            continue
+                if (
+                    adapter is None
+                    and provider is not None
+                    and not allow_job_collector
+                    and _nothing_to_collect(record, provider)
+                ):
+                    # A workflow without a collector or declared outputs completes
+                    # collection with its run as the only product. With the pinned
+                    # fallback enabled, the job's own pinned tree decides instead. Its staged files are its inputs.
+                    results[index] = replace(assemble(identity, record, provider, run, {}), run_only=True)
                     continue
-                adapter, fallback_provider, fallback_reason = _job_collector(workspace, record, workflow_id)
-                if fallback_provider is not None and fallback_provider.collector_exec is not None:
-                    if fallback_provider.directory is None:
-                        raise ValueError(f"{identity}: executable collector has no trusted package directory")
-                    key = f"{fallback_provider.directory.resolve()}:{fallback_provider.collector_exec}"
-                    executable_groups.setdefault(key, []).append((index, record, fallback_provider, run))
-                    continue
-                # The verified installed tree decides; a refused one leaves it to the registered provider.
-                deciding = fallback_provider or provider
-                if adapter is None and deciding is not None and _nothing_to_collect(record, deciding):
-                    results[index] = replace(assemble(identity, record, deciding, run, {}), run_only=True)
-                    continue
-                if adapter is None or fallback_provider is None:
-                    results[index] = _degraded_job(
-                        record, fallback_provider or provider, run, fallback_reason or "job collector unavailable"
-                    )
-                    continue
-                provider = fallback_provider
-                fallback = True
-            try:
-                results[index] = assemble(identity, record, provider, run, adapter(record))
-            except (ImportError, _CollectEnvironmentError):
-                raise
-            except Exception as exc:
-                from .packages import _PinnedTreeError
-
-                if fallback and isinstance(exc, _PinnedTreeError):
-                    results[index] = _degraded_job(record, provider, run, f"pinned runner tree was modified: {exc}")
-                elif isinstance(exc, compat.LanguageOutputsMissingError):
-                    results[index] = _degraded_job(record, provider, run, str(exc))
-                else:
-                    results[index] = _degraded_job(record, provider, run, f"{identity}: collector failed: {exc}")
-
-        for entries in executable_groups.values():
-            group_records = [entry[1] for entry in entries]
-            provider = entries[0][2]
-            assert provider.directory is not None
-            resolved, failures, exit_status = _run_executable_collector(
-                group_records, provider, provider.directory.resolve()
-            )
-            for local_index, (index, record, group_provider, run) in enumerate(entries):
-                identity = f"{record.workspace_id}:{record.job_id}"
-                failure_reason = failures.get(local_index)
-                if failure_reason is not None:
-                    built = _degraded_job(record, group_provider, run, failure_reason)
-                else:
-                    try:
-                        built = assemble(identity, record, group_provider, run, resolved[local_index])
-                    except (ImportError, _CollectEnvironmentError):
-                        raise
-                    except Exception as exc:
-                        built = _degraded_job(
-                            record, group_provider, run, f"{identity}: executable collector output failed: {exc}"
+                if adapter is None:
+                    if not allow_job_collector:
+                        reason = (
+                            f"no provider for workflow {workflow_id!r}; pass allow_job_collector=True to use the "
+                            "job's installed workflow package"
+                            if provider is None
+                            else f"no collector registered for workflow {workflow_id!r}; pass "
+                            "allow_job_collector=True to use the job's installed workflow package"
                         )
-                results[index] = built if exit_status is None else replace(built, collector_exit_status=exit_status)
+                        results[index] = _degraded_job(record, provider, run, reason)
+                        continue
+                    adapter, fallback_provider, fallback_reason = _job_collector(
+                        workspace, record, workflow_id, snapshots
+                    )
+                    if fallback_provider is not None and fallback_provider.collector_exec is not None:
+                        if fallback_provider.directory is None:
+                            raise ValueError(f"{identity}: executable collector has no trusted package directory")
+                        key = f"{fallback_provider.directory.resolve()}:{fallback_provider.collector_exec}"
+                        executable_groups.setdefault(key, []).append((index, record, fallback_provider, run))
+                        continue
+                    # The verified installed tree decides; a refused one leaves it to the registered provider.
+                    deciding = fallback_provider or provider
+                    if adapter is None and deciding is not None and _nothing_to_collect(record, deciding):
+                        results[index] = replace(assemble(identity, record, deciding, run, {}), run_only=True)
+                        continue
+                    if adapter is None or fallback_provider is None:
+                        results[index] = _degraded_job(
+                            record, fallback_provider or provider, run, fallback_reason or "job collector unavailable"
+                        )
+                        continue
+                    provider = fallback_provider
+                    fallback = True
+                try:
+                    results[index] = assemble(identity, record, provider, run, adapter(record))
+                except (ImportError, _CollectEnvironmentError):
+                    raise
+                except Exception as exc:
+                    from .packages import _PinnedTreeError
+
+                    if fallback and isinstance(exc, _PinnedTreeError):
+                        results[index] = _degraded_job(record, provider, run, f"pinned runner tree was modified: {exc}")
+                    elif isinstance(exc, compat.LanguageOutputsMissingError):
+                        results[index] = _degraded_job(record, provider, run, str(exc))
+                    else:
+                        results[index] = _degraded_job(record, provider, run, f"{identity}: collector failed: {exc}")
+
+            for entries in executable_groups.values():
+                group_records = [entry[1] for entry in entries]
+                provider = entries[0][2]
+                assert provider.directory is not None
+                resolved, failures, exit_status = _run_executable_collector(
+                    group_records, provider, provider.directory.resolve()
+                )
+                for local_index, (index, record, group_provider, run) in enumerate(entries):
+                    identity = f"{record.workspace_id}:{record.job_id}"
+                    failure_reason = failures.get(local_index)
+                    if failure_reason is not None:
+                        built = _degraded_job(record, group_provider, run, failure_reason)
+                    else:
+                        try:
+                            built = assemble(identity, record, group_provider, run, resolved[local_index])
+                        except (ImportError, _CollectEnvironmentError):
+                            raise
+                        except Exception as exc:
+                            built = _degraded_job(
+                                record, group_provider, run, f"{identity}: executable collector output failed: {exc}"
+                            )
+                    results[index] = built if exit_status is None else replace(built, collector_exit_status=exit_status)
+        finally:
+            _remove_snapshots(snapshots)
 
         for result in results:
             assert result is not None

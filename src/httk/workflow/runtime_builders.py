@@ -169,6 +169,8 @@ class JobSpec:
         payload-relative path, or only ``{path}`` when the digest is unknown.
     :param calls: Bind the workflow's call slots, alias to ``{"workflow": <installed id>, "parameters": {...}}``.
     :param persist_outputs: Name the call slot outputs the job records for its caller, name to output role.
+    :param carried: Freeze the trusted settings of the workflow the job carries in its ``workflow/`` (the
+        ``job.json`` ``carried`` member); ``None`` for a job of an installed workflow.
     """
 
     name: str
@@ -195,6 +197,7 @@ class JobSpec:
     staged_files: tuple[Mapping[str, object], ...] = ()
     calls: Mapping[str, Mapping[str, object]] | None = None
     persist_outputs: Mapping[str, str] | None = None
+    carried: Mapping[str, object] | None = None
 
     def as_mapping(self, *, parent: Mapping[str, object] | None = None) -> dict[str, object]:
         """Return the validated ``job.json`` mapping.
@@ -236,6 +239,7 @@ class JobSpec:
             # Validated, and returned as plain JSON, by JobDefinition below.
             **({"calls": self.calls} if self.calls else {}),
             **({"persist_outputs": self.persist_outputs} if self.persist_outputs else {}),
+            **({"carried": self.carried} if self.carried is not None else {}),
         }
         return JobDefinition.from_mapping(mapping).as_mapping()
 

@@ -99,6 +99,7 @@ def test_environment_variables() -> None:
     assert Path(environment["HTTK_WORKFLOW_BASH_API"]).is_file()
     assert environment["PATH"].endswith("/usr/bin")
     assert environment["HTTK_CODE_COMMAND"] == "run"
+    assert environment["PYTHONDONTWRITEBYTECODE"] == "1"  # no bytecode written into a pinned workflow/
     # Runner-store variables are left to the caller; the data directory only for transactional jobs.
     assert "HTTK_WORKFLOW_RUNNER_ROOT" not in environment
     assert "HTTK_WORKFLOW_DATA_DIR" not in environment

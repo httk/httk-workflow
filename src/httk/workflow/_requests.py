@@ -25,6 +25,7 @@ from httk.workflow._state import TERMINAL_STATES, Release, StateDoc
 from httk.workflow._util import json_bytes, require_int, require_string
 from httk.workflow.errors import FormatError
 from httk.workflow.models import (
+    CARRIED_WORKFLOW_PREFIX,
     Failure,
     canonical_uuid,
     is_workflow_id,
@@ -235,8 +236,11 @@ def validate_envelope(document: Mapping[str, object]) -> None:
         validate_step(document["step"], "request step")
     if "budget" in allowed:
         validate_budget_override(document["budget"], "request budget")
-    if "workflow" in allowed and not is_workflow_id(require_string(document["workflow"], "request workflow")):
-        # A request names its workflow by installed id only, never by a short name.
+    if "workflow" in allowed and (
+        not is_workflow_id(target := require_string(document["workflow"], "request workflow"))
+        or target.startswith(CARRIED_WORKFLOW_PREFIX)
+    ):
+        # A request names its workflow by installed id only, never by a short name or a job's carried id.
         raise FormatError(f"request workflow must be an installed workflow id, not {document['workflow']!r}")
     for flag in sorted(_FLAGS & members):
         if document[flag] is not True:

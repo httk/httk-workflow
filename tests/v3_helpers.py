@@ -19,7 +19,8 @@ from httk.workflow._state import StateDoc, read_state_unowned
 #: - ``succeed``; ``fail`` or ``fail:<code>``; ``advance:<step>``; ``retry_once``;
 #: - ``exit`` (no outcome: a process failure, exit status 3); ``pause``; ``sleep``; ``crash_once`` (sleeps on the
 #:   first attempt only);
-#: - ``spawn``: publish ``parameters.spawn.children`` (``{label, script, placement?, parameters?, workflow?, declarations?}``) and wait
+#: - ``spawn``: publish ``parameters.spawn.children`` (``{label, script, placement?, parameters?, workflow?, carried?,
+#:   declarations?}``; a child copies the parent's ``job.json`` otherwise, ``carried`` included) and wait
 #:   on them with ``parameters.spawn.condition`` (default ``all_succeeded``), then ``next_step`` (``gather``);
 #:   ``on_impossible`` names a rescue step.
 #:
@@ -80,6 +81,8 @@ if behavior == "spawn":
         placement = child_spec.get("placement", f"{job['placement']}/c{index}")
         child = dict(job, id=child_id, tag=label, name=label, placement=placement, initial_step="start")
         child["workflow"] = child_spec.get("workflow", job["workflow"])
+        if "carried" in child_spec:
+            child["carried"] = child_spec["carried"]
         child["declarations"] = child_spec.get("declarations", {})
         child["parameters"] = dict(child_spec.get("parameters", {}), script=child_spec["script"])
         child["parent"] = {
