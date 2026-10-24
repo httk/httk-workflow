@@ -1,0 +1,115 @@
+httk.workflow.hookapi
+=====================
+
+.. py:module:: httk.workflow.hookapi
+
+.. autoapi-nested-parse::
+
+   Small standard-library helpers for executable workflow hooks.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.hookapi.COLLECT_STREAM_FORMAT
+   httk.workflow.hookapi.COLLECT_STREAM_VERSION
+   httk.workflow.hookapi.INSTANTIATE_FORMAT
+   httk.workflow.hookapi.INSTANTIATE_VERSION
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.hookapi.InstantiateRequest
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.hookapi.instantiate_main
+   httk.workflow.hookapi.collect_main
+
+
+Module Contents
+---------------
+
+.. py:data:: COLLECT_STREAM_FORMAT
+   :value: 'httk-workflow-collect-stream'
+
+
+.. py:data:: COLLECT_STREAM_VERSION
+   :value: 2
+
+
+.. py:data:: INSTANTIATE_FORMAT
+   :value: 'httk-workflow-instantiate'
+
+
+.. py:data:: INSTANTIATE_VERSION
+   :value: 2
+
+
+.. py:class:: InstantiateRequest
+
+   The v1 request passed to an executable instantiate hook.
+
+   :param workflow: The declared workflow id.
+   :param tag: The caller's tag, or ``None``.
+   :param parameters: The parameters already supplied for the job.
+   :param inputs: Hook-consumed input descriptors. A descriptor is either
+       ``{"kind": "value", "value": ...}`` or
+       ``{"kind": "file", "path": "payload-relative/posix/path"}``.
+
+   The process current working directory is the staging payload. File
+   descriptors therefore name files relative to that directory.
+
+
+   .. py:attribute:: workflow
+      :type:  str
+
+
+   .. py:attribute:: tag
+      :type:  str | None
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, Any]
+
+
+   .. py:attribute:: inputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, Any]]
+
+
+.. py:function:: instantiate_main(fn)
+
+   Run *fn* as a v1 executable instantiate hook.
+
+   The hook receives one JSON document on standard input:
+   ``{"format": "httk-workflow-instantiate", "format_version": 2,
+   "workflow": <workflow-id>, "tag": <string-or-null>, "parameters":
+   {...}, "inputs": {<name>: <descriptor>}}``. The current working
+   directory is the staging payload; file descriptors contain payload-relative
+   POSIX paths. The returned mapping must contain ``parameters`` and may
+   contain ``tag``; it is emitted as one JSON document on standard output.
+   Exceptions, malformed requests, and invalid responses are reported on
+   standard error and exit with status 1.
+
+   :param fn: Convert the request into parameter mutations and an optional tag.
+   :return: Nothing; the response is written as one JSON document.
+
+
+.. py:function:: collect_main(fn)
+
+   Run *fn* as a streaming executable collector.
+
+   :param fn: Convert one serialized job record into role-to-value wrappers.
+   :return: Nothing; responses are written as JSONL to standard output.
+
+
