@@ -194,7 +194,9 @@ class StateDoc:
     :param exchange_name: The exchange client's name for the job, or ``None``.
     :param detached: The detachment record, or ``None``.
     :param seal: The authoritative seal record, or ``None``.
-    :param workflow_pin: The pinned installed workflow, or ``None``.
+    :param workflow_pin: The workflow the last attempt launched from (``id``, ``tree_sha256``, ``source``:
+        ``installed``, or ``copy`` for an unlocked job's runner copy, and ``workflow_present``: whether
+        ``workflow/`` existed at launch), or ``None``.
     :param history_tail: The last transitions (at most 32).
     :param job_digest: The digest of ``job.json`` pinned at the job's first activation, or ``None`` before it.
     :param budget_override: The operator's ``set_budget`` limits, which replace those of ``job.json``'s
@@ -575,7 +577,7 @@ def read_state_unowned(path: Path) -> tuple[StateDoc | None, bool]:
 
 def salvage_state(path: Path) -> dict[str, Any]:
     """Return what still reads from a damaged ``state.json``: ``applied_requests``, ``origin`` with
-    ``exchange_name``, ``job_digest`` and ``unlocked``.
+    ``exchange_name``, ``job_digest``, ``unlocked`` and ``workflow_pin``.
 
     Each member is kept only when it parses. The file itself may be a symlink, a FIFO or garbage: it is read
     without following or blocking, and anything else is ignored.
@@ -612,6 +614,8 @@ def salvage_state(path: Path) -> dict[str, Any]:
             kept["unlocked"] = unlocked
     except (FormatError, RecursionError):
         pass
+    if isinstance(pin := value.get("workflow_pin"), dict):
+        kept["workflow_pin"] = pin
     if value.get("workflow_override") is not None:
         _LOGGER.warning(
             "%s is damaged: its set_workflow override %r is not salvaged; the job falls back to job.json's workflow",

@@ -585,7 +585,7 @@ unlock spawned jobs on the workspace host with `httk job unlock`, which also
 unlocks their ancestors), and a
 workspace daemon refuses it (the daemon does not carry `unlock`; run it on the
 daemon host). `job show` prints an `unlocked` row, `job why` a "debug mode"
-check, and the JSON report gains `unlocked` and `paths.runner_copy` (`<payload>/workflow`). The jobs
+check, and the JSON report gains `unlocked` and `paths.runner_copy` (`<payload>/workflow`); `workflow_pin.source` (`installed` or `copy`) appears in the JSON report too. The jobs
 are collected only with `httk collect --force`.
 
 ### Ejecting and adopting jobs

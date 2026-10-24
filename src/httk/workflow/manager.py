@@ -380,6 +380,23 @@ class RunningAttempt:
         return f"RunningAttempt(attempt_id={self.attempt_id!r}, pid={self.process.pid})"
 
 
+def _created_runner_copy(owned: OwnedJob, pin: Mapping[str, object] | None) -> str | None:
+    """Delete a ``workflow/`` that was absent when the attempt launched, and return why its outcome is void.
+
+    Only an operator places a runner copy, between attempts. One present at launch was read-only in a confined
+    attempt (an unconfined one is trusted) and stays; one that appeared during the attempt is the job's own,
+    which a later unlock or collect must never take for the operator's, so it is deleted.
+
+    :param owned: The quiescent job.
+    :param pin: The ``workflow_pin`` of the attempt's launch (``workflow_present``), or ``None``.
+    :return: The protocol error message, or ``None``.
+    """
+
+    if (pin or {}).get("workflow_present") is True or not owned.discard_subtree(_store.RUNNER_COPY):
+        return None
+    return f"the attempt created {_store.RUNNER_COPY}/; it was removed"
+
+
 def _published(owned: OwnedJob, attempt_id: str) -> bool:
     """Report whether an attempt published its outcome directory.
 
@@ -955,14 +972,17 @@ class TaskManager:
                 outcome = read_outcome(outcome_dir, doc) if _published(owned, attempt_id) else None
             except (FormatError, _fs.UnsafePath, OSError):
                 outcome = None
-            if outcome is not None:
+            created = _created_runner_copy(owned, doc.workflow_pin)
+            if outcome is not None and created is None:
                 self._commit_outcome(owned, job, doc, outcome, outcome_dir)
                 return None
             if (cancel := self._pending_cancel(owned)) is not None:
                 # The dead owner was stopping the attempt for this request (or never saw it): it is cancelled.
                 self._commit(owned, job, doc, cancel_intent(attempt_id, owned.from_priority, cancel))
                 return None
-            if doc.owner_id == self.manager_id:
+            if created is not None:
+                code, message, unclean = "protocol_error", created, False
+            elif doc.owner_id == self.manager_id:
                 # This process ran the attempt and saw it end, but failed before recording the commit.
                 code, message, unclean = "process_failure", "the attempt ended without a committed outcome", False
             else:
@@ -979,6 +999,8 @@ class TaskManager:
 
         doc = StateDoc.empty(owned.job_id).with_failure(failure("protocol_error", message))
         salvaged = salvage_state(owned.path / "state.json")
+        # A workflow/ no readable pin shows present at the last launch may be the job's own: not kept for later.
+        _created_runner_copy(owned, salvaged.get("workflow_pin"))
         # An exchange job stays one (its client still asks for it by its name), and job.json stays pinned.
         doc = doc.updated(
             **{key: salvaged[key] for key in ("origin", "exchange_name", "job_digest", "unlocked") if key in salvaged}
@@ -1516,11 +1538,12 @@ class TaskManager:
             if installed is None:
                 raise RunnerResolutionError("runner_unavailable", problem or f"workflow {workflow_id} is gone")
             tree_sha256 = installed.record.get("tree_sha256")
+            source = "installed"
             # An unlocked job with its own runner copy launches from it (never a locked one: the payload is the
             # job's to write), pinned by the copy's digest at launch (null when it cannot be digested). Only the
             # runner entry, {package} and the runner root come from the copy: nothing in it is parsed or run here.
             if doc.unlocked is not None and (copy := _store.runner_copy(installed, owned.path)) is not None:
-                installed = copy
+                installed, source = copy, "copy"
                 try:
                     tree_sha256 = _store.source_digest(copy.package, declared_by=copy.installed_package)
                 except (ValueError, OSError):
@@ -1531,7 +1554,8 @@ class TaskManager:
                 owned, job, doc, failure_intent(job, doc, attempt_id, exc.code, str(exc), priority=owned.from_priority)
             )
             return False
-        pin = {"id": installed.id, "tree_sha256": tree_sha256}
+        present = os.path.lexists(owned.path / _store.RUNNER_COPY)
+        pin = {"id": installed.id, "tree_sha256": tree_sha256, "source": source, "workflow_present": present}
         doc = self._write(owned, doc.updated(workflow_pin=pin).with_phase("launching", attempt_id))
         payload = owned.path
         control = payload / "attempts" / attempt_id
@@ -1852,6 +1876,8 @@ class TaskManager:
                 tampered = "the attempt rewrote job.json"
         except FormatError as exc:
             tampered = f"the attempt left job.json unreadable: {exc}"
+        # Nor is workflow/: a runner copy appears only between attempts, placed by an operator.
+        tampered = tampered or _created_runner_copy(owned, doc.workflow_pin)
         if tampered is not None:
             outcome = None
         action = "none" if outcome is None else str(outcome["action"])

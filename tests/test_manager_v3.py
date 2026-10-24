@@ -208,7 +208,12 @@ def test_one_step_succeeds(ws: Workspace, installed: _store.Installed) -> None:
     assert doc.phase == {"kind": "idle", "attempt_id": None}
     assert doc.commit is None and doc.failure is None
     assert doc.release_to is not None and doc.release_to.state == "succeeded"
-    assert doc.workflow_pin == {"id": installed.id, "tree_sha256": installed.record["tree_sha256"]}
+    assert doc.workflow_pin == {
+        "id": installed.id,
+        "tree_sha256": installed.record["tree_sha256"],
+        "source": "installed",
+        "workflow_present": False,
+    }
     assert events(done) == SUCCEED
     # The job is sealed (unsigned: the test has no signing key), and the seal is recorded in state.json.
     seal = done.path / ".httk-job" / "seal.json"

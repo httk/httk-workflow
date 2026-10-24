@@ -187,6 +187,9 @@ def test_unlocked_is_optional_and_salvaged(tmp_path: Path) -> None:
     (tmp_path / "state.json").write_text(json.dumps(damaged))
     assert read_state_unowned(tmp_path / "state.json") == (None, True)
     assert salvage_state(tmp_path / "state.json")["unlocked"] == marker
+    pin = {"id": "local:x", "tree_sha256": None, "source": "installed", "workflow_present": False}
+    (tmp_path / "state.json").write_text(json.dumps(damaged | {"workflow_pin": pin}))
+    assert salvage_state(tmp_path / "state.json")["workflow_pin"] == pin
     (tmp_path / "state.json").write_text(json.dumps(damaged | {"unlocked": {"at": 3}}))
     assert "unlocked" not in salvage_state(tmp_path / "state.json")
 

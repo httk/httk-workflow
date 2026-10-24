@@ -306,8 +306,10 @@ unless told to:
 - `collect(..., force=True)` (`httk collect --force`) collects it, also with
   `--postprocess`. The job's registered provider's collector is used as for any
   job; the collect hook of the runner copy (`workflow/` in the job directory) runs,
-  unverified and without a pin check, only with `--allow-job-collector` and
-  only when no in-process registered provider supplies a collector. With `--into`, the run is stored with no mark that the job
+  unverified, only with `--allow-job-collector`, only when no in-process
+  registered provider supplies a collector, and only after the job has run again from the copy (`workflow_pin` `source` `"copy"`) with the copy unchanged since that launch. Unlocking a finished job and collecting straight away degrades the
+  job with `the job's last attempt did not run from its runner copy; restart it before collecting`; the other reasons read `runner copy modified since the
+  job ran: ... digest X does not match pinned Y` and `... could not be verified`. An unlocked job without a copy uses the installed tree as before. With `--into`, the run is stored with no mark that the job
   was unlocked: whoever forces the collection takes the responsibility.
 - Every per-job summary line of an unlocked job, degraded or forced, and the
   store report carry `"unlocked": true`, and
@@ -338,7 +340,7 @@ partition at a time, not as one in-memory result array.
 | `workspace`, `workspace_id` | the absolute workspace root and its identity |
 | `job_id`, `job_key` | the job UUID and the complete `tag--uuid` key |
 | `job` | the validated job definition, including its `digest`, `workflow` (the declared installed workflow's id) and `workflow_name`; `workflow_override` (`{id, name}`) only when an operator's `set_workflow` made the job run another installation |
-| `runner_provenance` | `{"id", "tree_sha256"}` of the installed workflow the job last launched with, or `null` |
+| `runner_provenance` | `{"id", "tree_sha256", "source"}` of the workflow the job last launched with (`source` `installed` or `copy`), or `null` |
 | `state` | the kind this job stopped in: `succeeded`, `failed`, `cancelled`, or `paused` |
 | `failure` | the unified failure record — `code`, `message`, optional `details`, `retryable` — or `null` |
 | `placement` | the placement subtree this job sits in |

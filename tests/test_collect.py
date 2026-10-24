@@ -156,7 +156,12 @@ def test_a_record_pins_the_job_digest_and_the_installed_workflow(campaign: tuple
     policy = parent.job["retry_policy"]
     assert isinstance(policy, dict) and policy["maximum_attempts_per_activation"] == 1
     # The installed workflow the job ran is pinned by its tree digest.
-    pin = {"id": installed.id, "tree_sha256": installed.record["tree_sha256"]}
+    pin = {
+        "id": installed.id,
+        "tree_sha256": installed.record["tree_sha256"],
+        "source": "installed",
+        "workflow_present": False,
+    }
     assert parent.runner_provenance == pin
 
     children = _by_label(list(job_records(ws, states=("succeeded", "failed"))))

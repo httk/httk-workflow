@@ -39,6 +39,7 @@ from pathlib import Path
 from types import FrameType
 
 from . import _confine_keeper, _kernel, _pmi_proxy
+from ._confine import trusted_overlays
 from ._launch_protocol import (
     MAX_ENVIRONMENT_ENTRIES,
     MAX_ENVIRONMENT_VALUE_BYTES,
@@ -547,8 +548,8 @@ def prepare_keeper_sandbox(
     (:mod:`httk.workflow._confine_keeper`). It unshares the user, PID, IPC and UTS namespaces but keeps the
     host network, dies with its helper (``--die-with-parent``) and drops all capabilities. It binds the
     read-only paths, ``jobs/`` and ``workflows/`` read-only at their real paths, ``.httk-workspace/format.json``
-    as a read-only content copy, and the job directory writable at its real path. The workspace root is an
-    empty tmpfs that receives only those three view binds and the job bind; it is remounted read-only after all
+    as a read-only content copy, and the job directory writable at its real path, with the job's trusted
+    entries read-only over it as in the attempt sandbox. The workspace root is an empty tmpfs that receives only those three view binds and the job bind; it is remounted read-only after all
     mounts. This also protects workspaces below ``/tmp``, where the parent directories are created in the
     writable ``/tmp`` mount. The rest of ``.httk-workspace/`` and ``exchange/`` are absent. The sandbox root is
     also remounted read-only last. A read-only path may not contain or lie inside the workspace; list a
@@ -604,6 +605,8 @@ def prepare_keeper_sandbox(
         descriptors.extend(workspace_descriptors)
         descriptors.append(os.dup(job_fd))
         argv += ["--bind-fd", str(descriptors[-1]), str(job)]
+        # The job's trusted entries stay read-only for its ranks exactly as for its attempt.
+        argv += trusted_overlays(job_fd, job, descriptors)
         argv += ["--dev", "/dev"]
         descriptors.append(os.dup(shm_fd))
         argv += ["--bind-fd", str(descriptors[-1]), "/dev/shm"]

@@ -87,7 +87,7 @@ elif not parameters.get("child") and context["step"] == "start":
             os.link(bundle / "files" / "input", job_dir / "alias")
         elif plant in ("state.json", "seal.json"):
             (bundle / plant).write_text("{}")
-        elif plant in ("logs", "attempts"):
+        elif plant in ("logs", "attempts", "workflow"):
             (bundle / plant).mkdir()
             (bundle / plant / "planted").write_text("planted")
         elif plant == "symlink":
@@ -178,6 +178,7 @@ def _children_of(ws: Workspace, parent_id: str) -> list[_kernel.JobRef]:
         ("seal.json", "carries trusted entries"),
         ("logs", "carries trusted entries"),
         ("attempts", "carries trusted entries"),
+        ("workflow", "carries trusted entries"),
     ],
 )
 def test_hostile_child_content_fails_the_parent_and_the_manager_keeps_running(

@@ -1,6 +1,7 @@
 """The collection gate of unlocked jobs (debug mode): degraded unless forced, then collected from the runner copy."""
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import ANY
 
@@ -14,31 +15,70 @@ from httk.workflow.collecting import _UNLOCKED_REASON
 from httk.workflow.postprocessing import collect_postprocess
 from httk.workflow.workflow_cli import command
 from test_collect_fallback import _finished
-from v3_helpers import cli_owner, find, only, state_of
+from v3_helpers import cli_owner, find, only, run, state_of
 
 
-def _unlocked(tmp_path: Path, *, copy: bool = True) -> tuple[Workspace, _kernel.JobRef]:
-    """A workspace whose one succeeded job was unsealed and unlocked (with its runner copy unless not *copy*)."""
+def _edit_total(hook: Path, total: str) -> None:
+    hook.write_text(
+        re.sub(r'"total", [0-9.]+', f'"total", {total}', hook.read_text(encoding="utf-8")), encoding="utf-8"
+    )
+
+
+def _unlocked(tmp_path: Path, *, copy: bool = True, total: str | None = None) -> tuple[Workspace, _kernel.JobRef]:
+    """A workspace whose one succeeded job was unsealed and unlocked.
+
+    With *copy*, its runner copy's hook gets the energy *total* (when given) and the job runs again from it.
+    """
 
     workspace, _installed = _finished(tmp_path)
     ref = only(workspace, "succeeded")
     with cli_owner(workspace) as owner:
         assert removal.request_now(workspace, owner, find(workspace, ref.job_id), "unseal", "debug") is None
         assert removal.request_now(workspace, owner, find(workspace, ref.job_id), "unlock", "debug", copy=copy) is None
+        if copy:
+            if total is not None:
+                _edit_total(find(workspace, ref.job_id).path / _store.RUNNER_COPY / "collect.py", total)
+            assert removal.request_now(workspace, owner, find(workspace, ref.job_id), "restart", "debug") is None
+    if copy:
+        run(workspace)
+        assert (state_of(find(workspace, ref.job_id)).workflow_pin or {}).get("source") == "copy"
     return workspace, find(workspace, ref.job_id)
 
 
 def test_an_unlocked_job_is_degraded_unless_forced(tmp_path: Path) -> None:
-    workspace, ref = _unlocked(tmp_path)
+    # The copy's hook was edited before the job ran again from it: the forced job collector is that hook.
+    workspace, _ref = _unlocked(tmp_path, total="2.5")
     (gated,) = collect(workspace, allow_job_collector=True)
     assert gated.missing_collector == _UNLOCKED_REASON and gated.unfulfilled == ("relaxed_structure",)
     assert gated.record.job["unlocked"] == {"at": ANY, "operator": "cli", "reason": "debug"}
-    # The forced job collector is the copy's, unverified: an edit there is what runs.
-    hook = ref.path / _store.RUNNER_COPY / "collect.py"
-    hook.write_text(hook.read_text(encoding="utf-8").replace('"total", 1.5', '"total", 2.5'), encoding="utf-8")
     (forced,) = collect(workspace, allow_job_collector=True, force=True)
     assert forced.missing_collector is None and forced.outputs["relaxed_structure"] == DataRecord.from_value(
         "https://example.test/energy", "total", 2.5
+    )
+
+
+def test_a_copy_edited_after_the_run_is_never_collected_from(tmp_path: Path) -> None:
+    workspace, ref = _unlocked(tmp_path)
+    pin = state_of(ref).workflow_pin
+    assert pin is not None
+    # What the job (or anyone) changes in its copy after its last launch is not run outside its sandbox.
+    _edit_total(ref.path / _store.RUNNER_COPY / "collect.py", "3.5")
+    actual = _store.source_digest(ref.path / _store.RUNNER_COPY, declared_by=tmp_path / "package")
+    (forced,) = collect(workspace, allow_job_collector=True, force=True)
+    assert forced.missing_collector == (
+        f"runner copy modified since the job ran: digest {actual} does not match pinned {pin['tree_sha256']}"
+    )
+    assert forced.unfulfilled == ("relaxed_structure",)
+
+
+def test_a_copy_the_last_attempt_did_not_run_from_is_never_collected_from(tmp_path: Path) -> None:
+    workspace, ref = _unlocked(tmp_path, copy=False)
+    # A no-copy unlock with a copy placed later, before the job runs again.
+    _store._copy_package(tmp_path / "package", ref.path / _store.RUNNER_COPY, None)
+    (forced,) = collect(workspace, allow_job_collector=True, force=True)
+    assert (
+        forced.missing_collector
+        == "the job's last attempt did not run from its runner copy; restart it before collecting"
     )
 
 

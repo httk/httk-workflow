@@ -35,8 +35,9 @@ SPAWN_FORMAT_VERSION = 2
 MAX_SPAWN_BYTES = 16 << 20
 #: Path bytes kept free below a child's job directory: room for the protocol files read inside an unowned job.
 _PATH_HEADROOM = 256
-#: Names only owners write at a job's root; a proposed child may not carry them.
-TRUSTED_NAMES = frozenset({"state.json", "seal.json", "logs", "attempts"})
+#: Names only owners write at a job's root (``workflow`` is an unlocked job's runner copy, placed by an
+#: operator); a proposed child may not carry them.
+TRUSTED_NAMES = frozenset({"state.json", "seal.json", "logs", "attempts", "workflow"})
 
 _ENTRY_REQUIRED = frozenset({"job_key", "label", "placement"})
 _ENTRY_MEMBERS = _ENTRY_REQUIRED | {"workspace_id", "job_id", "spawn_id"}

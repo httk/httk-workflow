@@ -487,7 +487,12 @@ def test_directory_package_runs_and_job_records_retain_the_tree_pin(tmp_path: Pa
     assert record.job_id == job.job_id
     assert record.job["workflow"] == "local:tests.cli.package"
     # The run pins the installed tree it ran, the sources-only digest of the package.
-    assert record.runner_provenance == {"id": "local:tests.cli.package", "tree_sha256": source_tree_digest(package)}
+    assert record.runner_provenance == {
+        "id": "local:tests.cli.package",
+        "tree_sha256": source_tree_digest(package),
+        "source": "installed",
+        "workflow_present": False,
+    }
 
 
 def test_workflow_dir_install_reinstalls_an_edited_package_only(tmp_path: Path) -> None:

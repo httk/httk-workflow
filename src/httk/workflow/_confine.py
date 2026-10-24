@@ -3,7 +3,9 @@
 The manager is trusted and runs unconfined; with ``manager.confine=bwrap`` it starts every attempt inside
 the sandbox built here. The sandbox exposes ``jobs/`` and ``workflows/`` read-only and
 ``.httk-workspace/format.json`` as a read-only content copy at their real paths. Only the attempt's own job
-directory is writable, so ``HTTK_WORKFLOW_*_DIR`` paths stay valid inside the sandbox unchanged.
+directory is writable, so ``HTTK_WORKFLOW_*_DIR`` paths stay valid inside the sandbox unchanged. Its
+trusted entries (``job.json``, ``state.json``, ``.httk-job/seal.json``, ``.httk-job/releases/``, ``logs/``
+and an unlocked job's runner copy ``workflow/``) are overlaid read-only on that bind when present.
 """
 
 import logging
@@ -79,6 +81,8 @@ _TRUSTED_OVERLAYS = (
     (".httk-job/seal.json", False),
     (".httk-job/releases", True),
     ("logs", True),
+    # An unlocked job's runner copy: the attempt runs it, but never rewrites it for a later trusted reader.
+    ("workflow", True),
 )
 
 
@@ -407,6 +411,27 @@ def _trusted_entry(job_fd: int, relative: str, directory: bool) -> int | None:
             os.close(at)
 
 
+def trusted_overlays(job_fd: int, job_path: Path, descriptors: list[int]) -> list[str]:
+    """Return the Bubblewrap options overlaying a job's present trusted entries read-only on its writable bind.
+
+    Binds apply in order, so the options go after the job directory's bind.
+
+    :param job_fd: A directory descriptor of the job directory.
+    :param job_path: The job directory's path inside the sandbox.
+    :param descriptors: The sandbox's descriptors; each overlay's descriptor is appended, for the caller to close.
+    :return: The options.
+    :raises OSError: If opening an entry fails for a reason other than absence.
+    :raises ValueError: When an entry is not the expected kind of entry.
+    """
+
+    argv: list[str] = []
+    for relative, directory in _TRUSTED_OVERLAYS:
+        if (trusted := _trusted_entry(job_fd, relative, directory)) is not None:
+            descriptors.append(trusted)
+            argv += ["--ro-bind-fd" if directory else "--ro-bind-data", str(trusted), str(job_path / relative)]
+    return argv
+
+
 def _namespace_options(settings: ConfineSettings, *, block_userns: bool) -> list[str]:
     assert settings.bwrap is not None
     argv = [str(settings.bwrap), "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
@@ -505,10 +530,7 @@ def prepare_attempt_sandbox(
         # Binds apply in order, so these overlay the writable job directory. Files are opened (inode-pinned)
         # now and copied by Bubblewrap when the sandbox starts, so an atomic manager replacement of state.json
         # in between neither fails the launch nor reaches the job; logs/ remains a read-only directory bind.
-        for relative, directory in _TRUSTED_OVERLAYS:
-            if (trusted := _trusted_entry(job_fd, relative, directory)) is not None:
-                descriptors.append(trusted)
-                argv += ["--ro-bind-fd" if directory else "--ro-bind-data", str(trusted), str(job_path / relative)]
+        argv += trusted_overlays(job_fd, job_path, descriptors)
         argv += ["--dev", "/dev", *device_and_proc_mounts(settings.devices, descriptors)]
         argv += ["--remount-ro", str(workspace_root), "--remount-ro", "/"]
         argv += ["--chdir", str(workdir), "--"]

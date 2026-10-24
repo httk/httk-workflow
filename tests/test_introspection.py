@@ -108,7 +108,12 @@ def test_show_reports_the_authoritative_state_of_a_finished_job(ws: Workspace, i
     assert report["phase"] == {"kind": "idle", "attempt_id": None}
     assert report["runner_steps"] == _STEPS
     assert report["workflow"] == {"id": installed.id, "name": "demo"}
-    assert report["workflow_pin"] == {"id": installed.id, "tree_sha256": installed.record["tree_sha256"]}
+    assert report["workflow_pin"] == {
+        "id": installed.id,
+        "tree_sha256": installed.record["tree_sha256"],
+        "source": "installed",
+        "workflow_present": False,
+    }
     assert report["claim"] == {"claim_pool": "default", "required_capabilities": []}
     assert len(str(report["job_digest"])) == 64
     assert report["budgets"]["activations"] == 3

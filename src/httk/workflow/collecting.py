@@ -1680,8 +1680,10 @@ def _job_collector(
 ) -> tuple[Callable[[JobRecord], Mapping[str, object]] | None, WorkflowProvider | None, str | None]:
     """Resolve a collector from the job's installed workflow package, verified against the job's pin.
 
-    An unlocked job (debug mode) ran code that may have been edited, so nothing is verified: its collector comes
-    from its own runner copy when it has one, else from the installed tree.
+    An unlocked job (debug mode) with its own runner copy collects from that copy only when the job's last
+    attempt launched from it and the copy still has the digest pinned then: the job may write its payload, so
+    nothing it changed afterwards is run here. Without a copy it collects, unverified, from the installed tree
+    (operator-controlled, never job-writable).
     """
 
     unlocked = record.job.get("unlocked") is not None
@@ -1692,7 +1694,21 @@ def _job_collector(
     if installed is None or installed.id != workflow_id:
         return None, None, f"job workflow {workflow_id!r} is not installed in this workspace"
     if unlocked:
-        installed = _store.runner_copy(installed, record.payload) or installed
+        if (copy := _store.runner_copy(installed, record.payload)) is not None:
+            modified = "runner copy modified since the job ran"
+            if (record.runner_provenance or {}).get("source") != "copy" or not isinstance(pinned, str):
+                return (
+                    None,
+                    None,
+                    "the job's last attempt did not run from its runner copy; restart it before collecting",
+                )
+            try:
+                actual = _store.source_digest(copy.package, declared_by=copy.installed_package)
+            except Exception as exc:
+                return None, None, f"{modified}: {copy.package} could not be verified: {exc}"
+            if actual != pinned:
+                return None, None, f"{modified}: digest {actual} does not match pinned {pinned}"
+            installed = copy
     elif installed.record.get("tree_sha256") != pinned:
         return (
             None,

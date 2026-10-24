@@ -694,7 +694,7 @@ activation). It is strict except that an absent `job_digest`, `budget_override`,
 | `exchange_name` | UUID or `null` | The client's own id of an exchange job. |
 | `detached` | `{at, operator}` or `null` | Set by `detach`. |
 | `seal` | `null`, `{sha256, signed}`, `{disabled: true}` or `{released: true, at, request_id}` | The authoritative seal record (§Seals). |
-| `workflow_pin` | `{id, tree_sha256}` or `null` | The installation the last launch used. For an unlocked job that runs from its own copy of the package, `tree_sha256` is the digest of that copy at launch, or `null` when it cannot be digested. |
+| `workflow_pin` | `{id, tree_sha256, source, workflow_present}` or `null` | The installation the last launch used. `source` is `"installed"` (the installation in the store) or `"copy"` (the job's own `workflow/` runner copy, for an unlocked job); `workflow_present` is a boolean: whether `workflow/` existed at launch. For a copy, `tree_sha256` is the digest of that copy at launch, or `null` when it cannot be digested. |
 | `history_tail` | list, at most 32 | `{at, event, ...}` entries: `released`, `request_applied`, `request_dropped`, `join_decided`, `paused`, `unsealed`, `job_digest_repinned`. |
 | `job_digest` | 64 hex digits or `null` | The pinned job digest. |
 | `budget_override` | object or `null` | Optional. Set by `set_budget`: keys are a non-empty subset of `maximum_attempts_per_activation`, `maximum_total_attempts` and `maximum_activations`, each an integer of at least 1 or `null` (that limit lifted). Absent keys fall back to `job.json`. The effective policy is the `retry_policy` of `job.json` with these keys replaced. |
@@ -867,7 +867,11 @@ attempts/<A>/
 otherwise, no capabilities) with the workspace bound read-only and the job
 directory writable, both at their real paths, and read-only overlays of the
 trusted entries present at launch: `job.json`, `state.json`,
-`.httk-job/seal.json`, `.httk-job/releases/` and `logs/`. Each overlay
+`.httk-job/seal.json`, `.httk-job/releases/`, `logs/` and `workflow/`, for the
+attempt and for its ranks (the rank keeper sandbox of `HTTK_WORKFLOW_LAUNCH`) alike (job-local
+code runs only inside the job's own sandbox, and nothing an attempt writes there
+is trusted afterwards). A symlinked trusted entry, `workflow` included, fails the
+launch. Each overlay
 binds the inode opened when the sandbox is built, so the `state.json` replaced before the gate opens stays
 read-only to the job. Installed workflows, the parent and the children are
 visible read-only through the workspace bind. The attempt context
@@ -935,13 +939,15 @@ failure fails the job with `protocol_error`. Manager failures carry
 
 An attempt that ends without a valid outcome fails with a reserved code below.
 A cancelled attempt commits as `cancelled` whatever it published. An attempt
-that changed or broke `job.json` has its outcome voided. Manager-detected
+that changed or broke `job.json`, or that left a `workflow/` that did not exist at its launch (`workflow_pin`
+`workflow_present` false), has its outcome voided and that `workflow/` deleted; the
+same check runs when the manager recovers a crashed `running` attempt. Manager-detected
 failures are retried only when their code is in `retry_on` and the effective
 budgets (`retry_policy` with `budget_override`) allow.
 
 | Code | Meaning |
 | --- | --- |
-| `protocol_error` | Exit status 0 without an outcome, an unusable outcome, or an outcome, child, transaction, seal or `job.json` the protocol forbids. |
+| `protocol_error` | Exit status 0 without an outcome, an unusable outcome, or an outcome, child, transaction, seal or `job.json` the protocol forbids; an attempt that created `workflow/` fails with the message `the attempt created workflow/; it was removed`. |
 | `process_failure` | A runner that could not be started, or exited nonzero without an outcome. |
 | `owner_lost` | Unclean: the attempt's owner died, or drained it, before it published. |
 | `timeout` | The manager stopped the attempt at its `maxtime`. |
@@ -1028,7 +1034,7 @@ A runner proposes children in its outcome: complete payloads in
 workspace_id?, job_id?, spawn_id?}]}`). Validation (commit step 1) requires
 unique labels and keys within the spawn set, this workspace, a `job_id` agreeing with the key, a
 real directory per child that passes `walk_untrusted`, no `state.json`,
-`seal.json`, `logs` or `attempts` at its top, a valid `job.json` whose key and
+`seal.json`, `logs`, `attempts` or `workflow` at its top, a valid `job.json` whose key and
 placement match and whose `parent` names this job (id, key, placement,
 workspace, spawn id), and ids not already present. A child of an exchange
 job (`origin` `exchange` in its trusted `state.json`, or a job in an exchange
@@ -1289,8 +1295,17 @@ protocol does not carry it.
   the job is unlocked: a `workflow/` in a locked job is inert, and execution
   from it is never automatic. The copy is a top-level payload member
   and the reserved name `workflow` keeps the protocol's own routes (transactions,
-  staged inputs, input moves, bundles) from writing it; a runner can still create
-  it, which is inert while the job is locked. Unlocked jobs are never sealed, so the seal covering `workflow/` matters only
+  staged inputs, input moves, bundles) from writing it. In a confined attempt
+  `workflow/` is a read-only overlay, and an attempt after which `workflow/` exists
+  although it was absent at launch (`workflow_pin` `workflow_present` false) fails
+  with `protocol_error` ("the attempt created workflow/; it was removed") with its
+  outcome voided, exactly like one that rewrites `job.json`, and that `workflow/`
+  is deleted (also when the manager recovers a crashed `running` attempt). A tree
+  present at launch, such as one the operator placed before `job unlock`, is never
+  touched; it was read-only for the attempt. When the manager rebuilds a damaged
+  `state.json` it also deletes `workflow/` unless the salvaged pin says it was
+  present at launch. A spawned child staged
+  with a top-level `workflow/` is refused as carrying a trusted entry. Unlocked jobs are never sealed, so the seal covering `workflow/` matters only
   for the layout. The operator edits it in place. An untrusted exchange bundle
   may not carry it (§Adopt: exchange jobs run only pre-installed
   workflows); trusted bundles (`job transfer`, `job adopt`, `job eject`) carry it
@@ -1310,7 +1325,13 @@ protocol does not carry it.
   step reruns. `job new --input-move-from-job` out of an unlocked job is
   refused, and so is ejecting it into an exchange inbox.
 - **Collection.** `collect` degrades an unlocked job and stores nothing for it,
-  unless forced (see {doc}`collecting`).
+  unless forced (see {doc}`collecting`). A forced collection with
+  `--allow-job-collector` uses the runner copy's collect hook only after the
+  job has run again from the copy (`workflow_pin` `source` `"copy"`) with the copy
+  unchanged since that launch; otherwise the job degrades with `runner copy
+  the job's last attempt did not run from its runner copy; restart it before
+  collecting` (the other reasons are `runner copy modified since the job ran: ...
+  digest X does not match pinned Y` and `... could not be verified`).
 - **Older readers.** An httk-workflow that predates `unlocked` treats such a
   `state.json` as damaged and rebuilds it without the marker; this is accepted.
 
@@ -1386,10 +1407,10 @@ platform_tag, built_at}`.
 - **No other races are handled, by decision.** Users do not change workflows
   that jobs are using, and two operators installing one id at once is not
   supported.
-- **At launch** the manager records `workflow_pin: {id, tree_sha256}` in
+- **At launch** the manager records `workflow_pin: {id, tree_sha256, source, workflow_present}` in
   `state.json`. Nothing enforces that the installed digest matches the one
   present at job creation. An unlocked job that has a runner copy is launched
-  from that copy, and `tree_sha256` is the digest of the copy at launch, or
+  from that copy, `source` is `"copy"`, and `tree_sha256` is the digest of the copy at launch, or
   `null` when it cannot be digested (§Unlocked jobs).
 
 ## Moving jobs

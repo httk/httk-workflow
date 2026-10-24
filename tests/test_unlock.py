@@ -185,6 +185,7 @@ def test_an_unlocked_job_launches_from_its_runner_copy(tmp_path: Path) -> None:
     pin = v3.state_of(done).workflow_pin
     assert pin is not None and pin["id"] == installed.id
     assert pin["tree_sha256"] == source_tree_digest(done.path / COPY) != installed.record["tree_sha256"]
+    assert pin["source"] == "copy" and (done.path / COPY / "run").is_file()  # left in place: unaffected
 
 
 def test_a_locked_job_never_launches_from_a_planted_copy(tmp_path: Path) -> None:
@@ -197,9 +198,37 @@ def test_a_locked_job_never_launches_from_a_planted_copy(tmp_path: Path) -> None
     (planted / "run").chmod(0o755)
     assert _request(workspace, ref.job_id, "restart") is None
     v3.run(workspace)
-    doc = v3.state_of(v3.find(workspace, ref.job_id))
-    assert doc.failure is not None and doc.failure["code"] == "converge"
+    done = v3.find(workspace, ref.job_id)
+    doc = v3.state_of(done)
+    # Run from the installed tree (its own failure, not the copy's exit 7); a tree present before the launch
+    # is not the attempt's, so it stays and fails nothing.
+    assert doc.failure is not None and doc.failure["code"] == "converge" and (done.path / COPY / "run").is_file()
     assert doc.workflow_pin is not None and doc.workflow_pin["tree_sha256"] == installed.record["tree_sha256"]
+    assert doc.workflow_pin["source"] == "installed" and doc.workflow_pin["workflow_present"] is True
+
+
+def test_an_attempt_that_creates_a_runner_copy_is_void_locked_or_unlocked(tmp_path: Path) -> None:
+    workspace = v3.workspace(tmp_path / "workspace")
+    installed = v3.install(workspace, tmp_path / "demo")
+    files = {"start": {"../workflow/run": "#!/bin/sh\n"}}
+    ref = v3.submit(
+        workspace, installed, {"start": "succeed"}, placement="project/creator", parameters={"files": files}
+    )
+    v3.run(workspace)
+    locked = v3.find(workspace, ref.job_id)
+    # A locked job's attempt succeeded, but the workflow/ it wrote voids the outcome.
+    assert locked.state == "failed" and not (locked.path / COPY).exists()
+    assert (v3.state_of(locked).failure or {}).get("message") == "the attempt created workflow/; it was removed"
+    assert _request(workspace, ref.job_id, "unlock", no_copy=True) is None
+    assert _request(workspace, ref.job_id, "restart") is None
+    v3.run(workspace)
+    job = v3.find(workspace, ref.job_id)
+    doc = v3.state_of(job)
+    # Unlocked without a copy, the attempt ran the installed tree: the copy it wrote voids its outcome again.
+    assert job.state == "failed" and doc.workflow_pin is not None and doc.workflow_pin["source"] == "installed"
+    assert doc.failure is not None and doc.failure["code"] == "protocol_error"
+    assert doc.failure["message"] == "the attempt created workflow/; it was removed"
+    assert not (job.path / COPY).exists() and v3.events(job).count("attempt_started") == 2
 
 
 def test_set_workflow_of_an_unlocked_job(tmp_path: Path) -> None:
@@ -345,7 +374,8 @@ def test_a_first_unlock_keeps_a_placed_copy_and_clears_crash_leftovers(tmp_path:
     assert (crashed_path / f"{COPY}.abcdefghijklmnop").read_text(encoding="utf-8") == "job data"
 
 
-def test_a_damaged_state_keeps_the_unlocked_marker(tmp_path: Path) -> None:
+@pytest.mark.parametrize("present", [False, True], ids=["created", "present-at-launch"])
+def test_a_damaged_state_keeps_the_unlocked_marker(tmp_path: Path, present: bool) -> None:
     workspace = v3.workspace(tmp_path / "workspace")
     installed = v3.install(workspace, tmp_path / "demo")
     ref = _failed(workspace, installed, "project/damaged")
@@ -353,7 +383,12 @@ def test_a_damaged_state_keeps_the_unlocked_marker(tmp_path: Path) -> None:
     job = v3.find(workspace, ref.job_id)
     marker = v3.state_of(job).unlocked
     state = json.loads((job.path / "state.json").read_text(encoding="utf-8"))
-    (job.path / "state.json").write_text(json.dumps({**state, "phase": "broken"}), encoding="utf-8")
+    # A workflow/ the salvaged pin does not show present at the last launch may be the job's own: it goes.
+    (job.path / COPY).mkdir()
+    pin = {**state["workflow_pin"], "workflow_present": present}
+    (job.path / "state.json").write_text(
+        json.dumps({**state, "phase": "broken", "workflow_pin": pin}), encoding="utf-8"
+    )
     _requests.post(
         workspace,
         action="set_priority",
@@ -364,5 +399,7 @@ def test_a_damaged_state_keeps_the_unlocked_marker(tmp_path: Path) -> None:
         priority=7,
     )
     v3.run(workspace)
-    doc = v3.state_of(v3.find(workspace, ref.job_id))
+    damaged = v3.find(workspace, ref.job_id)
+    doc = v3.state_of(damaged)
     assert doc.unlocked == marker and doc.failure is not None and doc.failure["code"] == "protocol_error"
+    assert (damaged.path / COPY).exists() is present

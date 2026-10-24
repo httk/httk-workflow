@@ -308,8 +308,8 @@ starts each attempt inside a Bubblewrap sandbox:
   and `exchange/`, are absent, and the sandbox root is remounted read-only. The
   job's trusted entries
   (`job.json`, `state.json`, `.httk-job/seal.json`, `.httk-job/releases/`,
-  `logs/`) are read-only
-  overlays, and the attempt cannot write the workspace root,
+  `logs/` and `workflow/`) are read-only for the attempt and its ranks
+  overlays (a symlinked one fails the launch), and the attempt cannot write the workspace root,
   `.httk-workspace/` or another job;
 - the paths of `confine.readonly_paths` are read-only, and `/tmp`, `/proc`,
   `/dev/shm`, the user, PID, IPC and UTS namespaces and (unless

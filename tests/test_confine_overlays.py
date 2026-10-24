@@ -7,12 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from httk.workflow import _confine_rank
 from httk.workflow._confine import (
     ConfinementUnavailableError,
     confine_settings,
     filtered_attempt_environment,
     probe_bwrap,
 )
+from test_confine_rank import _Launch, _Opened, launch, opened  # noqa: F401  (the fixtures)
 from test_confine_sandbox import (
     _Layout,
     _open_descriptors,
@@ -24,20 +26,21 @@ from test_confine_sandbox import (
     layout,  # noqa: F401  (the fixture)
 )
 
-_TRUSTED = ("job.json", "state.json", ".httk-job/seal.json", "logs")
+_TRUSTED = ("job.json", "state.json", ".httk-job/seal.json", "logs", "workflow")
 _TRUSTED_FILES = ("job.json", "state.json", ".httk-job/seal.json")
 
 
-def _plant_trusted(created: _Layout) -> None:
+def _plant_trusted(job: Path) -> None:
     for name in ("job.json", "state.json"):
-        (created.job / name).write_text("{}\n", encoding="utf-8")
-    (created.job / ".httk-job").mkdir()
-    (created.job / ".httk-job" / "seal.json").write_text("{}\n", encoding="utf-8")
-    (created.job / "logs").mkdir()
+        (job / name).write_text("{}\n", encoding="utf-8")
+    (job / ".httk-job").mkdir()
+    (job / ".httk-job" / "seal.json").write_text("{}\n", encoding="utf-8")
+    (job / "logs").mkdir()
+    (job / "workflow").mkdir()
 
 
 def test_trusted_entries_are_overlaid_read_only_after_the_job_bind(layout: _Layout) -> None:  # noqa: F811
-    _plant_trusted(layout)
+    _plant_trusted(layout.job)
     prepared = _prepare(layout, _settings())
     try:
         argv = prepared.argv
@@ -60,6 +63,39 @@ def test_trusted_entries_are_overlaid_read_only_after_the_job_bind(layout: _Layo
         prepared.close()
 
 
+def test_the_keeper_sandbox_of_ranks_overlays_the_same_trusted_entries(
+    launch: _Launch,  # noqa: F811
+    opened: _Opened,  # noqa: F811
+) -> None:
+    _plant_trusted(opened.job)
+    prepared = _confine_rank.prepare_keeper_sandbox(
+        launch.trusted,
+        workspace=opened.workspace,
+        workspace_fd=opened.workspace_fd,
+        job=opened.job,
+        job_fd=opened.job_fd,
+        shm_fd=opened.shm_fd,
+        environment={},
+    )
+    try:
+        argv = prepared.argv
+        job_bind = _option_index(argv, "--bind-fd", argv[argv.index(str(opened.job)) - 1], str(opened.job))
+        overlays = [
+            _option_index(
+                argv,
+                "--ro-bind-data" if name in _TRUSTED_FILES else "--ro-bind-fd",
+                argv[argv.index(str(opened.job / name)) - 1],
+                str(opened.job / name),
+            )
+            for name in _TRUSTED
+        ]
+        assert job_bind < min(overlays) and max(overlays) < _option_index(argv, "--dev", "/dev")
+        for index in overlays:
+            assert int(argv[index + 1]) in prepared.descriptors
+    finally:
+        prepared.close()
+
+
 def test_a_symlinked_job_state_dir_gets_no_seal_overlay(layout: _Layout, tmp_path: Path) -> None:  # noqa: F811
     (tmp_path / "elsewhere").mkdir()
     (tmp_path / "elsewhere" / "seal.json").write_text("{}\n", encoding="utf-8")
@@ -71,7 +107,7 @@ def test_a_symlinked_job_state_dir_gets_no_seal_overlay(layout: _Layout, tmp_pat
         prepared.close()
 
 
-@pytest.mark.parametrize("name", ["state.json", "logs"])
+@pytest.mark.parametrize("name", ["state.json", "logs", "workflow"])
 def test_a_planted_trusted_entry_is_refused_and_descriptors_are_closed(
     layout: _Layout,  # noqa: F811
     tmp_path: Path,
@@ -86,7 +122,7 @@ def test_a_planted_trusted_entry_is_refused_and_descriptors_are_closed(
 
 
 def test_file_overlay_keeps_preparation_content_after_state_replacement(layout: _Layout) -> None:  # noqa: F811
-    _plant_trusted(layout)
+    _plant_trusted(layout.job)
     original = b'{"phase":"prepared"}\n'
     (layout.job / "state.json").write_bytes(original)
     before = _open_descriptors()
@@ -117,10 +153,10 @@ def test_real_sandbox_refuses_writes_to_the_trusted_entries(layout: _Layout) -> 
     except ConfinementUnavailableError as exc:
         _unsupported_namespace_failure(str(exc))
         raise
-    _plant_trusted(layout)
+    _plant_trusted(layout.job)
     environment = filtered_attempt_environment({"PATH": "/usr/bin:/bin"})
     prepared = _prepare(layout, settings, block_userns=block_userns, workdir=layout.job, environment=environment)
-    targets = ["own", "job.json", "state.json", ".httk-job/seal.json", "logs/x"]
+    targets = ["own", "job.json", "state.json", ".httk-job/seal.json", "logs/x", "workflow/x"]
     script = (
         'for target in "$@"; do\n'
         '  if (echo data > "$target") 2>/dev/null; then echo "writable $target"; else echo "refused $target"; fi\n'
@@ -148,10 +184,11 @@ def test_real_sandbox_refuses_writes_to_the_trusted_entries(layout: _Layout) -> 
         "refused state.json",
         "refused .httk-job/seal.json",
         "refused logs/x",
+        "refused workflow/x",
         "pinned",
     ]
     assert (layout.job / "state.json").read_text(encoding="utf-8") == "{}\n"
-    assert not (layout.job / "logs" / "x").exists()
+    assert not (layout.job / "logs" / "x").exists() and not (layout.job / "workflow" / "x").exists()
 
 
 def test_real_sandbox_reads_preparation_content_after_state_replacement(layout: _Layout) -> None:  # noqa: F811
@@ -163,7 +200,7 @@ def test_real_sandbox_reads_preparation_content_after_state_replacement(layout: 
     except ConfinementUnavailableError as exc:
         _unsupported_namespace_failure(str(exc))
         raise
-    _plant_trusted(layout)
+    _plant_trusted(layout.job)
     original = b'{"phase":"prepared"}\n'
     (layout.job / "state.json").write_bytes(original)
     environment = filtered_attempt_environment({"PATH": "/usr/bin:/bin"})

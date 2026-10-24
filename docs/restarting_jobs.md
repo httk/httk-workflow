@@ -357,7 +357,8 @@ From then on, while the job is unlocked, the manager launches the runner from
 that copy (execution from `workflow/` is not automatic: only an unlocked job
 that has the directory runs from it, and a `workflow/` in a locked job is
 inert), and `workflow_pin`
-records the digest of the copy at launch, without the installation's declared
+records the digest of the copy at launch (with `source` `"copy"`, against
+`"installed"` for the installation), without the installation's declared
 build artifacts. Only the runner itself comes from the copy: the build spec,
 platform probe and build artifacts of a compiled workflow still come from the
 installation in the store, so editing `[workflow.build]` in the copy has no
@@ -369,6 +370,20 @@ httk job unlock silicon
 $EDITOR "$(httk job show silicon)/workflow/run.py"
 httk job request restart --reason "try the fix" silicon
 ```
+
+In a confined attempt and its ranks `workflow/` is a read-only overlay, like
+`job.json` and `logs/`: job-local code runs only inside the job's own sandbox, and nothing a
+running attempt writes there is trusted afterwards. Place or edit the copy
+between attempts; you may also place your own tree before unlocking. An attempt
+that leaves a `workflow/` that did not exist at its launch (`workflow_pin`
+`workflow_present` false) fails with `protocol_error` ("the attempt created
+workflow/; it was removed"), its outcome is voided as for an attempt that rewrites
+`job.json`, and the created `workflow/` is deleted. The same check runs when the
+manager recovers a crashed `running` attempt, and when it rebuilds a damaged
+`state.json` it also deletes `workflow/` unless the salvaged pin says it was
+present at launch. A tree present at launch is never touched; it was read-only
+for the attempt. A spawned
+child staged with a top-level `workflow/` is refused.
 
 The installed workflow is untouched, so other jobs of it are not affected, and
 `set_workflow` is refused while the copy exists, by the CLI before anything is
@@ -394,8 +409,12 @@ nonzero; collection with `--postprocess` reports the same text as an error, and
 `--force` lets both collect the job.
 `httk collect --force` collects it through its workflow's registered collector
 as usual; the collect hook of the runner copy is used only with
-`--allow-job-collector`, unverified, and only when no registered provider
-supplies a collector. With `--into --force` the run is stored **without** any mark
+`--allow-job-collector`, unverified, only when no registered provider
+supplies a collector, and only after the job has run again from the copy (`workflow_pin` `source` `"copy"`) with the copy unchanged since that launch. Unlocking a finished job and collecting straight away degrades the
+job with `the job's last attempt did not run from its runner copy; restart it before collecting`. Other reasons read `runner copy modified since
+the job ran: ... digest X does not match pinned Y` and `... could not be
+verified`.
+An unlocked job without a copy uses the installed tree as before. With `--into --force` the run is stored **without** any mark
 that the job was unlocked: you take responsibility for it. Every per-job line
 of an unlocked job carries `"unlocked": true`, forced or not. `--raw` and campaign collection are readouts and do
 not check the marker. See {doc}`/collecting`.

@@ -402,7 +402,12 @@ def test_collect_uses_the_installed_workflow_collector_when_allowed(tmp_path: Pa
     assert set(with_fallback.outputs) == {"relaxed_structure"}
     assert with_fallback.run.outputs[0].entry_id == content_id(with_fallback.outputs["relaxed_structure"])
     # The job pinned the installed tree it ran; the fallback verified that same tree.
-    assert record.runner_provenance == {"id": installed.id, "tree_sha256": installed.record["tree_sha256"]}
+    assert record.runner_provenance == {
+        "id": installed.id,
+        "tree_sha256": installed.record["tree_sha256"],
+        "source": "installed",
+        "workflow_present": False,
+    }
 
 
 def test_fallback_uses_pinned_manifest_curation_for_output_products(
