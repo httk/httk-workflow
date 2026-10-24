@@ -106,6 +106,13 @@ the setting. A ref that cannot be resolved is skipped with a warning.
   succeeded job that has none. Both are requests applied by the job's owner.
   The one sanctioned change is moving a file out to a new job (see
   [Release records](#release-records)).
+- **Unlocked jobs:** a job in debug mode (`httk job unlock`, see
+  {doc}`/restarting_jobs`) is the exception. A succeeded unlocked job is not
+  sealed (its `seal` is `{"disabled": true}`) and `job seal` refuses it; it may
+  be revived by `continue`, `restart` or `override_step`, and `job delete`
+  needs no `unseal`. A succeeded job with a live seal must be unsealed before
+  it can be unlocked. `.httk-job/` is outside the seal, so the runner copy of an
+  unlocked job (`.httk-job/workflow/`) is not sealed either.
 - **Sealed workspace or project:** modifying CLI commands (job creation,
   requests, deletion, eject, adopt, transfer, installs) are refused until it is
   unsealed; managers and jobs do not check it. A workspace cannot be unsealed
@@ -207,7 +214,8 @@ httk job unseal <JOB>...
 
 `workspace seal` records every job's seal digest as it finds it and lists the
 jobs without a seal; seal the succeeded ones with `job seal` first when they
-should be covered.
+should be covered. A succeeded unlocked job
+can never be sealed, so it is always among the unsealed ones.
 
 `job unseal`, `workspace unseal` and `project unseal` ask for confirmation,
 which `--force` skips. Without a terminal and without `--force` they refuse

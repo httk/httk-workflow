@@ -55,6 +55,7 @@ def _full_mapping() -> dict[str, object]:
         history_tail=[{"at": "t", "event": "claimed"}] * 32,
         budget_override={"maximum_attempts_per_activation": 3, "maximum_activations": None},
         workflow_override={"id": "local:y", "name": "y"},
+        unlocked={"at": "now", "operator": "op", "reason": "debug", "inherited_from": "parent-key"},
     )
     return mapping
 
@@ -127,6 +128,12 @@ def test_document_is_immutable_all_the_way_down() -> None:
         ("workflow_override", "local:y"),
         ("workflow_override", {"id": "demo", "name": "demo"}),
         ("workflow_override", {"id": "local:", "name": "demo"}),
+        ("unlocked", {}),
+        ("unlocked", {"operator": "op"}),
+        ("unlocked", {"at": 3}),
+        ("unlocked", {"at": "now", "reason": None}),
+        ("unlocked", {"at": "now", "by": "op"}),
+        ("unlocked", "now"),
     ],
 )
 def test_malformed_members_are_refused(member: str, value: object) -> None:
@@ -167,6 +174,21 @@ def test_workflow_override_is_optional() -> None:
     assert mapping["workflow_override"] is None
     del mapping["workflow_override"]
     assert StateDoc.from_mapping(mapping).workflow_override is None
+
+
+def test_unlocked_is_optional_and_salvaged(tmp_path: Path) -> None:
+    mapping = _full_mapping()
+    del mapping["unlocked"]
+    assert StateDoc.from_mapping(mapping).unlocked is None
+    marker = {"at": "now", "operator": "op"}
+    doc = StateDoc.empty(JOB_ID).updated(unlocked=marker, job_digest="a" * 64)
+    assert decode_state(encode_state(doc)).unlocked == marker
+    damaged = doc.as_mapping() | {"phase": "broken"}
+    (tmp_path / "state.json").write_text(json.dumps(damaged))
+    assert read_state_unowned(tmp_path / "state.json") == (None, True)
+    assert salvage_state(tmp_path / "state.json")["unlocked"] == marker
+    (tmp_path / "state.json").write_text(json.dumps(damaged | {"unlocked": {"at": 3}}))
+    assert "unlocked" not in salvage_state(tmp_path / "state.json")
 
 
 def test_non_json_values_are_refused() -> None:

@@ -79,6 +79,15 @@ A job without a usable collector is reported as *degraded*, with every
 declared output role unfulfilled; a workflow that only orchestrates others and
 declares no outputs is *run-only* and stores just its run.
 
+A job in debug mode (`httk job unlock`, see {doc}`restarting_jobs`) is
+degraded too: `job is unlocked (debug mode); pass --force to collect it`,
+nothing is stored for it and the command exits nonzero. `--postprocess`
+collection reports it as an error. `httk collect --force` collects it anyway
+(also with `--postprocess`),
+and with `--into` stores its run with no mark that it was unlocked, so you take
+responsibility for the result. Every report line of the job carries `"unlocked": true`;
+`--raw` readouts are not gated.
+
 From Python, a consumer reads a workspace like this:
 
 ```python

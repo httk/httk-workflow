@@ -655,6 +655,16 @@ def _eject(
                 "exchange's adoption would drop with the rest of state.json; run it here, or submit a new job of "
                 "that workflow to the exchange"
             )
+        if _exchange_inbox(destination) and (
+            unlocked := next(
+                (job for job in (root, *members) if (doc := job.read_state()) is not None and doc.unlocked),
+                None,
+            )
+        ):
+            raise ValueError(
+                f"{unlocked.job_key} is unlocked (debug mode), which the exchange's adoption would drop with the rest "
+                "of state.json; run it here, or submit a new job to the exchange"
+            )
         scratch = owner.scratch(_HOLD if hold else "eject")
         bundle = build_bundle(
             owner,

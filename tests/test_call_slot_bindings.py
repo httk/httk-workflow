@@ -402,6 +402,7 @@ def test_a_slot_is_fitted_once_per_installed_tree(
     attempt.workspace = workspace.root
     attempt.context = SimpleNamespace(workflow_id=job.workflow_id, durable=False)  # type: ignore[assignment]
     attempt._own, attempt._fits, attempt._job = None, {}, job
+    attempt.payload = tmp_path / "payload"  # no state.json: a locked job
     for _ in range(2):
         found = attempt._slot_callee("forces.dft")
         assert found is not None and found[0].id == other.id

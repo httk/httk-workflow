@@ -7,7 +7,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import fake_remote, register_ws
-from httk.workflow import TaskManager, Workspace, _store, job_records, scaffold
+from httk.workflow import TaskManager, Workspace, _kernel, _store, job_records, scaffold
 from httk.workflow.packages import load_workflow_package, source_tree_digest
 from httk.workflow.projects import initialize_project
 from httk.workflow.scaffold import new_job
@@ -488,6 +488,27 @@ def test_directory_package_runs_and_job_records_retain_the_tree_pin(tmp_path: Pa
     assert record.job["workflow"] == "local:tests.cli.package"
     # The run pins the installed tree it ran, the sources-only digest of the package.
     assert record.runner_provenance == {"id": "local:tests.cli.package", "tree_sha256": source_tree_digest(package)}
+
+
+def test_workflow_dir_install_reinstalls_an_edited_package_only(tmp_path: Path) -> None:
+    package = _cli_package(tmp_path / "package")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+
+    def installed() -> _store.Installed:
+        with _kernel.register_owner(workspace, kind="cli", label="t", allocation=None, advertised={}) as owner:
+            return scaffold._installed(workspace, package, owner=owner, install=True, step=None)
+
+    # .git is never installed, so it never counts as an edit (a symlink in it neither).
+    (package / ".git").mkdir()
+    (package / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (package / ".git" / "link").symlink_to("HEAD")
+    first = installed()
+    assert installed().record == first.record  # unchanged: reused, not installed again
+    (package / "run").write_text(_SUCCESS_RUNNER, encoding="utf-8")
+    edited = installed()
+    assert edited.id == first.id and edited.record["tree_sha256"] == _store.source_digest(package)
+    assert edited.record["tree_sha256"] != first.record["tree_sha256"]
+    assert (edited.package / "run").read_text(encoding="utf-8") == _SUCCESS_RUNNER
 
 
 def _compiled_cli_package(root: Path, *, build_command: str = "./build.sh") -> Path:

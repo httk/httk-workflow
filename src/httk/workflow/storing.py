@@ -255,6 +255,8 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
         mapping["identity_stable"] = item.identity_stable
     if item.run_only:
         mapping["run_only"] = True
+    if item.record.job.get("unlocked") is not None:
+        mapping["unlocked"] = True
     if item.references:
         mapping["references"] = sorted(item.references)
     if item.child_runs:

@@ -23,6 +23,7 @@ from httk.workflow._requests import (
     Eject,
     Request,
     Seal,
+    Unlock,
     Unseal,
     apply,
     parse,
@@ -298,6 +299,8 @@ def _expected(action: str, state: str) -> Effect:
         return Seal(Release(state, 500)) if state == "succeeded" else Drop("")
     if action == "unseal":
         return Unseal(Release(state, 500)) if state == "succeeded" else Drop("")
+    if action == "unlock":
+        return Drop("") if state == "cancelled" else Unlock(Release(state, 500))
     return Defer()
 
 
@@ -314,8 +317,8 @@ def test_application_table(action: str, state: str) -> None:
             if isinstance(expected, Release)
             else expected
         )
-    if isinstance(expected, (Seal, Unseal)):
-        assert isinstance(effect, (Seal, Unseal))
+    if isinstance(expected, (Seal, Unseal, Unlock)):
+        assert isinstance(effect, (Seal, Unseal, Unlock))
         assert effect.release == Release(expected.release.state, 500, (request.request_id,))
     if isinstance(expected, Defer):
         assert new is doc
@@ -597,6 +600,65 @@ def test_detach() -> None:
     assert isinstance(effect, Drop)
     _, effect = apply(_job(parent=False), _doc(), "ready", 500, _request("detach"))
     assert isinstance(effect, Drop)
+
+
+def _unlocked(doc: StateDoc, state: str = "failed") -> StateDoc:
+    new, effect = apply(_job(), doc, state, 500, _request("unlock"))
+    assert isinstance(effect, Unlock) and effect.copy and effect.release.state == state
+    return new
+
+
+def test_unlock_sets_a_one_way_marker() -> None:
+    doc = _doc()
+    new = _unlocked(doc)
+    assert new.unlocked is not None and dict(new.unlocked).keys() == {"at", "operator", "reason"}
+    assert new.unlocked["operator"] == "Op <op@example.org>" and new.unlocked["reason"] == "because"
+    assert new.history_tail[-1]["unlocked"] is True and new.history_tail[-1]["to"] == "failed"
+    # With no_copy a second unlock is dropped; a plain one (it copies) is left to the owner, keeping the marker.
+    dropped, effect = apply(_job(), new, "failed", 500, _request("unlock", no_copy=True))
+    assert isinstance(effect, Drop) and effect.reason == "already unlocked"
+    assert dropped.unlocked == new.unlocked
+    again, effect = apply(_job(), new, "failed", 500, _request("unlock", reason="other"))
+    assert isinstance(effect, Unlock) and again.unlocked == new.unlocked
+    _, effect = apply(_job(), doc, "failed", 500, _request("unlock", no_copy=True))
+    assert isinstance(effect, Unlock) and not effect.copy
+    assert apply(_job(), _doc(running=True), "ready", 500, _request("unlock"))[1] == Defer()
+
+
+def test_unlock_refusals() -> None:
+    _, effect = apply(_job(), _doc(), "cancelled", 500, _request("unlock"))
+    assert isinstance(effect, Drop) and effect.reason == "the job is already cancelled"
+    sealed = _doc().updated(seal={"sha256": "0" * 64, "signed": False})
+    _, effect = apply(_job(), sealed, "succeeded", 500, _request("unlock"))
+    assert isinstance(effect, Drop) and "run `job unseal` first" in effect.reason
+    for seal in ({"disabled": True}, {"released": True, "at": "now", "request_id": str(uuid.uuid4())}, None):
+        _, effect = apply(_job(), _doc().updated(seal=seal), "succeeded", 500, _request("unlock"))
+        assert isinstance(effect, Unlock)
+    with pytest.raises(FormatError):
+        validate_envelope(_document("unlock", no_copy=False))
+    with pytest.raises(FormatError):
+        validate_envelope(_document("cancel", no_copy=True))
+
+
+def test_unlocked_job_relaxations() -> None:
+    locked = _doc().updated(seal={"disabled": True})
+    unlocked = _unlocked(locked, "succeeded")
+    for action in ("continue", "restart", "override_step", "set_budget", "set_workflow"):
+        _, effect = apply(_job(), locked, "succeeded", 500, _request(action), workflow_name=lambda _id: "w2")
+        assert isinstance(effect, Drop), action
+        _, effect = apply(_job(), unlocked, "succeeded", 500, _request(action), workflow_name=lambda _id: "w2")
+        expected = "succeeded" if action.startswith("set_") else "ready"
+        assert isinstance(effect, Release) and effect.state == expected, action
+        _, effect = apply(_job(), unlocked, "cancelled", 500, _request(action), workflow_name=lambda _id: "w2")
+        assert isinstance(effect, Drop), action
+    _, effect = apply(_job(), locked, "succeeded", 500, _request("delete"))
+    assert isinstance(effect, Drop)
+    _, effect = apply(_job(), unlocked, "succeeded", 500, _request("delete"))
+    assert isinstance(effect, Discard)
+    _, effect = apply(_job(), locked.updated(seal=None), "succeeded", 500, _request("seal"))
+    assert isinstance(effect, Seal)
+    _, effect = apply(_job(), unlocked.updated(seal=None), "succeeded", 500, _request("seal"))
+    assert isinstance(effect, Drop) and effect.reason == "an unlocked job cannot be sealed"
 
 
 def test_mismatched_job_is_refused() -> None:

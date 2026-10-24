@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import os
 import re
 import shlex
 import sys
@@ -25,10 +26,11 @@ from httk.core.identity import (
 
 from .. import _fs, _kernel, _moving, _requests, _store
 from .._bundles import BundleError
+from .._job import JobDefinition
 from .._kernel import JobRef
 from .._logging import LOG_LEVELS, configure_logging
 from .._manager_scheduling import current_step
-from .._state import TERMINAL_STATES
+from .._state import TERMINAL_STATES, read_state_unowned
 from .._util import utc_now
 from ..adapters import (
     REMOTE_JOB_DELETE_COMMAND,
@@ -617,6 +619,14 @@ def _switch_target(workspace: Workspace, refs: Sequence[JobRef], workflow: str) 
         job, problem = read_job(ref)
         if job is not None:
             doc, problem = read_state(ref)
+            if (
+                problem is None
+                and doc is not None
+                and doc.unlocked is not None
+                and os.path.lexists(ref.path / _store.RUNNER_COPY)
+            ):
+                # As the owner refuses it: the copy, not an installation, is what the job runs.
+                problem = f"the job runs its own workflow copy at {_store.RUNNER_COPY}; edit or remove it instead of switching"
             problem = problem or workflow_switch_problem(workspace, job, doc, candidate, providers)
         if problem is not None:
             hint = "; narrow the selection with --placement or JOB ids" if len(refs) > 1 and "rule 2" in problem else ""
@@ -890,9 +900,9 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
             )
         target = resolve_remote(binding.remote, project=context.cwd)
         if read_metadata(target.bundle).get("kind") == "mount-daemon":
-            if arguments.action == "set_workflow":
+            if arguments.action in ("set_workflow", "unlock"):
                 raise ValueError(
-                    "set_workflow is not carried by the workspace daemon protocol; run it on the daemon host"
+                    f"{arguments.action} is not carried by the workspace daemon protocol; run it on the daemon host"
                 )
             status, stdout = request_remote_jobs(binding, context, arguments, identity)
             sys.stdout.write(stdout)
@@ -923,6 +933,8 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         return 1
     if tree:
         refs = _with_failed_descendants(workspace, refs)
+    # As `job unlock`: the parents of a debugged job take its results, so they are unlocked too (marker only).
+    ancestors = _ancestors(workspace, refs) if arguments.action == "unlock" else []
     _continue_notes(workspace, refs, arguments.action, tree=tree)
     if tree:
         return _continue_tree(
@@ -948,7 +960,11 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         keep_budget=bool(arguments.keep_budget),
         workflow=arguments.workflow,
     )
-    return _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
+    status = _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
+    if not ancestors:
+        return status
+    with _kernel.register_owner(workspace, kind="cli", label="job request", allocation=None, advertised={}) as owner:
+        return 1 if _unlock_ancestors(workspace, owner, ancestors, arguments.reason) else status
 
 
 def _request_document(
@@ -988,6 +1004,14 @@ def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLICont
     )
     refs = [resolve_job(workspace, selector) for selector in arguments.job_id]
     _prevalidate(refs, arguments.action, arguments.override_step, force=bool(arguments.force))
+    for ref in refs if arguments.action == "unlock" else ():
+        # The envelope path posts exactly the signed requests: it cannot walk to the ancestors as `job unlock` does.
+        job, _problem = read_job(ref)
+        if job is not None and job.parent is not None:
+            raise ValueError(
+                f"{ref.job_key} is a spawned job: unlock spawned jobs on the workspace host with `httk job unlock`, "
+                "which also unlocks their ancestors"
+            )
     if arguments.workflow is not None:
         # Resolved and checked against this (the far) side's installations; the client accepts the id it names.
         options["workflow"] = _switch_target(workspace, refs, arguments.workflow)
@@ -1442,25 +1466,97 @@ def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str
     """Post one *action* request per selected job and apply it now where the job is unowned.
 
     A request for a job an owner holds is ``queued`` for that owner (exit status 0, as ``job request``);
-    one that did not take effect otherwise is ``refused`` or ``uncertain`` (exit status 1).
+    one that did not take effect otherwise is ``refused`` or ``uncertain`` (exit status 1). An ``unlock`` copies
+    the runner unless ``--no-copy``, and is followed by marker-only ``unlock`` requests for the ancestors.
     """
 
     workspace = _modifiable(arguments, context, action=f"{action} jobs in it")
     refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
     if action == "unseal" and not confirm(f"Unseal {len(refs)} job(s)?", force=arguments.force):
         return 1
+    copy = not getattr(arguments, "no_copy", False)
+    reason = getattr(arguments, "reason", None) or f"job {action}"
+    # Found before any request moves a job; a string stands in for an ancestor that cannot be followed.
+    ancestors = _ancestors(workspace, refs) if action == "unlock" else []
     failed = False
     with _kernel.register_owner(workspace, kind="cli", label=f"job {action}", allocation=None, advertised={}) as owner:
         for ref in refs:
-            observed: list[RequestOutcome] = []
-            request_now(workspace, owner, ref, action, f"job {action}", outcomes=observed)
-            (outcome,) = observed
-            if outcome.status == "applied":
-                print(f"{ref.job_id}\t{done}")
-            else:
-                failed |= outcome.status != "queued"
-                print(f"{ref.job_id}\t{outcome.status}\t{outcome.explanation}")
+            failed |= _apply_now(workspace, owner, ref, action, reason, copy=copy, done=done)
+        failed |= _unlock_ancestors(workspace, owner, ancestors, reason)
     return 1 if failed else 0
+
+
+def _apply_now(
+    workspace: Workspace,
+    owner: _kernel.Owner,
+    ref: JobRef,
+    action: str,
+    reason: str,
+    *,
+    copy: bool,
+    done: str,
+    mark: str = "",
+) -> bool:
+    """Post one request and apply it now where the job is unowned, print its line; whether it failed."""
+
+    observed: list[RequestOutcome] = []
+    request_now(workspace, owner, ref, action, reason, outcomes=observed, copy=copy)
+    (outcome,) = observed
+    if outcome.status == "applied":
+        print(f"{ref.job_id}\t{done}{mark}")
+        return False
+    print(f"{ref.job_id}\t{outcome.status}\t{outcome.explanation}{mark}")
+    return outcome.status != "queued"
+
+
+def _unlock_ancestors(
+    workspace: Workspace, owner: _kernel.Owner, ancestors: Sequence[JobRef | str], reason: str
+) -> bool:
+    """Post a marker-only ``unlock`` for each of :func:`_ancestors`, printing its lines; whether one failed."""
+
+    failed = False
+    for ancestor in ancestors:
+        if isinstance(ancestor, str):
+            print(ancestor)
+        else:
+            failed |= _apply_now(
+                workspace, owner, ancestor, "unlock", reason, copy=False, done="unlocked", mark=" (ancestor)"
+            )
+    return failed
+
+
+def _ancestors(workspace: Workspace, refs: Sequence[JobRef]) -> list[JobRef | str]:
+    """Return every ancestor of *refs* in this workspace, nearest first, without repeats or selected jobs.
+
+    A parent that cannot be followed (not in this workspace, or behind an unreadable ``job.json``) ends
+    its chain with a warning line in its place, and an ancestor already unlocked is a line too. A detached job
+    still names the parent its data came from.
+    """
+
+    seen = {ref.job_id for ref in refs}
+    found: list[JobRef | str] = []
+    for ref in refs:
+        child: JobRef | None = ref
+        while child is not None:
+            try:
+                parent = JobDefinition.from_path(child.path / "job.json").parent
+            except (FormatError, OSError) as exc:
+                found.append(f"{child.job_id}\tjob.json unreadable ({exc}); its ancestors are not unlocked")
+                break
+            if parent is None or (job_id := str(parent["job_id"])) in seen:
+                break
+            seen.add(job_id)
+            # By job id alone, as Attempt.parent does: a tree transferred here keeps its origin's workspace_id.
+            ancestor = _kernel.locate(workspace, job_id, placement_hint=PurePosixPath(str(parent["placement"])))
+            if ancestor is None:
+                found.append(f"{child.job_id}\tparent {parent['job_key']} not found; not unlocked")
+            elif (doc := read_state_unowned(ancestor.path / "state.json")[0]) is not None and doc.unlocked is not None:
+                # Already what this asks for (an unlock request would be refused): walked past, not requested.
+                found.append(f"{ancestor.job_id}\talready unlocked (ancestor)")
+            else:
+                found.append(ancestor)
+            child = ancestor
+    return found
 
 
 def handle_job_seal(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -1479,6 +1575,17 @@ def handle_job_detach(arguments: argparse.Namespace, context: CLIContext) -> int
     """Make spawned jobs independent of their parents, permanently."""
 
     return _request_now(arguments, context, "detach", "detached")
+
+
+def handle_job_unlock(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Put jobs, and marker-only every ancestor of them, in debug mode (one-way), copying their runners."""
+
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        if read_metadata(resolve_remote(binding.remote, project=context.cwd).bundle).get("kind") == "mount-daemon":
+            raise ValueError("the workspace daemon does not carry unlock; run it on the daemon host")
+    return _request_now(arguments, context, "unlock", "unlocked")
 
 
 def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -2203,6 +2310,20 @@ def build_job_parser(
         _add_job_selector(leaf)
         if name == "unseal":
             leaf.add_argument("--force", action="store_true", help="skip the confirmation prompt")
+    unlock = _leaf(
+        group,
+        "unlock",
+        summary="lift a job's integrity policies for debugging (debug mode), permanently",
+        description=(
+            "Lift a job's integrity policies for debugging (debug mode), permanently: an unlock request, applied now "
+            "to an unowned job, that copies the job's runner to .httk-job/workflow/; every ancestor of the job gets a "
+            "marker-only unlock request too"
+        ),
+        handler=handle_job_unlock,
+    )
+    _add_job_selector(unlock)
+    unlock.add_argument("--no-copy", action="store_true", help="unlock without copying the runner into the job")
+    unlock.add_argument("--reason", metavar="TEXT", default="job unlock", help="the reason recorded with the marker")
 
     eject = _leaf(
         group,

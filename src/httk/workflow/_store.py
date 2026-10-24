@@ -38,15 +38,15 @@ import shutil
 import signal
 import stat
 import subprocess
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
 from httk.core.building import DEFAULT_TAG, BuildSpec, execute_build
-from httk.core.digests import sha256_file
+from httk.core.digests import sha256_file, tree_digest
 from httk.core.git_sources import parse_git_uri
 
 from httk.workflow import _fs, git_workflows, scaffold
@@ -63,6 +63,7 @@ from httk.workflow.packages import (
 from httk.workflow.scaffold import WorkflowProvider
 
 __all__ = [
+    "RUNNER_COPY",
     "ClosureReport",
     "Installed",
     "build",
@@ -74,7 +75,9 @@ __all__ = [
     "lookup",
     "platform_tag",
     "resolve_calls",
+    "runner_copy",
     "slot_default_notices",
+    "source_digest",
     "stale_replacements",
     "uninstall",
 ]
@@ -91,6 +94,8 @@ _PROBE_STDERR_TAIL = 1024
 _PLATFORM_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], str] = {}
 _INSTALLATION = re.compile(r"[a-z0-9._-]*--[0-9a-f]{16}")
 _REPLACED = re.compile(r"[a-z0-9._-]*--[0-9a-f]{16}\.old\.[a-z2-7]{16}")
+#: Where an unlocked job keeps its own copy of its installation's package, below its payload.
+RUNNER_COPY = ".httk-job/workflow"
 
 
 @dataclass(frozen=True)
@@ -101,19 +106,28 @@ class Installed:
     :param name: The short name.
     :param directory: ``workflows/<slug>--<h16>/``.
     :param record: The ``install.json`` content.
+    :param package_override: The package tree used instead of the installed one (an unlocked job's runner
+        copy, see :func:`runner_copy`), or ``None``; builds stay the installation's.
     """
 
     id: str
     name: str
     directory: Path
     record: Mapping[str, object]
+    package_override: Path | None = None
     _cache: dict[str, WorkflowProvider] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @property
-    def package(self) -> Path:
-        """The installed package tree."""
+    def installed_package(self) -> Path:
+        """The installed package tree in the store, also under an override: the only one a manager reads."""
 
         return self.directory / "package"
+
+    @property
+    def package(self) -> Path:
+        """The package tree: the installed one, or the override."""
+
+        return self.installed_package if self.package_override is None else self.package_override
 
     def provider(self) -> WorkflowProvider:
         """Return the parsed provider of the installed package, whose ``workflow_id`` is this id.
@@ -135,6 +149,22 @@ class Installed:
 
         path = self.directory / "builds" / platform
         return path if (path / "build.json").is_file() and not path.is_symlink() else None
+
+
+def runner_copy(installed: Installed, payload: Path) -> Installed | None:
+    """Return *installed* as launched from the job's own runner copy (:data:`RUNNER_COPY`), when it has one.
+
+    :param installed: The job's effective installation.
+    :param payload: The job directory.
+    :return: The installation with its package overridden by the copy, or ``None`` without a copy (or when
+        ``.httk-job`` or the copy is a symlink or not a directory: never followed).
+    """
+
+    try:
+        os.close(_fs.open_dir_under(payload, RUNNER_COPY))
+    except (FileNotFoundError, _fs.UnsafePath):
+        return None
+    return replace(installed, package_override=payload / RUNNER_COPY)
 
 
 @dataclass(frozen=True)
@@ -496,17 +526,38 @@ def _scratch(owner: Owner) -> Iterator[Path]:
         reconcile_scratch(owner, path)
 
 
+def _not_source(spec: BuildSpec | None) -> Callable[[str], bool]:
+    """The relative paths of a package that are not its sources: ``.git`` anywhere and the declared artifacts."""
+
+    is_artifact = artifact_excluder(spec)
+    return lambda relative: relative.rpartition("/")[2] == ".git" or is_artifact(relative)
+
+
+def source_digest(package: Path, *, declared_by: Path | None = None) -> str:
+    """Return the ``tree_sha256`` of a package's sources: the tree as :func:`_copy_package` copies it.
+
+    :param package: The package tree.
+    :param declared_by: The package whose ``[workflow.build]`` declares the artifacts to leave out (*package*
+        by default); a manager digests an unlocked job's runner copy with the store installation's declaration,
+        never parsing the job-writable copy.
+    :return: The digest.
+    :raises ValueError: If the tree holds a symlink or special file, or the build section is malformed.
+    """
+
+    return tree_digest(package, exclude=_not_source(read_build_spec(declared_by or package)))
+
+
 def _copy_package(source: Path, destination: Path, spec: BuildSpec | None) -> None:
     """Copy a package's sources, refusing symlinks and special files, skipping ``.git`` and build artifacts."""
 
-    is_artifact = artifact_excluder(spec)
+    skipped_source = _not_source(spec)
 
     def ignore(directory: str, names: list[str]) -> set[str]:
         skipped: set[str] = set()
         for name in names:
             path = Path(directory, name)
             relative = path.relative_to(source).as_posix()
-            if name == ".git" or is_artifact(relative):
+            if skipped_source(relative):
                 skipped.add(name)
             elif not (stat.S_ISREG(mode := os.lstat(path).st_mode) or stat.S_ISDIR(mode)):
                 raise ValueError(f"workflow package {source} contains a symlink or special file: {relative}")
@@ -844,7 +895,7 @@ def _install(
         tree = work / "tree"
         tree.mkdir()
         _copy_package(provider.directory, tree / "package", provider.build)
-        tree_sha256 = source_tree_digest(tree / "package")
+        tree_sha256 = source_digest(tree / "package")
         record = _record(workflow_id, name, origin, reference, tree_sha256, recorded, defaults, provider)
         _fs.write_file(_fs.loc(tree / "install.json"), _encode(record), durable=workspace.durable)
         if build and provider.build is not None:

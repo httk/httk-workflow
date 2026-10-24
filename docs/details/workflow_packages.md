@@ -992,7 +992,13 @@ Installing copies the package's sources into the workspace store,
 calls, `requires`, runner, steps and initial step, and with `builds/` for
 registered builds. Reinstalling an id replaces its installation; jobs keep
 their workflow id, so users do not reinstall a workflow that queued jobs are
-using. `httk workflow list --workspace WS` and
+using. `job new --workflow-dir DIR --install` reinstalls when the sources
+of `DIR` have changed since the installation (compared by the installed
+digest's rules, ignoring `.git` and declared build artifacts), so an
+edited package directory is picked up by the next job. To iterate on a runner
+for one job only, without reinstalling, unlock the job: it gets its own copy of
+the installed `package/` at `.httk-job/workflow/` to edit and rerun (see
+{doc}`/restarting_jobs`). `httk workflow list --workspace WS` and
 `httk workflow describe --workspace WS ID` show installations; the manager
 records the id and tree digest it launched in `state.json` `workflow_pin`.
 The store layout is specified in

@@ -38,7 +38,8 @@ The job directory holds:
 Everything in the job directory may be edited while the job is `failed` or
 `paused`, except `job.json`. It is digest-pinned at the first activation, and a
 different digest fails the job with `protocol_error`. That includes the retry
-policy, the parameters and the placement.
+policy, the parameters and the placement. The exception is an unlocked job (see
+[Debug mode](#debug-mode-unlocked-jobs)), whose `job.json` may be edited.
 
 Edit **before** posting the request: a manager may launch the job the moment it
 is revived.
@@ -192,7 +193,8 @@ retries. It holds only until the next revival without `--keep-budget`, which
 restores the declared allowance.
 
 Do not try the other routes. Editing `job.json` fails the job at the digest
-check. Counters are not reset, since that would lose the record of what the job
+check, unless the job is unlocked (see
+[Debug mode](#debug-mode-unlocked-jobs)). Counters are not reset, since that would lose the record of what the job
 did; a revival raises the limits instead. `--force` does not skip a budget: it
 only accepts the revival hazard, and the manager checks the budget again at
 launch.
@@ -276,6 +278,120 @@ declared `workflow` with `workflow_override` beside it. A job that carries an
 override cannot be ejected into a workspace daemon's exchange, whose adoption
 rebuilds `state.json`; the workspace daemon protocol does not carry
 `set_workflow`.
+
+## Debug mode: unlocked jobs
+
+The rules that keep a job's provenance intact (a digest-pinned `job.json`, a
+succeeded job that is never changed, the `set_workflow` compatibility rules, a
+pinned workflow tree) get in the way while you develop or debug a workflow.
+*Unlocking* a job lifts them for that job and marks it, so that collection does
+not store it by accident:
+
+```console
+httk job unlock --reason "debugging relax" silicon   # marker and a runner copy
+httk job unlock --no-copy silicon                   # marker only
+httk job request unlock --reason "debugging relax" silicon   # the same, ancestors included
+```
+
+`job unlock` posts an `unlock` request per selected job and applies it at once
+to a job no manager holds; it prints and exits as `job detach` does, and takes
+`--reason TEXT` (default `job unlock`). `job request unlock` posts the same
+request, and on a local workspace unlocks the ancestors too, with the same
+lines and exit status. A remote workspace is refused by `job unlock` as by
+`job detach`; `job request unlock` reaches an ssh remote through the signed
+request envelope, but is refused there for a spawned job (unlock spawned jobs
+on the workspace host with `httk job unlock`, which also unlocks their
+ancestors). A workspace daemon does not carry `unlock` (run it on the daemon
+host). A cancelled job cannot be unlocked, and a
+succeeded job with a live seal must be released with `job unseal` first. A
+second `unlock` of a job that already has its copy, or was unlocked with
+`--no-copy`, is dropped as already unlocked; an unlock with the copy missing
+makes a fresh copy.
+
+**The marker is one-way.** `state.json` records `unlocked` with the time, the
+operator and the reason. No request clears it, and it survives the repair of a
+damaged `state.json`. `job show` prints an `unlocked` row (since and by, or inherited from, whether
+it runs its own runner copy, and that collection needs `--force`), `job why`
+has a "debug mode" check, and the JSON report carries `unlocked` and
+`paths.runner_copy`. To get an ordinary job
+again, make a new one.
+
+**Ancestors and children.** `job unlock` also posts a marker-only request to
+every ancestor of each selected job, nearest first, following the parent
+recorded in `job.json` (also for a detached job). Ancestor lines end with `
+(ancestor)`; an ancestor already unlocked is skipped (`already unlocked
+(ancestor)`), and a parent that cannot be found is reported without changing the
+exit status. Each refusal is printed per job, and the command exits `1` if any
+request was refused. Children that an unlocked parent publishes later start out
+unlocked too (`unlocked.inherited_from` names the parent); they get no runner
+copy.
+
+### What it relaxes
+
+- `job.json` may be edited at any time. The next reconcile pins the new digest
+  and records `job_digest_repinned` (`{from, to}`) in the history. A `job.json` that cannot be
+  read still fails the job.
+- `continue`, `restart` and `override_step`, and also `set_budget` and
+  `set_workflow`, apply to a `succeeded` job. The revival hazard described
+  above still needs `--force`.
+- `set_workflow` skips every compatibility check beyond the installation of
+  the candidate: the ones listed above and the check of the call slots. The
+  candidate must still be installed, and a job that runs a language
+  realization is still refused.
+- A succeeded unlocked job is not sealed (`seal` is `{"disabled": true}`), and
+  `job seal` is refused. `job delete` of it needs no `job unseal`.
+
+### Editing the runner
+
+The default `unlock` copies the job's installed `package/` to
+`.httk-job/workflow/` in the job directory. An existing copy is never
+overwritten (a first unlock that finds one keeps it and reports `job unlocked;
+existing runner copy kept`, so you may place your own runner tree there before
+unlocking), and a language realization (CWL, PWD, jobflow, httk v1) gets none.
+From then on, while the job is unlocked, the manager launches the runner from
+that copy (a `.httk-job/workflow` in a locked job is ignored), and `workflow_pin`
+records the digest of the copy at launch, without the installation's declared
+build artifacts. Only the runner itself comes from the copy: the build spec,
+platform probe and build artifacts of a compiled workflow still come from the
+installation in the store, so editing `[workflow.build]` in the copy has no
+effect; rebuild through the installation. Edit the copy in place and revive
+the job:
+
+```console
+httk job unlock silicon
+$EDITOR "$(httk job show silicon)/.httk-job/workflow/run.py"
+httk job request restart --reason "try the fix" silicon
+```
+
+The installed workflow is untouched, so other jobs of it are not affected, and
+`set_workflow` is refused while the copy exists, by the CLI before anything is
+posted: edit or remove the copy instead. The copy is not fsynced, so after a
+power loss it may be torn: remove `.httk-job/workflow` and run `job unlock`
+again. `--no-copy` is for debugging with data and `job.json` only.
+
+### What stays yours
+
+Nothing clears `data/`, `run/` or the children a job already published when a
+step reruns; delete what must not survive. Still enforced: that only the owner
+writes `state.json`, that requests apply once, the refusal of symlinks and
+other unsafe entries, the placement and schema rules, the sandbox overlays,
+`cancelled` as a final state, the retry budgets and the digests of staged
+inputs. `job new --input-move-from-job` out of an unlocked job is refused (copy
+the file instead), and so is ejecting it into a workspace daemon's exchange.
+
+### Collecting an unlocked job
+
+`httk collect` stores nothing for an unlocked job. It reports the job as
+degraded, `job is unlocked (debug mode); pass --force to collect it`, and exits
+nonzero; collection with `--postprocess` reports the same text as an error, and
+`--force` lets both collect the job.
+`httk collect --force` collects it through its workflow's registered collector
+as usual; the collect hook of the runner copy is used only with
+`--allow-job-collector`, unverified, and only when no registered provider
+supplies a collector. With `--into --force` the run is stored **without** any mark
+that the job was unlocked: you take responsibility for it. Every per-job line
+of an unlocked job carries `"unlocked": true`, forced or not. `--raw` and campaign collection are readouts and do
+not check the marker. See {doc}`/collecting`.
 
 ## Parents and children
 

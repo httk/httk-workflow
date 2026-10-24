@@ -39,7 +39,9 @@ httk job new --workspace WS --workflow example.relax --input structure=POSCAR
 
 installs it (id `local:example.relax`) and instantiates a job from it;
 `httk job new --workflow-dir my-workflow --install ...` does both in one
-command. A single runner file (`--from-runner`) or command
+command, and installs again when `my-workflow` has changed since. To edit the
+runner for a single job instead, unlock that job (`httk job unlock`, see
+{doc}`restarting_jobs`). A single runner file (`--from-runner`) or command
 (`--from-command`) needs no package: `job new` installs it ad hoc. Beyond runner, inputs and parameters, the manifest can declare
 typed workspace settings the runner consumes (`[workflow.environment.*]`)
 and the other settings it reads (`settings`),

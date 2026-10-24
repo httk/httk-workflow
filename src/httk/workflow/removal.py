@@ -11,6 +11,8 @@ waiting for a manager.
 
 import dataclasses
 import logging
+import os
+import re
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -219,7 +221,7 @@ def workflow_switch_problem(
     value of its declared type; (6) declare the same environment names and types; and (7) declare the step
     the job runs next (for a waiting parent, the steps its join advances to); and (8) declare exactly the call
     slots the job binds, each binding fitting the candidate's slot as installed now. A language realization never
-    switches: its executed document lives in the payload. A job made from an installed package (it stores
+    switches: its executed document lives in the payload. An unlocked job (debug mode) skips rules 2-8. A job made from an installed package (it stores
     ``declarations.workflow``) records empty parameter, input and environment declarations by leaving them
     out; any other job without a snapshot (a spawned child) is compared with its current installation, and
     without that the switch is refused as unverifiable.
@@ -238,6 +240,8 @@ def workflow_switch_problem(
         return f"workflow {candidate.id} cannot be read: {exc}"
     if job.parameters.get("workflow_realization") == "language" or provider.language is not None:
         return "a language realization cannot switch workflows: its executed document lives in the payload"
+    if doc is not None and doc.unlocked is not None:
+        return None
     current_id, current_name = effective_workflow(job, doc)
     cache = {} if providers is None else providers
 
@@ -375,11 +379,12 @@ def refusal(
     cache: ListingCache | None = None,
     doc: StateDoc | None = None,
     installations: dict[str, _store.Installed | None] | None = None,
+    payload: Path | None = None,
 ) -> str | None:
     """The revival guard for ``continue``/``restart``/``override_step``, the waiting-parent check for ``delete``,
     the destination check for ``eject`` (an unusable destination is a refusal that moves nothing), and the
     compatibility check for ``set_workflow`` (:func:`workflow_switch_problem`, against the installation with
-    exactly the requested id).
+    exactly the requested id; refused for a job that runs its own runner copy).
 
     :param workspace: The workspace.
     :param job: The job the request is for.
@@ -387,6 +392,7 @@ def refusal(
     :param cache: The pass's listings, if any.
     :param doc: The job's current ``state.json``, for ``set_workflow``.
     :param installations: Installations looked up by exact id, shared with the caller (filled here).
+    :param payload: The owned job's directory, for the runner-copy check of ``set_workflow``.
     :return: Why the request must not apply, or ``None``.
     """
 
@@ -401,6 +407,9 @@ def refusal(
         candidate = found[workflow_id]
         if candidate is None:
             return f"rule 1 (installed): workflow {workflow_id} is not installed in the job's workspace"
+        unlocked = doc is not None and doc.unlocked is not None
+        if unlocked and payload is not None and os.path.lexists(payload / _store.RUNNER_COPY):
+            return f"the job runs its own workflow copy at {_store.RUNNER_COPY}; edit or remove it instead of switching"
         return workflow_switch_problem(workspace, job, doc, candidate)
     if request.action in ("continue", "restart", "override_step"):
         return _joins.consumed_by_decided_join(workspace, job, cache=cache)
@@ -518,6 +527,68 @@ def _seal(owned: OwnedJob, doc: StateDoc, request: _requests.Request) -> StateDo
         return doc.with_history("request_dropped", request_id=request.request_id, action="seal", note=str(exc))
     owned.append_log("sealed", detail={"sha256": sha256, "signed": signed, "request_id": request.request_id})
     return doc.updated(seal={"sha256": sha256, "signed": signed})
+
+
+def _unlock(
+    owned: OwnedJob, job: JobDefinition, doc: StateDoc, new: StateDoc, request: _requests.Request, copy: bool
+) -> tuple[StateDoc, bool, str]:
+    """Carry out the ``Unlock`` effect: copy the job's runner when asked; the document to release, whether the
+    request was dropped, and the outcome's explanation."""
+
+    applied = (new, False, "job unlocked")
+
+    def dropped(note: str) -> tuple[StateDoc, bool, str]:
+        # A late refusal, as a seal that cannot be made: the job unchanged (no marker), the request recorded.
+        noted = doc.with_history("request_dropped", request_id=request.request_id, action="unlock", note=note)
+        return noted.updated(applied_requests=(*doc.applied_requests, request.request_id)), True, note
+
+    if not copy:
+        return applied
+    workflow_id, _name = effective_workflow(job, doc)
+    installed = _store.lookup(owned.owner.workspace, workflow_id)
+    if installed is None:
+        return dropped(f"workflow {workflow_id} is not installed in the job's workspace; nothing to copy")
+    try:
+        provider = installed.provider()
+    except ValueError as exc:
+        return dropped(f"workflow {workflow_id} cannot be read: {exc}")
+    if provider.language is not None or job.parameters.get("workflow_realization") == "language":
+        return applied  # a builtin language runner: nothing to copy
+    state_dir, name = _store.RUNNER_COPY.split("/")
+    temporary = f"{name}.{_fs.fresh_token()}"
+    try:
+        anchor = _fs.open_dir_under(owned.path, state_dir, create=True, mode=0o777)
+        try:
+            for leftover in os.listdir(anchor):
+                # A copy an earlier crash left unfinished (the job is owned and idle here).
+                if re.fullmatch(rf"{re.escape(name)}\.[a-z2-7]{{16}}", leftover):
+                    owned.discard_subtree(f"{state_dir}/{leftover}")
+            if _fs.lstat(_fs.anchored(anchor, name)) is not None:
+                # An existing copy is never overwritten: a first unlock keeps one the operator placed.
+                if doc.unlocked is not None:
+                    return dropped("already unlocked")
+                owned.append_log("runner_copy_kept", detail={"workflow": workflow_id, "request_id": request.request_id})
+                return new, False, "job unlocked; existing runner copy kept"
+            try:
+                # ponytail: the copied files are not fsynced; after a power loss the copy may be torn (remove it
+                # and unlock again).
+                _store._copy_package(installed.package, owned.path / state_dir / temporary, provider.build)
+                # Never a half copy at the final name.
+                _fs.move_owned(
+                    _fs.anchored(anchor, temporary),
+                    _fs.anchored(anchor, name),
+                    durable=owned.owner.workspace.durable,
+                    create_parents=False,
+                )
+            except BaseException:
+                owned.discard_subtree(f"{state_dir}/{temporary}")
+                raise
+        finally:
+            os.close(anchor)
+    except (ValueError, OSError, WorkflowError) as exc:
+        return dropped(f"cannot copy the runner of workflow {workflow_id}: {exc}")
+    owned.append_log("runner_copied", detail={"workflow": workflow_id, "request_id": request.request_id})
+    return applied
 
 
 def _eject(
@@ -653,7 +724,7 @@ def apply_requests(
             from_state,
             from_priority,
             request,
-            refusal=lambda candidate: refusal(workspace, job, candidate, cache, doc, installations),
+            refusal=lambda candidate: refusal(workspace, job, candidate, cache, doc, installations, owned.path),
             workflow_name=lambda workflow_id: None if (found := installations.get(workflow_id)) is None else found.name,
         )
         if isinstance(effect, _requests.Eject) and (from_state, from_priority) != (
@@ -692,6 +763,10 @@ def apply_requests(
             )
             release(owned, sealed, _recording(effect.release, extra))
             observe(request, "refused" if note else "applied", str(note or "job sealed"), effect.release.state)
+        elif isinstance(effect, _requests.Unlock):
+            unlocked, refused, explanation = _unlock(owned, job, doc, new, request, effect.copy)
+            release(owned, unlocked, _recording(effect.release, extra))
+            observe(request, "refused" if refused else "applied", explanation, effect.release.state)
         elif isinstance(effect, _requests.Eject):
             observe(request, *_eject(owned, new, request, effect))
         elif isinstance(effect, _requests.Unseal):
@@ -888,6 +963,7 @@ def request_now(
     reason: str,
     *,
     outcomes: list[RequestOutcome] | None = None,
+    copy: bool = True,
 ) -> str | None:
     """Post one request for a job and apply it now when the job is unowned (``job delete|seal|unseal|detach``).
 
@@ -899,6 +975,8 @@ def request_now(
     :param action: The request action.
     :param reason: The operator's reason.
     :param outcomes: Append the immediate typed result when supplied.
+    :param copy: Whether an ``unlock`` copies the job's runner (``False`` posts ``no_copy``); other actions
+        ignore it.
     :return: ``None`` when the request took effect, otherwise why it did not (yet).
     """
 
@@ -909,7 +987,13 @@ def request_now(
             outcomes.append(RequestOutcome(ref.job_id, "", "uncertain", "the job was not found"))
         return "the job was not found"
     path = _requests.post(
-        workspace, action=action, job_id=ref.job_id, placement=placement, operator="cli", reason=reason
+        workspace,
+        action=action,
+        job_id=ref.job_id,
+        placement=placement,
+        operator="cli",
+        reason=reason,
+        no_copy=action == "unlock" and not copy,
     )
     (outcome,) = serve_requests(workspace, [(current, path)], owner=owner)
     if outcomes is not None:

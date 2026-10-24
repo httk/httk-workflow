@@ -1771,6 +1771,14 @@ def _installed(
     found = None
     if package:
         found = _store.lookup(workspace, f"local:{parse_workflow_manifest(path).workflow_id}")
+        # An edited source tree is installed again; an unchanged one is reused.
+        if (
+            found is not None
+            and owner is not None
+            and install
+            and _store.source_digest(path) != found.record.get("tree_sha256")
+        ):
+            return _store.install(workspace, owner, path)
     elif not path.exists():
         found = _store.lookup(workspace, text)
         # An alias or a git URI of an already fetched workflow names an installation by its canonical id.
@@ -2295,6 +2303,9 @@ def _move_input(
 
     ref, member = _move_source(workspace, source)
     origin = ref.path
+    if (unlocked := read_state(ref)[0]) is not None and unlocked.unlocked is not None:
+        # Moving would launder a debug-mode product into a clean job.
+        raise ValueError(f"{source}: the source job is unlocked; copy the file with --input-from instead")
     try:
         directory = _fs.open_dir_under(origin, member.parent) if member.parent.parts else _fs.open_dir(origin)
     except (FileNotFoundError, _fs.UnsafePath) as exc:

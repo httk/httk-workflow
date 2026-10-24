@@ -28,6 +28,7 @@ _WORKSPACE_ONLY = (
     ("job", "--job"),
     ("raw", "--raw"),
     ("allow_job_collector", "--allow-job-collector"),
+    ("force", "--force"),
 )
 #: Options that do not apply to ``--postprocess`` collection, with their flags.
 _NOT_POSTPROCESS = (
@@ -162,6 +163,7 @@ def _collect_postprocess(arguments: argparse.Namespace, workspace: Workspace, jo
         jobs=jobs,
         on_skipped=_skip,
         steps=arguments.step,
+        force=arguments.force,
     )
     summary: dict[str, object] = {"format": "httk-workflow-postprocess-collect-summary", "format_version": 1}
     if arguments.into is not None:
@@ -345,6 +347,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             batch_size=64 if arguments.batch_size is None else arguments.batch_size,
             jobs=jobs,
             steps=arguments.step,
+            force=arguments.force,
         )
 
         def resolve_keys() -> Sequence[tuple[str, bytes]]:
@@ -459,6 +462,14 @@ def build_collect_parser(
         help=(
             "collect the declared output files of this postprocess script's last run on each job instead of the "
             "jobs; with --into, store each run as a provenance run fed by the job's stored run"
+        ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "also collect unlocked jobs (debug mode), with --into storing them without any mark that they were "
+            "unlocked; an unlocked job's own collect hook comes from its runner copy, unverified"
         ),
     )
     parser.add_argument(

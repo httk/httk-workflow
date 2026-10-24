@@ -359,8 +359,9 @@ def test_keep_budget_is_present_only_as_true_on_a_revival() -> None:
         Request(REQUEST_ID, WORKSPACE_ID, "health", enrollment_id=ENROLLMENT_ID, keep_budget=True)
 
 
-# set_workflow is not carried by the daemon protocol (the CLI refuses it for mount-daemon remotes).
-@pytest.mark.parametrize("action", [action for action in _requests.ACTIONS if action != "set_workflow"])
+# set_workflow and unlock are not carried by the daemon protocol (the CLI refuses set_workflow for mount-daemon
+# remotes).
+@pytest.mark.parametrize("action", [action for action in _requests.ACTIONS if action not in ("set_workflow", "unlock")])
 def test_job_request_accepts_every_request_action(action: str) -> None:
     options: dict[str, dict[str, object]] = {
         "set_priority": {"priority": 7},

@@ -6,6 +6,7 @@ from typing import Any
 
 from .._kernel import OWNED, JobRef
 from .._state import _thaw
+from .._store import RUNNER_COPY
 from ..models import placement_text
 from ..workspace import Workspace
 from ._diagnosis import BudgetStatus, _describe_child, budget_status, claim_requirements, observe_join
@@ -28,6 +29,10 @@ def describe_job(workspace: Workspace, ref: JobRef, *, include_children: bool = 
     placement = job_placement(ref)
     control = attempt_control(ref, doc)
     data = ref.path / "data"
+    unlocked = None if doc is None else doc.unlocked
+    # Used only while the job is unlocked, as the manager uses it (never through a symlink).
+    copy = ref.path / RUNNER_COPY
+    has_copy = unlocked is not None and copy.is_dir() and not copy.is_symlink() and not copy.parent.is_symlink()
     report: dict[str, Any] = {
         "format": JOB_REPORT_FORMAT,
         "format_version": 3,
@@ -53,10 +58,12 @@ def describe_job(workspace: Workspace, ref: JobRef, *, include_children: bool = 
         "seal": None if doc is None else _thaw(doc.seal),
         "workflow_pin": None if doc is None else _thaw(doc.workflow_pin),
         "workflow_override": None if doc is None else _thaw(doc.workflow_override),
+        "unlocked": _thaw(unlocked),
         "paths": {
             "payload": str(ref.path),
             "workdir": str(ref.path / "run"),
             "data": str(data) if data.is_dir() else None,
+            "runner_copy": str(copy) if has_copy else None,
         },
         "last_headline": read_last_headline(ref.path),
         "state_error": state_error,
@@ -120,6 +127,15 @@ def render_job(report: Mapping[str, Any]) -> str:
         _pair("updated at", report.get("updated_at")),
         _pair("job digest", report.get("job_digest")),
     ]
+    unlocked, paths = report.get("unlocked"), report.get("paths")
+    if isinstance(unlocked, Mapping):
+        origin = unlocked.get("inherited_from")
+        text = (
+            f"inherited from {origin}" if origin else f"since {unlocked.get('at')} by {unlocked.get('operator') or '-'}"
+        )
+        if isinstance(paths, Mapping) and paths.get("runner_copy"):
+            text += "; runs its own runner copy"
+        lines.append(_pair("unlocked", f"{text}; collect needs --force"))
     if report.get("state") == OWNED:
         lines.append(_pair("owner", f"{report.get('owner_id')} (claimed from {report.get('claimed_from')})"))
     phase = report.get("phase")
@@ -171,7 +187,6 @@ def render_job(report: Mapping[str, Any]) -> str:
         )
         for index, text in enumerate(status.describe()):
             lines.append(_pair("budgets" if index == 0 else "", text))
-    paths = report.get("paths")
     if isinstance(paths, Mapping):
         lines.append(_pair("payload", paths.get("payload")))
         lines.append(_pair("workdir", paths.get("workdir")))

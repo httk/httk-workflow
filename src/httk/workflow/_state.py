@@ -55,7 +55,8 @@ _ACTIVATION_REASONS = ("initial", "advance", "retry", "manual_continue", "overri
 _OWNER_ID = re.compile(r"[0-9a-f]{32}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 #: Members a document may lack (it was written before they existed); each reads as ``None``.
-_OPTIONAL_MEMBERS = frozenset({"job_digest", "budget_override", "workflow_override"})
+_OPTIONAL_MEMBERS = frozenset({"job_digest", "budget_override", "workflow_override", "unlocked"})
+_UNLOCKED_MEMBERS = frozenset({"at", "operator", "reason", "inherited_from"})
 
 type Frozen = None | bool | int | float | str | tuple["Frozen", ...] | Mapping[str, "Frozen"]
 
@@ -134,6 +135,18 @@ def _mapping_or_none(value: object, name: str) -> Mapping[str, Frozen] | None:
     return value
 
 
+def _unlocked(value: object) -> Mapping[str, Frozen] | None:
+    # {at, operator?, reason?, inherited_from?}: every member a string, at required.
+    unlocked = _mapping_or_none(value, "unlocked")
+    if unlocked is not None:
+        if "at" not in unlocked or not set(unlocked) <= _UNLOCKED_MEMBERS:
+            raise FormatError("state.json unlocked must be {at, operator?, reason?, inherited_from?} or null")
+        for member, item in unlocked.items():
+            if not isinstance(item, str):
+                raise FormatError(f"state.json unlocked.{member} must be a string")
+    return unlocked
+
+
 def _records(value: object, name: str, limit: int | None = None) -> tuple[Mapping[str, Frozen], ...]:
     if not isinstance(value, tuple) or not all(isinstance(item, Mapping) for item in value):
         raise FormatError(f"state.json {name} must be a list of objects")
@@ -188,6 +201,8 @@ class StateDoc:
         ``retry_policy`` (``null`` lifts one), or ``None``.
     :param workflow_override: The operator's ``set_workflow`` choice ``{id, name}``: the installed workflow the job
         runs instead of ``job.json``'s ``workflow``, or ``None``.
+    :param unlocked: The one-way debug-mode marker ``{at, operator?, reason?, inherited_from?}`` an ``unlock``
+        request (or an unlocked parent) set, or ``None`` for a locked job.
     """
 
     job_id: str
@@ -216,6 +231,7 @@ class StateDoc:
     job_digest: str | None = None
     budget_override: Mapping[str, Frozen] | None = None
     workflow_override: Mapping[str, Frozen] | None = None
+    unlocked: Mapping[str, Frozen] | None = None
 
     @classmethod
     def empty(cls, job_id: str) -> Self:
@@ -255,6 +271,7 @@ class StateDoc:
                 "job_digest": None,
                 "budget_override": None,
                 "workflow_override": None,
+                "unlocked": None,
             }
         )
 
@@ -337,6 +354,7 @@ class StateDoc:
             job_digest=job_digest,
             budget_override=budget_override,
             workflow_override=workflow_override,
+            unlocked=_unlocked(doc["unlocked"]),
         )
 
     def as_mapping(self) -> dict[str, object]:
@@ -557,7 +575,7 @@ def read_state_unowned(path: Path) -> tuple[StateDoc | None, bool]:
 
 def salvage_state(path: Path) -> dict[str, Any]:
     """Return what still reads from a damaged ``state.json``: ``applied_requests``, ``origin`` with
-    ``exchange_name``, and ``job_digest``.
+    ``exchange_name``, ``job_digest`` and ``unlocked``.
 
     Each member is kept only when it parses. The file itself may be a symlink, a FIFO or garbage: it is read
     without following or blocking, and anything else is ignored.
@@ -589,6 +607,11 @@ def salvage_state(path: Path) -> dict[str, Any]:
     digest = value.get("job_digest")
     if isinstance(digest, str) and _DIGEST.fullmatch(digest):
         kept["job_digest"] = digest
+    try:
+        if (unlocked := _unlocked(_freeze(value.get("unlocked")))) is not None:
+            kept["unlocked"] = unlocked
+    except (FormatError, RecursionError):
+        pass
     if value.get("workflow_override") is not None:
         _LOGGER.warning(
             "%s is damaged: its set_workflow override %r is not salvaged; the job falls back to job.json's workflow",

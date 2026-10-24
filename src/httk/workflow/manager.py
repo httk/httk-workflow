@@ -923,6 +923,10 @@ class TaskManager:
         if doc.job_digest is None:
             # Pinned at the first sight of the job (its first activation); the next write records it.
             doc = doc.updated(job_digest=job.digest)
+        elif doc.unlocked is not None and doc.job_digest != job.digest:
+            # An unlocked job's job.json may be edited between attempts: re-pinned (the next write records it).
+            repinned = {"from": doc.job_digest, "to": job.digest}
+            doc = doc.updated(job_digest=job.digest).with_history("job_digest_repinned", **repinned)
         kind, attempt_id = doc.phase["kind"], _text(doc.phase, "attempt_id")
         if (doc.commit is not None or kind != "idle") and doc.owner_id != self.manager_id:
             owned.append_log("recovered", attempt_id=attempt_id, detail=doc.owner_id)
@@ -977,7 +981,7 @@ class TaskManager:
         salvaged = salvage_state(owned.path / "state.json")
         # An exchange job stays one (its client still asks for it by its name), and job.json stays pinned.
         doc = doc.updated(
-            **{key: salvaged[key] for key in ("origin", "exchange_name", "job_digest") if key in salvaged}
+            **{key: salvaged[key] for key in ("origin", "exchange_name", "job_digest", "unlocked") if key in salvaged}
         )
         dropped: list[dict[str, str]] = []
         if "applied_requests" in salvaged:
@@ -1029,7 +1033,7 @@ class TaskManager:
                 priority=owned.from_priority,
                 plans=plans,
                 workspace_id=workspace_id,
-                seal=self._seal_enabled(job),
+                seal=self._seal_enabled(job, doc),
             )
         except (FormatError, UnsupportedExtensionError) as exc:
             intent = failure_intent(
@@ -1171,9 +1175,12 @@ class TaskManager:
 
         return removal.release(owned, doc, target)
 
-    def _seal_enabled(self, job: JobDefinition) -> bool:
-        """Decide the seal of a ``succeed`` commit: the job's ``seal_succeeded``, else the ``seal.succeeded`` setting."""
+    def _seal_enabled(self, job: JobDefinition, doc: StateDoc) -> bool:
+        """Decide the seal of a ``succeed`` commit: never for an unlocked job, else the job's ``seal_succeeded``,
+        else the ``seal.succeeded`` setting."""
 
+        if doc.unlocked is not None:
+            return False
         if job.seal_succeeded is not None:
             return job.seal_succeeded
         raw = self._effective_settings().get("seal.succeeded", True)
@@ -1461,7 +1468,8 @@ class TaskManager:
 
         artifacts = None
         if installed.record.get("build") is True:
-            spec = read_build_spec(installed.package)
+            # Always the store's declaration: a runner copy is job-writable, and the probe runs in this process.
+            spec = read_build_spec(installed.installed_package)
             built = None if spec is None else installed.build_dir(_store.platform_tag(spec))
             artifacts = None if built is None else built / "artifacts"
         runner = installed.record.get("runner")
@@ -1507,13 +1515,23 @@ class TaskManager:
             installed, problem = self._workflow(workflow_id)
             if installed is None:
                 raise RunnerResolutionError("runner_unavailable", problem or f"workflow {workflow_id} is gone")
+            tree_sha256 = installed.record.get("tree_sha256")
+            # An unlocked job with its own runner copy launches from it (never a locked one: the payload is the
+            # job's to write), pinned by the copy's digest at launch (null when it cannot be digested). Only the
+            # runner entry, {package} and the runner root come from the copy: nothing in it is parsed or run here.
+            if doc.unlocked is not None and (copy := _store.runner_copy(installed, owned.path)) is not None:
+                installed = copy
+                try:
+                    tree_sha256 = _store.source_digest(copy.package, declared_by=copy.installed_package)
+                except (ValueError, OSError):
+                    tree_sha256 = None
             command, artifacts = self._runner_command(installed)
         except RunnerResolutionError as exc:
             self._commit(
                 owned, job, doc, failure_intent(job, doc, attempt_id, exc.code, str(exc), priority=owned.from_priority)
             )
             return False
-        pin = {"id": installed.id, "tree_sha256": installed.record.get("tree_sha256")}
+        pin = {"id": installed.id, "tree_sha256": tree_sha256}
         doc = self._write(owned, doc.updated(workflow_pin=pin).with_phase("launching", attempt_id))
         payload = owned.path
         control = payload / "attempts" / attempt_id
@@ -1823,7 +1841,14 @@ class TaskManager:
         # job.json is not the attempt's to change (note §3.3): a rewritten one voids whatever it published.
         tampered: str | None = None
         try:
-            if JobDefinition.from_path(owned.path / "job.json").digest != job.digest:
+            reread = JobDefinition.from_path(owned.path / "job.json")
+            if reread.digest != job.digest and doc.unlocked is not None:
+                # An unlocked job's job.json may be edited: the outcome stands, committed with the re-read
+                # definition, and the commit's write re-pins it.
+                repinned = {"from": doc.job_digest, "to": reread.digest}
+                doc = doc.updated(job_digest=reread.digest).with_history("job_digest_repinned", **repinned)
+                job = reread
+            elif reread.digest != job.digest:
                 tampered = "the attempt rewrote job.json"
         except FormatError as exc:
             tampered = f"the attempt left job.json unreadable: {exc}"

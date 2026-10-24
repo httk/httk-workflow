@@ -268,6 +268,9 @@ def validate_children(
         elif child.claim_pool.startswith(EXCHANGE_POOL_PREFIX):
             raise FormatError(f"spawned child {job_key} names the exchange pool {child.claim_pool}")
         state = StateDoc.empty(child_id).updated(origin=parent_doc.origin, exchange_name=parent_doc.exchange_name)
+        if parent_doc.unlocked is not None:
+            # Debug mode propagates along data flow, owner-side: an unlocked parent's children are unlocked.
+            state = state.updated(unlocked={"at": state.updated_at, "inherited_from": parent.job_key})
         plans.append(
             ChildPlan(
                 job_id=child_id,

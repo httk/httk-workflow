@@ -1287,7 +1287,8 @@ class Attempt:
         return installed
 
     def _own_installation(self) -> "Installed":
-        """Return the installation this attempt was launched from (the job's effective workflow)."""
+        """Return the installation this attempt was launched from (the job's effective workflow), viewed at the
+        job's own runner copy when the job is unlocked and has one."""
 
         from . import _store
 
@@ -1295,6 +1296,9 @@ class Attempt:
             own = _store.lookup(self._workspace(), self.context.workflow_id)
             if own is None:
                 raise ValueError(f"this job's workflow {self.context.workflow_id} is not installed in the workspace")
+            doc, _damaged = read_state_unowned(self.payload / "state.json")
+            if doc is not None and doc.unlocked is not None:
+                own = _store.runner_copy(own, self.payload) or own
             self._own = own
         return self._own
 

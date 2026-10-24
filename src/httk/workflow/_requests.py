@@ -46,6 +46,7 @@ __all__ = [
     "Eject",
     "Request",
     "Seal",
+    "Unlock",
     "Unseal",
     "apply",
     "operator_key",
@@ -76,6 +77,7 @@ ACTIONS = (
     "delete",
     "seal",
     "unseal",
+    "unlock",
 )
 
 _REQUIRED = frozenset(
@@ -91,9 +93,10 @@ _OPTIONS = {
     "force": ("continue", "restart", "override_step"),
     "keep_budget": ("continue", "restart", "override_step"),
     "tree": ("eject",),
+    "no_copy": ("unlock",),
 }
 #: Optional flags: present only as ``true``.
-_FLAGS = frozenset({"force", "keep_budget", "tree"})
+_FLAGS = frozenset({"force", "keep_budget", "tree", "no_copy"})
 _SIGNATURE = frozenset({"operator_key", "signature"})
 #: The actions that revive a failed or paused job (and may carry ``force`` and ``keep_budget``).
 _REVIVALS = ("continue", "restart", "override_step")
@@ -171,8 +174,21 @@ class Unseal:
     release: Release
 
 
+@dataclass(frozen=True)
+class Unlock:
+    """Release the job with ``state.json`` ``unlocked`` set, after copying its runner when *copy* asks for it.
+
+    :param release: Where the job goes afterwards (where it was claimed from), with the request id.
+    :param copy: Copy the effective installation's package to ``.httk-job/workflow/`` first (unless the request
+        carries ``no_copy``).
+    """
+
+    release: Release
+    copy: bool = True
+
+
 #: What :func:`apply` decides; :class:`~httk.workflow._state.Release` carries the applied request id.
-type Effect = Release | Discard | Eject | Defer | Drop | Seal | Unseal
+type Effect = Release | Discard | Eject | Defer | Drop | Seal | Unseal | Unlock
 
 
 def unsealed(doc: StateDoc | None) -> bool:
@@ -268,7 +284,7 @@ def post(
     :param reason: The operator's explanation.
     :param seed_path: Sign with this identity seed; ``None`` posts unsigned.
     :param **extra: ``priority``, ``step``, ``budget``, ``workflow``, ``force``, ``keep_budget``, ``destination``,
-        ``tree`` (``None`` or ``False`` are left out), or a deterministic ``request_id`` and ``created_at``.
+        ``tree``, ``no_copy`` (``None`` or ``False`` are left out), or a deterministic ``request_id`` and ``created_at``.
     :return: The posted request file.
     :raises httk.workflow.errors.FormatError: If the document would be invalid.
     """
@@ -388,26 +404,37 @@ def restored_budget(
     return raised, doc.updated(budget_override=kept or None)
 
 
-def _refusal(job: JobDefinition, doc: StateDoc, from_state: str, action: str) -> str | None:
+def _refusal(job: JobDefinition, doc: StateDoc, from_state: str, action: str, no_copy: bool) -> str | None:
     terminal = from_state in TERMINAL_STATES
-    if (action == "cancel" and terminal) or (
-        action in ("set_budget", "set_workflow") and from_state in ("succeeded", "cancelled")
-    ):
+    unlocked = doc.unlocked is not None
+    # An unlocked (debug-mode) job may be changed after it succeeded; cancelled stays final.
+    settled = ("cancelled",) if unlocked else ("succeeded", "cancelled")
+    if (action == "cancel" and terminal) or (action in ("set_budget", "set_workflow") and from_state in settled):
         return f"the job is already {from_state}"
+    if action == "unlock":
+        live_seal = doc.seal is not None and isinstance(doc.seal.get("sha256"), str)
+        if from_state == "cancelled":
+            return "the job is already cancelled"
+        if from_state == "succeeded" and live_seal:
+            return "a sealed succeeded job cannot be unlocked; run `job unseal` first"
+        # With a copy asked for (the default), the owner decides once it sees whether the payload has one.
+        return "already unlocked" if unlocked and no_copy else None
     if action == "pause" and (terminal or from_state == "paused"):
         return f"the job is already {from_state}"
     if action == "pause" and from_state == "waiting":
         # A paused parent has no wait to reopen: its continue, like a restart or override_step, would rerun the
         # spawning step and orphan the children the join waits on. Only a parent failed at its wait reopens it.
         return "a parent waiting on its children cannot be paused"
-    if action in _REVIVALS and from_state not in ("failed", "paused"):
+    if action in _REVIVALS and from_state not in ("failed", "paused", *(("succeeded",) if unlocked else ())):
         return f"{action} applies to failed or paused jobs, not {from_state}"
     if action == "detach" and (job.parent is None or doc.detached is not None):
         return "the job has no parent link to detach"
     if action == "delete" and not (terminal or from_state == "paused"):
         return f"only terminal or paused jobs are deleted, not {from_state}"
-    if action == "delete" and from_state == "succeeded" and not unsealed(doc):
+    if action == "delete" and from_state == "succeeded" and not (unsealed(doc) or unlocked):
         return "a succeeded job is never changed; release it with `job unseal` first"
+    if action == "seal" and unlocked:
+        return "an unlocked job cannot be sealed"
     if action in ("seal", "unseal") and from_state != "succeeded":
         return f"only succeeded jobs are {action}ed, not {from_state}"
     if action == "seal" and doc.seal is not None and isinstance(doc.seal.get("sha256"), str):
@@ -451,6 +478,11 @@ def apply(
     ``seal`` (a repair verb for a succeeded job without a seal) and ``unseal``
     (the operator's release of a succeeded job, after which ``delete`` applies)
     need the payload, so their effects are executed by the owner.
+    ``unlock`` sets the one-way ``state.json`` ``unlocked`` marker (debug mode)
+    and leaves the job where it is; without ``no_copy`` the owner first copies the
+    job's runner into its payload. An unlocked job may also be revived, have
+    its budget or workflow set, and be deleted after it succeeded, and is never
+    sealed.
 
     :param job: The job's definition.
     :param doc: Its current ``state.json``.
@@ -483,7 +515,7 @@ def apply(
         # Recorded whether the switch applies or is dropped.
         previous = job.workflow_id if doc.workflow_override is None else doc.workflow_override["id"]
         audit["workflow"] = {"from": previous, "to": document["workflow"]}
-    reason = _refusal(job, doc, from_state, action)
+    reason = _refusal(job, doc, from_state, action, document.get("no_copy") is True)
     daemon_pinned = isinstance(document["operator"], str) and document["operator"].startswith("daemon:")
     checked = daemon_pinned or (reason is None and action in (*_REVIVALS, "delete", "eject", "set_workflow"))
     if checked and refusal is not None and (hazard := refusal(request)) is not None:
@@ -529,6 +561,12 @@ def apply(
         new = doc.updated(workflow_override=override, runner_steps=None)
     elif action == "detach":
         new = doc.updated(detached={"at": datetime.now(UTC).isoformat(), "operator": document["operator"]})
+    elif action == "unlock":
+        # One-way: a second unlock (asking for a runner copy) keeps the first marker.
+        if doc.unlocked is None:
+            marker = {"at": datetime.now(UTC).isoformat(), "operator": document["operator"]}
+            new = doc.updated(unlocked={**marker, "reason": document["reason"]} if document["reason"] else marker)
+        audit["unlocked"] = True
     elif action in _REVIVALS:
         reopen = action == "continue" and from_state == "failed" and doc.join is not None
         raised: dict[str, int | None] = {}
@@ -565,4 +603,6 @@ def apply(
         return new, Seal(release)
     if action == "unseal":
         return new, Unseal(release)
+    if action == "unlock":
+        return new, Unlock(release, document.get("no_copy") is not True)
     return new, release

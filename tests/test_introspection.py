@@ -122,6 +122,40 @@ def test_show_reports_the_authoritative_state_of_a_finished_job(ws: Workspace, i
     assert "attempts this activation 1/3" in text
 
 
+def test_show_and_why_report_an_unlocked_job(ws: Workspace, installed: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    from httk.workflow import _store, removal
+
+    submitted = _submit(ws, installed, {"start": "fail"}, placement="project/unlocked")
+    v3.run(ws)
+    with v3.cli_owner(ws) as owner:
+        assert removal.request_now(ws, owner, v3.find(ws, submitted.job_id), "unlock", "debugging") is None
+    # An edited job.json is re-pinned at the next reconcile: its history entry must render too.
+    path = v3.find(ws, submitted.job_id).path / "job.json"
+    mapping = json.loads(path.read_text(encoding="utf-8"))
+    mapping["parameters"]["script"] = {"start": "succeed"}
+    path.write_text(json.dumps(mapping), encoding="utf-8")
+    with v3.cli_owner(ws) as owner:
+        assert removal.request_now(ws, owner, v3.find(ws, submitted.job_id), "restart", "debugging") is None
+    v3.run(ws)
+
+    ref = v3.find(ws, submitted.job_id)
+    assert "job_digest_repinned" in [entry["event"] for entry in v3.state_of(ref).history_tail]
+    report = describe_job(ws, ref)
+    assert report["state"] == "succeeded" and report["unlocked"]["operator"] == "cli"
+    assert report["paths"]["runner_copy"] == str(ref.path / _store.RUNNER_COPY)
+    line = next(line for line in render_job(report).splitlines() if line.startswith("unlocked"))
+    assert line.endswith(f"since {report['unlocked']['at']} by cli; runs its own runner copy; collect needs --force")
+    inherited = {**report, "unlocked": {"at": "t", "inherited_from": "p--x"}, "paths": {}}
+    assert "inherited from p--x; collect needs --force" in render_job(inherited)
+    assert "\nunlocked " not in render_job({**report, "unlocked": None})
+    (check,) = (check for check in explain_job(ws, ref).checks if check.name == "debug mode")
+    assert "`httk collect` collects it only with --force" in check.detail
+
+    for verb in ("show", "why"):
+        assert command(["job", verb, submitted.job_id], CLIContext("httk", ws.root)) == 0
+    assert "runs its own runner copy" in capsys.readouterr().out
+
+
 def test_a_selector_must_name_exactly_one_job(ws: Workspace, installed: Any) -> None:
     for _ in range(2):
         _submit(ws, installed, _THREE_STEPS, placement="project/many")

@@ -19,7 +19,7 @@ what the commands do to a workspace.
 
 ```text
 httk workspace          show | configure | init | adopt | list | default | move | forget | delete | status | owners (managers) | attest-dead | workflows | settings show|set|unset | workflow-prelude show|set|unset | policy show|set|unset | fsck | gc | seal | unseal | verify | exchange enable | daemon init|configure|show|check|run
-httk job                new | submit | request | delete | seal | unseal | detach | eject | adopt | list | show | log | why | debug | push | pull | transfer
+httk job                new | submit | request | delete | seal | unseal | detach | unlock | eject | adopt | list | show | log | why | debug | push | pull | transfer
 httk collect            [PATH] [--workspace WORKSPACE] [--into PATH] [--dry-run] …
 httk workflow list      [--workspace WORKSPACE] [--json]
 httk workflow describe  TARGET… [--workspace WORKSPACE] [--json]
@@ -286,6 +286,7 @@ manager's platform stays `ready` and unclaimed there.
 | `job seal JOB...` | seal succeeded jobs that carry no seal | `--workspace` |
 | `job unseal JOB...` | release succeeded jobs from their seal, so they may be deleted | `--workspace`, `--force` skips the confirmation |
 | `job detach JOB...` | make spawned jobs independent of their parents, permanently | `--workspace` |
+| `job unlock [--no-copy] JOB...` | put jobs, and every ancestor of them, in debug mode (one-way) and, unless `--no-copy`, give each selected job its own copy of the runner to edit | `--workspace`, `--no-copy`, `--reason TEXT` (default `job unlock`) |
 | `job eject JOB [DEST]` | move a quiescent job out into the bundle `DEST/<job-key>` | `--workspace`, `--tree`, `--wait`, `--timeout`, `--hold`, `--destination-id`, `--operator`, `--json` |
 | `job adopt BUNDLE...` | move ejected bundles into the workspace, in turn | `--workspace`, `--move`, `--json` |
 | `job list` | list jobs a page at a time (remote: over the adapter) | `--workspace`, `--state`, `--step`, `--placement`, `--limit`, `--after`, `--tag-contains`, `--counts`, `--json` |
@@ -331,7 +332,8 @@ commit prefix it was installed from (see
 [Short names](workflow_uris.md#short-names)). A workflow that
 is not installed is refused, unless `--install` installs it first (with its
 calls): a git URI `git+https://HOST/PATH[@REF][#SUBDIR]`, a package directory
-(`--workflow-dir`), or a workflow name known on this machine. A runner file,
+(`--workflow-dir`, installed again when the directory's sources differ from
+the installed ones, compared by the installed digest's rules), or a workflow name known on this machine. A runner file,
 command template or bare workflow document is always installed ad hoc, as
 `adhoc:<name>@<digest>`. The job records the installed workflow's id, pinned to
 the full commit for a git workflow.
@@ -446,7 +448,7 @@ options are valid only with `set_budget`), `set_workflow` (with
 `--workflow WORKFLOW`: an installed id, short name or `NAME@REF`, resolved once
 in the jobs' workspace, on the remote side for a remote one; every job is
 checked against it before anything is posted, and a workspace daemon remote
-refuses it), `detach`, `eject` (with `--destination`), `delete`, `seal` and
+refuses it), `detach`, `unlock`, `eject` (with `--destination`), `delete`, `seal` and
 `unseal`. The job's owner applies each
 once, at its next boundary; a manager claims an unowned job to apply it. What
 each action does is tabulated in
@@ -474,8 +476,8 @@ uncertain result. `--wait` is valid only for `pause`; it waits for
 queued pauses and exits `0` only when each reaches `paused`. A superseded,
 dropped or timed-out pause exits `1`. `--timeout SECONDS` requires `--wait`.
 
-`job delete`, `job seal`, `job unseal` and `job detach` use the same immediate
-serving path and print one concise line per job: done, or the `queued`,
+`job delete`, `job seal`, `job unseal`, `job detach` and `job unlock` use the
+same immediate serving path and print one concise line per job: done, or the `queued`,
 `refused` or `uncertain` outcome with its explanation.
 
 For an ordinary remote workspace, `job request ACTION --workspace REMOTE:NAME
@@ -551,7 +553,7 @@ with a `next_after` that resumes the scan. This selector `--step` is not the
 `job why` also lists **held** jobs: a job held for a transfer is in neither
 state tree, and `job why JOB` shows its hold, destination and the way back.
 
-### Sealing and detaching jobs
+### Sealing, detaching and unlocking jobs
 
 `job seal` and `job unseal` are the per-job half of {doc}`sealing`. `job seal`
 seals a succeeded job that has no seal yet, with the workspace's `seal.keys`.
@@ -562,6 +564,28 @@ is what lets `job delete` remove it.
 longer moves with its parent's tree, it can be transferred on its own, and
 `Attempt.parent` reads `None` for it. It stays in any join that references it.
 A job with no parent is refused.
+
+`job unlock [--no-copy] [--reason TEXT] JOB...` puts jobs in debug mode (see
+{doc}`/restarting_jobs`). It posts an `unlock` request per selected job and,
+marker-only and nearest first, per ancestor of each (by the parent recorded in
+`job.json`, also for a detached job), and applies them at once to unowned jobs.
+Ancestor lines end with ` (ancestor)`; an ancestor already unlocked prints
+`already unlocked (ancestor)` and is not an error, and a parent that cannot be
+found prints `<job_id>` `parent <key> not found; not unlocked` without changing
+the exit status. It exits `1` when a request of a selected job or ancestor is
+refused or uncertain. `job request unlock` does the same on a local workspace, ancestors included, with the same lines and exit rules. Without `--no-copy`
+it copies the job's installed `package/` to `.httk-job/workflow/`, where the
+manager then runs the runner from and the operator edits it. The marker cannot
+be cleared by any request. A succeeded job with a live seal is refused until
+`job unseal`, and a cancelled job is refused. `job unlock` refuses a remote
+workspace as `job detach` does; `job request unlock` reaches an ssh remote
+through the signed request envelope (it copies; a spawned job is refused there:
+unlock spawned jobs on the workspace host with `httk job unlock`, which also
+unlocks their ancestors), and a
+workspace daemon refuses it (the daemon does not carry `unlock`; run it on the
+daemon host). `job show` prints an `unlocked` row, `job why` a "debug mode"
+check, and the JSON report gains `unlocked` and `paths.runner_copy`. The jobs
+are collected only with `httk collect --force`.
 
 ### Ejecting and adopting jobs
 
@@ -831,7 +855,7 @@ See {doc}`monitor` for the panes, keys, and read budget.
 
 | Options | Apply to |
 | --- | --- |
-| `--state`, `--step`, `--placement`, `--job JOB` (repeatable; not with `--placement`), `--raw`, `--allow-job-collector` | a workspace only |
+| `--state`, `--step`, `--placement`, `--job JOB` (repeatable; not with `--placement`), `--raw`, `--allow-job-collector`, `--force` | a workspace only |
 | `--dry-run`, `--prefer NAME`, `--exclude PATTERN`, `--collector DIR` | a calculation tree only |
 | `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--no-id-ledger`, `--id-ledger PATH`, `--no-bare-runs`, `--upgrade`, `--degraded`, `--fail-fast`, `--batch-size N` | both |
 
@@ -842,8 +866,13 @@ streams `JobRecord` records. With `--into`, a sealed id ledger at
 ({doc}`/details/stable_ids`), and `--upgrade` lets an existing store take an
 additive layout change. Every form ends with one
 `httk-workflow-collect-summary` line, and the command exits nonzero when any
-job was degraded, failed to store, or had an unreadable `job.json`. See
-{doc}`/details/collecting`.
+job was degraded, failed to store, or had an unreadable `job.json`. A job in
+debug mode (`job unlock`) is degraded unless `--force` is given, which collects
+it (through its registered collector; the runner copy's hook only with
+`--allow-job-collector`) and, with
+`--into`, stores its run with no mark that it was unlocked; its report carries
+`"unlocked": true` on every line, and `--raw` is not gated. `--force` also lets
+`--postprocess` collect such a job. See {doc}`/details/collecting`.
 
 `--postprocess SCRIPT` (workspace only) collects the declared output files of
 that postprocess script's last run on each selected job instead of the job
@@ -1151,7 +1180,7 @@ leases, receipts and the maintenance lock. These spellings no longer parse:
 | `job confirm-launches-ended` | `workspace attest-dead` once the owner and its launches are gone |
 | `job eject --resume` | an interrupted eject is rolled forward or back by recovery |
 | `httk workflow transfer offer\|receive\|retire\|reclaim` | `job transfer`, `job eject --hold`, `job adopt`, `job transfer --release` |
-| `workspace unlock` | nothing to unlock: there is no maintenance lock |
+| `workspace unlock` | removed with the maintenance lock; there is nothing to release (`job unlock` is unrelated: it puts one job in debug mode) |
 | `workspace forget --force` | `workspace forget` |
 | `workspace fsck --quarantine-unrepairable` | `workspace fsck --repair` |
 | `workspace seal --force` | `job seal` the remaining jobs first, or seal the workspace with them listed as unsealed |

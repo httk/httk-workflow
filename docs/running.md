@@ -147,7 +147,7 @@ httk job delete silicon                # terminal or paused jobs only
 ```
 
 The job's owner applies each request at its next boundary; a manager claims an
-idle job to apply it. `job delete`, `job seal`, `job unseal` and `job detach`
+idle job to apply it. `job delete`, `job seal`, `job unseal`, `job detach` and `job unlock`
 apply at once to a job no owner holds, print `queued` (exit `0`) for one an
 owner holds, and `refused` (exit `1`) when the request cannot apply. A
 succeeded job is protected: `httk job unseal` it before `job delete`.
@@ -267,7 +267,8 @@ httk seal verify
 httk project unseal
 ```
 
-A succeeded job is never changed until `job unseal` releases it, and a sealed
+A succeeded job is never changed until `job unseal` releases it (or, for debugging,
+`job unlock` puts it in debug mode, see {doc}`restarting_jobs`), and a sealed
 workspace refuses modifying commands; reading, `fsck`, `gc` and postprocessing
 still work, and a seal travels with its job. {doc}`details/sealing` covers key refs, verdicts and what each level
 records.

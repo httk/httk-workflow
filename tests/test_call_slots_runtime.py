@@ -504,6 +504,39 @@ def test_a_role_that_cannot_be_recorded_fails_before_the_hook_runs(
     assert "exploded" not in str(failure["message"])
 
 
+def test_an_unlocked_job_persists_outputs_with_the_collect_hook_of_its_edited_copy(
+    tmp_path: Path, workspace: Workspace
+) -> None:
+    from httk.workflow import removal
+
+    callee = _install(workspace, _callee(tmp_path / "callee"))
+    [path] = _cases(tmp_path, contiguous=CONTIGUOUS)
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    scaffold.scaffold_job(
+        workspace, callee.id, payload, inputs={"structure": httk.core.load(path)}, parameters={"collect_mode": "raise"}
+    )
+    owner = _kernel.register_owner(workspace, kind="cli", label="test", allocation=None, advertised={})
+    try:
+        changes = {"persist_outputs": {"forces": "site_forces"}}
+        ref = scaffold.submit_payload(workspace, owner, payload, move=False, changes=changes)
+    finally:
+        owner.close()
+    run_manager(workspace)
+    assert "exploded" in str(_failure(find(workspace, ref.job_id))["message"])
+
+    with _kernel.register_owner(workspace, kind="cli", label="test", allocation=None, advertised={}) as owner:
+        assert removal.request_now(workspace, owner, find(workspace, ref.job_id), "unlock", "debug") is None
+        hook = find(workspace, ref.job_id).path / _store.RUNNER_COPY / "collect.py"
+        hook.write_text(hook.read_text(encoding="utf-8").replace('mode == "raise"', "False"), encoding="utf-8")
+        assert removal.request_now(workspace, owner, find(workspace, ref.job_id), "restart", "debug") is None
+    run_manager(workspace)
+    done = find(workspace, ref.job_id)
+    assert done.state == "succeeded", _error(done)
+    document = json.loads((done.path / ".httk-job" / "outputs.json").read_text(encoding="utf-8"))
+    assert document["outputs"]["forces"]["value"] == EXPECTED["contiguous"]
+
+
 def test_an_unreadable_path_names_the_slot_input(tmp_path: Path, workspace: Workspace) -> None:
     parent = _run(tmp_path, workspace, [str(tmp_path / "absent.cif")], by_path=True)
     assert parent.state == "failed" and "call slot 'forces' input 'structure': " in _error(parent)

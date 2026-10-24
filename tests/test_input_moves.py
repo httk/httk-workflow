@@ -134,6 +134,20 @@ def test_a_sealed_file_moves_into_the_new_job_without_hashing(tmp_path: Path, mo
     assert list((ws.control / "tmp").iterdir()) == []
 
 
+def test_a_file_never_moves_out_of_an_unlocked_job(tmp_path: Path) -> None:
+    from httk.workflow import removal
+
+    ws = _workspace(tmp_path)
+    job_id = JobDefinition.from_path(_origin(ws) / "job.json").id
+    with cli_owner(ws) as owner:
+        for action in ("unseal", "unlock"):
+            assert removal.request_now(ws, owner, find(ws, job_id), action, "t") is None
+    source = find(ws, job_id).path / "run" / "traj.dat"
+    with pytest.raises(ValueError, match="the source job is unlocked; copy the file with --input-from instead"):
+        new_job(ws, _WORKFLOW, parameters={"script": {"start": "succeed"}}, move_inputs={"trajectory": source})
+    assert source.read_bytes() == _FRAMES
+
+
 def test_the_cli_moves_a_file_and_refuses_it_with_input_for_the_same_name(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

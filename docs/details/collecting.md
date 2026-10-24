@@ -286,7 +286,33 @@ tree, as the manager recorded them at launch (`workflow_pin` in `state.json`).
 A stored result therefore names the software that produced it. For a job that
 `set_workflow` switched, collection resolves the provider, the collector and
 the run's `workflow_definition_uri` from that pinned installation rather than
-from the declared `workflow`.
+from the declared `workflow`. An unlocked job (see [Unlocked
+jobs](#unlocked-jobs)) is the exception: it may have run from its own edited
+copy of the package, so its pin names the digest of that copy and no installed
+tree.
+
+### Unlocked jobs
+
+A job in debug mode (`httk job unlock`, see {doc}`/restarting_jobs`) carries the
+`state.json` `unlocked` marker, and its code, `job.json` and even its succeeded
+state may have been changed by hand. Collection therefore does not store it
+unless told to:
+
+- `collect()` yields it degraded, with `missing_collector` set to
+  `job is unlocked (debug mode); pass --force to collect it`. As for any
+  degraded job nothing is stored, and the sweep exits nonzero.
+- `collect_postprocess` (`--postprocess`) sets `CollectedPostprocess.error` to
+  the same text, which makes the command exit 1.
+- `collect(..., force=True)` (`httk collect --force`) collects it, also with
+  `--postprocess`. The job's registered provider's collector is used as for any
+  job; the collect hook of the runner copy (`.httk-job/workflow/`) runs,
+  unverified and without a pin check, only with `--allow-job-collector` and
+  only when no in-process registered provider supplies a collector. With `--into`, the run is stored with no mark that the job
+  was unlocked: whoever forces the collection takes the responsibility.
+- Every per-job summary line of an unlocked job, degraded or forced, and the
+  store report carry `"unlocked": true`, and
+  `JobRecord.job["unlocked"]` carries the marker.
+- `--raw` and campaign collection are readouts and do not check the marker.
 
 ### Damage is reported
 
@@ -443,6 +469,7 @@ is not counted as skipped. `collect`, `campaign_collect` and
 httk collect --workspace WORKSPACE
 httk collect --workspace WORKSPACE --state succeeded --state failed
 httk collect --workspace WORKSPACE --placement project/campaign --raw
+httk collect --workspace WORKSPACE --force      # also collect unlocked jobs
 ```
 
 `httk collect` also takes a PATH. A workspace root or a registered workspace
@@ -517,7 +544,10 @@ means a job could not be collected, stored or read, and the counts say which.
 
 Each summary line carries its own triage fields:
 
-- `missing_collector` explains a degradation.
+- `missing_collector` explains a degradation; for an unlocked job it says to
+  pass `--force`.
+- `unlocked` is `true` on every line of a job that carries the debug-mode
+  marker.
 - `products_unlinked` lists `product_of` links skipped because the output was
   produced but its curated source edge is absent from the observed provenance,
   as `"<role> -> <source> (source edge absent in observed provenance)"`. A
@@ -535,7 +565,9 @@ product links are saved into a file-backed SQLite store, and its report gains
 ### Degraded and failed jobs
 
 A degraded job stores nothing: its report carries
-`"stored": null, "skipped": "degraded"` and no empty `Run` is written. A job
+`"stored": null, "skipped": "degraded"` and no empty `Run` is written. An
+unlocked job is degraded this way unless collected with `--force` (see
+[Unlocked jobs](#unlocked-jobs)). A job
 whose entries cannot be stored keeps a `"storage_error"` and fails the exit
 code.
 
@@ -657,7 +689,8 @@ The first postprocess collect into a store whose layout has no `files` family
 (no job stored a file yet) needs `--upgrade`; a store that declares `files`
 with zero rows needs none (the upgrade is an additive layout upgrade; back the store up first). The
 command ends with one `httk-workflow-postprocess-collect-summary` line and
-exits 1 on any error or unreadable `job.json`; jobs with no receipt, a failed
+exits 1 on any error or unreadable `job.json` (an unlocked job is an error,
+see [Unlocked jobs](#unlocked-jobs)); jobs with no receipt, a failed
 script, no declared outputs or no matching files are skipped (exit 0).
 `httk serve optimade serve STORE` serves the runs and files, and the job's
 run shows the postprocess run through the reverse `_httk_is_input`

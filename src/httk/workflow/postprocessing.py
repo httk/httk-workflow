@@ -455,6 +455,7 @@ def collect_postprocess(
     jobs: Iterable[str] | None = None,
     on_skipped: Callable[[str], None] | None = None,
     steps: Iterable[str] | None = None,
+    force: bool = False,
 ) -> Iterator[CollectedPostprocess]:
     """Describe the declared output files of *script*'s last run on each selected job.
 
@@ -476,13 +477,14 @@ def collect_postprocess(
     :param on_skipped: Receive the job key of every selected job dropped for an
         unreadable ``job.json``, forwarded to ``job_records``.
     :param steps: Collect only the jobs at one of these steps, as ``job_records`` selects them.
+    :param force: Collect unlocked jobs (debug mode) too; without it each is an error.
     :return: A lazy iterator with one item per selected readable job.
     :raises ValueError: If *script* is not a single path component, or the
         postprocess root is not inside the workspace (a ``postprocess.directory``
         setting elsewhere).
     """
 
-    from .collecting import _workspace_name, job_records
+    from .collecting import _UNLOCKED_REASON, _workspace_name, job_records
 
     _check_script_name(script)
     root = postprocess_root(workspace, None)
@@ -494,7 +496,12 @@ def collect_postprocess(
         )
     url_prefix = f"data/{_workspace_name(workspace)}"
     records = job_records(workspace, states=states, placement=placement, on_skipped=on_skipped, jobs=jobs, steps=steps)
-    return (_collect_one(record, script, root, workspace_root, url_prefix) for record in records)
+    return (
+        CollectedPostprocess(script, record, error=_UNLOCKED_REASON)
+        if not force and record.job.get("unlocked") is not None
+        else _collect_one(record, script, root, workspace_root, url_prefix)
+        for record in records
+    )
 
 
 __all__ = [

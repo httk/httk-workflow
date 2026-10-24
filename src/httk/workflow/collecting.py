@@ -119,6 +119,8 @@ COLLECT_FORMAT_VERSION = 3
 COLLECTABLE_STATES = tuple(state for state in UNOWNED_STATES if state in TERMINAL_STATES or state == "paused")
 #: The default selection: the jobs that finished the way they were meant to.
 DEFAULT_COLLECT_STATES = ("succeeded",)
+#: Why an unlocked job (debug mode) is not collected without ``force``.
+_UNLOCKED_REASON = "job is unlocked (debug mode); pass --force to collect it"
 _FILE_URL_PREFIX = "file://"
 DEFAULT_COLLECT_TIMEOUT: float | None = 3600.0
 #: Maximum UTF-8 response-line size retained from an executable collector.
@@ -364,7 +366,8 @@ def _job_mapping(job: JobDefinition, doc: StateDoc | None) -> dict[str, object]:
     ``job.json`` at ``payload_path``. ``workflow`` is the declared installed
     workflow's id and ``workflow_name`` its short name; ``workflow_override``,
     present only after an operator's ``set_workflow``, is the ``{id, name}``
-    from ``state.json`` the job ran instead.
+    from ``state.json`` the job ran instead; ``unlocked``, present only for a
+    job in debug mode, is ``state.json``'s ``unlocked`` marker.
     """
 
     policy = job.retry_policy
@@ -394,6 +397,8 @@ def _job_mapping(job: JobDefinition, doc: StateDoc | None) -> dict[str, object]:
         result["environment"] = _thaw(job.environment)
     if doc is not None and doc.workflow_override is not None:
         result["workflow_override"] = _thaw(doc.workflow_override)
+    if doc is not None and doc.unlocked is not None:
+        result["unlocked"] = _thaw(doc.unlocked)
     if job.staged_files:
         result["staged_files"] = [_thaw(entry) for entry in job.staged_files]
     if job.calls is not None:
@@ -1673,30 +1678,38 @@ def _run_executable_collector(
 def _job_collector(
     workspace: Workspace, record: JobRecord, workflow_id: str
 ) -> tuple[Callable[[JobRecord], Mapping[str, object]] | None, WorkflowProvider | None, str | None]:
-    """Resolve a collector from the job's installed workflow package, verified against the job's pin."""
+    """Resolve a collector from the job's installed workflow package, verified against the job's pin.
 
+    An unlocked job (debug mode) ran code that may have been edited, so nothing is verified: its collector comes
+    from its own runner copy when it has one, else from the installed tree.
+    """
+
+    unlocked = record.job.get("unlocked") is not None
     pinned = (record.runner_provenance or {}).get("tree_sha256")
-    if not isinstance(pinned, str):
+    if not unlocked and not isinstance(pinned, str):
         return None, None, "the job records no pinned installed workflow"
     installed = _store.lookup(workspace, workflow_id)
     if installed is None or installed.id != workflow_id:
         return None, None, f"job workflow {workflow_id!r} is not installed in this workspace"
-    if installed.record.get("tree_sha256") != pinned:
+    if unlocked:
+        installed = _store.runner_copy(installed, record.payload) or installed
+    elif installed.record.get("tree_sha256") != pinned:
         return (
             None,
             None,
             f"pinned runner tree was modified: workflow {workflow_id!r} was reinstalled since the job ran",
         )
-    try:
-        actual = tree_digest(installed.package)
-    except Exception as exc:
-        return None, None, f"pinned runner tree was modified: {installed.package} could not be verified: {exc}"
-    if actual != pinned:
-        return (
-            None,
-            None,
-            f"pinned runner tree was modified: {installed.package} digest {actual} does not match pinned {pinned}",
-        )
+    else:
+        try:
+            actual = tree_digest(installed.package)
+        except Exception as exc:
+            return None, None, f"pinned runner tree was modified: {installed.package} could not be verified: {exc}"
+        if actual != pinned:
+            return (
+                None,
+                None,
+                f"pinned runner tree was modified: {installed.package} digest {actual} does not match pinned {pinned}",
+            )
     try:
         provider = installed.provider()
     except ImportError:
@@ -1709,9 +1722,14 @@ def _job_collector(
         return None, provider, "job-pinned workflow tree has no collect hook"
     if provider.collector_exec is not None:
         return None, provider, None
-    from .packages import _tree_hook
+    from .packages import _source_hook, _tree_hook
 
-    hook = _tree_hook(installed.package, pinned, provider.collect_file, "collect")
+    if unlocked:
+        # ponytail: the hook module is cached per process by path, so an edit to the copy shows in the next
+        # process; evict it from sys.modules here if edit-and-recollect in one process matters.
+        hook = _source_hook(installed.package, provider.collect_file, "collect")
+    else:
+        hook = _tree_hook(installed.package, str(pinned), provider.collect_file, "collect")
     return cast(Callable[[JobRecord], Mapping[str, object]], hook), provider, None
 
 
@@ -2373,6 +2391,7 @@ def collect(
     batch_size: int = 64,
     jobs: Iterable[str] | None = None,
     steps: Iterable[str] | None = None,
+    force: bool = False,
 ) -> Iterator[CollectedJob]:
     """Collect records through registered or explicitly allowed job collectors.
 
@@ -2400,6 +2419,8 @@ def collect(
         :func:`job_records` selects them.
     :param steps: Collect only the jobs at one of these steps, as
         :func:`job_records` selects them.
+    :param force: Collect unlocked jobs (debug mode) too, each job collector of one
+        unverified from its runner copy when it has one; without it they degrade.
     :yields: Framework-assembled collected jobs, including degraded jobs.
     :raises ValueError: If ``batch_size`` is invalid, or
         *fail_fast* observes a per-job collection failure.
@@ -2454,6 +2475,9 @@ def collect(
                     f"{identity}: provenance declaration is unusable: {exc}; "
                     f"inspect {record.payload}/.httk-job/declarations/provenance.json",
                 )
+                continue
+            if not force and record.job.get("unlocked") is not None:
+                results[index] = _degraded_job(record, provider, run, _UNLOCKED_REASON)
                 continue
             fallback = False
             if provider is not None and provider.collector_exec is not None:

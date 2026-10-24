@@ -825,6 +825,13 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
     if job_error is not None:
         report.check("job definition", False, job_error)
         report.hint("repair or delete the job: nothing schedules a job whose job.json it cannot read")
+    if doc is not None and doc.unlocked is not None:
+        report.check(
+            "debug mode",
+            None,
+            "this job is unlocked: its integrity policies are lifted, for good, and `httk collect` collects it only "
+            "with --force",
+        )
     control = attempt_control(ref, doc)
     placement = job_placement(ref)
     placement_name = None if placement is None else placement_text(placement)
