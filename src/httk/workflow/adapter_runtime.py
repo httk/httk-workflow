@@ -10,7 +10,8 @@ selected by the ``kind`` recorded in the bundle's ``remote.json``:
 ``ssh``
     Files move as one uncompressed ``tar`` stream over a single ``ssh``
     connection per push or pull (the remote needs a POSIX ``tar``), and commands
-    run on the configured host.
+    run on the configured host. ``deliver`` streams its batch on the stdin of
+    the one ``httk`` command it runs there, so it needs no remote ``tar``.
 ``mount``
     Files are copied through a locally mounted view of the remote filesystem
     (sshfs, NFS, any shared mount) and commands run on the remote through a
@@ -41,6 +42,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, Protocol
@@ -619,13 +621,14 @@ def _runner(kind: str, settings: Mapping[str, object]) -> _Runner:
 
 
 def _ssh_tar_argv(settings: Mapping[str, object], command: str) -> list[str]:
-    """Return the ssh call that runs one ``tar`` command line on the remote.
+    """Return the ssh call that runs one command line on the remote, its stdin carrying a stream.
 
-    The ``cli_prelude`` is deliberately left out: ``tar`` is a system binary, and
+    A ``tar`` command line leaves the ``cli_prelude`` out: ``tar`` is a system binary, and
     a prelude that prints would corrupt the archive on the connection's stdout.
+    ``deliver`` passes a :func:`_remote_command` with the prelude, as ``invoke`` runs it.
 
     :param settings: The persisted remote settings and their credentials.
-    :param command: The remote command line, built by :func:`_shell_command`.
+    :param command: The remote command line, built by :func:`_shell_command` or :func:`_remote_command`.
     :return: The local ssh argument vector.
     """
 
@@ -939,6 +942,67 @@ def _invoke(kind: str, operation: str, request: Mapping[str, object]) -> None:
     _result(operation, returncode=completed.returncode, stdout=completed.stdout, stderr=stderr)
 
 
+def _deliver(kind: str, request: Mapping[str, object]) -> None:
+    """Stream a batch of files as an uncompressed tar on the stdin of one ``httk`` command where it runs.
+
+    One process carries both: for ``ssh`` one connection (the far side needs no ``tar``), for ``mount`` one
+    executor call, for ``local`` the command itself. The command's stdout is drained by a reader thread while
+    the stream is written, and its stderr goes to a temporary file, so a far side that prints before it reads
+    (a chatty ``cli_prelude``, say) cannot stall the writer.
+
+    :param kind: The adapter kind.
+    :param request: The request: ``source``, ``files``, ``argv`` (an ``httk`` command) and optional ``cwd``.
+    :raises ValueError: If a request member is malformed.
+    """
+
+    settings = _settings(request)
+    source = request.get("source")
+    if not isinstance(source, str) or not source:
+        raise ValueError("deliver requires a nonempty source path")
+    files = _files(request)
+    if not files:
+        raise ValueError("deliver requires a nonempty files batch")
+    argv = _argv(request, "deliver")
+    if argv[0] != "httk":
+        raise ValueError("deliver runs an httk command only")
+    cwd = _cwd(request)
+    local_cwd = None
+    if kind == "ssh":
+        command = _ssh_tar_argv(settings, _remote_command(settings, argv, cwd=cwd))
+    elif kind == "mount":
+        command = [*_exec_command(settings), _remote_command(settings, argv, cwd=cwd)]
+    else:
+        command, local_cwd = _local_httk(argv, settings), cwd
+    local = Path(source).expanduser()
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(command, cwd=local_cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+        assert process.stdin is not None and process.stdout is not None
+        output = process.stdout
+        received: list[bytes] = []
+        reader = threading.Thread(target=lambda: received.append(output.read()), daemon=True)
+        reader.start()
+        try:
+            with process.stdin as pipe, tarfile.open(fileobj=pipe, mode="w|") as archive:
+                for item in files:
+                    archive.add(local / item, arcname=item)
+        except BrokenPipeError:
+            pass  # the far side stopped reading; its exit status and stderr say why
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            reader.join()
+            output.close()
+        stdout = b"".join(received).decode("utf-8", errors="replace")
+        completed = subprocess.CompletedProcess(command, process.wait(), stdout, "")
+        errors.seek(0)
+        completed.stderr = errors.read().decode("utf-8", errors="replace")
+    hint = _login_hint(settings, completed) if kind == "ssh" else ""
+    stderr = f"{completed.stderr.rstrip()}{hint}\n" if hint else completed.stderr
+    _result("deliver", returncode=completed.returncode, stdout=stdout, stderr=stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Dispatch one adapter request file.
 
@@ -976,6 +1040,8 @@ def main(argv: list[str] | None = None) -> int:
             _transfer(kind, operation, request)
         elif operation in {"invoke", "status"}:
             _invoke(kind, operation, request)
+        elif operation == "deliver":
+            _deliver(kind, request)
         else:
             raise ValueError(f"unsupported maintained adapter operation: {operation}")
     except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:

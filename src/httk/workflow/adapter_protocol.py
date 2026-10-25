@@ -2,7 +2,7 @@
 
 A remote adapter is a versioned directory with one executable ``adapter``
 program. Every operation -- ``configure``, ``install``, ``invoke``, ``push``,
-``pull``, ``status`` and optional ``daemon`` -- runs that one program, which reads
+``pull``, ``deliver``, ``status`` and optional ``daemon`` -- runs that one program, which reads
 one JSON request file, learns which operation to perform from the request's
 ``operation`` member, and prints one JSON result. The ``install`` operation
 keeps its historical protocol spelling but only ever *verifies* that the target

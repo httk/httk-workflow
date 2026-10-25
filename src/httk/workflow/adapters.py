@@ -80,6 +80,7 @@ __all__ = [
 ADAPTER_OPERATIONS = (
     "configure",
     "daemon",
+    "deliver",
     "install",
     "invoke",
     "push",

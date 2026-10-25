@@ -974,11 +974,10 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     assert v3.find(destination, job_id).state == "ready"
     v3.run(destination)
     assert v3.find(destination, job_id).state == "succeeded"
-    # Every step of the flow really crossed the stand-in transport.
+    # The push crossed the stand-in transport as one connection: the bundle streamed to the adoption, no probe.
     commands = remote.commands()
-    assert any("workspace status --json station" in item for item in commands)
-    assert any("job adopt --json --by-path --workspace " in item for item in commands)
-    assert any(item.startswith("mkdir -p ") and " && tar -xpf - -C " in item for item in commands)
+    (adoption,) = commands
+    assert adoption.startswith("httk job adopt --json --stdin-tar ") and "--workspace station" in adoption
 
 
 def test_probe_remote_workspace_refuses_an_older_remote_with_the_upgrade(tmp_path: Path) -> None:

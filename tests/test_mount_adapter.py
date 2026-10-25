@@ -510,12 +510,9 @@ def test_a_job_reaches_a_mount_workspace_and_runs_there(tmp_path: Path, mount: M
     assert v3.find(destination, job_id).state == "ready"
     v3.run(destination)
     assert v3.find(destination, job_id).state == "succeeded"
-    # The workspace status and the remote adoption really crossed the executor,
-    # while the bundle bytes moved through the mount rather than the executor.
-    commands = mount.commands()
-    assert any("workspace status --json station" in item for item in commands)
-    assert any("job adopt --json --by-path --workspace " in item for item in commands)
-    assert not any(item.startswith("rsync ") or " rsync " in item for item in commands)
+    # The push is one executor call, no probe: the bundle bytes stream on its stdin into the remote adoption.
+    (adoption,) = mount.commands()
+    assert adoption.startswith("httk job adopt --json --stdin-tar ") and "--workspace station" in adoption
 
 
 # 9. refusal still holds with three kinds -------------------------------------

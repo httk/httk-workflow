@@ -12,6 +12,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import sys
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -23,9 +24,7 @@ from httk.core.git_sources import GitUri, parse_git_uri
 from .. import _fs, _kernel, _store
 from .._durations import TIME_RESOURCES, format_duration
 from .._manager_scheduling import bound_workflows, effective_workflow
-from .._pip_repositories import _pip_names, _pip_owner, _pip_provider, _pip_tag_uris
 from ..adapters import probe_remote_workspace, resolve_remote, run_adapter
-from ..git_workflows import _uninstall_workflows, fetch_workflows
 from ..introspection import iter_jobs, read_job, read_state
 from ..models import WORKSPACE_DIRECTORY
 from ..packages import installed_plugin_workflow_owners, installed_plugin_workflows
@@ -96,6 +95,8 @@ def _manifest_step_drift(workflow: ResolvedWorkflow) -> str | None:
 
 
 def _source_kind(target: str, workflow: ResolvedWorkflow) -> str:
+    from .._pip_repositories import _pip_provider
+
     if (workflow.registration_id or "").startswith("git+"):
         return "pip" if _pip_provider(workflow.workflow_id) is not None else "installed"
     provider = workflow_provider(target)
@@ -184,6 +185,8 @@ def _calls_document(workflow: ResolvedWorkflow) -> dict[str, object]:
 
 
 def _workflow_description(target: str, format: str | None = None) -> dict[str, object]:
+    from .._pip_repositories import _pip_owner
+
     workflow = resolve_workflow(target, format=format)
     source = workflow.directory if workflow.directory is not None else workflow.source
     source_document: dict[str, object] = {"kind": _source_kind(target, workflow), "path": str(source)}
@@ -561,6 +564,8 @@ def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
 def _list_this_machine(arguments: argparse.Namespace) -> int:
     """List the workflows a name selects on this machine."""
 
+    from .._pip_repositories import _pip_names, _pip_owner, _pip_tag_uris
+
     plugin_providers = installed_plugin_workflows()
     owners = installed_plugin_workflow_owners()
     pip_winners = _pip_names()[0]
@@ -619,6 +624,8 @@ def _list_this_machine(arguments: argparse.Namespace) -> int:
 def _install_on_this_machine(arguments: argparse.Namespace) -> int:
     """Fetch git workflows into this machine's cache, without a workspace."""
 
+    from ..git_workflows import fetch_workflows
+
     rows: list[dict[str, object]] = []
     failed = False
     for target in arguments.sources:
@@ -659,6 +666,8 @@ def _install_targets(source: str) -> tuple[list[str], dict[str, WorkflowProvider
     them bind to each other.
     """
 
+    from ..git_workflows import fetch_workflows
+
     if not source.startswith("git+"):
         return [source], None
     providers = fetch_workflows(source)
@@ -675,6 +684,10 @@ def _install_targets(source: str) -> tuple[list[str], dict[str, WorkflowProvider
     return [provider.workflow_id for provider in providers], siblings
 
 
+#: A ``workflow install --token``: the ``tmp/push.<token>/`` landing name ``workspace gc`` sweeps.
+_PUSH_TOKEN = re.compile(r"[0-9a-f]{32}")
+
+
 def _install_copies(arguments: argparse.Namespace, context: Any) -> int:
     """Install copied store entries (``--from-store DIR...``) under their recorded ids, printing one JSON document.
 
@@ -684,24 +697,47 @@ def _install_copies(arguments: argparse.Namespace, context: Any) -> int:
     ``[workflow.build]`` (``build``). The DIRs are left in place unless ``--consume`` discards the pushed copy
     holding them, ``tmp/push.<hex>/``, whatever the outcome once the workspace is known (a failure to discard
     it goes to stderr only).
+
+    In the same process, ``--build`` builds each row ``installed`` here with a ``[workflow.build]``, adding
+    ``build_status`` to every row (``built``, ``failed`` with ``build_reason``, or null when not built), and
+    ``--also-build ID`` builds installations already here, reported as ``built``: ``[{"id", "status",
+    "reason"?}]``. A failed build leaves the installation in place.
+
+    With ``--stdin-tar`` the entries arrive as one tar stream instead, extracted into ``tmp/push.<token>/`` (which
+    ``workspace gc`` sweeps) and always discarded afterwards. With neither, only the ``--also-build`` ids are
+    built: ``{"workflows": [], "built": [...]}``.
     """
 
+    mode = "--stdin-tar" if arguments.stdin_tar else "--from-store"
     given = [flag for flag in ("sources", "no_calls", "no_build", "format") if getattr(arguments, flag)]
     if given:
-        raise ValueError(f"--from-store cannot be combined with {given[0].replace('_', '-')}")
+        raise ValueError(f"{mode} cannot be combined with {given[0].replace('_', '-')}")
+    if arguments.stdin_tar and arguments.from_store is not None:
+        raise ValueError("--stdin-tar cannot be combined with --from-store")
+    if arguments.token is not None and not arguments.stdin_tar:
+        raise ValueError("--token names the landing of --stdin-tar")
+    if arguments.token is not None and not _PUSH_TOKEN.fullmatch(arguments.token):
+        raise ValueError(f"--token must be 32 lowercase hexadecimal digits: {arguments.token!r}")
     if arguments.workspace is None:
-        raise ValueError("--from-store needs --workspace")
+        raise ValueError(f"{mode} needs --workspace")
     workspace = Workspace(
         _local_root(arguments, context, action="install workflows into it"), durable=_durable(arguments)
     )
     label = arguments.source_label or "a copied store entry"
     rows: list[dict[str, object]] = []
+    built: list[dict[str, object]] = []
+    landing = workspace.control / "tmp" / f"push.{arguments.token or uuid.uuid4().hex}"
+    entries: list[str] = list(arguments.from_store or ())
     try:
         require_cli_modifiable(workspace)
+        if arguments.stdin_tar:
+            from ._job import receive_tar
+
+            entries = [str(landing / name) for name in receive_tar(workspace, landing)]
         with _kernel.register_owner(
             workspace, kind="cli", label="workflow install", allocation=None, advertised={}
         ) as owner:
-            for directory in arguments.from_store:
+            for directory in entries:
                 row: dict[str, object] = {"directory": directory}
                 try:
                     status, installed = _store.install_copy(
@@ -711,24 +747,55 @@ def _install_copies(arguments: argparse.Namespace, context: Any) -> int:
                 except _ERRORS as exc:
                     row.update(id=None, status="refused", reason=str(exc))
                 rows.append(row)
-        print(json.dumps({"workflows": rows}, indent=2, sort_keys=True))
+            for row in rows if arguments.build else ():
+                reason = None
+                attempted = row["status"] == "installed" and row["build"] is True
+                if attempted:
+                    reason = _build_reason(workspace, owner, str(row["id"]))
+                row["build_status"] = ("failed" if reason else "built") if attempted else None
+                if reason is not None:
+                    row["build_reason"] = reason
+            for workflow_id in arguments.also_build:
+                reason = _build_reason(workspace, owner, workflow_id)
+                outcome: dict[str, object] = {"id": workflow_id, "status": "failed" if reason else "built"}
+                built.append(outcome if reason is None else {**outcome, "reason": reason})
+        document: dict[str, object] = {"workflows": rows}
+        if arguments.also_build:
+            document["built"] = built
+        print(json.dumps(document, indent=2, sort_keys=True))
     finally:
-        if arguments.consume:
-            for directory in {Path(directory).parent: directory for directory in arguments.from_store}.values():
+        if arguments.stdin_tar:
+            _fs.discard(_fs.loc(landing), trash_dir=workspace.control / "tmp", durable=workspace.durable)
+        elif arguments.consume:
+            for directory in {Path(directory).parent: directory for directory in entries}.values():
                 try:
                     _consume(workspace, directory)
                 except _ERRORS as exc:
                     print(f"{directory}: the pushed copy was not discarded: {exc}", file=sys.stderr)
-    return 1 if any(row["status"] == "refused" for row in rows) else 0
+    failed = any(row["status"] == "refused" or row.get("build_status") == "failed" for row in rows)
+    return 1 if failed or any(entry["status"] == "failed" for entry in built) else 0
+
+
+def _build_reason(workspace: Workspace, owner: _kernel.Owner, workflow_id: str) -> str | None:
+    """Build one installed workflow, its output kept off standard output: why it failed, or ``None``."""
+
+    try:
+        with _stdout_to_stderr(True):
+            _store.build(workspace, owner, workflow_id)
+    except _ERRORS as exc:
+        return str(exc)
+    return None
 
 
 def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
     """Install workflows into a workspace's store, or fetch git workflows on this machine without one."""
 
-    if arguments.from_store is not None:
+    if arguments.from_store is not None or arguments.stdin_tar or (arguments.also_build and not arguments.sources):
         return _install_copies(arguments, context)
     if arguments.source_label is not None:
         raise ValueError("--source-label applies only to --from-store")
+    if arguments.build or arguments.also_build:
+        raise ValueError("--build and --also-build apply only to --from-store or --stdin-tar")
     if not arguments.sources:
         raise ValueError("give at least one SOURCE to install")
     if arguments.workspace is None:
@@ -782,6 +849,8 @@ def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
 
 def _push_source(source: str) -> str | Path:
     """Resolve an install source here: the pinned git URI the remote installs, or the local tree or file to push."""
+
+    from ..git_workflows import fetch_workflows
 
     path = Path(source).expanduser()
     if path.exists():
@@ -846,6 +915,7 @@ def _install_remote(binding: WorkspaceBinding, context: Any, arguments: argparse
 def _not_installable(selector: str) -> str | None:
     """Explain why a selector names a workflow uninstall cannot remove."""
 
+    from .._pip_repositories import _pip_names, _pip_owner, _pip_provider
     from ..packages import installed_plugin_workflows
     from ..scaffold import _WORKFLOW_PROVIDERS
 
@@ -924,6 +994,8 @@ def handle_workflow_uninstall(arguments: argparse.Namespace, context: Any) -> in
 
 def _uninstall_on_this_machine(arguments: argparse.Namespace) -> int:
     """Forget fetched git workflows on this machine by short name or URI."""
+
+    from ..git_workflows import _uninstall_workflows
 
     rows: list[dict[str, object]] = []
     failed = False
@@ -1025,6 +1097,10 @@ def build_install_parser(subparsers: argparse._SubParsersAction[argparse.Argumen
     # Hidden: the receiving side of a transfer, installing copied store entries under their recorded ids.
     install.add_argument("--from-store", metavar="DIR", nargs="+", help=argparse.SUPPRESS)
     install.add_argument("--source-label", metavar="TEXT", help=argparse.SUPPRESS)
+    install.add_argument("--build", action="store_true", help=argparse.SUPPRESS)
+    install.add_argument("--stdin-tar", action="store_true", help=argparse.SUPPRESS)
+    install.add_argument("--token", metavar="TOKEN", help=argparse.SUPPRESS)
+    install.add_argument("--also-build", action="append", default=[], metavar="ID", help=argparse.SUPPRESS)
     uninstall = _leaf(
         subparsers,
         "uninstall",

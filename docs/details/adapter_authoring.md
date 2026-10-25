@@ -283,8 +283,8 @@ If `argv[0]` is the literal `httk`, the adapter must apply the remote's
 The same contract as `invoke`, byte for byte, except that `cwd` is ignored. It
 is a separate operation so that a health probe can have a different
 implementation, timeout or credentials from arbitrary command execution.
-`httk job transfer REMOTE:NAME default` uses it to check that the far side is a
-compatible workspace before anything moves.
+{py:func}`httk.workflow.adapters.probe_remote_workspace` uses it to learn a remote
+workspace's id and root (a transfer does not: it learns the id from the adoption).
 
 ```json
 {"argv": ["httk", "workflow", "workspace", "status", "/scratch/me/runs", "--json"],
@@ -335,12 +335,55 @@ A local copy onto an existing destination is idempotent when both sides carry
 the identical `bundle.json`, and an error otherwise. A resumed
 transfer therefore does not need to know whether the previous attempt finished.
 
+### `deliver`
+
+Pushes one batch of files and runs one `httk` command with that batch as an
+uncompressed `tar` stream on its standard input, in a single process: for `ssh`
+one connection, so the target needs no `tar` binary. A push of job bundles
+uses it to stream the bundles into `httk job adopt --json --stdin-tar …`, which
+extracts them with the same filters as a pull and prints its adoption report.
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `source` | nonempty string, required | the local directory the batch is relative to |
+| `files` | nonempty array of relative paths, required | the paths sent (a directory entry with its contents), each archived under its relative name |
+| `argv` | array of nonempty strings, required | the command; `argv[0]` must be `httk` |
+| `cwd` | string, optional | the directory to run it in |
+
+`files` entries are refused as for `push`.
+
+```json
+{"argv": ["httk", "job", "adopt", "--json", "--stdin-tar", "--workspace", "runs"],
+ "files": ["6f1c…", "9a2e…"], "format": "httk-computer-request", "format_version": 2,
+ "operation": "deliver", "source": "/home/me/ws/.httk-workspace/transfers/outgoing",
+ "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
+ "remote_settings": {"host": "login.example.org"}}
+```
+
+```json
+{"format": "httk-computer-result", "format_version": 2, "operation": "deliver", "ok": true,
+ "returncode": 0, "stdout": "{\"bundles\": [...], \"workspace_id\": \"…\"}\n", "stderr": ""}
+```
+
+The result is that of `invoke`: a nonzero `returncode` is still `ok: true`, and
+the command's `stderr` says why (a far side that stopped reading the stream
+included). The command's output is read while the stream is written, so a far
+side that prints before it reads cannot stall the transfer; the `cli_prelude`
+runs before the command, as for `invoke`, and what it prints precedes the
+command's answer on `stdout`.
+
+`deliver` is required for job transfers to a remote: every push to a remote
+workspace, and the workflows it ships, go through it. An adapter that lacks it
+(or refuses it) makes every transfer to that remote report each hold `failed`
+with the adapter's error; the holds stay in the source for `--resume` once the
+adapter supports `deliver`.
+
 ## The optional `daemon` operation
 
 Protocol version 2 also recognizes `daemon`. It is optional, and existing
 adapters may refuse it. The maintained `mount-daemon` bundle uses a separate
 `python3 -m httk.workflow._daemon_adapter` dispatcher and refuses the generic
-`invoke`, `status`, `push` and `pull` operations. A missing or changed `kind` is
+`invoke`, `status`, `push`, `pull` and `deliver` operations. A missing or changed `kind` is
 an error; this dispatcher never falls back to local execution.
 
 Beyond the standard request envelope, `daemon` accepts exactly:
@@ -477,7 +520,7 @@ a large campaign, belongs in a bundle whose `timeout_seconds` allows for it.
 
 ### Scheduler sites
 
-For a PBS site, write a custom adapter that implements the six base operations
+For a PBS site, write a custom adapter that implements the seven base operations
 and uses `qsub` only when a command is explicitly invoked on that site. The
 manager launch policy belongs to the target workspace's launcher, not to the
 remote adapter. See {doc}`/details/launcher_authoring` for the compact PBS launcher

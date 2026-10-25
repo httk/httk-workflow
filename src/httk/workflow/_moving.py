@@ -52,7 +52,8 @@ where they went and the state they left); :func:`recover` returns such a tree to
   members still in the bundle that are still here (a copy already gone was discarded), then publishes. A copy
   claimed by an adopter that died is back in ``away`` once recovery returned it.
 - ``release-keep``: every member still in the released hold is published into ``away`` again, bottom-up (one
-  already published is absent from the bundle), then the scratch is discarded.
+  already published is absent from the bundle), recording the destination workspace id given to the release
+  (kept beside the hold in the scratch) when the hold records none; then the scratch is discarded.
 """
 
 import dataclasses
@@ -150,6 +151,8 @@ _RECORD_TEMPORARY = re.compile(r"\.(source|plan|rekey|replaces)\.json\.[a-z2-7]{
 #: The scratch purpose of a release that keeps the hold's members as away copies; a plain release's is
 #: ``release`` (discardable).
 _RELEASE_KEEP = "release-keep"
+#: The file of a ``release-keep`` scratch that holds the destination workspace id given to the release.
+_DESTINATION_ID_FILE = "destination-workspace-id"
 _RECORD_LIMIT = 1 << 16
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 #: The format of the ``reason.json`` beside a refused bundle.
@@ -1465,43 +1468,67 @@ def held(workspace: "Workspace", *, workflows: bool = False) -> list[Hold]:
     return holds
 
 
-def release_hold(workspace: "Workspace", owner: Owner, transfer_id: str, *, keep: bool = False) -> bool:
+def release_hold(
+    workspace: "Workspace",
+    owner: Owner,
+    transfer_id: str,
+    *,
+    keep: bool = False,
+    destination_workspace_id: str | None = None,
+) -> bool:
     """Discard a held bundle once its destination adopted it, or with *keep* keep its members as away copies.
 
     A kept member is published bottom-up into ``away`` at the priority it was held with, its ``state.json``
     recording ``away``: the destination (workspace id and locator), the transfer id, and the state and priority
     it left (see :func:`recover`). The ``release-keep`` scratch reconciler finishes an interrupted release. A hold
-    that records no destination workspace id (:attr:`Hold.destination_workspace_id`) keeps nothing, as without
-    *keep*, and a warning says so.
+    that records no destination workspace id (:attr:`Hold.destination_workspace_id`) keeps its copies for
+    *destination_workspace_id* (the id the adopting workspace reported); without either it keeps nothing, as
+    without *keep*, and a warning says so.
 
     :param workspace: The workspace.
     :param owner: The releasing owner.
     :param transfer_id: The hold's transfer id.
     :param keep: Keep the members as ``away`` copies instead of discarding them.
+    :param destination_workspace_id: With *keep*, the destination workspace's canonical id for a hold that
+        records none.
     :return: ``False`` when the hold is gone (another actor released or adopted it).
-    :raises ValueError: For a malformed transfer id.
+    :raises ValueError: For a malformed transfer id or destination workspace id.
     """
 
     if not _TRANSFER_ID.fullmatch(transfer_id):
         raise ValueError(f"not a transfer id: {transfer_id!r}")
+    if destination_workspace_id is not None:
+        destination_workspace_id = canonical_uuid(destination_workspace_id, "destination_workspace_id")
     purpose = _RELEASE_KEEP if keep else "release"
     scratch = _kernel.take(workspace, owner, _fs.loc(_outgoing(workspace) / transfer_id), purpose)
     if scratch is None:
         return False
     if keep:
-        _keep_away(owner, scratch / transfer_id)
+        if destination_workspace_id is not None:
+            # Beside the hold, for the reconciler that finishes an interrupted release (a death between the take
+            # and this write leaves only the hold's own record).
+            _fs.write_file(
+                _fs.loc(scratch / _DESTINATION_ID_FILE),
+                destination_workspace_id.encode("ascii"),
+                durable=workspace.durable,
+            )
+        _keep_away(owner, scratch / transfer_id, destination_workspace_id)
     owner.discard_scratch(scratch)
     return True
 
 
-def _keep_away(owner: Owner, bundle: Path) -> None:
-    """Publish every member still in a released hold into ``away``, bottom-up; a published one is absent."""
+def _keep_away(owner: Owner, bundle: Path, destination_workspace_id: str | None = None) -> None:
+    """Publish every member still in a released hold into ``away``, bottom-up; a published one is absent.
+
+    The copies record the hold's destination workspace id, else *destination_workspace_id*.
+    """
 
     read = read_manifest(bundle / "bundle.json")
     if read is None:
         return  # build_bundle writes bundle.json first: a hold without it never held a member
     manifest = read[1]
-    if manifest.destination_workspace_id is None:
+    workspace_id = manifest.destination_workspace_id or destination_workspace_id
+    if workspace_id is None:
         # A copy must know which workspace's bundle replaces it, and recover which one's late return to refuse.
         _LOGGER.warning(
             "kept no away copies of transfer %s: its hold records no destination workspace id", manifest.transfer_id
@@ -1514,7 +1541,7 @@ def _keep_away(owner: Owner, bundle: Path) -> None:
         # A held member's state.json was readable when it was claimed; should it not be now, the copy still stays.
         doc = read_state_unowned(directory / "state.json")[0] or StateDoc.empty(member.job_id)
         away = {
-            "workspace_id": manifest.destination_workspace_id,
+            "workspace_id": workspace_id,
             "locator": manifest.destination_locator or "?",
             "transfer_id": manifest.transfer_id,
             "state": member.state,
@@ -1537,9 +1564,17 @@ def reconcile_release_keep(owner: Owner, scratch: Path) -> bool:
     :return: ``True``: the scratch is then discarded.
     """
 
+    destination_workspace_id = None
+    try:
+        recorded = (scratch / _DESTINATION_ID_FILE).read_text(encoding="ascii")
+        destination_workspace_id = canonical_uuid(recorded.strip(), "destination_workspace_id")
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, WorkflowError) as exc:
+        _LOGGER.warning("ignored the unreadable destination workspace id of %s: %s", scratch, exc)
     for name in _kernel.list_names(scratch):
         if _TRANSFER_ID.fullmatch(name):
-            _keep_away(owner, scratch / name)
+            _keep_away(owner, scratch / name, destination_workspace_id)
     return True
 
 

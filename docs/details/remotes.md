@@ -59,10 +59,13 @@ source ~/venv/bin/activate' kappa
 ```
 
 The prelude runs under `set -e`, so a failing line aborts before anything else.
-It runs ahead of every command the adapter sends over ssh, including the
-`httk workspace status` that `remote check` uses to find httk, except the
-`tar` that carries a push or pull: that stream must stay free of anything a
-prelude prints. If only the
+It runs ahead of every `httk` command the adapter sends over ssh, including the
+`httk workspace status` that `remote check` uses to find httk and the adoption
+that receives a push. That command's stdin carries the pushed bundles, so a
+prelude must not read stdin, and whatever it prints on stdout comes before the
+command's JSON answer: the transfer then reports an answer it cannot read and
+keeps the holds for `--resume`. The `tar` that carries a pull runs without the
+prelude, since that stream must stay free of anything a prelude prints. If only the
 `httk` program is somewhere non-standard and the environment is otherwise
 ready, the narrower `httk_command=/path/to/httk` setting is enough.
 
@@ -209,8 +212,14 @@ A transfer holds the jobs on the source, copies them, adopts them at the
 destination and only then releases the hold, so an interrupted transfer is
 finished by running it again or with `httk job transfer --resume`;
 `httk transfer status` lists what a workspace holds. All jobs of one transfer
-travel together, so it opens the same few ssh connections whether it moves one
-job or a thousand, and it reports each step on stderr (`-q` silences that). The
+travel together, so the cost is the same whether it moves one job or a thousand:
+a push to a remote workspace is one ssh connection and one remote `httk` start
+(the bundles stream straight into the adoption there), plus one of each when the
+destination lacks a workflow the jobs need or its build; a pull from a remote
+workspace is three connections and two `httk` starts (hold, copy, release); a
+remote-to-remote transfer four connections and three starts. On a site where
+every Python start is slow, that is what a transfer costs. It reports each step
+on stderr (`-q` silences that). The
 steps and their recovery are in the `job transfer` section of {doc}`workflow_cli`.
 
 ### Local names and second trees
@@ -261,8 +270,13 @@ Three settings describe it:
   project subtree you transfer into; `remote_root=/` maps every absolute remote
   path onto the mount and is not recommended.
 - `exec_command`: an executor prefix, parsed once with `shlex.split`, that runs
-  one shell command line on the remote and relays its stdout, stderr and exit
-  status.
+  one shell command line on the remote and relays its stdin, stdout, stderr and
+  exit status. A push streams its bundles on the executor's stdin into the
+  remote adoption, so the executor must pass stdin through (no `docker exec`
+  without `-i`, no wrapper that redirects `</dev/null`). An executor that drops
+  stdin makes the adoption read an empty stream, which it refuses: nothing
+  arrives, and the transfer reports each hold `not_moved` (a local SRC takes the
+  jobs back) or, from a remote SRC, `failed` with the holds kept.
 
 ```console
 $ httk remote add --template mount sigma

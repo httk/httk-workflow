@@ -49,7 +49,7 @@ from httk.core.building import DEFAULT_TAG, BuildSpec, execute_build
 from httk.core.digests import sha256_file, tree_digest
 from httk.core.git_sources import parse_git_uri
 
-from httk.workflow import _fs, git_workflows, scaffold
+from httk.workflow import _fs, scaffold
 from httk.workflow._job import JobDefinition
 from httk.workflow._kernel import KernelWorkspace, Owner, reconcile_scratch
 from httk.workflow._state import _thaw
@@ -753,6 +753,9 @@ def _resolve(
         provider = parse_workflow_manifest(path)
         return f"local:{provider.workflow_id}", provider.workflow_id, provider, str(path.resolve())
     if text.startswith("git+"):
+        # Imported here: git_workflows pulls the pip repository stack, which a lean remote CLI start avoids.
+        from httk.workflow import git_workflows
+
         provider = git_workflows.fetch_workflow(text)
         return provider.workflow_id, provider.name or provider.workflow_id, provider, text
     if not by_name and path.is_file() and not path.is_symlink():

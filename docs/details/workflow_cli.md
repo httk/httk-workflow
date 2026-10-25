@@ -288,7 +288,7 @@ manager's platform stays `ready` and unclaimed there.
 | `job detach JOB...` | make spawned jobs independent of their parents, permanently | `--workspace` |
 | `job unlock [--no-copy] JOB...` | put jobs, and every ancestor of them, in debug mode (one-way) and, unless `--no-copy`, give each selected job its own copy of the runner to edit | `--workspace`, `--no-copy`, `--reason TEXT` (default `job unlock`) |
 | `job eject JOB [DEST]` | move a quiescent job out into the bundle `DEST/<job-key>` | `--workspace`, `--tree`, `--wait`, `--timeout`, `--hold`, `--destination-id`, `--operator`, `--json` |
-| `job adopt BUNDLE...` | move ejected bundles into the workspace, in turn | `--workspace`, `--move`, `--json` |
+| `job adopt BUNDLE...` | move ejected bundles into the workspace, in turn | `--workspace`, `--move`, `--stdin-tar`, `--json` |
 | `job list` | list jobs a page at a time (remote: over the adapter) | `--workspace`, `--state`, `--step`, `--placement`, `--limit`, `--after`, `--tag-contains`, `--counts`, `--json` |
 | `job show JOB...` | describe jobs from their documents (remote: over the adapter) | `--workspace`, `--no-children`, `--json` |
 | `job log JOB...` | print run logs (remote: over the adapter) | `--workspace`, `--limit`, `--json` |
@@ -676,6 +676,16 @@ positions, every member's `job.json` agreeing with the manifest, and an adopted
 job's placement satisfying the
 [placement rule](workflow_filesystem_api.md#placement-rules).
 
+`job adopt --stdin-tar` (no BUNDLE) is the receiving end of a push: it reads the
+bundles as one `tar` stream on standard input, extracts it whole into a fresh
+landing `transfers/incoming/<token>/` with the same filters as a pull (a
+malformed stream or a refused member exits `2` and adopts nothing), then adopts
+every top-level bundle directory in it and removes the emptied landing. A bundle
+whose `bundle.json` records another destination workspace id is refused and
+discarded there. The `--json` document then also carries `workspace_id`, this
+workspace's id, and, for each hidden `--built-for ID`, a `workflows` entry
+`{"id", "status", "tree_sha256"}` with status `present`, `unbuilt` or `missing`.
+
 Both commands are crash-safe and take no file locks: each records what it needs
 to finish before it moves anything, so an interrupted eject or adoption is
 rolled forward or back once the killed command's death is proven and its
@@ -696,7 +706,7 @@ httk job push [SRC] DST [--no-keep] [--job JOB … | --state STATE … | --step 
 httk job pull SRC [DST] [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--no-workflows] [--json] [-q]
 httk job transfer (--job JOB … | --state STATE … | --step STEP …) [--placement PREFIX] [--tree] [--keep] [--no-workflows] SRC DST [--json] [-q]
 httk job transfer --resume [--keep] [SRC] [DST]
-httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [--keep] [WS]
+httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [--keep [--destination-id ID]] [WS]
 httk job recover [--workspace WS] (JOB … | --all [--placement PREFIX])
 httk transfer status [WS] [--json]
 ```
@@ -741,21 +751,28 @@ A transfer is four steps. It **holds** each selected job on SRC (with `--tree`,
 its terminal or paused descendants too) in SRC's own
 `.httk-workspace/transfers/outgoing/<transfer id>/`, recording DST, after which
 the jobs are in neither workspace's state trees. It **copies** the held bundle
-to DST (on one filesystem adoption simply moves it in; otherwise the adapter's
-`push` or `pull` lands it in DST), **adopts** it there into the states and
-priorities it left, and only then **releases** the hold. On a remote SRC,
+to DST (on one filesystem adoption simply moves it in; a local DST receives it
+with the adapter's `pull`; a remote DST receives it with the adapter's
+`deliver`, streamed into `job adopt --stdin-tar` there), **adopts** it there
+into the states and priorities it left, and only then **releases** the hold.
+A remote end is never probed first: its commands name the workspace by the
+plain name it has on the far side. On a remote SRC,
 `--job` needs canonical job UUIDs; `--state` and `--step` are resolved there.
 
-Before the first adoption of a batch, the workflows the held jobs need (each
-job's effective workflow and the closure of its calls, as SRC resolves them)
-that DST lacks and SRC has are installed in DST under the same ids: one query of
-DST's store, then, only when something is missing, one copy of those store
-entries (`install.json` and `package/`) and one receiving call, the internal
-`workflow install --from-store`. After the release, a shipped workflow with
-`[workflow.build]` is built there, as is a needed one DST already had without
-a build for its platform (the query asks for that with the internal
-`workflow list --built-for ID`, whose rows then carry `built`, `null` without a
-build section; a plain listing never runs a platform probe). An installation DST already has is never replaced,
+The workflows the held jobs need (each job's effective workflow and the
+closure of its calls, as SRC resolves them) that DST lacks and SRC has are
+installed in DST under the same ids, and a shipped workflow with
+`[workflow.build]` is built there, as is a needed one DST already had without a
+build for its platform. For a local DST this happens before the first adoption
+of a batch, from DST's store; the builds follow the release. A remote DST
+reports what it has with the adoption itself (`job adopt --built-for ID`, each
+`present`, `unbuilt` or `missing`), and only when something is missing or
+unbuilt one more remote start follows: one `deliver` of the store entries
+(`install.json` and `package/`) to the internal `workflow install --stdin-tar
+--build [--also-build ID …]`, or, with nothing to install, one
+`workflow install --also-build ID …`. Adopting before installing is safe: a
+manager skips, and does not fail, a ready job whose workflow is not installed
+yet. An installation DST already has is never replaced,
 even with another tree. `--no-workflows` skips all of this. With
 `--json` each outcome lists `workflows`, one `{id, status}` per needed workflow:
 `installed`, `present`, `mismatch` (DST keeps its other tree, which the jobs
@@ -768,39 +785,64 @@ every hold was adopted or already was. Progress, one line per step, goes to
 stderr unless `-q`/`--quiet` is given.
 
 Each hold is its own bundle, but the holds bound for one destination travel as
-one batch, so the number of adapter calls (and ssh connections) does not grow
-with the number of jobs: one hold call on a remote SRC, one `push` or `pull` of
-every bundle (a remote DST receives them in
-`.httk-workspace/transfers/incoming/<batch token>/`), one adoption call on a
-remote DST, and one release call on a remote SRC. Local to remote takes four
-calls (the probe of DST, the query of its workflows, the push and the
-adoption), remote to local four (the hold, `transfer status`, the pull and the
-release), and remote to remote eight; shipping workflows adds one copy and one
-install call, and one build call per shipped workflow that has
-`[workflow.build]`.
-Only a batch whose id lists exceed 64 KiB of command text (some 1500 jobs) is
-split, into as many such calls per step as it needs. A copy or adoption call
-that fails as a whole marks every hold it carried `failed`; they stay held for
-`--resume`.
+one batch, so the number of adapter calls, ssh connections and remote `httk`
+starts does not grow with the number of jobs: one hold call on a remote SRC
+(its answer also lists the other holds already bound for DST, so no
+`transfer status` call follows), one `pull` of every bundle from a remote SRC,
+one `deliver` to a remote DST (which lands the bundles in
+`.httk-workspace/transfers/incoming/<batch token>/` and adopts them in the same
+start), and one release call on a remote SRC. Local to remote takes one ssh
+connection and one remote `httk` start; remote to local three connections
+(hold, pull, release) and two starts; remote to remote four connections and
+three starts. Shipping missing or unbuilt workflows to a remote DST adds one
+connection and one start.
+A delivery is one call for the whole batch (its bundles travel in the stream);
+only a hold, pull or release whose id list exceeds 64 KiB of command text (some
+1500 jobs) is split, into as many such calls as it needs.
 
-A bundle DST refuses (for example because some of its jobs are already there)
-stays held on SRC and is reported; one whose jobs are all at DST already is
-"already adopted", and its hold is released.
+A bundle DST refuses (for example because some of its jobs are already there,
+or because its `bundle.json` records another destination workspace id) stays
+held on SRC and is reported; one whose jobs are all at DST already is "already
+adopted", and its hold is released. When a remote DST refuses a delivery before
+adopting anything (the workspace name is unknown there, the stream was
+refused), a local SRC takes those holds back at once and reports them
+`not_moved` with DST's reason; a remote SRC keeps them held (`failed`). An
+answer that cannot be read (a banner on the connection, a crash, a timeout)
+marks every hold of that call `failed` and leaves it held: whether the jobs
+arrived is unknown, and `--resume` delivers again (they then report "already
+adopted") and releases. Releasing such a hold by hand instead, after checking
+with `httk job show` that DST has the jobs, keeps away copies only with
+`httk job transfer --release T --keep --destination-id ID SRC`, where ID is the
+`workspace_id` that `httk workspace status --json REMOTE:WS` reports for DST.
 
 **Recovery.** Delivery is at least once. Every run, and
 `job transfer --resume`, first re-drives the holds of SRC bound for DST
 (`--resume` without DST re-drives every hold to the destination it records), so
-a transfer interrupted at any step is finished by running it again. A hold
-records DST's workspace id, so only that workspace adopts it. `transfer status`
+a transfer interrupted at any step is finished by running it again. A pushed
+hold records the destination locator only (no probe runs before a push); DST's
+workspace id is learnt from the adoption and recorded in the away copies. A
+hold that does record an id (a local DST, or `--destination-id`) is adopted
+only by that workspace: the far side refuses a bundle that records another
+workspace's id. Accepted limitation: if a push's answer was unreadable and the
+remote workspace NAME is then pointed at another workspace before `--resume`,
+the resume delivers to the new workspace and the jobs exist in both; after such
+a change, check with `httk job show` or `httk job list` on the remote before
+resuming. `transfer status`
 lists the holds of a workspace (transfer id, root job, member count,
 destination, age), `job why JOB` explains a held job, and `httk project repair
 --dry-run` reports holds and incoming copies older than seven days. A transfer
 abandoned for good is taken back into SRC with
 `httk job adopt --workspace SRC SRC/.httk-workspace/transfers/outgoing/<transfer id>`,
 which is safe only after checking that DST does not have the jobs;
-`job transfer --release T` discards a hold whose jobs DST has. `job transfer
+`job transfer --release T` discards a hold whose jobs DST has (add `--keep
+--destination-id ID` to keep away copies, as above). `job transfer
 --hold (--job JOB … | --state STATE … | --step STEP …) SRC DST` only holds jobs in a local SRC, recording DST as
-given; it is the first leg a client runs on a remote SRC.
+given; it is the first leg a client runs on a remote SRC. With `--json` it
+prints `{"holds": [...], "held_before": [...], "errors": [...]}`, where
+`held_before` lists, in the same shape, the other holds of SRC already bound for
+the same DST locator. `--release T --keep --destination-id ID` keeps away copies
+that record ID as their destination workspace when the hold recorded none (a
+push learns that id from the adoption report).
 
 ### Away copies
 
@@ -1211,20 +1253,21 @@ first. See {doc}`/campaigns`.
 One machine runs these argument vectors on another over an adapter. They are
 protocol, not operator interface, and hidden from `--help` where they are not
 ordinary commands; their spelling is frozen because the far side may run a
-different *httk*. The batched `job transfer --hold`, the repeated `--release`
-and the several-bundle `job adopt` (run in the batch's landing directory, with
-bare transfer ids) need both ends to run the same *httk-workflow* release. An
-older SRC answers the hold with an error and no hold document, so nothing is
-held. An older DST rejects several bundles, and adopts a single one but answers
-with a report the client does not recognise: the hold is reported `failed`
-and stays held, while the jobs may have arrived. Upgrade DST, check with
+different *httk*. The batched `job transfer --hold`, the repeated `--release`,
+`job adopt --stdin-tar` and `workflow install --stdin-tar` need both ends to run
+the same *httk-workflow* release. An older SRC answers the hold with an error
+and no hold document, so nothing is held. An older DST rejects
+`--stdin-tar`: the holds are reported `failed` and stay held, and with any
+answer the client does not recognise the jobs may have arrived. Upgrade DST, check with
 `httk job show` whether the jobs are there, and then release the hold with
 `httk job transfer --release` (or re-run `--resume` after the upgrade):
 
 ```text
 httk job transfer --hold --json [--tree] [--destination-id ID] [--job JOB …] [--state STATE …] [--step STEP …] [--placement PREFIX] -- WS DST
-httk job adopt --json --by-path --workspace ROOT TRANSFER_ID [TRANSFER_ID …]   (in the batch landing)
-httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] WS
+httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [--keep [--destination-id ID]] WS
+httk job adopt --json --stdin-tar --token TOKEN --workspace WS [--built-for ID …]   (bundles as tar on stdin, by deliver)
+httk workflow install --json --workspace WS [--also-build ID …] --stdin-tar --source-label TEXT --build   (store entries as tar on stdin, by deliver)
+httk workflow install --json --workspace WS --also-build ID …
 httk transfer status --json WS
 httk job request-envelopes ACTION --workspace WS --operator LABEL --reason TEXT [--priority N] [--override-step S] [--workflow W] [--destination D] [--max-attempts-per-activation N|unlimited] [--max-total-attempts N|unlimited] [--max-activations N|unlimited] [--force] [--keep-budget] [--tree] JOB_ID …
 httk job publish-requests --workspace WS --document JSON [--document JSON …] [--wait] [--timeout S] [--sequential]

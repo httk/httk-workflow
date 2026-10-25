@@ -7,33 +7,13 @@ the command and its handlers from this module.
 """
 
 import argparse
+import importlib
 import sys
 from collections.abc import Sequence
+from typing import Any
 
 from httk.core.cli import CLIContext
 
-from ..adapters import (
-    REMOTE_MANAGER_COMMAND,
-    REMOTE_STATUS_COMMAND,
-    REMOTE_WORKSPACE_DELETE_COMMAND,
-    REMOTE_WORKSPACE_FSCK_COMMAND,
-    REMOTE_WORKSPACE_GC_COMMAND,
-    REMOTE_WORKSPACE_INIT_COMMAND,
-    REMOTE_WORKSPACE_LIST_COMMAND,
-    REMOTE_WORKSPACE_MOVE_COMMAND,
-    REMOTE_WORKSPACE_SETTINGS_COMMAND,
-    REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND,
-)
-from ._build import build_build_parser, handle_build
-from ._campaign import (
-    build_campaign_parser,
-    handle_campaign_collect,
-    handle_campaign_init,
-    handle_campaign_show,
-    handle_campaign_start_managers,
-    handle_campaign_submit,
-)
-from ._collect import build_collect_parser
 from ._common import (
     _ERRORS,
     remote_workspace_output,
@@ -44,98 +24,11 @@ from ._common import (
 from ._common import (
     HelpFormatter as _HelpFormatter,
 )
-from ._compat import (
-    add_v1_collect_arguments,
-    build_v1_parser,
-    handle_v1_collect,
-)
-from ._describe import (
-    build_describe_parser,
-    build_install_parser,
-    build_list_parser,
-    handle_workflow_describe,
-    handle_workflow_install,
-    handle_workflow_list,
-    handle_workflow_uninstall,
-)
-from ._job import (
-    build_job_parser,
-    ensure_identity_key,
-    handle_job_debug,
-    handle_job_delete,
-    handle_job_list,
-    handle_job_log,
-    handle_job_new,
-    handle_job_request,
-    handle_job_seal,
-    handle_job_show,
-    handle_job_submit,
-    handle_job_unseal,
-    handle_job_why,
-    publish_job_requests,
-    request_remote_job_result,
-)
-from ._launcher import (
-    build_launcher_parser,
-    handle_launcher_add,
-    handle_launcher_check,
-    handle_launcher_configure,
-    handle_launcher_list,
-    handle_launcher_remove,
-    handle_launcher_show,
-)
-from ._manager import (
-    add_manager_run_arguments,
-    add_run_arguments,
-    build_manager_parser,
-    build_run_parser,
-    handle_manager_run,
-    launch_workspace_managers,
-    submit_remote_manager_result,
-)
-from ._monitor import build_monitor_parser, handle_monitor
-from ._postprocess import build_postprocess_parser, handle_postprocess
-from ._precheck import build_precheck_parser, handle_precheck
-from ._project import (
-    build_config_parser,
-    handle_config_import_v1,
-    handle_config_set,
-    handle_config_show,
-    handle_config_unset,
-)
-from ._seal import build_seal_parser, handle_seal_verify
-from ._transfer import (
-    build_remote_parser,
-    build_transfer_operator_parser,
-    build_transfer_parser,
-    handle_remote_adapter_operation,
-    handle_remote_add,
-    handle_remote_import_v1,
-    handle_remote_list,
-    handle_remote_remove,
-    handle_remote_show,
-    handle_transfer,
-)
-from ._workspace import (
-    add_workspace_init_arguments,
-    add_workspace_status_arguments,
-    build_workspace_parser,
-    handle_workspace_delete,
-    handle_workspace_forget,
-    handle_workspace_fsck,
-    handle_workspace_gc,
-    handle_workspace_init,
-    handle_workspace_list,
-    handle_workspace_policy_set,
-    handle_workspace_policy_show,
-    handle_workspace_seal,
-    handle_workspace_settings_set,
-    handle_workspace_settings_show,
-    handle_workspace_settings_unset,
-    handle_workspace_status,
-    handle_workspace_unseal,
-    handle_workspace_workflows,
-)
+
+# The group re-exports resolve lazily (PEP 562 ``__getattr__``), and ``build_parser`` builds only the group a
+# command names, so a remote ``httk job adopt`` start imports the job group alone, not numpy and the storage
+# stack behind ``collect``. Their static view, for type checkers and the API reference, is ``__init__.pyi``.
+# pyright: reportUnsupportedDunderAll=false
 
 __all__ = [
     "REMOTE_MANAGER_COMMAND",
@@ -255,13 +148,165 @@ __all__ = [
 ]
 
 
+_LAZY_EXPORTS = {
+    "REMOTE_MANAGER_COMMAND": "..adapters",
+    "REMOTE_STATUS_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_DELETE_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_FSCK_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_GC_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_INIT_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_LIST_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_MOVE_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_SETTINGS_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND": "..adapters",
+    "build_build_parser": "._build",
+    "handle_build": "._build",
+    "build_campaign_parser": "._campaign",
+    "handle_campaign_collect": "._campaign",
+    "handle_campaign_init": "._campaign",
+    "handle_campaign_show": "._campaign",
+    "handle_campaign_start_managers": "._campaign",
+    "handle_campaign_submit": "._campaign",
+    "add_v1_collect_arguments": "._compat",
+    "build_v1_parser": "._compat",
+    "handle_v1_collect": "._compat",
+    "build_describe_parser": "._describe",
+    "build_install_parser": "._describe",
+    "build_list_parser": "._describe",
+    "handle_workflow_describe": "._describe",
+    "handle_workflow_install": "._describe",
+    "handle_workflow_list": "._describe",
+    "handle_workflow_uninstall": "._describe",
+    "build_job_parser": "._job",
+    "ensure_identity_key": "._job",
+    "handle_job_debug": "._job",
+    "handle_job_delete": "._job",
+    "handle_job_list": "._job",
+    "handle_job_log": "._job",
+    "handle_job_new": "._job",
+    "handle_job_request": "._job",
+    "handle_job_seal": "._job",
+    "handle_job_show": "._job",
+    "handle_job_submit": "._job",
+    "handle_job_unseal": "._job",
+    "handle_job_why": "._job",
+    "publish_job_requests": "._job",
+    "request_remote_job_result": "._job",
+    "build_launcher_parser": "._launcher",
+    "handle_launcher_add": "._launcher",
+    "handle_launcher_check": "._launcher",
+    "handle_launcher_configure": "._launcher",
+    "handle_launcher_list": "._launcher",
+    "handle_launcher_remove": "._launcher",
+    "handle_launcher_show": "._launcher",
+    "add_manager_run_arguments": "._manager",
+    "add_run_arguments": "._manager",
+    "build_manager_parser": "._manager",
+    "build_run_parser": "._manager",
+    "handle_manager_run": "._manager",
+    "launch_workspace_managers": "._manager",
+    "submit_remote_manager_result": "._manager",
+    "build_monitor_parser": "._monitor",
+    "handle_monitor": "._monitor",
+    "build_postprocess_parser": "._postprocess",
+    "handle_postprocess": "._postprocess",
+    "build_precheck_parser": "._precheck",
+    "handle_precheck": "._precheck",
+    "build_config_parser": "._project",
+    "handle_config_import_v1": "._project",
+    "handle_config_set": "._project",
+    "handle_config_show": "._project",
+    "handle_config_unset": "._project",
+    "build_seal_parser": "._seal",
+    "handle_seal_verify": "._seal",
+    "build_remote_parser": "._transfer",
+    "build_transfer_operator_parser": "._transfer",
+    "build_transfer_parser": "._transfer",
+    "handle_remote_adapter_operation": "._transfer",
+    "handle_remote_add": "._transfer",
+    "handle_remote_import_v1": "._transfer",
+    "handle_remote_list": "._transfer",
+    "handle_remote_remove": "._transfer",
+    "handle_remote_show": "._transfer",
+    "handle_transfer": "._transfer",
+    "add_workspace_init_arguments": "._workspace",
+    "add_workspace_status_arguments": "._workspace",
+    "build_workspace_parser": "._workspace",
+    "handle_workspace_delete": "._workspace",
+    "handle_workspace_forget": "._workspace",
+    "handle_workspace_fsck": "._workspace",
+    "handle_workspace_gc": "._workspace",
+    "handle_workspace_init": "._workspace",
+    "handle_workspace_list": "._workspace",
+    "handle_workspace_policy_set": "._workspace",
+    "handle_workspace_policy_show": "._workspace",
+    "handle_workspace_seal": "._workspace",
+    "handle_workspace_settings_set": "._workspace",
+    "handle_workspace_settings_show": "._workspace",
+    "handle_workspace_settings_unset": "._workspace",
+    "handle_workspace_status": "._workspace",
+    "handle_workspace_unseal": "._workspace",
+    "handle_workspace_workflows": "._workspace",
+}
+
+# Each command group: the names it registers, its module, its parser builder, whether the builder takes
+# ``program``, and whether the group belongs only to the full dispatcher (not to ``httk workflow``).
+_GROUPS = (
+    (("workspace",), "._workspace", "build_workspace_parser", True, True),
+    (("job",), "._job", "build_job_parser", True, True),
+    (("describe",), "._describe", "build_describe_parser", False, False),
+    (("list",), "._describe", "build_list_parser", False, False),
+    (("install", "uninstall"), "._describe", "build_install_parser", False, False),
+    (("seal",), "._seal", "build_seal_parser", False, True),
+    (("collect",), "._collect", "build_collect_parser", True, True),
+    (("build",), "._build", "build_build_parser", False, False),
+    (("postprocess",), "._postprocess", "build_postprocess_parser", False, False),
+    (("precheck",), "._precheck", "build_precheck_parser", False, False),
+    (("run",), "._manager", "build_run_parser", False, False),
+    (("manager",), "._manager", "build_manager_parser", False, True),
+    (("v1",), "._compat", "build_v1_parser", False, True),
+    (("config",), "._project", "build_config_parser", False, True),
+    (("remote",), "._transfer", "build_remote_parser", False, True),
+    (("launcher",), "._launcher", "build_launcher_parser", False, True),
+    (("campaign",), "._campaign", "build_campaign_parser", False, True),
+    (("monitor",), "._monitor", "build_monitor_parser", False, False),
+)
+
+
+def __getattr__(name: str) -> Any:
+    """Import a group re-export from its module on first access.
+
+    :param name: The module attribute to resolve.
+    :return: The requested re-export.
+    :raises AttributeError: If ``name`` is not a group re-export.
+    """
+    module = _LAZY_EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(module, __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    """List the module attributes, including the not yet resolved re-exports.
+
+    :return: The sorted attribute names.
+    """
+    return sorted(set(globals()) | set(__all__))
+
+
 def build_parser(
     program: str,
     context: CLIContext,
     *,
     include_workspace_job: bool = True,
+    only: str | None = None,
 ) -> argparse.ArgumentParser:
-    """Build the internal dispatcher, or only workflow verbs without standalone groups."""
+    """Build the internal dispatcher, or only workflow verbs without standalone groups.
+
+    *only* naming a group builds that group alone, importing only its module; any other value builds them all.
+    """
 
     parser = argparse.ArgumentParser(
         prog=program,
@@ -270,29 +315,13 @@ def build_parser(
     )
     parser.set_defaults(handler=None, help_parser=parser)
     groups = parser.add_subparsers(metavar="GROUP")
-    if include_workspace_job:
-        build_workspace_parser(groups, program=f"{context.program} workspace")
-    if include_workspace_job:
-        build_job_parser(groups, program=f"{context.program} job")
-    build_describe_parser(groups)
-    build_list_parser(groups)
-    build_install_parser(groups)
-    if include_workspace_job:
-        build_seal_parser(groups)
-    if include_workspace_job:
-        build_collect_parser(groups, program=f"{context.program} collect")
-    build_build_parser(groups)
-    build_postprocess_parser(groups)
-    build_precheck_parser(groups)
-    build_run_parser(groups)
-    if include_workspace_job:
-        build_manager_parser(groups)
-        build_v1_parser(groups)
-        build_config_parser(groups)
-        build_remote_parser(groups)
-        build_launcher_parser(groups)
-        build_campaign_parser(groups)
-    build_monitor_parser(groups)
+    included = [group for group in _GROUPS if include_workspace_job or not group[4]]
+    for names, module, builder, takes_program, _ in [group for group in included if only in group[0]] or included:
+        build = getattr(importlib.import_module(module, __name__), builder)
+        if takes_program:
+            build(groups, program=f"{context.program} {names[0]}")
+        else:
+            build(groups)
     return parser
 
 
@@ -337,7 +366,7 @@ def command(argv: Sequence[str], context: CLIContext, *, prog: str | None = None
     *prog* names the command errors are reported under (default ``httk``).
     """
 
-    return dispatch(build_parser(context.program, context), argv, context, prog=prog)
+    return dispatch(build_parser(context.program, context, only=argv[0] if argv else None), argv, context, prog=prog)
 
 
 def workflow_command(argv: Sequence[str], context: CLIContext) -> int:
@@ -347,7 +376,10 @@ def workflow_command(argv: Sequence[str], context: CLIContext) -> int:
     # Keep it accepted but absent from public workflow help.
     if list(argv[:2]) == ["manager", "run"]:
         return manager_command(argv[1:], context)
-    return dispatch(build_parser(f"{context.program} workflow", context, include_workspace_job=False), argv, context)
+    parser = build_parser(
+        f"{context.program} workflow", context, include_workspace_job=False, only=argv[0] if argv else None
+    )
+    return dispatch(parser, argv, context)
 
 
 def workspace_command(argv: Sequence[str], context: CLIContext) -> int:
@@ -416,6 +448,8 @@ def v1_command(argv: Sequence[str], context: CLIContext) -> int:
 
 def transfer_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``transfer`` command: inspecting held transfers."""
+
+    from ._transfer import build_transfer_operator_parser
 
     parser = argparse.ArgumentParser(prog=context.program)
     parser.set_defaults(handler=None, help_parser=parser)

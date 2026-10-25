@@ -11,6 +11,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack
 from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -26,7 +27,7 @@ from httk.core.identity import (
 )
 
 from .. import _fs, _kernel, _moving, _requests, _store
-from .._bundles import BundleError
+from .._bundles import BundleError, read_manifest
 from .._children import newest_labeled
 from .._job import JobDefinition
 from .._kernel import JobRef
@@ -1882,27 +1883,145 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
     removed once adopted (for a bundle that is the caller's own to remove, such as a fetched exchange return).
     A refused bundle does not stop the ones after it. Afterwards, a bundle's parent directory that is a direct
     child of this workspace's ``transfers/incoming/`` (a transfer's per-batch landing) is removed when empty.
+    With ``--stdin-tar`` the bundles arrive as one tar stream, extracted whole into such a landing before any is
+    adopted; a bundle there bound for another workspace is refused and discarded.
     """
 
-    workspace = _modifiable(arguments, context, action="adopt jobs into it")
-    entries: list[dict[str, object]] = []
-    sources = [context.cwd / Path(bundle).expanduser() for bundle in arguments.bundles]
-    with _kernel.register_owner(workspace, kind="cli", label="job adopt", allocation=None, advertised={}) as owner:
+    workspace: Workspace | None = None
+    landing: Path | None = None
+    parents: set[Path] = set()
+    stack = ExitStack()
+    try:
+        if arguments.stdin_tar == bool(arguments.bundles):
+            raise ValueError("give BUNDLE paths, or --stdin-tar to read the bundles from standard input, not both")
+        if arguments.token is not None and not arguments.stdin_tar:
+            raise ValueError("--token names the landing of --stdin-tar")
+        workspace = _modifiable(arguments, context, action="adopt jobs into it")
+        if arguments.stdin_tar:
+            landing, bundles = _receive_bundles(workspace, arguments.token)
+            sources = [landing / name for name in bundles]
+            parents.add(landing.resolve())  # removed when empty, even after an empty stream
+        else:
+            sources = [context.cwd / Path(bundle).expanduser() for bundle in arguments.bundles]
+            bundles = arguments.bundles
+        owner = stack.enter_context(
+            _kernel.register_owner(workspace, kind="cli", label="job adopt", allocation=None, advertised={})
+        )
         # One wait of the visibility deadline for every bundle's absent jobs, not one a bundle.
         absent = _moving.settle_absent(workspace, sources)
-        for source, bundle in zip(sources, arguments.bundles, strict=True):
+    except _ERRORS as exc:
+        stack.close()
+        # Nothing of the stream was adopted: its landing goes, and with --json the one document says so.
+        if workspace is not None and landing is not None:
+            _fs.discard(_fs.loc(landing), trash_dir=workspace.control / "tmp", durable=workspace.durable)
+        if not (arguments.stdin_tar and arguments.json):
+            raise
+        print(f"job adopt: {exc}", file=sys.stderr)
+        workspace_id = None if workspace is None else workspace.workspace_id
+        print(json.dumps({"bundles": [], "workspace_id": workspace_id, "refused": str(exc)}, indent=2))
+        return 2
+    entries: list[dict[str, object]] = []
+    with stack:
+        for source, bundle in zip(sources, bundles, strict=True):
+            foreign = _foreign_bundle(workspace, source) if arguments.stdin_tar else None
+            if foreign is not None:
+                print(f"{bundle}: {foreign}", file=sys.stderr)
+                _fs.discard(_fs.loc(source), trash_dir=workspace.control / "tmp", durable=workspace.durable)
+                entries.append({"bundle": bundle, "status": "refused", "message": foreign})
+                continue
             entries.append(_adopt_one(workspace, owner, source, bundle, arguments, absent))
     incoming = (workspace.control / "transfers" / "incoming").resolve()
-    for bundle in arguments.bundles:
-        parent = (context.cwd / Path(bundle).expanduser()).parent.resolve()
+    for parent in parents | {source.parent.resolve() for source in sources}:
         if parent.parent == incoming:
             try:
                 _fs.remove_empty_dir(_fs.loc(parent))  # kept while a bundle stayed in it
             except OSError:
                 pass
     if arguments.json:
-        print(json.dumps({"bundles": entries}, indent=2))
+        document: dict[str, object] = {"bundles": entries, "workspace_id": workspace.workspace_id}
+        if arguments.built_for:
+            document["workflows"] = _built_for(workspace, arguments.built_for)
+        print(json.dumps(document, indent=2))
     return 0 if all(entry["status"] in ("adopted", "already_adopted") for entry in entries) else 1
+
+
+#: A ``job adopt --token``: the landing's directory name below ``transfers/incoming/``.
+_LANDING_TOKEN = re.compile(r"[0-9a-z]{16,64}")
+
+
+def _receive_bundles(workspace: Workspace, token: str | None) -> tuple[Path, list[str]]:
+    """Extract the tar stream on standard input into ``transfers/incoming/<token>/`` (a fresh token by default).
+
+    :param workspace: The adopting workspace.
+    :param token: The landing's name, so that a retried delivery lands in the same place, or ``None``.
+    :return: The landing, and the names of the bundles in it, sorted.
+    :raises ValueError: For a malformed token or stream, or a refused member.
+    """
+
+    if token is None:
+        token = _fs.fresh_token()
+    elif not _LANDING_TOKEN.fullmatch(token):
+        raise ValueError(f"--token must be 16 to 64 lowercase letters and digits: {token!r}")
+    landing = workspace.control / "transfers" / "incoming" / token
+    return landing, receive_tar(workspace, landing)
+
+
+def receive_tar(workspace: Workspace, landing: Path) -> list[str]:
+    """Extract the tar stream on standard input into *landing* (created when absent): its top-level directories.
+
+    The extraction filters of the adapter's pull are the trust boundary; every top-level entry must be a
+    directory. A stream that fails either is refused whole and *landing* discarded, so nothing of it is used.
+
+    :param workspace: The workspace *landing* belongs to (its ``tmp/`` takes the discarded landing).
+    :param landing: The directory to extract into.
+    :return: The names of the top-level directories, sorted.
+    :raises ValueError: For a malformed stream or a refused member.
+    """
+
+    import tarfile
+
+    from ..adapter_runtime import _extract
+
+    landing.mkdir(parents=True, exist_ok=True)
+    try:
+        _extract(sys.stdin.buffer, landing)
+        with os.scandir(landing) as found:
+            entries = sorted(found, key=lambda entry: entry.name)
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                raise ValueError(f"not a directory: {entry.name!r}")
+    except (tarfile.TarError, EOFError, OSError, ValueError) as exc:
+        _fs.discard(_fs.loc(landing), trash_dir=workspace.control / "tmp", durable=workspace.durable)
+        raise ValueError(f"refused the stream, nothing of it was used: {exc}") from None
+    return [entry.name for entry in entries]
+
+
+def _foreign_bundle(workspace: Workspace, bundle: Path) -> str | None:
+    """Why a delivered bundle may not be adopted here: it records another destination workspace; else ``None``."""
+
+    try:
+        read = read_manifest(bundle / "bundle.json")
+    except BundleError:
+        return None  # the adoption refuses it with the reason
+    recorded = None if read is None else read[1].destination_workspace_id
+    if recorded is None or recorded == workspace.workspace_id:
+        return None
+    return f"the bundle is bound for workspace {recorded}, not this workspace {workspace.workspace_id}"
+
+
+def _built_for(workspace: Workspace, workflow_ids: Sequence[str]) -> list[dict[str, object]]:
+    """Report each id as ``workflow list --built-for`` sees it: ``present``, ``unbuilt`` or ``missing``."""
+
+    rows: list[dict[str, object]] = []
+    for workflow_id in workflow_ids:
+        found = _store.lookup(workspace, workflow_id)
+        if found is None:
+            rows.append({"id": workflow_id, "status": "missing", "tree_sha256": None})
+            continue
+        digest = found.record.get("tree_sha256")
+        status = "unbuilt" if _store.built(found) is False else "present"
+        rows.append({"id": workflow_id, "status": status, "tree_sha256": digest if isinstance(digest, str) else None})
+    return rows
 
 
 def _adopt_one(
@@ -2153,6 +2272,14 @@ def _add_request_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+class _WorkflowLabels:
+    """The registered workflows ``job new --workflow`` lists, discovered when its help is rendered."""
+
+    def __str__(self) -> str:
+        labels = registered_workflow_labels()
+        return f" ({', '.join(labels)})" if labels else ""
+
+
 def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     new = _leaf(
         group,
@@ -2166,13 +2293,15 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
     )
     _add_workspace_option(new, help_text="the workspace to submit into")
     workflow_group = new.add_mutually_exclusive_group(required=True)
-    workflow_group.add_argument(
+    workflow = workflow_group.add_argument(
         "--workflow",
         metavar="WORKFLOW",
-        help="an installed workflow id or short name, a registered or packaged workflow name"
-        + (f" ({', '.join(labels)})" if (labels := registered_workflow_labels()) else "")
-        + " or a git URI git+https://HOST/PATH[@REF][#SUBDIR] (not a path; use --from-runner or --workflow-dir)",
+        help="an installed workflow id or short name, a registered or packaged workflow name%(workflow_labels)s"
+        " or a git URI git+https://HOST/PATH[@REF][#SUBDIR] (not a path; use --from-runner or --workflow-dir)",
     )
+    # argparse expands ``%(workflow_labels)s`` from the action's attributes only when this help is printed, so
+    # every other job verb skips discovering the installed workflows.
+    vars(workflow)["workflow_labels"] = _WorkflowLabels()
     workflow_group.add_argument(
         "--workflow-dir", metavar="PATH", help="a workflow package directory containing httk_workflow.toml"
     )
@@ -2606,15 +2735,25 @@ def build_job_parser(
     _add_workspace_option(adopt, help_text="the workspace to adopt into")
     _add_by_path_argument(adopt)
     adopt.add_argument(
-        "bundles", metavar="BUNDLE", nargs="+", help="an ejected job bundle directory (several are adopted in turn)"
+        "bundles", metavar="BUNDLE", nargs="*", help="an ejected job bundle directory (several are adopted in turn)"
     )
+    adopt.add_argument(
+        "--stdin-tar",
+        action="store_true",
+        help="read the bundles as one tar stream on standard input (the receiving end of a push), not BUNDLE",
+    )
+    # Hidden: the transfer protocol's landing name and the workflows the sender asks about.
+    adopt.add_argument("--token", metavar="TOKEN", help=argparse.SUPPRESS)
+    adopt.add_argument("--built-for", action="append", default=[], metavar="ID", help=argparse.SUPPRESS)
     adopt.add_argument(
         "--move",
         action="store_true",
         help="remove the bundle once adopted when it had to be copied from another filesystem",
     )
     adopt.add_argument(
-        "--json", action="store_true", help='print one JSON document, {"bundles": [...]}, an entry per BUNDLE'
+        "--json",
+        action="store_true",
+        help='print one JSON document, {"bundles": [...], "workspace_id": ...}, an entry per BUNDLE',
     )
     add_durability_arguments(adopt)
 

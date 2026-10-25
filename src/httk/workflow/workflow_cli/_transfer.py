@@ -2,7 +2,7 @@
 
 ``job transfer`` moves jobs between workspaces as hold + copy + adopt + release
 on :mod:`httk.workflow._moving`, locally or through the remote adapters'
-``invoke``, ``push`` and ``pull``; ``job push``/``job pull`` are its everyday forms (an implicit
+``invoke``, ``deliver`` and ``pull``; ``job push``/``job pull`` are its everyday forms (an implicit
 ``--state ready``/``succeeded``, ``--tree``, the default workspace as the omitted end);
 ``transfer status`` lists held transfers. ``job push`` (unless ``--no-keep``) and ``job transfer --keep``
 release the hold keeping the moved jobs in SRC as ``away`` copies, which a later transfer back replaces.
@@ -15,11 +15,10 @@ import shlex
 import sys
 import tempfile
 import time
-import uuid
 from collections.abc import Sequence
 from contextlib import redirect_stdout
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import StringIO
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
@@ -27,7 +26,7 @@ from typing import Any, cast
 from httk.core.cli import CLIContext
 
 from .. import _fs, _kernel, _moving, _store
-from .._bundles import BundleError
+from .._bundles import BundleError, read_manifest
 from .._manager_scheduling import current_step
 from .._util import write_json_atomic
 from ..adapters import (
@@ -38,7 +37,6 @@ from ..adapters import (
     import_v1_remote,
     list_remotes,
     metadata_path,
-    probe_remote_workspace,
     read_credentials,
     read_metadata,
     resolve_remote,
@@ -454,7 +452,7 @@ class _End:
     locator: str
     workspace: Workspace | None = None
     binding: WorkspaceBinding | None = None
-    root: str | None = None
+    #: A local workspace's id; a remote one's is learnt from its adoption report, never probed.
     workspace_id: str | None = None
 
     @property
@@ -463,8 +461,9 @@ class _End:
         return self.binding.name.split(":", 1)[1]
 
 
-def _end(value: str | None, context: CLIContext, arguments: argparse.Namespace, *, probe: bool = False) -> _End:
-    """Resolve one end; *value* ``None`` is the enclosing or default workspace. *probe* learns a remote's root and id."""
+def _end(value: str | None, context: CLIContext, arguments: argparse.Namespace) -> _End:
+    """Resolve one end; *value* ``None`` is the enclosing or default workspace. A remote one is not contacted: its
+    commands name the workspace by its plain name, which the far side resolves in its own registry."""
 
     reference: Path | WorkspaceBinding
     if value is not None:
@@ -478,13 +477,7 @@ def _end(value: str | None, context: CLIContext, arguments: argparse.Namespace, 
     if isinstance(reference, Path):
         workspace = Workspace(reference, durable=_durable(arguments))
         return _End(str(workspace.root), workspace=workspace, workspace_id=workspace.workspace_id)
-    root = workspace_id = None
-    if probe:
-        target = resolve_remote(reference.remote, project=context.cwd)
-        workspace_id, root = probe_remote_workspace(
-            target, reference.name.split(":", 1)[1], timeout=arguments.adapter_timeout
-        )
-    return _End(reference.name, binding=reference, root=root, workspace_id=workspace_id)
+    return _End(reference.name, binding=reference)
 
 
 def _remote(
@@ -643,8 +636,13 @@ def _parent_here(ref: _kernel.JobRef, present: set[str], *, step: bool) -> tuple
 
 def _hold_jobs(
     src: _End, dst: _End, context: CLIContext, arguments: argparse.Namespace, errors: list[str]
-) -> list[_moving.Hold]:
-    """Step 1: hold every selected job on *src*, recording *dst* and its id; a job that cannot move is an error."""
+) -> tuple[list[_moving.Hold], list[_moving.Hold] | None]:
+    """Step 1: hold every selected job on *src*, recording *dst* and its id when known; a job that cannot move is
+    an error.
+
+    The result is the new holds, and for a remote *src* the other holds it reported bound for *dst*
+    (``held_before``), or ``None`` (a local *src*, or a hold call that printed no document).
+    """
 
     holds: list[_moving.Hold] = []
     if src.workspace is not None:
@@ -714,7 +712,8 @@ def _hold_jobs(
                 + ("(detach them to move them alone)" if arguments.tree else "(use --tree, or detach them)"),
                 file=sys.stderr,
             )
-        return holds
+        return holds, None
+    before: list[_moving.Hold] | None = []
     for selector in arguments.jobs:
         try:
             canonical_uuid(selector, "JOB")
@@ -739,6 +738,7 @@ def _hold_jobs(
                 f"job transfer --hold on {src.locator} failed: {exc}; jobs it already held are driven by this run's "
                 f"pass over {src.locator}'s holds or by `httk job transfer --resume {src.locator} {dst.locator}`"
             )
+            before = None
             continue
         try:
             document = json.loads(out)
@@ -747,6 +747,9 @@ def _hold_jobs(
             ):
                 raise ValueError("no hold document")
             held = [_moving.Hold.from_mapping(hold) for hold in document["holds"]]
+            # An older SRC lists no held_before: this run then asks transfer status.
+            reported = document.get("held_before")
+            earlier = [_moving.Hold.from_mapping(hold) for hold in reported] if isinstance(reported, list) else None
         except (ValueError, TypeError):
             message = f"job transfer --hold on {src.locator} printed no hold document"
             message += f": {err.strip()}" if code and err.strip() else ""
@@ -754,11 +757,13 @@ def _hold_jobs(
             if "unrecognized arguments" in err or "invalid choice" in err:
                 message += f" ({src.locator} may run an older httk-workflow; upgrade it)"
             errors.append(message)
+            before = None
             continue
         holds += held
+        before = None if before is None or earlier is None else [*before, *earlier]
         errors.extend(str(error) for error in document["errors"])
         sys.stderr.write(err)  # the far side's notes, such as children left with their root
-    return holds
+    return holds, before
 
 
 #: The statuses of a ``job adopt --json`` entry.
@@ -779,21 +784,49 @@ def _adopt_local(workspace: Workspace, owner: _kernel.Owner, source: Path, absen
     return {"status": "already_adopted" if report.already_adopted else "adopted", **adopt_document(report)}
 
 
-def _adoption(out: str, bundles: list[str]) -> list[dict[str, Any]]:
-    """The entries of a remote ``job adopt --json`` of *bundles*, checked; :class:`ValueError` when malformed."""
+def _adoption(out: str, bundles: list[str]) -> dict[str, Any]:
+    """The checked document of a remote ``job adopt --json --stdin-tar`` of *bundles*: as printed, with ``entries``
+    by bundle added; :class:`ValueError` when it is no such document.
+
+    A document with ``refused`` says that nothing was adopted and lists no bundle; any other names every bundle
+    sent, each with a known status.
+    """
 
     document = json.loads(out)
-    entries = document.get("bundles") if isinstance(document, dict) else None
-    if (
-        not isinstance(entries, list)
-        or len(entries) != len(bundles)
-        or not all(
-            isinstance(entry, dict) and entry.get("bundle") == bundle and entry.get("status") in _ADOPT_STATUSES
-            for entry, bundle in zip(entries, bundles, strict=False)
-        )
-    ):
+    if not isinstance(document, dict) or not isinstance(document.get("bundles"), list):
+        raise ValueError("not an adoption report")
+    workspace_id = document.get("workspace_id")
+    if workspace_id is not None:
+        document["workspace_id"] = canonical_uuid(str(workspace_id), "workspace_id")
+    if "refused" in document:
+        if document["bundles"] or not isinstance(document["refused"], str):
+            raise ValueError("an ambiguous refusal")
+        return document
+    entries = {
+        entry["bundle"]: entry
+        for entry in document["bundles"]
+        if isinstance(entry, dict) and entry.get("status") in _ADOPT_STATUSES
+    }
+    if workspace_id is None or not all(bundle in entries for bundle in bundles):
         raise ValueError("not an adoption report of the bundles sent")
-    return entries
+    document["entries"] = {bundle: entries[bundle] for bundle in bundles}
+    return document
+
+
+def _deliver_call(
+    end: _End, context: CLIContext, arguments: argparse.Namespace, source: str, files: list[str], argv: list[str]
+) -> tuple[int, str, str]:
+    """One adapter ``deliver``: *files* (relative to the local *source*) streamed to *argv* run on *end*."""
+
+    assert end.binding is not None
+    target = resolve_remote(end.binding.remote, project=context.cwd)
+    result = run_adapter(
+        target.bundle,
+        "deliver",
+        {"source": source, "files": files, "argv": argv},
+        timeout=arguments.adapter_timeout,
+    )
+    return int(result.get("returncode", 0) or 0), str(result.get("stdout", "")), str(result.get("stderr", ""))
 
 
 def _deliver(
@@ -802,217 +835,290 @@ def _deliver(
     holds: list[_moving.Hold],
     context: CLIContext,
     arguments: argparse.Namespace,
-    token: str,
 ) -> dict[str, dict[str, Any]]:
-    """Steps 2 and 3 for a chunk: one copy of its held bundles to *dst* and one adoption there.
+    """Steps 2 and 3 for a chunk bound for a local *dst*: copy its held bundles there and adopt them.
 
-    A remote *dst* receives them in ``transfers/incoming/<token>/``. The result is each hold's adoption entry by
-    transfer id (``status`` as ``job adopt --json`` gives it); an error raised fails the whole chunk.
+    The result is each hold's adoption entry by transfer id (``status`` as ``job adopt --json`` gives it); an
+    error raised fails the whole chunk.
     """
 
+    assert dst.workspace is not None
     ids = [hold.transfer_id for hold in holds]
     # One workspace's holds share its transfers/outgoing/.
     outgoing = str(PurePosixPath(holds[0].path).parent)
-    if dst.workspace is not None:
-        require_cli_modifiable(dst.workspace)
-        failure: Exception | None = None
-        entries: dict[str, dict[str, Any]] = {}
-        with _owner(dst.workspace, "job transfer") as owner:
-            # Errors are kept, not raised, inside: an owner left by an error stays open for recovery.
-            scratch = None
-            try:
-                if src.workspace is not None and not arguments.keep:
-                    # One filesystem: adoption moves each hold in, and a refusal moves it back. Across: it copies.
-                    sources = [Path(hold.path) for hold in holds]
-                elif src.workspace is not None:
-                    # Keeping away copies releases the hold itself, so the adoption takes a copy of it.
-                    scratch = owner.scratch("landing")
-                    sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
-                    for hold, target in zip(holds, sources, strict=True):
-                        _fs.copy_tree(Path(hold.path), target, durable=dst.workspace.durable)
-                else:
-                    scratch = owner.scratch("landing")
-                    _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
-                    _adapter(src, context, arguments, "pull", outgoing, str(scratch / "outgoing"), ids)
-                    sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
-                _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
-                absent = _moving.settle_absent(dst.workspace, sources)
-                for transfer_id, source in zip(ids, sources, strict=True):
-                    entries[transfer_id] = _adopt_local(dst.workspace, owner, source, absent)
-            except _ERRORS as exc:
-                failure = exc
-            finally:
-                if scratch is not None:
-                    owner.discard_scratch(scratch)
-        if failure is not None:
-            raise failure
-        return entries
-    assert dst.root is not None
-    landing = PurePosixPath(dst.root, WORKSPACE_DIRECTORY, "transfers", "incoming", token)
-    _say(arguments, f"copying {len(ids)} bundle(s) to {dst.locator}")
+    require_cli_modifiable(dst.workspace)
+    failure: Exception | None = None
+    entries: dict[str, dict[str, Any]] = {}
+    with _owner(dst.workspace, "job transfer") as owner:
+        # Errors are kept, not raised, inside: an owner left by an error stays open for recovery.
+        scratch = None
+        try:
+            if src.workspace is not None and not arguments.keep:
+                # One filesystem: adoption moves each hold in, and a refusal moves it back. Across: it copies.
+                sources = [Path(hold.path) for hold in holds]
+            elif src.workspace is not None:
+                # Keeping away copies releases the hold itself, so the adoption takes a copy of it.
+                scratch = owner.scratch("landing")
+                sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
+                for hold, target in zip(holds, sources, strict=True):
+                    _fs.copy_tree(Path(hold.path), target, durable=dst.workspace.durable)
+            else:
+                scratch = owner.scratch("landing")
+                _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
+                _adapter(src, context, arguments, "pull", outgoing, str(scratch / "outgoing"), ids)
+                sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
+            _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
+            absent = _moving.settle_absent(dst.workspace, sources)
+            for transfer_id, source in zip(ids, sources, strict=True):
+                entries[transfer_id] = _adopt_local(dst.workspace, owner, source, absent)
+        except _ERRORS as exc:
+            failure = exc
+        finally:
+            if scratch is not None:
+                owner.discard_scratch(scratch)
+    if failure is not None:
+        raise failure
+    return entries
+
+
+def _deliver_remote(
+    src: _End,
+    dst: _End,
+    holds: list[_moving.Hold],
+    context: CLIContext,
+    arguments: argparse.Namespace,
+    token: str,
+    built_for: list[str],
+) -> dict[str, Any]:
+    """Steps 2 and 3 for a chunk bound for a remote *dst*: one ``deliver`` of its held bundles to ``job adopt
+    --stdin-tar`` there (a remote *src*'s bundles relayed through a local directory), asking about *built_for*.
+
+    The result is the checked adoption document (see :func:`_adoption`). A :class:`RuntimeError` says that *dst*
+    gave no usable answer, so whether anything was adopted is unknown.
+    """
+
+    ids = [hold.transfer_id for hold in holds]
+    outgoing = str(PurePosixPath(holds[0].path).parent)
+    argv = [*REMOTE_JOB_ADOPT_COMMAND, "--json", "--stdin-tar", "--token", token, "--workspace", dst.plain]
+    argv += [item for workflow_id in built_for for item in ("--built-for", workflow_id)]
     if src.workspace is not None:
-        _adapter(dst, context, arguments, "push", outgoing, str(landing), ids)
+        _say(arguments, f"delivering {len(ids)} bundle(s) to {dst.locator}")
+        code, out, err = _deliver_call(dst, context, arguments, outgoing, ids, argv)
     else:
         with tempfile.TemporaryDirectory(prefix="httk-transfer-") as relay:
-            _adapter(src, context, arguments, "pull", outgoing, f"{relay}/outgoing", ids)
-            _adapter(dst, context, arguments, "push", f"{relay}/outgoing", str(landing), ids)
-    _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
-    # Bare transfer ids, adopted from within the landing, keep the command short; the workspace goes by its
-    # probed root, so that resolving it does not depend on the landing as the working directory.
-    argv = [*REMOTE_JOB_ADOPT_COMMAND, "--json", "--by-path", "--workspace", dst.root, *ids]
-    code, out, err = _remote(dst, context, arguments, argv, cwd=str(landing))
+            _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
+            for chunk in _chunks(ids):  # a pull names its files on the far side's command line
+                _adapter(src, context, arguments, "pull", outgoing, f"{relay}/outgoing", chunk)
+            _say(arguments, f"delivering {len(ids)} bundle(s) to {dst.locator}")
+            code, out, err = _deliver_call(dst, context, arguments, f"{relay}/outgoing", ids, argv)
     try:
-        adopted = _adoption(out, ids)
-    except ValueError:
-        # Refused copies in the landing were discarded there: each hold stays the only bundle.
-        if code:
-            raise RuntimeError(err.strip() or f"job adopt failed on {dst.locator}") from None
-        raise ValueError(
-            f"{dst.locator} returned an unrecognised adoption report (it may run an older httk-workflow; upgrade "
-            "it, check whether the jobs arrived with `httk job show`, and release with `httk job transfer --release`)"
+        return _adoption(out, ids)
+    except (ValueError, TypeError, WorkflowError):
+        detail = err.strip() if code and err.strip() else f"{dst.locator} returned an unrecognised adoption report"
+        if "unrecognized arguments" in err or "invalid choice" in err:
+            detail += f" ({dst.locator} may run an older httk-workflow; upgrade it)"
+        raise RuntimeError(
+            f"{detail}; whether the jobs arrived is unknown: check with `httk job show` on {dst.locator}, then "
+            f"deliver again with `httk job transfer --resume {src.locator} {dst.locator}` or, if they are there, "
+            f"release with {_release_remedy(arguments, 'TRANSFER_ID', None, src, dst)}"
         ) from None
-    return dict(zip(ids, adopted, strict=True))
 
 
-def _dst_workflows(
-    dst: _End, context: CLIContext, arguments: argparse.Namespace, ids: list[str]
-) -> dict[str, tuple[object, bool]]:
-    """Which of *ids* *dst* has installed: each one's ``tree_sha256`` and whether it lacks its build there."""
+def _release_remedy(
+    arguments: argparse.Namespace, transfer_id: str, destination_id: str | None, src: _End, dst: _End
+) -> str:
+    """The hand-run release of *transfer_id*, keeping away copies (for *destination_id*, or DST's id) with ``keep``."""
 
-    if dst.workspace is not None:
-        found = {workflow_id: _store.lookup(dst.workspace, workflow_id) for workflow_id in ids}
-        return {
-            key: (installed.record.get("tree_sha256"), _store.built(installed) is False)
-            for key, installed in found.items()
-            if installed is not None
-        }
-    assert dst.root is not None
-    # ponytail: one call with every id as --built-for; a batch needing thousands of workflows would need chunks.
-    asked = [item for workflow_id in ids for item in ("--built-for", workflow_id)]
-    argv = [*_WORKFLOW_COMMAND, "list", "--json", "--by-path", "--workspace", dst.root, *asked]
-    code, out, err = _remote(dst, context, arguments, argv)
-    rows = json.loads(out) if code == 0 else None
-    if not isinstance(rows, list):
-        raise RuntimeError(err.strip() or f"workflow list failed on {dst.locator}")
-    # An older DST reports no "built": its unbuilt installations are not built by the transfer.
+    command = f"httk job transfer --release {transfer_id}"
+    if not arguments.keep:
+        return f"`{command} {src.locator}`"
+    if destination_id is not None:
+        return f"`{command} --keep --destination-id {destination_id} {src.locator}`"
+    return (
+        f"`{command} --keep --destination-id ID {src.locator}`, ID being the workspace_id that "
+        f"`httk workspace status --json {dst.locator}` reports"
+    )
+
+
+def _take_back(src: _End, holds: list[_moving.Hold], reason: str) -> dict[str, dict[str, Any]]:
+    """Adopt the holds of a local *src* back into it after *dst* refused them before adopting any: the outcome
+    members by transfer id (``not_moved``, or ``failed`` when one cannot be taken back and stays held)."""
+
+    assert src.workspace is not None
+    updates: dict[str, dict[str, Any]] = {}
+    message = f"refused before anything was adopted: {reason}; the jobs are back in {src.locator}"
+    with _owner(src.workspace, "job transfer") as owner:
+        sources = [Path(hold.path) for hold in holds]
+        absent = _moving.settle_absent(src.workspace, sources)
+        for hold, source in zip(holds, sources, strict=True):
+            failure: str | None
+            try:
+                report = _moving.adopt(src.workspace, owner, source, untrusted=False, absent=absent)
+            except _ERRORS as exc:
+                report, failure = None, str(exc)
+            else:
+                failure = None if report is not None else "another actor took the hold first"
+            if failure is None:
+                updates[hold.transfer_id] = {"status": "not_moved", "message": message}
+            else:
+                updates[hold.transfer_id] = {
+                    "status": "failed",
+                    "message": f"refused before anything was adopted: {reason}; taking it back failed: {failure}",
+                }
+    return updates
+
+
+def _dst_workflows(dst: _End, ids: list[str]) -> dict[str, tuple[object, bool]]:
+    """Which of *ids* a local *dst* has installed: each one's ``tree_sha256`` and whether it lacks its build there."""
+
+    assert dst.workspace is not None
+    found = {workflow_id: _store.lookup(dst.workspace, workflow_id) for workflow_id in ids}
     return {
-        row["id"]: (row.get("tree_sha256"), row.get("built") is False)
-        for row in rows
-        if isinstance(row, dict) and isinstance(row.get("id"), str)
+        key: (installed.record.get("tree_sha256"), _store.built(installed) is False)
+        for key, installed in found.items()
+        if installed is not None
+    }
+
+
+def _reported_workflows(report: object) -> dict[str, tuple[object, bool]] | None:
+    """What :func:`_dst_workflows` gives, from the ``workflows`` of a remote adoption document (``None`` when
+    unusable)."""
+
+    if not isinstance(report, list):
+        return None
+    return {
+        row["id"]: (row.get("tree_sha256"), row.get("status") == "unbuilt")
+        for row in report
+        if isinstance(row, dict) and isinstance(row.get("id"), str) and row.get("status") in ("present", "unbuilt")
     }
 
 
 def _install_shipped(
     src: _End, dst: _End, store: str, directories: list[str], context: CLIContext, arguments: argparse.Namespace
 ) -> dict[str, dict[str, Any]]:
-    """Copy SRC's store entries ``<store>/<directory>/{install.json,package}`` to *dst* and install them there.
+    """Install SRC's store entries ``<store>/<directory>/{install.json,package}`` in a local *dst* with
+    :func:`httk.workflow._store.install_copy`, from SRC's store itself or from a landing scratch.
 
-    A local *dst* installs them with :func:`httk.workflow._store.install_copy`, from SRC's store itself or from a
-    landing scratch; a remote one receives them in ``tmp/push.<hex>/`` and installs them with ``workflow install
-    --from-store --consume``, which discards that landing (else ``workspace gc`` does, after a day). The result
-    is a ``workflow install --from-store`` row by directory; an error raised fails them all.
+    The result is a ``workflow install --from-store`` row by directory; an error raised fails them all.
     """
 
+    assert dst.workspace is not None
     files = [f"{directory}/{name}" for directory in directories for name in ("install.json", "package")]
     label = f"transfer from {src.locator}"
     rows: dict[str, dict[str, Any]] = {}
-    if dst.workspace is not None:
-        require_cli_modifiable(dst.workspace)
-        failure: Exception | None = None
-        with _owner(dst.workspace, "job transfer") as owner:
-            # Errors are kept, not raised, inside: an owner left by an error stays open for recovery.
-            scratch = None
-            try:
-                base = Path(store)
-                if src.workspace is None:
-                    scratch = owner.scratch("landing")
-                    base = scratch / "workflows"
-                    for chunk in _chunks(files):
-                        _adapter(src, context, arguments, "pull", store, str(base), chunk)
-                for directory in directories:
-                    try:
-                        status, installed = _store.install_copy(
-                            dst.workspace, owner, base / directory, source_label=label
-                        )
-                        build = installed.record.get("build") is True
-                        rows[directory] = {"id": installed.id, "status": status, "build": build}
-                    except _ERRORS as exc:
-                        rows[directory] = {"status": "refused", "reason": str(exc)}
-            except _ERRORS as exc:
-                failure = exc
-            finally:
-                if scratch is not None:
-                    owner.discard_scratch(scratch)
-        if failure is not None:
-            raise failure
-        return rows
-    assert dst.root is not None
-    landing = PurePosixPath(dst.root, WORKSPACE_DIRECTORY, "tmp", f"push.{uuid.uuid4().hex}")
-    consumed = pushed = False
-    try:
+    require_cli_modifiable(dst.workspace)
+    failure: Exception | None = None
+    with _owner(dst.workspace, "job transfer") as owner:
+        # Errors are kept, not raised, inside: an owner left by an error stays open for recovery.
+        scratch = None
+        try:
+            base = Path(store)
+            if src.workspace is None:
+                scratch = owner.scratch("landing")
+                base = scratch / "workflows"
+                for chunk in _chunks(files):
+                    _adapter(src, context, arguments, "pull", store, str(base), chunk)
+            for directory in directories:
+                try:
+                    status, installed = _store.install_copy(dst.workspace, owner, base / directory, source_label=label)
+                    build = installed.record.get("build") is True
+                    rows[directory] = {"id": installed.id, "status": status, "build": build}
+                except _ERRORS as exc:
+                    rows[directory] = {"status": "refused", "reason": str(exc)}
+        except _ERRORS as exc:
+            failure = exc
+        finally:
+            if scratch is not None:
+                owner.discard_scratch(scratch)
+    if failure is not None:
+        raise failure
+    return rows
+
+
+def _install_remote(
+    src: _End,
+    dst: _End,
+    store: str | None,
+    directories: list[str],
+    rebuild: list[str],
+    context: CLIContext,
+    arguments: argparse.Namespace,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str | None]]:
+    """In one remote ``httk`` start, install SRC's store entries ``<store>/<directory>/{install.json,package}``
+    in a remote *dst* (one ``deliver`` to ``workflow install --stdin-tar --build``, a remote *src*'s entries relayed
+    through a local directory) and build the installations *rebuild* names (``--also-build``); with no
+    directories, only build them (one ``invoke``).
+
+    The result is the install rows by directory, and each *rebuild* id's build failure (``None`` when built); a
+    :class:`RuntimeError` says that *dst* gave no usable answer.
+    """
+
+    label = f"transfer from {src.locator}"
+    also = [item for workflow_id in rebuild for item in ("--also-build", workflow_id)]
+    files = [f"{directory}/{name}" for directory in directories for name in ("install.json", "package")]
+    argv = [*_WORKFLOW_COMMAND, "install", "--json", "--workspace", dst.plain, *also]
+    if not directories:
+        _say(arguments, f"building {len(rebuild)} workflow(s) in {dst.locator}")
+        code, out, err = _remote(dst, context, arguments, argv)
+    else:
+        assert store is not None
+        argv += ["--stdin-tar", "--source-label", label, "--build"]
+        _say(arguments, f"installing {len(directories)} workflow(s) in {dst.locator}")
         if src.workspace is not None:
-            for chunk in _chunks(files):
-                pushed = True
-                _adapter(dst, context, arguments, "push", store, str(landing), chunk)
+            code, out, err = _deliver_call(dst, context, arguments, store, files, argv)
         else:
             with tempfile.TemporaryDirectory(prefix="httk-transfer-") as relay:
                 for chunk in _chunks(files):
                     _adapter(src, context, arguments, "pull", store, f"{relay}/workflows", chunk)
-                for chunk in _chunks(files):
-                    pushed = True
-                    _adapter(dst, context, arguments, "push", f"{relay}/workflows", str(landing), chunk)
-        argv = [*_WORKFLOW_COMMAND, "install", "--by-path", "--workspace", dst.root, "--source-label", label]
-        # Bare names, run within the landing; "./" keeps a name starting with "-" an argument.
-        chunks = _chunks([f"./{directory}" for directory in directories])
-        for index, chunk in enumerate(chunks):
-            names = [item.removeprefix("./") for item in chunk]
-            # The last call discards the landing, whatever its outcome.
-            consume = ["--consume"] if index == len(chunks) - 1 else []
-            try:
-                code, out, err = _remote(
-                    dst, context, arguments, [*argv, *consume, "--from-store", *chunk], cwd=str(landing)
-                )
-                document = json.loads(out) if code in (0, 1) else None
-                entries = document.get("workflows") if isinstance(document, dict) else None
-                if not isinstance(entries, list) or len(entries) != len(chunk):
-                    older = " (it may run an older httk-workflow)" if "unrecognized arguments" in err else ""
-                    raise RuntimeError(f"workflow install failed on {dst.locator}{older}: {err.strip()}")
-            except _ERRORS as exc:
-                rows.update({name: {"status": "failed", "reason": str(exc)} for name in names})
-                continue
-            consumed |= bool(consume)
-            for name, entry in zip(names, entries, strict=True):
-                ok = isinstance(entry, dict) and entry.get("status") in ("installed", "present", "mismatch", "refused")
-                rows[name] = entry if ok else {"status": "failed", "reason": f"malformed report {entry!r}"}
-    finally:
-        if pushed and not consumed:
-            print(
-                f"warning: the copied workflows are left in {landing} on {dst.locator}; "
-                "`httk workspace gc` removes them after a day",
-                file=sys.stderr,
-            )
-    return rows
+                code, out, err = _deliver_call(dst, context, arguments, f"{relay}/workflows", files, argv)
+    try:
+        document = json.loads(out) if code in (0, 1) else None
+        rows = document.get("workflows") if isinstance(document, dict) else None
+        built = document.get("built", []) if isinstance(document, dict) else None
+        if not isinstance(rows, list) or not isinstance(built, list):
+            raise ValueError
+        by_directory = {
+            PurePosixPath(str(row["directory"])).name: row
+            for row in rows
+            if isinstance(row, dict) and isinstance(row.get("directory"), str)
+        }
+        reported = {entry["id"]: entry for entry in built if isinstance(entry, dict) and "id" in entry}
+    except (ValueError, TypeError):
+        older = " (it may run an older httk-workflow; upgrade it)" if "unrecognized arguments" in err else ""
+        raise RuntimeError(f"workflow install failed on {dst.locator}{older}: {err.strip()}") from None
+    failures: dict[str, str | None] = {}
+    for workflow_id in rebuild:
+        entry = reported.get(workflow_id, {"status": "failed", "reason": "not reported"})
+        failures[workflow_id] = None if entry.get("status") == "built" else str(entry.get("reason"))
+    return by_directory, failures
 
 
 def _ship_workflows(
-    src: _End, dst: _End, holds: list[_moving.Hold], context: CLIContext, arguments: argparse.Namespace
+    src: _End,
+    dst: _End,
+    holds: list[_moving.Hold],
+    context: CLIContext,
+    arguments: argparse.Namespace,
+    have: dict[str, tuple[object, bool]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Install in *dst*, under the same ids, the workflows the holds need that it lacks and *src* has.
 
     The result maps every needed id to ``{"status", "reason"?, "build"?}``: ``present`` or ``mismatch`` (*dst*
     already has it, with the same or another tree, and keeps it), ``missing`` (installed in neither),
-    ``installed``, ``refused`` or ``failed``; ``build`` marks one :func:`_build_shipped` builds. Nothing is ever
-    replaced, and a failure here never fails the transfer: the jobs then wait at *dst*.
+    ``installed``, ``refused``, ``failed`` or ``unbuilt``; ``build`` marks one a local *dst*'s
+    :func:`_build_shipped` builds. A remote *dst* reported what it has (*have*) with the adoption, and builds in the
+    same start that installs. Nothing is ever replaced, and a failure here never fails the transfer: the jobs then
+    wait at *dst*.
     """
 
     needed = {entry[0]: entry for hold in holds for entry in hold.workflows or ()}
     if not needed:
         return {}
-    try:
-        have = _dst_workflows(dst, context, arguments, sorted(needed))
-    except _ERRORS as exc:
-        reason = f"cannot list the workflows of {dst.locator}: {exc}"
-        return {workflow_id: {"status": "failed", "reason": reason} for workflow_id in needed}
+    if have is None:
+        if dst.workspace is None:
+            reason = f"{dst.locator} reported no workflows with the adoption"
+            return {workflow_id: {"status": "failed", "reason": reason} for workflow_id in needed}
+        have = _dst_workflows(dst, sorted(needed))
     shipping: dict[str, dict[str, Any]] = {}
     ship: dict[str, str] = {}
     for workflow_id, (_, directory, digest) in needed.items():
@@ -1028,37 +1134,55 @@ def _ship_workflows(
             ship[directory] = workflow_id
     store = PurePosixPath(holds[0].path)
     expected = ("outgoing", "transfers", WORKSPACE_DIRECTORY)
-    if ship and tuple(parent.name for parent in store.parents[:3]) != expected:
+    # One workspace's holds share its store: <root>/workflows beside <root>/.httk-workspace/transfers/outgoing.
+    base = (
+        str(store.parents[3] / "workflows") if tuple(parent.name for parent in store.parents[:3]) == expected else None
+    )
+    if ship and base is None:
         reason = f"the hold path {store} is not below a workspace's transfers/outgoing"
         shipping.update({workflow_id: {"status": "failed", "reason": reason} for workflow_id in ship.values()})
-    elif ship:
-        _say(arguments, f"installing {len(ship)} workflow(s) in {dst.locator}")
-        try:
-            # One workspace's holds share its store: <root>/workflows beside <root>/.httk-workspace/transfers/outgoing.
-            rows = _install_shipped(src, dst, str(store.parents[3] / "workflows"), sorted(ship), context, arguments)
-        except _ERRORS as exc:
-            rows = {directory: {"status": "failed", "reason": str(exc)} for directory in ship}
-        for directory, workflow_id in ship.items():
-            row = rows.get(directory, {"status": "failed", "reason": "not reported"})
-            if row["status"] != "refused" and row["status"] != "failed" and row.get("id") != workflow_id:
-                row = {"status": "refused", "reason": f"{directory} installed {row.get('id')!r}, not {workflow_id}"}
-            shipping[workflow_id] = {key: row[key] for key in ("status", "reason") if key in row}
-            if row["status"] == "installed" and row.get("build"):
-                # Only what this transfer installed: another actor's installation is built only when DST lacked a
-                # build when queried.
-                shipping[workflow_id]["build"] = True
+        ship = {}
+    rebuild = [] if dst.workspace is not None else [key for key, entry in shipping.items() if entry.pop("build", False)]
+    if not (ship or rebuild):
+        return shipping
+    failures: dict[str, str | None] = {}
+    try:
+        if dst.workspace is not None:
+            _say(arguments, f"installing {len(ship)} workflow(s) in {dst.locator}")
+            rows = _install_shipped(src, dst, str(base), sorted(ship), context, arguments)
+        else:
+            rows, failures = _install_remote(src, dst, base, sorted(ship), rebuild, context, arguments)
+    except _ERRORS as exc:
+        rows = {directory: {"status": "failed", "reason": str(exc)} for directory in ship}
+        failures = dict.fromkeys(rebuild, str(exc))
+    remedy = f"build it with `httk workflow build --workspace {dst.locator} {{}}`"
+    for directory, workflow_id in ship.items():
+        row = rows.get(directory, {"status": "failed", "reason": "not reported"})
+        if row.get("status") not in ("installed", "present", "mismatch", "refused", "failed"):
+            row = {"status": "failed", "reason": f"malformed report {row!r}"}
+        if row["status"] not in ("refused", "failed") and row.get("id") != workflow_id:
+            row = {"status": "refused", "reason": f"{directory} installed {row.get('id')!r}, not {workflow_id}"}
+        shipping[workflow_id] = {key: row[key] for key in ("status", "reason") if key in row}
+        if row["status"] == "installed" and row.get("build") and dst.workspace is not None:
+            # Only what this transfer installed: another actor's installation is built only when DST lacked a
+            # build when queried.
+            shipping[workflow_id]["build"] = True
+        if row.get("build_status") == "failed":
+            failures[workflow_id] = str(row.get("build_reason"))
+    for workflow_id, failure in failures.items():
+        if failure is not None:
+            shipping[workflow_id].update(status="unbuilt", reason=f"{failure}; {remedy.format(workflow_id)}")
     return shipping
 
 
-def _build_shipped(
-    dst: _End, shipping: dict[str, dict[str, Any]], context: CLIContext, arguments: argparse.Namespace
-) -> None:
-    """Build in *dst* each needed workflow marked ``build``: one this transfer installed that declares
+def _build_shipped(dst: _End, shipping: dict[str, dict[str, Any]], arguments: argparse.Namespace) -> None:
+    """Build in a local *dst* each needed workflow marked ``build``: one this transfer installed that declares
     ``[workflow.build]``, or one *dst* had without a build for its platform.
 
     A failed build marks it ``unbuilt`` with the reason and the remedy; the installation stays either way.
     """
 
+    assert dst.workspace is not None
     built = [workflow_id for workflow_id, entry in shipping.items() if entry.pop("build", False)]
     built = [workflow_id for workflow_id in built if shipping[workflow_id]["status"] in _BUILDABLE]
     if built:
@@ -1066,18 +1190,12 @@ def _build_shipped(
     for workflow_id in built:
         reason = None
         try:
-            if dst.workspace is not None:
-                with _owner(dst.workspace, "job transfer") as owner:
-                    try:
-                        with _stdout_to_stderr(True):
-                            _store.build(dst.workspace, owner, workflow_id)
-                    except _ERRORS as exc:
-                        reason = str(exc)
-            else:
-                assert dst.root is not None
-                argv = [*_WORKFLOW_COMMAND, "build", "--by-path", "--workspace", dst.root, workflow_id]
-                code, _, err = _remote(dst, context, arguments, argv)
-                reason = None if code == 0 else err.strip() or f"workflow build exited with {code}"
+            with _owner(dst.workspace, "job transfer") as owner:
+                try:
+                    with _stdout_to_stderr(True):
+                        _store.build(dst.workspace, owner, workflow_id)
+                except _ERRORS as exc:
+                    reason = str(exc)
         except _ERRORS as exc:
             reason = str(exc)
         if reason is not None:
@@ -1089,18 +1207,25 @@ def _build_shipped(
 _BUILDABLE = ("installed", "present", "mismatch")
 
 
-def _release_argv(transfer_ids: list[str], keep: bool) -> list[str]:
-    """The ``job transfer --release ... [--keep]`` arguments that release *transfer_ids* on a remote."""
+def _release_argv(transfer_ids: list[str], keep: bool, destination_id: str | None = None) -> list[str]:
+    """The ``job transfer --release ... [--keep [--destination-id ID]]`` arguments that release *transfer_ids* on a
+    remote; *destination_id* is the adopting workspace's id for away copies of holds that record none."""
 
     releases = [item for transfer_id in transfer_ids for item in ("--release", transfer_id)]
-    return [*REMOTE_JOB_TRANSFER_COMMAND, *releases, *(["--keep"] if keep else [])]
+    identified = ["--destination-id", destination_id] if destination_id is not None else []
+    return [*REMOTE_JOB_TRANSFER_COMMAND, *releases, *(["--keep", *identified] if keep else [])]
 
 
 def _release(
-    src: _End, transfer_ids: list[str], context: CLIContext, arguments: argparse.Namespace
+    src: _End,
+    transfer_ids: list[str],
+    context: CLIContext,
+    arguments: argparse.Namespace,
+    destination_id: str | None = None,
 ) -> tuple[list[str], set[str]]:
-    """Step 4: discard the holds on *src*, or with ``keep`` keep their jobs there as away copies; one already gone
-    (adopted in on one filesystem) is fine.
+    """Step 4: discard the holds on *src*, or with ``keep`` keep their jobs there as away copies (recording
+    *destination_id*, the adopting workspace, when a hold records none); one already gone (adopted in on one
+    filesystem) is fine.
 
     The result lists the ids a remote *src* did not confirm (an older remote takes only the last ``--release``),
     and the ids a local *src* released itself (the others were gone).
@@ -1112,10 +1237,13 @@ def _release(
             released = {
                 transfer_id
                 for transfer_id in transfer_ids
-                if _moving.release_hold(src.workspace, owner, transfer_id, keep=arguments.keep)
+                if _moving.release_hold(
+                    src.workspace, owner, transfer_id, keep=arguments.keep, destination_workspace_id=destination_id
+                )
             }
         return [], released
-    code, out, err = _remote(src, context, arguments, [*_release_argv(transfer_ids, arguments.keep), src.plain])
+    argv = _release_argv(transfer_ids, arguments.keep, destination_id)
+    code, out, err = _remote(src, context, arguments, [*argv, src.plain])
     if code not in (0, 1):
         older = arguments.keep and "unrecognized arguments: --keep" in err
         message = err.strip() or f"job transfer --release failed on {src.locator}"
@@ -1134,7 +1262,9 @@ def _drive(
 ) -> list[dict[str, Any]]:
     """Copy, adopt and release a batch of holds bound for *dst*: one outcome per hold, in order.
 
-    A hold that was not adopted stays held on *src*.
+    A hold that was not adopted stays held on *src*, except when a remote *dst* refused a chunk before adopting
+    any of it: a local *src* then takes those holds back (``not_moved``). The workflows the holds need are shipped
+    to a local *dst* before the adoption, and to a remote one after it, from what its adoption reported.
     """
 
     outcomes: dict[str, dict[str, Any]] = {
@@ -1143,7 +1273,8 @@ def _drive(
     }
     ready = []
     for hold in holds:
-        if hold.destination_workspace_id is not None and dst.workspace_id != hold.destination_workspace_id:
+        # A remote DST's id is unknown here: it refuses a bundle bound for another workspace itself.
+        if dst.workspace_id is not None and hold.destination_workspace_id not in (None, dst.workspace_id):
             message = (
                 f"the hold's destination is not this workspace: {dst.locator} is {dst.workspace_id}, the hold is "
                 f"bound for {hold.destination_workspace_id}; it stays held on {src.locator}"
@@ -1151,24 +1282,49 @@ def _drive(
             outcomes[hold.transfer_id].update(status="refused", message=message)
         else:
             ready.append(hold)
+    workflows = bool(ready) and not arguments.no_workflows
+    if workflows and any(hold.workflows is None for hold in ready):
+        print(
+            f"warning: {src.locator} reported no usable workflows for its holds (it may run an older or newer "
+            "httk-workflow); workflows were not shipped",
+            file=sys.stderr,
+        )
     shipping: dict[str, dict[str, Any]] = {}
-    if ready and not arguments.no_workflows:
-        if any(hold.workflows is None for hold in ready):
-            print(
-                f"warning: {src.locator} reported no usable workflows for its holds (it may run an older or newer "
-                "httk-workflow); workflows were not shipped",
-                file=sys.stderr,
-            )
+    if workflows and dst.workspace is not None:
         # Once a batch, before the first adoption: a job adopted after its workflow can start at once.
         shipping = _ship_workflows(src, dst, ready, context, arguments)
     entries: dict[str, dict[str, Any]] = {}
-    token = _fs.fresh_token()  # one landing for every chunk
+    destination_id = dst.workspace_id
+    report: object = None
     by_id = {hold.transfer_id: hold for hold in ready}
-    for chunk in _chunks(list(by_id)):
+    if dst.workspace is not None:
+        for chunk in _chunks(list(by_id)):
+            try:
+                entries.update(_deliver(src, dst, [by_id[transfer_id] for transfer_id in chunk], context, arguments))
+            except _ERRORS as exc:
+                entries.update({transfer_id: {"status": "failed", "message": str(exc)} for transfer_id in chunk})
+    elif ready:
+        # One delivery for the whole batch: the bundles travel in the stream, not on the command line.
+        built_for = sorted({entry[0] for hold in ready for entry in hold.workflows or ()}) if workflows else []
         try:
-            entries.update(_deliver(src, dst, [by_id[transfer_id] for transfer_id in chunk], context, arguments, token))
+            document = _deliver_remote(src, dst, ready, context, arguments, _fs.fresh_token(), built_for)
         except _ERRORS as exc:
-            entries.update({transfer_id: {"status": "failed", "message": str(exc)} for transfer_id in chunk})
+            entries.update({transfer_id: {"status": "failed", "message": str(exc)} for transfer_id in by_id})
+        else:
+            if "refused" in document:
+                # Definitively nothing of the batch was adopted.
+                reason = f"{dst.locator}: {document['refused']}"
+                if src.workspace is not None:
+                    for transfer_id, update in _take_back(src, ready, reason).items():
+                        outcomes[transfer_id].update(update)
+                else:
+                    message = f"refused before anything was adopted: {reason}; it stays held on {src.locator}"
+                    message += f" (`httk job transfer --resume {src.locator} {dst.locator}` delivers it again)"
+                    outcomes.update({key: {**outcomes[key], "status": "failed", "message": message} for key in by_id})
+            else:
+                entries.update(document["entries"])
+                destination_id = destination_id or document["workspace_id"]
+                report = document.get("workflows")
     delivered = []
     for transfer_id, entry in entries.items():
         outcome, status = outcomes[transfer_id], entry["status"]
@@ -1184,27 +1340,31 @@ def _drive(
             outcome.update(status="taken", message="another actor took the held bundle first")
         else:
             outcome.update(status="failed", message=f"{entry.get('message')}; it stays held on {src.locator}")
+    if workflows and dst.workspace is None and delivered:
+        # After the adoption, from its report: a manager skips a ready job whose workflow is not installed yet.
+        shipping = _ship_workflows(src, dst, ready, context, arguments, _reported_workflows(report))
     unreleased: list[tuple[str, str]] = []
     released: set[str] = set()
     for chunk in _chunks(delivered, flag="--release"):
         try:
-            unconfirmed, done = _release(src, chunk, context, arguments)
+            unconfirmed, done = _release(src, chunk, context, arguments, destination_id)
             released |= done
             unreleased += [(transfer_id, "not confirmed by the source") for transfer_id in unconfirmed]
         except _ERRORS as exc:
             unreleased += [(transfer_id, str(exc)) for transfer_id in chunk]
     for transfer_id in delivered:
-        # A local release keeps copies only of a hold it took that records its destination's id; a remote one
-        # is taken at its word.
+        # A local release keeps copies only of a hold it took that records its destination's id, or for which the
+        # adoption reported it; a remote one is taken at its word.
         hold = by_id[transfer_id]
-        recorded = src.workspace is None or hold.destination_workspace_id is not None
+        recorded = src.workspace is None or hold.destination_workspace_id is not None or destination_id is not None
         outcomes[transfer_id]["kept"] = arguments.keep and transfer_id in released and recorded
     for transfer_id, reason in unreleased:
         outcomes[transfer_id]["message"] = (
             f"the jobs are in {dst.locator}, but the hold was not released: {reason}; "
-            f"run `httk job transfer --resume` or `httk job transfer --release {transfer_id}`"
+            f"run `httk job transfer --resume` or {_release_remedy(arguments, transfer_id, destination_id, src, dst)}"
         )
-    _build_shipped(dst, shipping, context, arguments)
+    if dst.workspace is not None:
+        _build_shipped(dst, shipping, arguments)
     for hold in ready:
         if shipping and hold.workflows is not None:
             outcomes[hold.transfer_id]["workflows"] = [
@@ -1273,17 +1433,23 @@ def _handle_release(arguments: argparse.Namespace, context: CLIContext) -> int:
     for transfer_id in arguments.release:
         if not _TRANSFER_ID.fullmatch(transfer_id):
             raise ValueError(f"not a transfer id: {transfer_id!r}")
+    destination_id = arguments.destination_id
+    if destination_id is not None:
+        if not arguments.keep:
+            raise ValueError("--destination-id with --release names the workspace away copies record; it needs --keep")
+        destination_id = canonical_uuid(destination_id, "--destination-id")
     src = _end(arguments.source, context, arguments)
     if src.workspace is None:
-        code, out, err = _remote(
-            src, context, arguments, [*_release_argv(arguments.release, arguments.keep), src.plain]
-        )
+        argv = _release_argv(arguments.release, arguments.keep, destination_id)
+        code, out, err = _remote(src, context, arguments, [*argv, src.plain])
         sys.stdout.write(out)
         sys.stderr.write(err)
         return code
     with _owner(src.workspace, "job transfer --release") as owner:
         released = [
-            _moving.release_hold(src.workspace, owner, transfer_id, keep=arguments.keep)
+            _moving.release_hold(
+                src.workspace, owner, transfer_id, keep=arguments.keep, destination_workspace_id=destination_id
+            )
             for transfer_id in arguments.release
         ]
     for transfer_id, done in zip(arguments.release, released, strict=True):
@@ -1312,9 +1478,23 @@ def _handle_hold(arguments: argparse.Namespace, context: CLIContext) -> int:
         destination_id = canonical_uuid(destination_id, "--destination-id")
     errors: list[str] = []
     dst = _End(arguments.destination, workspace_id=destination_id)
-    holds = _hold_jobs(src, dst, context, arguments, errors)
+    holds, _ = _hold_jobs(src, dst, context, arguments, errors)
     if arguments.json:
-        print(json.dumps({"holds": [hold.as_mapping() for hold in holds], "errors": errors}, indent=2, sort_keys=True))
+        # The other holds already bound for this destination, so that the client needs no transfer status call.
+        # Their workflows are resolved for these only, not for every hold of SRC.
+        new = {hold.transfer_id for hold in holds}
+        before = []
+        for hold in _moving.held(src.workspace):
+            if hold.destination_locator != dst.locator or hold.transfer_id in new:
+                continue
+            try:
+                read = read_manifest(Path(hold.path) / "bundle.json")
+            except BundleError:
+                read = None  # changed since it was listed: reported without workflows, as by an older SRC
+            needed = None if read is None else _moving._needed_workflows(src.workspace, Path(hold.path), read[1])
+            before.append(replace(hold, workflows=needed).as_mapping())
+        document = {"holds": [hold.as_mapping() for hold in holds], "held_before": before, "errors": errors}
+        print(json.dumps(document, indent=2, sort_keys=True))
     else:
         for error in errors:
             print(error, file=sys.stderr)
@@ -1366,14 +1546,15 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     resolve_dst = arguments.destination is not None or everyday
     if resolve_dst and arguments.source is None:
         # The named end first: an invalid DST must not create the per-user default workspace as SRC.
-        dst = _end(arguments.destination, context, arguments, probe=True)
+        dst = _end(arguments.destination, context, arguments)
     src = _end(arguments.source, context, arguments)
     if resolve_dst:
-        dst = dst or _end(arguments.destination, context, arguments, probe=True)
+        dst = dst or _end(arguments.destination, context, arguments)
         if dst.locator == src.locator:
             raise ValueError(f"SRC and DST are the same workspace: {src.locator}")
         ends[dst.locator] = dst
     errors: list[str] = []
+    known: list[_moving.Hold] | None = None
     if selected:
         assert dst is not None
         if dst.workspace is not None:
@@ -1383,11 +1564,16 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
         what += [f"every {state} job" for state in arguments.state]
         at = f" at step {' or '.join(arguments.step)}" if arguments.step else ""
         _say(arguments, f"holding {', '.join(what or ['every job'])}{at} on {src.locator}")
-        _hold_jobs(src, dst, context, arguments, errors)
+        held, before = _hold_jobs(src, dst, context, arguments, errors)
+        if before is not None:
+            # A remote SRC listed the other holds bound for DST with the hold: no transfer status call.
+            known = sorted({hold.transfer_id: hold for hold in [*before, *held]}.values(), key=lambda h: h.transfer_id)
     # Every run re-drives the holds bound for its destination (with --resume and no DST: every hold), each
     # destination's holds as one batch.
     batches: dict[str, list[_moving.Hold]] = {}
-    for hold in _holds(src, context, arguments, workflows=not arguments.no_workflows):
+    if known is None:
+        known = _holds(src, context, arguments, workflows=not arguments.no_workflows)
+    for hold in known:
         locator = hold.destination_locator
         if dst is not None and locator not in ends:
             continue
@@ -1396,7 +1582,7 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
             continue
         if locator not in ends:
             try:
-                ends[locator] = _end(locator, context, arguments, probe=True)
+                ends[locator] = _end(locator, context, arguments)
             except _ERRORS as exc:
                 errors.append(f"{hold.transfer_id}: cannot reach its destination {locator}: {exc}")
                 continue
@@ -1648,7 +1834,8 @@ def build_transfer_parser(
             parser.add_argument(
                 "--destination-id",
                 metavar="WORKSPACE_ID",
-                help="with --hold: the destination workspace's id, recorded so that the transfer adopts only there",
+                help="with --hold: the destination workspace's id, recorded so that the transfer adopts only there "
+                "(with --release --keep: the id the away copies record when the hold records none)",
             )
         parser.add_argument(
             "--no-workflows",

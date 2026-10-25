@@ -211,6 +211,33 @@ def test_a_crash_after_the_first_kept_member_is_finished_once_by_recovery(tmp_pa
     assert not job_ids_below(source.control / "tmp")
 
 
+def test_an_interrupted_release_keeps_the_destination_id_it_was_given(tmp_path: Path) -> None:
+    source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
+    plan = tree(source)
+    with cli_owner(source) as owner:
+        hold = _moving.hold(
+            source, owner, claim_root(source, owner, plan[0][0]["id"]), tree=True, destination_locator=LOCATOR
+        )
+    assert hold.destination_workspace_id is None  # a push's hold: the id comes from the adoption
+    deliver(hold, target, tmp_path / "landing" / hold.transfer_id)
+    away = source.jobs / "away"
+
+    def crash_after_first_submit(op: str, phase: str, src: _fs.Loc | None, dst: _fs.Loc | None) -> None:
+        if op == "rename" and phase == "after" and dst is not None and dst.path.is_relative_to(away):
+            raise Crash("after the first submit")
+
+    owner = cli_owner(source)
+    _fs.set_fault_injector(crash_after_first_submit)
+    with pytest.raises(Crash):
+        _moving.release_hold(source, owner, hold.transfer_id, keep=True, destination_workspace_id=target.workspace_id)
+    _fs.set_fault_injector(None)
+    assert len(job_ids_below(away)) == 1
+    die_and_recover(source, owner)
+    # The reconciler read the id the release was given: every copy records it.
+    assert_away(source, plan, hold, target)
+    assert not job_ids_below(source.control / "tmp")
+
+
 # -- inert away jobs ------------------------------------------------------------------------------------------------
 
 
@@ -633,3 +660,61 @@ def test_an_interrupted_recover_is_finished_by_a_second_one(tmp_path: Path) -> N
     released = recover(source, root_id)
     assert [item.job_id for item in released][-1] == root_id
     assert_in(source, plan)
+
+
+def kept_by_id(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> tuple[Workspace, Workspace, Plan, _moving.Hold]:
+    """A hold that records no destination id, adopted in B and released in A by ``job transfer --release --keep
+    --destination-id`` naming B (the push learns the id only from the adoption report)."""
+
+    from httk.core.cli import CLIContext
+
+    from httk.workflow.workflow_cli import command
+
+    source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
+    plan = tree(source)
+    with cli_owner(source) as owner:
+        hold = _moving.hold(
+            source, owner, claim_root(source, owner, plan[0][0]["id"]), tree=True, destination_locator=LOCATOR
+        )
+    assert hold.destination_workspace_id is None
+    assert deliver(hold, target, tmp_path / "landing" / hold.transfer_id) is not None
+    context = CLIContext("httk", tmp_path)
+    release = ["job", "transfer", "--no-durable", "--release", hold.transfer_id]
+    # Refused: without --keep, and with an id that is no canonical UUID; nothing is released.
+    assert command([*release, "--destination-id", target.workspace_id, str(source.root)], context) == 2
+    assert "needs --keep" in capsys.readouterr().err
+    assert command([*release, "--keep", "--destination-id", "B", str(source.root)], context) == 2
+    capsys.readouterr()
+    assert [held.transfer_id for held in _moving.held(source)] == [hold.transfer_id]
+    assert command([*release, "--keep", "--destination-id", target.workspace_id, str(source.root)], context) == 0
+    assert capsys.readouterr().out == f"released {hold.transfer_id}\n"
+    return source, target, plan, hold
+
+
+def test_a_release_given_the_destination_id_keeps_copies_and_recover_works(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, target, plan, hold = kept_by_id(tmp_path, capsys)
+    assert_away(source, plan, hold, target)
+    recover(source, plan[0][0]["id"])
+    assert_in(source, plan)
+
+
+def test_a_release_given_the_destination_id_is_replaced_by_the_return(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, target, plan, _hold = kept_by_id(tmp_path, capsys)
+    back, extra = returned(tmp_path, source, target, plan)
+    report = deliver(back, source, tmp_path / "back" / back.transfer_id)
+    assert report is not None and len(report.published) == 5
+    assert list(_kernel.list_jobs(source, "away")) == []
+    assert_in(source, [(plan[0][0], "succeeded", 411), *plan[1:], (extra, "succeeded", 450)])
+
+
+def test_the_hold_s_own_destination_id_wins_over_the_given_one(tmp_path: Path) -> None:
+    source, target, plan, hold = pushed(tmp_path)
+    with cli_owner(source) as owner:
+        assert _moving.release_hold(
+            source, owner, hold.transfer_id, keep=True, destination_workspace_id=str(uuid.uuid4())
+        )
+    assert_away(source, plan, hold, target)
