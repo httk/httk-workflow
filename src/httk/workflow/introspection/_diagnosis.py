@@ -1009,6 +1009,28 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
         summary = "this job succeeded; nothing is left to run"
     elif state == "cancelled":
         summary = "this job was cancelled by an operator request and is terminal; resubmit it to run it again"
+    elif state == "away":
+        away = None if doc is None else doc.away
+        locator = "?" if away is None else away["locator"]
+        summary = f"this job is away: a copy kept when it was pushed to {locator}"
+        summary += "" if away is None else f" on {away['at']}"
+        summary += "; it does not run here"
+        if away is None and doc is not None and doc.release_to is not None and doc.release_to.state != "away":
+            # recover clears the record before the job leaves away: an interrupted one leaves this.
+            report.check("away record", False, f"cleared by a recover that did not finish (to {doc.release_to.state})")
+            report.hint(f"an interrupted recover left this job; run 'httk job recover {ref.job_key}' to finish it")
+        elif away is None:
+            report.check("away record", False, "state.json records no away record; delete the copy instead")
+        else:
+            report.check(
+                "away record",
+                None,
+                f"left {away['state']} at priority {away['priority']}, transfer {away['transfer_id']}",
+            )
+            report.hint(f"bring the finished job home with 'httk job pull {locator}' (it replaces this copy)")
+            # A member is recovered with the root of its away tree.
+            root = _moving.away_root(workspace, ref).job_key
+            report.hint(f"if the job was lost there, run 'httk job recover {root}' and push it again")
     if state in {"ready", "waiting", "paused"}:
         report.hint("drive it in the foreground with 'httk job debug [--workspace WS] JOB'")
     return Diagnosis(

@@ -44,7 +44,7 @@ from ..adapters import (
     resolve_remote,
     run_adapter,
 )
-from ..errors import FormatError, WorkflowError
+from ..errors import DuplicateTagError, FormatError, WorkflowError
 from ..introspection import (
     JOB_HISTORY_FORMAT,
     JOB_LIST_FORMAT,
@@ -118,7 +118,7 @@ from ._common import (
     remote_workspace_output,
 )
 from ._daemon_jobs import request_remote_jobs
-from ._transfer import _protocol_workspace, adopt_document, build_transfer_parser, eject_once
+from ._transfer import _MOVABLE_STATES, _protocol_workspace, adopt_document, build_transfer_parser, eject_once
 
 _ENVELOPES_FORMAT = "httk-workflow-request-envelopes"
 #: The option each action requires (and that no other action takes), by request member.
@@ -448,22 +448,33 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
             "embed_workflow": arguments.embed_workflow,
             "calls": calls,
             "call_parameters": call_parameters,
+            "duplicate_tag": arguments.duplicate_tag,
         }
         results: Iterator[ScaffoldedJob]
-        if items:
-            for item in items:
-                # In a batch, --tag prefixes each item's derived tag (run7-si2o), so one flag names the whole
-                # sweep without erasing per-item identity; the composed tag is re-sanitized to stay a valid tag.
-                derived = item.get("tag")
-                if arguments.tag and derived:
-                    item["tag"] = _sanitize_tag(f"{arguments.tag}-{derived}")
-                else:
-                    item["tag"] = arguments.tag or derived or command_tag
-            results = new_jobs(workspace, target, items, **shared)
-        else:
-            tag = arguments.tag or command_tag or input_tag
-            results = iter([new_job(workspace, target, tag=tag, move_inputs=move_inputs, **shared)])
-        return _report_jobs(results, arguments, context, batch=len(items) if items else None)
+        try:
+            if items:
+                for item in items:
+                    # In a batch, --tag prefixes each item's derived tag (run7-si2o), so one flag names the whole
+                    # sweep without erasing per-item identity; the composed tag is re-sanitized to stay a valid tag.
+                    derived = item.get("tag")
+                    if arguments.tag and derived:
+                        item["tag"] = _sanitize_tag(f"{arguments.tag}-{derived}")
+                    else:
+                        item["tag"] = arguments.tag or derived or command_tag
+                results = new_jobs(workspace, target, items, **shared)
+            else:
+                tag = arguments.tag or command_tag or input_tag
+                job = new_job(workspace, target, tag=tag, move_inputs=move_inputs, **shared)
+                results = iter([] if job is None else [job])
+            return _report_jobs(results, arguments, context, batch=len(items) if items else None)
+        except DuplicateTagError as exc:
+            # The library names its keyword; the operator needs the flag.
+            existing = exc.existing
+            raise WorkflowError(
+                f"a job with tag {exc.tag!r} already exists in placement {exc.placement.as_posix()!r}: "
+                f"{existing.job_key} ({existing.state}); "
+                "pass --duplicate-tag allow to create another or --duplicate-tag skip to skip it"
+            ) from exc
 
 
 def _report_jobs(
@@ -493,7 +504,8 @@ def _report_jobs(
     if arguments.json:
         print(json.dumps([job.as_mapping() for job in collected], indent=2))
     if batch is not None:
-        print(f"submitted {submitted} jobs", file=sys.stderr)
+        skipped = f" ({batch - submitted} skipped)" if submitted < batch else ""
+        print(f"submitted {submitted} jobs{skipped}", file=sys.stderr)
     return 0
 
 
@@ -853,7 +865,7 @@ def _at_steps(ref: JobRef, steps: frozenset[str], *, named: bool) -> bool:
 def _selected_jobs(workspace: Workspace, cwd: Path, arguments: argparse.Namespace) -> list[JobRef]:
     """Return the JOB selectors' jobs, then every other job in a ``--state`` (under ``--placement``), once each.
 
-    ``--step`` narrows both; without JOB selectors or ``--state`` it selects from every unowned state.
+    ``--step`` narrows both; without JOB selectors or ``--state`` it selects from every unowned state but ``away``.
     """
 
     steps = None if arguments.step is None else frozenset(arguments.step)
@@ -862,7 +874,7 @@ def _selected_jobs(workspace: Workspace, cwd: Path, arguments: argparse.Namespac
         refs = [ref for ref in refs if _at_steps(ref, steps, named=True)]
     if arguments.state or (steps is not None and not arguments.job_id):
         seen = {ref.job_id for ref in refs}
-        states = arguments.state or _kernel.UNOWNED_STATES
+        states = arguments.state or _MOVABLE_STATES  # an away copy is selected only by name or --state away
         for ref in iter_jobs(workspace, states, placement_prefix=arguments.placement):
             if ref.job_id not in seen and (steps is None or _at_steps(ref, steps, named=False)):
                 seen.add(ref.job_id)
@@ -1462,6 +1474,47 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
     if not (arguments.force or arguments.confirmed or _confirm_job_delete([(ref.job_key, ref.state) for ref in refs])):
         return 1
     return _print_removal_report(refs, remove_jobs(workspace, refs))
+
+
+def handle_job_recover(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Return away copies, each root with its away tree, to the states they left, so that they can be pushed again."""
+
+    if bool(arguments.jobs) == arguments.all:
+        raise ValueError(
+            "give JOB selectors or --all, not both" if arguments.all else "name away jobs: JOB... or --all"
+        )
+    if arguments.placement is not None and (not arguments.all or not normalize_placement(arguments.placement).parts):
+        raise ValueError("--placement narrows --all to a nonempty placement prefix")
+    workspace = _modifiable(arguments, context, action="recover away copies in it")
+    if arguments.all:
+        listed = iter_jobs(workspace, ("away",), placement_prefix=arguments.placement)
+        # A member goes with its root.
+        refs = [ref for ref in listed if _moving.away_root(workspace, ref).job_id == ref.job_id]
+        if not refs:
+            print("no away jobs to recover")
+    else:
+        refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+    failed = False
+    with _kernel.register_owner(workspace, kind="cli", label="job recover", allocation=None, advertised={}) as owner:
+        for ref in refs:
+            if ref.state == _kernel.OWNED:
+                message = "it is running or held by an owner; recover it once it is back in away"
+                print(f"{ref.job_key}: {message}", file=sys.stderr)
+                failed = True
+                continue
+            root = _kernel.claim(workspace, owner, ref)
+            if root is None:
+                print(f"{ref.job_key}: another actor moved it first", file=sys.stderr)
+                failed = True
+                continue
+            try:
+                released = _moving.recover(workspace, owner, root)
+            except _ERRORS as exc:
+                print(f"{ref.job_key}: {exc}", file=sys.stderr)
+                failed = True
+                continue
+            print(f"recovered {ref.job_key}: {len(released)} job(s) back to {released[-1].state}")
+    return 1 if failed else 0
 
 
 def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str, done: str) -> int:
@@ -2103,6 +2156,13 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
     )
     new.add_argument("--priority", type=int, metavar="PRIORITY", help="scheduling priority (default: the workflow's)")
     new.add_argument("--step", metavar="STEP", help="the step the job starts at (default: the workflow's own)")
+    new.add_argument(
+        "--duplicate-tag",
+        choices=("refuse", "skip", "allow"),
+        default="refuse",
+        help="what to do when a job with the same tag exists in the placement: refuse (error), skip it, "
+        "or allow another (default: refuse)",
+    )
     new.add_argument("--json", action="store_true", help="print one JSON report per job, as an array")
 
 
@@ -2302,6 +2362,30 @@ def build_job_parser(
     delete.add_argument("--force", action="store_true", help="skip the confirmation")
     delete.add_argument("--confirmed", action="store_true", help=argparse.SUPPRESS)
     _add_adapter_timeout(delete)
+
+    recover = _leaf(
+        group,
+        "recover",
+        summary="return away copies to the states they left, to push them again",
+        description=(
+            "Return away jobs, the copies job push (or job transfer --keep) kept here, to the states and priorities "
+            "they left, each root with its away tree, so that a job lost where it went can be pushed again; "
+            "nothing checks whether it still runs there, and a later return of it from there is refused"
+        ),
+        handler=handle_job_recover,
+    )
+    _add_workspace_option(recover, help_text="the workspace holding the away copies")
+    recover.add_argument(
+        "jobs",
+        metavar="JOB",
+        nargs="*",
+        help="the root of an away tree: job UUID, job key, unique prefix, or a path inside the workspace",
+    )
+    recover.add_argument("--all", action="store_true", help="recover every away root")
+    recover.add_argument(
+        "--placement", metavar="PREFIX", help="with --all: only away roots under this placement prefix"
+    )
+    add_durability_arguments(recover)
 
     for name, handler, summary in (
         ("seal", handle_job_seal, "seal succeeded jobs that carry no seal"),

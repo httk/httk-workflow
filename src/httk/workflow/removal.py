@@ -51,7 +51,7 @@ __all__ = [
 _LOGGER = logging.getLogger("httk.workflow.manager")
 
 #: The states a ``delete`` request applies to (a succeeded job only after ``job unseal``).
-REMOVABLE_KINDS = frozenset({*TERMINAL_STATES, "paused"})
+REMOVABLE_KINDS = frozenset({*TERMINAL_STATES, "paused", "away"})
 
 #: Why a request waits for the owner that holds its job.
 _HELD = "another owner holds the job; the request applies at its next boundary"

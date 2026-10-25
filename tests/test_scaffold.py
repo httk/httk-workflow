@@ -442,7 +442,7 @@ def test_a_scaffolded_job_references_its_installed_workflow(workspace: Workspace
     assert [ref.job_id for ref in _ready(workspace)] == [job.job_id]
 
     # A second job installs nothing: one installation serves a whole campaign.
-    again = new_job(workspace, "test-relax", files={"POSCAR": structure}, tag="silicon")
+    again = new_job(workspace, "test-relax", files={"POSCAR": structure}, tag="silicon", duplicate_tag="allow")
     assert again.workflow == job.workflow
     assert [found.id for found in _store.list_installed(workspace)] == ["local:tests.relax"]
 
@@ -917,7 +917,7 @@ def test_command_workflow_is_generated_published_once_and_runs(tmp_path: Path, c
     assert first["workflow"]["id"].startswith("adhoc:command@")
     assert first["tag"] == "n17"
 
-    assert command(arguments, _context(tmp_path)) == 0
+    assert command([*arguments, "--duplicate-tag", "allow"], _context(tmp_path)) == 0
     second = json.loads(capsys.readouterr().out)[0]
     # The same rendered text is the same ad hoc workflow, installed once.
     assert second["workflow"] == first["workflow"]

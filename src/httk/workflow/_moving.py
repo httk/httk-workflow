@@ -20,6 +20,11 @@ only when it is a duplicate delivery; an operator's bundle is refused back to it
 hold (in ``transfers/incoming/``) is discarded. An untrusted bundle is first *isolated*: right after the take
 it is copied, descriptor-anchored, to ``.partial/<name>`` in the scratch, and that copy replaces the taken
 original, which a client holding open descriptors could still change. Every later step works on the copy.
+A trusted bundle whose members found here are all ``away`` copies kept by a transfer to the bundle's source
+workspace replaces them: they are claimed and discarded before any member is published.
+
+**Away copies**: releasing a hold with ``keep`` publishes its members into ``away`` (inert copies recording
+where they went and the state they left); :func:`recover` returns such a tree to those states.
 
 **Crash-resume contract** of the reconcilers, registered with the kernel at import:
 
@@ -42,7 +47,12 @@ original, which a client holding open descriptors could still change. Every late
   present) is the complete copy: the original is discarded and the copy renamed into place.
   ``plan.json`` is the validated, deduplicated manifest: once it exists only publication remains, and a member
   directory missing from the bundle was published by the earlier run. Before it, validation, rekeying,
-  deduplication and the exchange-name claim run again; each is idempotent.
+  deduplication and the exchange-name claim run again; each is idempotent. ``replaces.json``, written just before
+  ``plan.json``, names the away copies a trusted adoption replaces: a replay claims and discards those of the
+  members still in the bundle that are still here (a copy already gone was discarded), then publishes. A copy
+  claimed by an adopter that died is back in ``away`` once recovery returned it.
+- ``release-keep``: every member still in the released hold is published into ``away`` again, bottom-up (one
+  already published is absent from the bundle), then the scratch is discarded.
 """
 
 import dataclasses
@@ -52,7 +62,7 @@ import os
 import re
 import stat
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -60,6 +70,7 @@ from typing import TYPE_CHECKING, Self, cast
 
 from httk.workflow import _fs, _kernel, _store
 from httk.workflow._bundles import (
+    MAX_MANIFEST_BYTES,
     BundleError,
     BundleManifest,
     build_bundle,
@@ -73,7 +84,14 @@ from httk.workflow._bundles import (
 from httk.workflow._job import JobDefinition
 from httk.workflow._kernel import OWNED, JobRef, OwnedJob, Owner, OwnerLost
 from httk.workflow._manager_scheduling import bound_workflows, effective_workflow
-from httk.workflow._state import TERMINAL_STATES, StateDoc, encode_state, read_state_unowned
+from httk.workflow._state import (
+    TERMINAL_STATES,
+    UNOWNED_STATES,
+    Release,
+    StateDoc,
+    encode_state,
+    read_state_unowned,
+)
 from httk.workflow._util import json_bytes, utc_now
 from httk.workflow.errors import FormatError, WorkflowError
 from httk.workflow.models import (
@@ -97,12 +115,14 @@ __all__ = [
     "EjectReport",
     "Hold",
     "adopt",
+    "away_root",
     "destination_problem",
     "eject",
     "held",
     "hold",
     "reconcile_adopt",
     "reconcile_eject",
+    "recover",
     "release_hold",
     "tree_members",
 ]
@@ -121,10 +141,15 @@ _HOLD = "hold"
 _ADOPT = {False: "adopt", True: "adopt-untrusted"}
 _SOURCE = "source.json"
 _PLAN = "plan.json"
+#: The away copies a trusted adoption replaces, ``{job_id: placement}``, written before ``plan.json``.
+_REPLACES = "replaces.json"
 _PARTIAL = ".partial"
 #: Names an ``adopt`` scratch holds besides the bundle; a bundle may not be named like one of them.
-RESERVED_NAMES = frozenset({_SOURCE, _PLAN, "rekey.json", _PARTIAL})
-_RECORD_TEMPORARY = re.compile(r"\.(source|plan|rekey)\.json\.[a-z2-7]{16}\.tmp")
+RESERVED_NAMES = frozenset({_SOURCE, _PLAN, "rekey.json", _REPLACES, _PARTIAL})
+_RECORD_TEMPORARY = re.compile(r"\.(source|plan|rekey|replaces)\.json\.[a-z2-7]{16}\.tmp")
+#: The scratch purpose of a release that keeps the hold's members as away copies; a plain release's is
+#: ``release`` (discardable).
+_RELEASE_KEEP = "release-keep"
 _RECORD_LIMIT = 1 << 16
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 #: The format of the ``reason.json`` beside a refused bundle.
@@ -317,7 +342,13 @@ def _workflow_entry(entry: object) -> tuple[str, str | None, str | None]:
 # -- eject ----------------------------------------------------------------------------------------------------------
 
 
-def tree_members(workspace: _kernel.KernelWorkspace, root_id: str, root_doc: StateDoc | None) -> list[JobRef]:
+def tree_members(
+    workspace: _kernel.KernelWorkspace,
+    root_id: str,
+    root_doc: StateDoc | None,
+    *,
+    states: frozenset[str] = _MEMBER_STATES,
+) -> list[JobRef]:
     """List the descendants an eject of the root with *tree* moves, top-down (breadth first).
 
     The children a parent published are recorded in its ``state.json`` and confirmed from the child's side: its
@@ -327,9 +358,10 @@ def tree_members(workspace: _kernel.KernelWorkspace, root_id: str, root_doc: Sta
     :param workspace: The workspace.
     :param root_id: The root's job UUID.
     :param root_doc: The root's ``state.json``, or ``None``.
+    :param states: The states a member may be in: terminal or paused by default (an ``away`` or owned member
+        blocks); :func:`recover` passes every unowned state.
     :return: The members besides the root.
-    :raises Busy: For a member neither terminal nor paused, or one whose ``job.json`` or ``state.json`` is
-        unreadable.
+    :raises Busy: For a member in none of *states*, or one whose ``job.json`` or ``state.json`` is unreadable.
     """
 
     found: list[JobRef] = []
@@ -345,7 +377,7 @@ def tree_members(workspace: _kernel.KernelWorkspace, root_id: str, root_doc: Sta
             ref = _kernel.locate(workspace, job_id, placement_hint=hint, settle=True)
             if ref is None:
                 continue
-            if ref.state not in _MEMBER_STATES:
+            if ref.state not in states:
                 running = "running or held by an owner" if ref.state == OWNED else ref.state
                 raise Busy(ref.job_key, f"it is {running}; tree members must be terminal or paused")
             try:
@@ -364,8 +396,10 @@ def tree_members(workspace: _kernel.KernelWorkspace, root_id: str, root_doc: Sta
     return found
 
 
-def _claim_tree(workspace: "Workspace", owner: Owner, root: OwnedJob) -> list[OwnedJob]:
-    refs = tree_members(workspace, root.job_id, root.read_state())
+def _claim_tree(
+    workspace: "Workspace", owner: Owner, root: OwnedJob, *, states: frozenset[str] = _MEMBER_STATES
+) -> list[OwnedJob]:
+    refs = tree_members(workspace, root.job_id, root.read_state(), states=states)
     claimed: dict[str, OwnedJob] = {}
     # Sorted claims: two ejectors of overlapping trees cannot each hold a part forever.
     for ref in sorted(refs, key=lambda item: item.job_id):
@@ -640,6 +674,8 @@ def _eject(
     members: list[OwnedJob] = []
     scratch: Path | None = None
     try:
+        if root.from_state == "away":
+            raise ValueError(f"{root.job_key} is away; recover it first")
         if tree:
             members = _claim_tree(workspace, owner, root)
         elif children := tree_members(workspace, root.job_id, root.read_state()):
@@ -747,7 +783,7 @@ def eject(
     :param owner_key: The optional key that may control the adopted root through the workspace daemon.
     :return: Where the bundle went.
     :raises Busy: When a member cannot be claimed, or without *tree* when the root has descendants.
-    :raises ValueError: For an unusable destination.
+    :raises ValueError: For an unusable destination, or a root claimed from ``away``.
     :raises httk.workflow.errors.WorkflowError: When the destination is occupied or the delivery failed, or
         :class:`~httk.workflow._bundles.BundleError` when the jobs cannot form a bundle.
     """
@@ -965,10 +1001,13 @@ def _presence(
     *,
     untrusted: bool,
     absent: frozenset[str] | None = None,
-) -> str | None:
-    """``"all"`` when every member is here already, a refusal reason, or ``None`` to publish.
+) -> tuple[str | None, dict[str, JobRef]]:
+    """``"all"`` when every member is here already, a refusal reason, or ``None`` to publish, with the away copies
+    the publication replaces (by job UUID).
 
-    Ids in *absent* (from :func:`settle_absent`) are looked up afresh but not settled again.
+    A trusted bundle replaces away copies of its members when every member found here is one, kept by a
+    transfer to the workspace the bundle comes from; any other hit keeps the rules of :func:`adopt`. Ids in
+    *absent* (from :func:`settle_absent`) are looked up afresh but not settled again.
     """
 
     # ponytail: check-then-act; two operators adopting copies of one trusted bundle at once can duplicate it
@@ -978,22 +1017,100 @@ def _presence(
     found = _kernel.locate_many(workspace, ids, placements=placements, settle=absent is None)
     if absent is not None and (unsettled := [job_id for job_id in ids if job_id not in found and job_id not in absent]):
         found |= _kernel.locate_many(workspace, unsettled, placements=placements, settle=True)
+    copies = {job_id: ref for job_id, ref in found.items() if ref.state == "away" and not untrusted}
+    if found and len(copies) == len(found):
+        source = manifest.source_workspace_id
+        for ref in copies.values():
+            doc, _damaged = read_state_unowned(ref.path / "state.json")
+            away = None if doc is None else doc.away
+            if away is None:
+                return f"{ref.job_key} is away without a record of where it went; delete the copy first", {}
+            if away["workspace_id"] != source:
+                reason = f"{ref.job_key} is away at {away['locator']}, but this bundle comes from workspace {source}"
+                return f"{reason}; recover or delete the copy first", {}
+        found = {}
+    else:
+        copies = {}
+        if not untrusted and (late := _late_return(found.values(), manifest.source_workspace_id)) is not None:
+            return late, {}
     if len(found) == len(ids):
-        return "all"
+        return "all", {}
     if found:
         present = ", ".join(sorted(ref.job_key for ref in found.values()))
-        return f"{len(found)} of its {len(ids)} jobs are already in this workspace: {present}"
+        return f"{len(found)} of its {len(ids)} jobs are already in this workspace: {present}", {}
     if untrusted:
-        return None
+        return None, {}
     parent = JobDefinition.from_path(manifest.member_dir(bundle, manifest.members[0]) / "job.json").parent
     if parent is not None:
         hint = PurePosixPath(str(parent.get("placement")))
         parent_id = str(parent.get("job_id"))
         settle = absent is None or parent_id not in absent
-        ref = _kernel.locate(workspace, parent_id, placement_hint=hint, settle=settle)
-        if ref is not None:
-            return f"the root's parent {ref.job_key} is in this workspace; adopt the parent's whole tree instead"
+        parent_ref = _kernel.locate(workspace, parent_id, placement_hint=hint, settle=settle)
+        if parent_ref is not None:
+            reason = (
+                f"the root's parent {parent_ref.job_key} is in this workspace; adopt the parent's whole tree instead"
+            )
+            return reason, {}
+    return None, copies
+
+
+def _late_return(found: Iterable[JobRef], source: str) -> str | None:
+    """The refusal of a bundle one of whose present (unowned) members was recovered here from a transfer to
+    *source*: the bundle is that job's late return, never an already-adopted duplicate to discard."""
+
+    for ref in found:
+        if ref.state == OWNED:
+            continue  # being worked on: today's rules
+        doc, _damaged = read_state_unowned(ref.path / "state.json")
+        if doc is not None and doc.recovered is not None and doc.recovered["workspace_id"] == source:
+            return (
+                f"{ref.job_key} was recovered here after it was pushed to workspace {source}; this bundle is its "
+                "late return. Delete one of the two, or adopt the bundle into another workspace"
+            )
     return None
+
+
+def _read_replaces(scratch: Path) -> dict[str, str]:
+    """The ``replaces.json`` of an ``adopt`` scratch; empty when it has none."""
+
+    data = _fs.read_bounded(_fs.loc(scratch / _REPLACES), MAX_MANIFEST_BYTES)
+    return {} if data is None else {str(key): str(value) for key, value in json.loads(data).items()}
+
+
+def _discard_copies(workspace: "Workspace", owner: Owner, replaces: dict[str, str]) -> str | None:
+    """Claim every away copy an adoption replaces, then discard each (the ``delete`` primitive), all before any
+    member is published.
+
+    A copy no longer found was discarded by an earlier run. Nothing is discarded unless every copy found is
+    claimed from ``away``: otherwise the claimed ones go back and the reason is returned.
+    """
+
+    found = _kernel.locate_many(
+        workspace, list(replaces), placements=[PurePosixPath(item) for item in replaces.values()], settle=True
+    )
+    claimed: list[OwnedJob] = []
+    problem = None
+    for job_id in sorted(found):
+        ref = found[job_id]
+        if ref.state != "away":
+            problem = f"{ref.job_key} is {ref.state} here, no longer away"
+            break
+        if (job := _kernel.claim(workspace, owner, ref)) is None:
+            problem = f"{ref.job_key} was taken by another actor"
+            break
+        claimed.append(job)
+    try:
+        for job in claimed:
+            if problem is not None:
+                job.give_back()
+            else:
+                job.discard()
+    except Exception:
+        for job in claimed:
+            if owner.holds(job.ref):
+                job.give_back()
+        raise
+    return problem
 
 
 def _finish(
@@ -1011,7 +1128,7 @@ def _finish(
     if read is None:
         try:
             manifest = _validated(workspace, scratch, bundle, untrusted=record.untrusted)
-            presence = _presence(workspace, bundle, manifest, untrusted=record.untrusted, absent=absent)
+            presence, copies = _presence(workspace, bundle, manifest, untrusted=record.untrusted, absent=absent)
         except BundleError as exc:
             return _refuse(owner, scratch, bundle, record, str(exc))
         if presence == "all":
@@ -1049,10 +1166,23 @@ def _finish(
                     record,
                     f"the exchange name {name} is claimed by another adoption whose job is not here",
                 )
+        if copies:
+            # Before the plan: a replay that finds the plan finds the copies it replaces too.
+            replaces = {job_id: placement_text(ref.placement or PurePosixPath()) for job_id, ref in copies.items()}
+            _fs.write_file(_fs.loc(scratch / _REPLACES), json_bytes(replaces), durable=durable)
         _fs.write_file(_fs.loc(scratch / _PLAN), manifest.to_json(), durable=durable)
     else:
         manifest = read[1]
+    if not record.untrusted and (replaces := _read_replaces(scratch)):
+        # A member already published (absent from the bundle) is here under its id: its copy went before it.
+        unpublished = {
+            member.job_id for member in manifest.members if _fs.exists(_fs.loc(manifest.member_dir(bundle, member)))
+        }
+        pending = {job_id: placement for job_id, placement in replaces.items() if job_id in unpublished}
+        if pending and (problem := _discard_copies(workspace, owner, pending)) is not None:
+            return _refuse(owner, scratch, bundle, record, problem)
     names = exchange_names(scratch) if record.untrusted else {}
+    source_id = manifest.source_workspace_id
     published: list[JobRef] = []
     workflows: set[str] = set()
     bound: set[str] = set()
@@ -1077,6 +1207,11 @@ def _finish(
             if children:
                 doc = doc.with_children(children)
             _fs.write_file(_fs.loc(directory / "state.json"), encode_state(doc), durable=durable)
+        elif kept is not None and kept.recovered is not None and kept.recovered["workspace_id"] == source_id:
+            # This arrival from the workspace it was recovered from supersedes the recovery: a duplicate delivery of
+            # it is already adopted, never a late return.
+            kept = kept.updated(recovered=None)
+            _fs.write_file(_fs.loc(directory / "state.json"), encode_state(kept), durable=durable)
         published.append(_kernel.submit(workspace, owner, directory, state=member.state, priority=member.priority))
     owner.discard_scratch(scratch)
     # An embedded workflow travels in its job's workflow/; its fixed calls are among the bound workflows.
@@ -1330,26 +1465,179 @@ def held(workspace: "Workspace", *, workflows: bool = False) -> list[Hold]:
     return holds
 
 
-def release_hold(workspace: "Workspace", owner: Owner, transfer_id: str) -> bool:
-    """Discard a held bundle once its destination adopted it.
+def release_hold(workspace: "Workspace", owner: Owner, transfer_id: str, *, keep: bool = False) -> bool:
+    """Discard a held bundle once its destination adopted it, or with *keep* keep its members as away copies.
+
+    A kept member is published bottom-up into ``away`` at the priority it was held with, its ``state.json``
+    recording ``away``: the destination (workspace id and locator), the transfer id, and the state and priority
+    it left (see :func:`recover`). The ``release-keep`` scratch reconciler finishes an interrupted release. A hold
+    that records no destination workspace id (:attr:`Hold.destination_workspace_id`) keeps nothing, as without
+    *keep*, and a warning says so.
 
     :param workspace: The workspace.
     :param owner: The releasing owner.
     :param transfer_id: The hold's transfer id.
+    :param keep: Keep the members as ``away`` copies instead of discarding them.
     :return: ``False`` when the hold is gone (another actor released or adopted it).
     :raises ValueError: For a malformed transfer id.
     """
 
     if not _TRANSFER_ID.fullmatch(transfer_id):
         raise ValueError(f"not a transfer id: {transfer_id!r}")
-    scratch = _kernel.take(workspace, owner, _fs.loc(_outgoing(workspace) / transfer_id), "release")
+    purpose = _RELEASE_KEEP if keep else "release"
+    scratch = _kernel.take(workspace, owner, _fs.loc(_outgoing(workspace) / transfer_id), purpose)
     if scratch is None:
         return False
+    if keep:
+        _keep_away(owner, scratch / transfer_id)
     owner.discard_scratch(scratch)
     return True
 
 
+def _keep_away(owner: Owner, bundle: Path) -> None:
+    """Publish every member still in a released hold into ``away``, bottom-up; a published one is absent."""
+
+    read = read_manifest(bundle / "bundle.json")
+    if read is None:
+        return  # build_bundle writes bundle.json first: a hold without it never held a member
+    manifest = read[1]
+    if manifest.destination_workspace_id is None:
+        # A copy must know which workspace's bundle replaces it, and recover which one's late return to refuse.
+        _LOGGER.warning(
+            "kept no away copies of transfer %s: its hold records no destination workspace id", manifest.transfer_id
+        )
+        return
+    for member in reversed(manifest.members):
+        directory = manifest.member_dir(bundle, member)
+        if not _fs.exists(_fs.loc(directory)):
+            continue
+        # A held member's state.json was readable when it was claimed; should it not be now, the copy still stays.
+        doc = read_state_unowned(directory / "state.json")[0] or StateDoc.empty(member.job_id)
+        away = {
+            "workspace_id": manifest.destination_workspace_id,
+            "locator": manifest.destination_locator or "?",
+            "transfer_id": manifest.transfer_id,
+            "state": member.state,
+            "priority": member.priority,
+            "at": utc_now(),
+        }
+        # release_to names away: a later claim from away must not see the hold's state as a pending release.
+        doc = doc.updated(away=away, release_to={"state": "away", "priority": member.priority}).with_history(
+            "away", **{"from": member.state, "transfer_id": manifest.transfer_id, "destination": away["locator"]}
+        )
+        _fs.write_file(_fs.loc(directory / "state.json"), encode_state(doc), durable=owner.workspace.durable)
+        _kernel.submit(owner.workspace, owner, directory, state="away", priority=member.priority)
+
+
+def reconcile_release_keep(owner: Owner, scratch: Path) -> bool:
+    """The ``release-keep`` scratch reconciler: publish the members still in the released hold into ``away``.
+
+    :param owner: The owner the scratch is named after.
+    :param scratch: ``tmp/<owner-id>.release-keep.<token>/``.
+    :return: ``True``: the scratch is then discarded.
+    """
+
+    for name in _kernel.list_names(scratch):
+        if _TRANSFER_ID.fullmatch(name):
+            _keep_away(owner, scratch / name)
+    return True
+
+
+# -- away copies ----------------------------------------------------------------------------------------------------
+
+
+def away_root(workspace: _kernel.KernelWorkspace, ref: JobRef) -> JobRef:
+    """Return the root of the away tree *ref* belongs to: its furthest ancestor that stayed behind from the same
+    transfer (``away`` with the same ``away.transfer_id``), or *ref* itself.
+
+    :param workspace: The workspace.
+    :param ref: A job (unowned, or owned by the caller).
+    :return: The root, as last observed; *ref* when it has no away record or its parent is not in its tree.
+    """
+
+    doc = read_state_unowned(ref.path / "state.json")[0]
+    transfer = None if doc is None or doc.away is None else doc.away["transfer_id"]
+    current, seen = ref, {ref.job_id}
+    while transfer is not None:
+        try:
+            parent = JobDefinition.from_path(current.path / "job.json").parent
+        except FormatError:
+            break
+        if parent is None or (parent_id := str(parent.get("job_id"))) in seen:
+            break
+        hint = PurePosixPath(str(parent.get("placement")))
+        found = _kernel.locate(workspace, parent_id, placement_hint=hint)
+        # A parent claimed from away (a request being served, say) is still in the tree.
+        if found is None or "away" not in (found.state, found.from_state):
+            break
+        doc = read_state_unowned(found.path / "state.json")[0]
+        if doc is None or doc.away is None or doc.away["transfer_id"] != transfer:
+            break
+        current = found
+        seen.add(parent_id)
+    return current
+
+
+def recover(workspace: "Workspace", owner: Owner, root: OwnedJob) -> list[JobRef]:
+    """Return a claimed away job and its tree to the states and priorities they left (``job recover``).
+
+    The members are the root's descendants in any unowned state (:func:`tree_members`), claimed in sorted
+    job-UUID order. They are released bottom-up: an away member to its ``away.state`` and ``away.priority``,
+    ``away`` cleared and a ``recovered`` history event added; any other member (one recovered by an earlier,
+    interrupted run) goes back unchanged, which applies a pending release. A root whose record is gone but whose
+    release is pending (a recovery interrupted after the root's ``state.json`` was written) is finished so.
+    Nothing checks whether the job still runs where it went. *root*'s handle is retired whatever happens: a
+    refusal gives every claimed job back.
+
+    :param workspace: The workspace.
+    :param owner: The owner holding *root*.
+    :param root: The root, claimed from ``away``.
+    :return: The released jobs, bottom-up (the root last).
+    :raises ValueError: When *root* was not claimed from ``away``, has no away record, or belongs to the away
+        tree of an ancestor (which is to be recovered instead).
+    :raises Busy: When a member cannot be claimed.
+    """
+
+    try:
+        if root.from_state != "away":
+            raise ValueError(f"{root.job_key} is {root.from_state}, not away")
+        doc = root.read_state()
+        # A pending release is an interrupted recovery (the record already cleared): it is finished.
+        if (doc is None or doc.away is None) and root.pending_release() is None:
+            raise ValueError(f"{root.job_key} has no away record of the state it left; delete it instead")
+        if (top := away_root(workspace, root.ref)).job_id != root.job_id:
+            raise ValueError(f"{root.job_key} is a member of the away tree of {top.job_key}; recover {top.job_key}")
+        members = _claim_tree(workspace, owner, root, states=frozenset(UNOWNED_STATES))
+    except Exception:
+        root.give_back()
+        raise
+    jobs = [root, *members]
+    released: list[JobRef] = []
+    try:
+        for job in reversed(jobs):
+            doc = job.read_state()
+            away = None if doc is None else doc.away
+            if doc is None or away is None or job.from_state != "away":
+                if job.from_state == "away" and job.pending_release() is None:
+                    _LOGGER.warning("%s is away without an away record; it stays away", job.job_key)
+                released.append(job.give_back())  # a pending release (an interrupted recovery) is applied
+                continue
+            state, priority = str(away["state"]), cast(int, away["priority"])
+            recovered = {"workspace_id": away["workspace_id"], "transfer_id": away["transfer_id"], "at": utc_now()}
+            doc = doc.updated(away=None, recovered=recovered).with_history(
+                "recovered", **{"from": "away", "to": state, "transfer_id": away["transfer_id"]}
+            )
+            released.append(job.release(doc, Release(state, priority)))
+    except Exception:
+        for job in jobs:
+            if owner.holds(job.ref):
+                job.give_back()
+        raise
+    return released
+
+
 _kernel.register_reconciler("eject", reconcile_eject)
 _kernel.register_reconciler(_HOLD, reconcile_eject)
+_kernel.register_reconciler(_RELEASE_KEEP, reconcile_release_keep)
 for _purpose in _ADOPT.values():
     _kernel.register_reconciler(_purpose, reconcile_adopt)

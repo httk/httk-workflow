@@ -212,7 +212,7 @@ def test_a_binding_is_refused(tmp_path: Path, workspace: Workspace, options: dic
     pair = _install(workspace, _callee(tmp_path / "pair"))
     caller = _install(workspace, _caller(tmp_path / "caller", extra=f'\n[workflow.calls]\nsub = "{pair.id}"\n'))
     with pytest.raises(ValueError, match=message):
-        new_job(workspace, caller.id, **options)  # type: ignore[arg-type]
+        new_job(workspace, caller.id, **options)  # type: ignore[call-overload]
 
 
 def test_a_binding_that_does_not_fit_is_refused_with_its_reasons(tmp_path: Path, workspace: Workspace) -> None:
@@ -437,7 +437,7 @@ def test_default_parameters_go_with_the_default(tmp_path: Path, workspace: Works
     caller = _install(workspace, _caller(tmp_path / "caller", default="tests.binding.pair", extra=extra))
 
     def bound(**options: object) -> object:
-        return _definition(new_job(workspace, caller.id, **options)).as_mapping()["calls"]["forces.dft"]  # type: ignore[arg-type,index]
+        return _definition(new_job(workspace, caller.id, **options)).as_mapping()["calls"]["forces.dft"]  # type: ignore[call-overload,index]
 
     defaulted = {"workflow": pair.id, "parameters": {"cutoff": 400.0, "kpoints": 4}}
     assert bound() == defaulted

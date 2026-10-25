@@ -47,8 +47,9 @@ STATE_FORMAT = "httk-workflow-state"
 STATE_FORMAT_VERSION = 1
 #: The largest accepted ``state.json``, in encoded bytes.
 MAX_STATE_BYTES = 100 << 20
-#: The six states a job directory can rest in outside ``owned/``.
-UNOWNED_STATES = ("ready", "waiting", "paused", "failed", "succeeded", "cancelled")
+#: The seven states a job directory can rest in outside ``owned/``; ``away`` holds the inert copy of a job that
+#: was transferred to another workspace (its ``state.json`` ``away`` record says where and what it left).
+UNOWNED_STATES = ("ready", "waiting", "paused", "failed", "succeeded", "cancelled", "away")
 TERMINAL_STATES = ("succeeded", "failed", "cancelled")
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,8 +62,10 @@ _ACTIVATION_REASONS = ("initial", "advance", "retry", "manual_continue", "overri
 _OWNER_ID = re.compile(r"[0-9a-f]{32}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 #: Members a document may lack (it was written before they existed); each reads as ``None``.
-_OPTIONAL_MEMBERS = frozenset({"job_digest", "budget_override", "workflow_override", "unlocked"})
+_OPTIONAL_MEMBERS = frozenset({"job_digest", "budget_override", "workflow_override", "unlocked", "away", "recovered"})
 _UNLOCKED_MEMBERS = frozenset({"at", "operator", "reason", "inherited_from"})
+_AWAY_MEMBERS = frozenset({"workspace_id", "locator", "transfer_id", "state", "priority", "at"})
+_RECOVERED_MEMBERS = frozenset({"workspace_id", "transfer_id", "at"})
 
 type Frozen = None | bool | int | float | str | tuple["Frozen", ...] | Mapping[str, "Frozen"]
 
@@ -153,6 +156,34 @@ def _unlocked(value: object) -> Mapping[str, Frozen] | None:
     return unlocked
 
 
+def _transfer_record(value: object, name: str, members: frozenset[str]) -> Mapping[str, Frozen] | None:
+    # The members away and recovered share: workspace_id (uuid), transfer_id (32 hex), at (and locator).
+    record = _mapping_or_none(value, name)
+    if record is None:
+        return None
+    if set(record) != members:
+        raise FormatError(f"state.json {name} must be {{{', '.join(sorted(members))}}} or null")
+    canonical_uuid(record["workspace_id"], f"state.json {name}.workspace_id")
+    for member in sorted({"locator", "at"} & members):
+        if not isinstance(record[member], str) or not record[member]:
+            raise FormatError(f"state.json {name}.{member} must be a non-empty string")
+    if not isinstance(record["transfer_id"], str) or not _OWNER_ID.fullmatch(record["transfer_id"]):
+        raise FormatError(f"state.json {name}.transfer_id must be 32 lowercase hex digits")
+    return record
+
+
+def _away(value: object) -> Mapping[str, Frozen] | None:
+    # {workspace_id, locator, transfer_id, state: unowned but away, priority: 0-999, at}.
+    away = _transfer_record(value, "away", _AWAY_MEMBERS)
+    if away is None:
+        return None
+    if away["state"] not in UNOWNED_STATES or away["state"] == "away":
+        raise FormatError(f"state.json away.state must be an unowned state other than away: {away['state']!r}")
+    if type(away["priority"]) is not int or not 0 <= away["priority"] <= 999:
+        raise FormatError(f"state.json away.priority must be an integer 0-999: {away['priority']!r}")
+    return away
+
+
 def _records(value: object, name: str, limit: int | None = None) -> tuple[Mapping[str, Frozen], ...]:
     if not isinstance(value, tuple) or not all(isinstance(item, Mapping) for item in value):
         raise FormatError(f"state.json {name} must be a list of objects")
@@ -212,6 +243,11 @@ class StateDoc:
         runs instead of ``job.json``'s ``workflow``, or ``None``.
     :param unlocked: The one-way debug-mode marker ``{at, operator?, reason?, inherited_from?}`` an ``unlock``
         request (or an unlocked parent) set, or ``None`` for a locked job.
+    :param away: For a job in ``away``, the record of the transfer it stayed behind from: ``{workspace_id,
+        locator, transfer_id, state, priority, at}``, where ``state`` and ``priority`` are what it left; otherwise
+        ``None``.
+    :param recovered: For a job ``job recover`` returned from ``away``, ``{workspace_id, transfer_id, at}`` of the
+        transfer it had stayed behind from (so that the job's late return from there is refused), or ``None``.
     """
 
     job_id: str
@@ -241,6 +277,8 @@ class StateDoc:
     budget_override: Mapping[str, Frozen] | None = None
     workflow_override: Mapping[str, Frozen] | None = None
     unlocked: Mapping[str, Frozen] | None = None
+    away: Mapping[str, Frozen] | None = None
+    recovered: Mapping[str, Frozen] | None = None
 
     @classmethod
     def empty(cls, job_id: str) -> Self:
@@ -281,6 +319,8 @@ class StateDoc:
                 "budget_override": None,
                 "workflow_override": None,
                 "unlocked": None,
+                "away": None,
+                "recovered": None,
             }
         )
 
@@ -365,6 +405,8 @@ class StateDoc:
             budget_override=budget_override,
             workflow_override=workflow_override,
             unlocked=_unlocked(doc["unlocked"]),
+            away=_away(doc["away"]),
+            recovered=_transfer_record(doc["recovered"], "recovered", _RECOVERED_MEMBERS),
         )
 
     def as_mapping(self) -> dict[str, object]:

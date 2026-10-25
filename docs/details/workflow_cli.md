@@ -366,6 +366,23 @@ Other options:
 - `--format FORMAT` selects the format of a bare document (see
   [Running workflow documents](#running-workflow-documents)).
 - `--priority` (0 is highest) and `--step` override the workflow's defaults.
+- `--duplicate-tag {refuse,skip,allow}` decides what happens when a job with
+  the same `--tag` already exists in the same placement (exactly that
+  placement, not its subtree) in any state, away and running included. The
+  default `refuse` fails with `a job with tag 'TAG' already exists in placement
+  'PLACEMENT': KEY (STATE); pass --duplicate-tag allow to create another or
+  --duplicate-tag skip to skip it` (the API raises
+  `httk.workflow.DuplicateTagError` with `tag`, `placement` and `existing`).
+  `skip` leaves the existing job, warns `skipped tag TAG: already KEY (STATE)`
+  and goes on; a batch ends with `submitted N jobs (K skipped)`, and
+  `new_job(..., duplicate_tag="skip")` returns `None`. `allow` creates another.
+  Jobs without a tag are never checked, `job submit` and spawned children are
+  unaffected, and deleting a job frees its tag. The check precedes the
+  creation, so two creators racing on one tag can both succeed;
+  `workspace fsck` notes jobs sharing a tag in one placement (a `noted`
+  finding `duplicate_tag`, not a failure). Re-running a creation script with
+  `skip` thus creates only the jobs that do not exist yet, wherever the
+  existing ones are, as *httk* v1's fixed task directories did.
 
 The command prints one tab-separated `job_key<TAB>directory` line per job, or a
 report with `--json`. The directory is where the job sits now; it changes as
@@ -456,7 +473,8 @@ options are valid only with `set_budget`), `set_workflow` (with
 in the jobs' workspace, on the remote side for a remote one; every job is
 checked against it before anything is posted, and a workspace daemon remote
 refuses it), `detach`, `unlock`, `eject` (with `--destination`), `delete`, `seal` and
-`unseal`. The job's owner applies each
+`unseal`. An `away` job accepts no request but `delete` (see
+*Away copies* below). The job's owner applies each
 once, at its next boundary; a manager claims an unowned job to apply it. What
 each action does is tabulated in
 [the task-manager guide](taskmanager.md#requests). `--force` accepts reviving a
@@ -665,11 +683,12 @@ directory. Any combination of local and remote ends works, and a
 remote-to-remote transfer is relayed through the client:
 
 ```console
-httk job push [SRC] DST [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--no-workflows] [--json] [-q]
+httk job push [SRC] DST [--no-keep] [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--no-workflows] [--json] [-q]
 httk job pull SRC [DST] [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--no-workflows] [--json] [-q]
-httk job transfer (--job JOB … | --state STATE … | --step STEP …) [--placement PREFIX] [--tree] [--no-workflows] SRC DST [--json] [-q]
-httk job transfer --resume [SRC] [DST]
-httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [WS]
+httk job transfer (--job JOB … | --state STATE … | --step STEP …) [--placement PREFIX] [--tree] [--keep] [--no-workflows] SRC DST [--json] [-q]
+httk job transfer --resume [--keep] [SRC] [DST]
+httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [--keep] [WS]
+httk job recover [--workspace WS] (JOB … | --all [--placement PREFIX])
 httk transfer status [WS] [--json]
 ```
 
@@ -682,7 +701,8 @@ workspace (the enclosing workspace, the project's default, else the per-user
 default, which is created on first use), and with none the command is
 refused. Both always act as `--tree`, and `--job`, `--state` or `--step`
 replaces their implicit state (`--step` without `--state` selects from every
-unowned state). `--resume`, `--release`, `--hold` and `--destination-id` stay
+unowned state except `away`; `--state away` is refused by push, pull and
+transfer). `--resume`, `--release`, `--hold` and `--destination-id` stay
 on `job transfer`.
 
 Jobs are selected by name with `--job` (a UUID, key, unique prefix, path or
@@ -772,6 +792,39 @@ which is safe only after checking that DST does not have the jobs;
 `job transfer --release T` discards a hold whose jobs DST has. `job transfer
 --hold (--job JOB … | --state STATE … | --step STEP …) SRC DST` only holds jobs in a local SRC, recording DST as
 given; it is the first leg a client runs on a remote SRC.
+
+### Away copies
+
+`job push` leaves in SRC an *away copy* of every job it moves
+(`--no-keep` opts out), and `job transfer --keep` does the same; a plain
+`job transfer` moves. An away copy is a job in the seventh unowned state,
+`away` (`jobs/away/<placement>/…`). It never runs, is not collected and cannot
+be transferred or requested; only `job delete` works on it. Its `state.json`
+records `away`: the destination workspace id and locator, the transfer id, the
+state and priority the job left, and the time. After a keeping push the
+command prints `kept N away copies in SRC (httk job list --state away; httk job
+recover JOB to resend)`, and `--json` outcomes carry `"kept": true|false`.
+`httk job list --state away` lists what you are still waiting for, and `job
+why` and `job show` explain an away job.
+
+`job pull` (or any trusted transfer back) replaces the away copy when the job
+returns from the workspace it was pushed to. A bundle from another workspace
+is refused: `KEY is away at X, but this bundle comes from workspace Y; recover
+or delete the copy first`. An interrupted transfer finished with `--resume` is
+released with the `--keep` of the run that releases it (a push re-drives with
+keeping unless `--no-keep`).
+
+`job recover (JOB … | --all [--placement PREFIX]) [--workspace WS]` returns an
+away tree, its root and the spawned descendants, to the states and priorities
+it left, so that a job lost at its destination can be pushed again. A job that
+is not a root is refused with a message naming its root. It prints `recovered
+KEY: N job(s) back to STATE`; refusals print `KEY: <message>` on stderr and exit
+`1`. It works on local workspaces only. Nothing checks whether the job still
+runs at its destination: recovering one that does and pushing it elsewhere
+runs it twice. A late return of the old remote job is refused afterwards:
+nothing is overwritten and the hold stays on the remote, so delete one of the
+two, or adopt the bundle in another workspace. Away copies are not kept
+through the workspace daemon's exchange.
 
 ## Running managers
 

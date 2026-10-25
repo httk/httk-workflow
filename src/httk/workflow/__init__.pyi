@@ -30,6 +30,7 @@ reached through its submodule.
 from .calculations import AmbiguousClaimError, DirectoryClaim, IdentityCollisionError, claims, collect_tree
 from .collecting import CollectedJob, JobRecord, StructureInput, collect, job_records
 from .errors import (
+    DuplicateTagError,
     FormatError,
     RunnerResolutionError,
     TransactionError,
@@ -67,6 +68,7 @@ __all__ = [
     "CollectedJob",
     "CollectedPostprocess",
     "DirectoryClaim",
+    "DuplicateTagError",
     "FormatError",
     "IdentityCollisionError",
     "InstantiateHandler",

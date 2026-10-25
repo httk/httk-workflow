@@ -225,6 +225,14 @@ placement. Do not edit the immutable `job.json` of a submitted job to change
 its workflow. Migrate one representative task first and compare it
 with the compatibility reference before moving a larger batch.
 
+Two v1 habits have *httk₂* counterparts. A v1 task directory sent to a
+computer was simply gone locally; `httk job push` leaves an `away` copy
+instead (`httk job list --state away`, `httk job recover JOB` if the remote
+job is lost). And v1's fixed task directory names made re-running an
+instantiate script create only what was missing; *httk₂* job keys are fresh
+UUIDs, but a job with a `--tag` is created once per placement, so
+`httk job new --tag T --duplicate-tag skip` gives the same behaviour.
+
 ## 6. Replace the *httk* v1 control flow with native Bash
 
 A typical v1 runner looks like:

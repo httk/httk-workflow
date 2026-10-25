@@ -3,10 +3,17 @@
 # Seal errors are owned by httk-core so isinstance checks agree across the
 # boundary: workflow code that seals through core, and core code that raises
 # on a workflow member, share one SealError / SealedError type.
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
+
 from httk.core.project.sealing import SealedError, SealError
+
+if TYPE_CHECKING:
+    from ._kernel import JobRef
 
 __all__ = [
     "ConfinementUnavailableError",
+    "DuplicateTagError",
     "FormatError",
     "ResolutionMiss",
     "RunnerResolutionError",
@@ -27,6 +34,24 @@ class WorkflowError(RuntimeError):
 
 class ConfinementUnavailableError(WorkflowError):
     """Bubblewrap is missing or cannot build the attempt sandbox (``manager.confine=bwrap``)."""
+
+
+class DuplicateTagError(WorkflowError):
+    """A new job's tag is already used by a job of the same placement, in any state.
+
+    :param tag: The tag.
+    :param placement: The placement.
+    :param existing: The job already carrying the tag there.
+    """
+
+    def __init__(self, tag: str, placement: PurePosixPath, existing: "JobRef") -> None:
+        super().__init__(
+            f"a job with tag {tag!r} already exists in placement {placement.as_posix()!r}: "
+            f"{existing.job_key} ({existing.state}); pass duplicate_tag='allow' to create another or 'skip' to skip it"
+        )
+        self.tag = tag
+        self.placement = placement
+        self.existing = existing
 
 
 class ResolutionMiss(ValueError):

@@ -210,6 +210,8 @@ def _drive(
     job, job_error = read_job(ref)
     if job is None:
         raise ValueError(f"cannot debug {ref.job_key}: {job_error}")
+    if ref.state == "away":
+        raise ValueError(f"{ref.job_key} is away; recover it first")
     workflow_id, _name = effective_workflow(job, read_state(ref)[0])
     write(f"[{meta}] {ref.job_key} at {placement_text(job.placement)} is {ref.state} (workflow {workflow_id})")
     tail = _Tail(ref.path, write)

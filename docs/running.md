@@ -193,6 +193,16 @@ Both are forms of `httk job transfer SRC DST`, the general verb, which needs an
 explicit selection and moves a selected job with its descendants only with
 `--tree`.
 
+`job push` keeps an *away copy* of every job it moves: an inert job in the
+state `away` that never runs, is not collected and records where it went.
+`httk job list --state away` shows what you are still waiting for, and
+`job pull` of the finished jobs replaces the copies (`--no-keep` keeps none;
+plain `job transfer` moves, `job transfer --keep` keeps). A job lost on the
+remote is returned to the state it left with `httk job recover JOB` (or
+`--all`), to push again; nothing checks that it is dead there, so recovering
+one that still runs and pushing it elsewhere runs it twice. See
+{doc}`details/workflow_cli`, *Away copies*.
+
 A transfer holds the jobs on the source, copies them to the destination,
 adopts them there and only then releases the hold; an interrupted transfer is
 finished by running it again or with `httk job transfer --resume`, and

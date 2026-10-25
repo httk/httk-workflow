@@ -276,6 +276,9 @@ def test_parse_refusals(tmp_path: Path) -> None:
 
 
 def _expected(action: str, state: str) -> Effect:
+    if state == "away":
+        # An away job is an inert copy: only delete applies.
+        return Discard() if action == "delete" else Drop("")
     terminal = state in TERMINAL_STATES
     if action == "cancel":
         return Drop("") if terminal else Release("cancelled", 500)
@@ -328,7 +331,9 @@ def test_application_table(action: str, state: str) -> None:
     entry = new.history_tail[-1]
     assert (entry["request_id"], entry["action"], entry["from"]) == (request.request_id, action, state)
     assert entry["event"] == ("request_dropped" if isinstance(effect, Drop) else "request_applied")
-    if isinstance(effect, Drop) and action in ("continue", "restart", "override_step"):
+    if isinstance(effect, Drop) and state == "away":
+        assert effect.reason == "the job is away at ?; recover it first"
+    elif isinstance(effect, Drop) and action in ("continue", "restart", "override_step"):
         assert effect.reason == f"{action} applies to failed or paused jobs, not {state}"
 
 

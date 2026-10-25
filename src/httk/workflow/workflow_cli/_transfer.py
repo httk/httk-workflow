@@ -4,7 +4,8 @@
 on :mod:`httk.workflow._moving`, locally or through the remote adapters'
 ``invoke``, ``push`` and ``pull``; ``job push``/``job pull`` are its everyday forms (an implicit
 ``--state ready``/``succeeded``, ``--tree``, the default workspace as the omitted end);
-``transfer status`` lists held transfers.
+``transfer status`` lists held transfers. ``job push`` (unless ``--no-keep``) and ``job transfer --keep``
+release the hold keeping the moved jobs in SRC as ``away`` copies, which a later transfer back replaces.
 """
 
 import argparse
@@ -423,6 +424,8 @@ TRANSFER_STATUS_FORMAT = "httk-workflow-transfer-status"
 _TRANSFER_ID = re.compile(r"[0-9a-f]{32}")
 #: Transfer outcomes that moved the jobs.
 _DELIVERED = ("adopted", "already_adopted")
+#: The states a transfer selects from: never ``away``, whose copies stay until recovered or replaced.
+_MOVABLE_STATES = tuple(state for state in _kernel.UNOWNED_STATES if state != "away")
 
 
 def _workspace_reference(value: str, context: CLIContext) -> Path | WorkspaceBinding:
@@ -666,7 +669,7 @@ def _hold_jobs(
         if arguments.state or (steps is not None and not arguments.jobs):
             seen = {ref.job_id for ref in refs}
             # Listed in full first: holding moves jobs out of the directories the listing walks.
-            states = arguments.state or _kernel.UNOWNED_STATES
+            states = arguments.state or _MOVABLE_STATES
             listed = list(iter_jobs(workspace, states, placement_prefix=arguments.placement))
             present = {ref.job_id for ref in iter_jobs(workspace)}
             for ref in listed:
@@ -818,9 +821,15 @@ def _deliver(
             # Errors are kept, not raised, inside: an owner left by an error stays open for recovery.
             scratch = None
             try:
-                if src.workspace is not None:
+                if src.workspace is not None and not arguments.keep:
                     # One filesystem: adoption moves each hold in, and a refusal moves it back. Across: it copies.
                     sources = [Path(hold.path) for hold in holds]
+                elif src.workspace is not None:
+                    # Keeping away copies releases the hold itself, so the adoption takes a copy of it.
+                    scratch = owner.scratch("landing")
+                    sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
+                    for hold, target in zip(holds, sources, strict=True):
+                        _fs.copy_tree(Path(hold.path), target, durable=dst.workspace.durable)
                 else:
                     scratch = owner.scratch("landing")
                     _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
@@ -1080,26 +1089,44 @@ def _build_shipped(
 _BUILDABLE = ("installed", "present", "mismatch")
 
 
-def _release(src: _End, transfer_ids: list[str], context: CLIContext, arguments: argparse.Namespace) -> list[str]:
-    """Step 4: discard the holds on *src*; one already gone (adopted in on one filesystem) is fine.
+def _release_argv(transfer_ids: list[str], keep: bool) -> list[str]:
+    """The ``job transfer --release ... [--keep]`` arguments that release *transfer_ids* on a remote."""
 
-    The result lists the ids a remote *src* did not confirm (an older remote takes only the last ``--release``).
+    releases = [item for transfer_id in transfer_ids for item in ("--release", transfer_id)]
+    return [*REMOTE_JOB_TRANSFER_COMMAND, *releases, *(["--keep"] if keep else [])]
+
+
+def _release(
+    src: _End, transfer_ids: list[str], context: CLIContext, arguments: argparse.Namespace
+) -> tuple[list[str], set[str]]:
+    """Step 4: discard the holds on *src*, or with ``keep`` keep their jobs there as away copies; one already gone
+    (adopted in on one filesystem) is fine.
+
+    The result lists the ids a remote *src* did not confirm (an older remote takes only the last ``--release``),
+    and the ids a local *src* released itself (the others were gone).
     """
 
     _say(arguments, f"releasing {len(transfer_ids)} hold(s) on {src.locator}")
     if src.workspace is not None:
         with _owner(src.workspace, "job transfer") as owner:
-            for transfer_id in transfer_ids:
-                _moving.release_hold(src.workspace, owner, transfer_id)
-        return []
-    releases = [item for transfer_id in transfer_ids for item in ("--release", transfer_id)]
-    code, out, err = _remote(src, context, arguments, [*REMOTE_JOB_TRANSFER_COMMAND, *releases, src.plain])
+            released = {
+                transfer_id
+                for transfer_id in transfer_ids
+                if _moving.release_hold(src.workspace, owner, transfer_id, keep=arguments.keep)
+            }
+        return [], released
+    code, out, err = _remote(src, context, arguments, [*_release_argv(transfer_ids, arguments.keep), src.plain])
     if code not in (0, 1):
-        raise RuntimeError(err.strip() or f"job transfer --release failed on {src.locator}")
+        older = arguments.keep and "unrecognized arguments: --keep" in err
+        message = err.strip() or f"job transfer --release failed on {src.locator}"
+        if older:
+            message += f" ({src.locator} may run an older httk-workflow that keeps no away copies; upgrade it)"
+        raise RuntimeError(message)
     # Confirmed: "released T" on stdout, or "T: no such hold ..." on stderr (gone already).
     confirmed = {line.removeprefix("released ") for line in out.splitlines() if line.startswith("released ")}
     confirmed |= {line.split(":", 1)[0] for line in err.splitlines() if ": no such hold" in line}
-    return [transfer_id for transfer_id in transfer_ids if transfer_id not in confirmed]
+    unconfirmed = [transfer_id for transfer_id in transfer_ids if transfer_id not in confirmed]
+    return unconfirmed, set(transfer_ids) - set(unconfirmed)
 
 
 def _drive(
@@ -1149,19 +1176,29 @@ def _drive(
             outcome.update({key: value for key, value in entry.items() if key not in ("bundle", "message")})
             delivered.append(transfer_id)
         elif status == "refused":
-            message = f"bundle refused: {entry.get('message')}; it stays held on {src.locator}"
+            # The adoption's own refusals already say "bundle refused:"; its other errors do not.
+            reason = str(entry.get("message")).removeprefix("bundle refused: ")
+            message = f"bundle refused: {reason}; it stays held on {src.locator}"
             outcome.update(status="refused", message=message)
         elif status == "taken":
             outcome.update(status="taken", message="another actor took the held bundle first")
         else:
             outcome.update(status="failed", message=f"{entry.get('message')}; it stays held on {src.locator}")
     unreleased: list[tuple[str, str]] = []
+    released: set[str] = set()
     for chunk in _chunks(delivered, flag="--release"):
         try:
-            unconfirmed = _release(src, chunk, context, arguments)
+            unconfirmed, done = _release(src, chunk, context, arguments)
+            released |= done
             unreleased += [(transfer_id, "not confirmed by the source") for transfer_id in unconfirmed]
         except _ERRORS as exc:
             unreleased += [(transfer_id, str(exc)) for transfer_id in chunk]
+    for transfer_id in delivered:
+        # A local release keeps copies only of a hold it took that records its destination's id; a remote one
+        # is taken at its word.
+        hold = by_id[transfer_id]
+        recorded = src.workspace is None or hold.destination_workspace_id is not None
+        outcomes[transfer_id]["kept"] = arguments.keep and transfer_id in released and recorded
     for transfer_id, reason in unreleased:
         outcomes[transfer_id]["message"] = (
             f"the jobs are in {dst.locator}, but the hold was not released: {reason}; "
@@ -1185,7 +1222,12 @@ _SHIPPED = {
 
 
 def _report(
-    outcomes: list[dict[str, Any]], errors: list[str], *, json_output: bool, empty: str = "no held transfers to drive"
+    outcomes: list[dict[str, Any]],
+    errors: list[str],
+    *,
+    json_output: bool,
+    source: str,
+    empty: str = "no held transfers to drive",
 ) -> int:
     missing = sorted({workflow for outcome in outcomes for workflow in outcome.get("missing_workflows", ())})
     # One warning per id: a root the adoption names as missing is left to its line below.
@@ -1214,6 +1256,8 @@ def _report(
             print(
                 f"{outcome['transfer_id']}\t{outcome['status']}\t{len(outcome['members'])} job(s)\t{outcome['destination']}"
             )
+        if kept := sum(len(outcome["members"]) for outcome in outcomes if outcome.get("kept")):
+            print(f"kept {kept} away copies in {source} (httk job list --state away; httk job recover JOB to resend)")
     for outcome in outcomes:
         if "message" in outcome:
             print(f"{outcome['transfer_id']}: {outcome['message']}", file=sys.stderr)
@@ -1231,13 +1275,17 @@ def _handle_release(arguments: argparse.Namespace, context: CLIContext) -> int:
             raise ValueError(f"not a transfer id: {transfer_id!r}")
     src = _end(arguments.source, context, arguments)
     if src.workspace is None:
-        releases = [item for transfer_id in arguments.release for item in ("--release", transfer_id)]
-        code, out, err = _remote(src, context, arguments, [*REMOTE_JOB_TRANSFER_COMMAND, *releases, src.plain])
+        code, out, err = _remote(
+            src, context, arguments, [*_release_argv(arguments.release, arguments.keep), src.plain]
+        )
         sys.stdout.write(out)
         sys.stderr.write(err)
         return code
     with _owner(src.workspace, "job transfer --release") as owner:
-        released = [_moving.release_hold(src.workspace, owner, transfer_id) for transfer_id in arguments.release]
+        released = [
+            _moving.release_hold(src.workspace, owner, transfer_id, keep=arguments.keep)
+            for transfer_id in arguments.release
+        ]
     for transfer_id, done in zip(arguments.release, released, strict=True):
         if done:
             print(f"released {transfer_id}")
@@ -1254,6 +1302,8 @@ def _handle_hold(arguments: argparse.Namespace, context: CLIContext) -> int:
         raise ValueError("--hold takes --job, --state or --step, SRC and the destination to record")
     if arguments.no_workflows:
         raise ValueError("--no-workflows applies to a transfer, not to --hold")
+    if arguments.keep:
+        raise ValueError("--keep applies when a hold is released, not to --hold")
     src = _end(arguments.source, context, arguments)
     if src.workspace is None:
         raise ValueError(f"--hold holds jobs in a workspace on this machine, not in {src.locator}")
@@ -1359,8 +1409,8 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
         which = f"{' or '.join(arguments.state)} " if arguments.state else ""
         at = f" at step {' or '.join(arguments.step)}" if arguments.step else ""
         empty = f"no {which}job{at} to move in {src.locator}{under}"
-        return _report(outcomes, errors, json_output=arguments.json, empty=empty)
-    return _report(outcomes, errors, json_output=arguments.json)
+        return _report(outcomes, errors, json_output=arguments.json, source=src.locator, empty=empty)
+    return _report(outcomes, errors, json_output=arguments.json, source=src.locator)
 
 
 def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -1404,7 +1454,7 @@ or every job in a state: `job transfer --state succeeded [--placement PREFIX]
 [--tree] SRC DST` (--state and --job combine; both repeat). `--step STEP`
 (repeatable) narrows the selection to jobs at that step (the current
 activation's, else the initial step); without --state it selects from every
-unowned state. --state and --step never split a tree: they leave out jobs whose
+unowned state but away. --state and --step never split a tree: they leave out jobs whose
 parent is in SRC, which move only in their root's tree. Without --tree a selected job that has children present is
 refused: --tree moves a finished campaign's roots with their children (failed,
 cancelled or paused ones too). A root with children that are not all
@@ -1431,15 +1481,23 @@ adoption builds those with [workflow.build] there. An installation DST already
 has is never replaced, even with another tree (reported). --no-workflows ships
 none.
 
+Away copies: with --keep the release keeps each moved job in SRC as an inert
+copy in the state `away` (`job push` does so unless --no-keep), recording
+DST, the transfer and the state it left; it never runs or moves there. A
+later transfer back from DST replaces the copies (`job pull` does), and
+`job recover JOB` returns a lost job's copy to the state it left, to push
+again. `--state away` is no choice.
+
 Recovery: delivery is at least once. Every run, and `job transfer --resume
 [SRC] [DST]`, first re-drives the holds bound for DST (with --resume and no DST,
 every hold, to the destination it records); DST reports "already adopted" for
-a bundle it already has, and the hold is released. `transfer status` and
+a bundle it already has, and the hold is released (keeping away copies with
+the --keep of the run that releases it). `transfer status` and
 `job why` list held bundles. A transfer abandoned for good is taken back into
 SRC with `job adopt SRC/.httk-workspace/transfers/outgoing/<transfer id>`,
 which is safe only after checking that DST does not have the jobs.
-`job transfer --release T [--release T ...] [WS]` discards holds whose jobs
-DST has; `job transfer --hold (--job JOB | --state STATE | --step STEP) ... SRC DST` only
+`job transfer --release T [--release T ...] [--keep] [WS]` discards holds
+whose jobs DST has (with --keep, keeps them as away copies); `job transfer --hold (--job JOB | --state STATE | --step STEP) ... SRC DST` only
 holds, recording DST as given (the first leg a client runs on a remote SRC)."""
 
 
@@ -1453,12 +1511,13 @@ use). With one positional it names {named}: `httk job {verb} REMOTE:WS`;
 with none the command is refused.
 
 --job, --state or --step replaces the implicit --state {state};
---step without --state selects from every unowned state. A selected job
+--step without --state selects from every unowned state but away. A selected job
 whose parent is in SRC moves only in its root's tree. A root moves only whole: one whose
 children are not all terminal or paused (a parent that an any_terminal,
 any_succeeded or at_least join let finish before its children) is refused
 and stays, never split. The workflows the jobs need that DST lacks and SRC
 has are installed there too (--no-workflows ships none; see `job transfer`).
+{keeping}
 Every run re-drives the held transfers bound for DST; --resume, --release and --hold stay on `job transfer`, which also
 covers the general case."""
 
@@ -1471,6 +1530,12 @@ _EVERYDAY = {
         "omitted": "SRC",
         "named": "DST",
         "summary": "move the ready jobs of a workspace (by default this one) to another",
+        "keeping": (
+            "SRC keeps each moved job as an away copy (state away, never run\n"
+            "there; --no-keep keeps none, also for the held transfers this run\n"
+            "re-drives): `job pull` of the finished jobs replaces the copies, and\n"
+            "`job recover JOB` returns a copy whose job was lost there, to push again."
+        ),
     },
     "pull": {
         "usage": "SRC [DST]",
@@ -1480,6 +1545,10 @@ _EVERYDAY = {
         "omitted": "DST",
         "named": "SRC",
         "summary": "move the succeeded jobs of another workspace to one (by default this one)",
+        "keeping": (
+            "A pull keeps no copies in SRC; the away copies a `job push` kept in\n"
+            "DST are replaced by the arriving jobs."
+        ),
     },
 }
 
@@ -1508,6 +1577,15 @@ def build_transfer_parser(
         )
         # The options job transfer keeps for itself; push and pull always move whole trees.
         parser.set_defaults(transfer_verb=verb, resume=False, release=[], hold=False, destination_id=None, tree=True)
+        if verb == "push":
+            parser.add_argument(
+                "--no-keep",
+                dest="keep",
+                action="store_false",
+                help="move the jobs without keeping away copies here",
+            )
+        else:
+            parser.set_defaults(keep=False)  # a pull never keeps copies in SRC
         parsers.append(parser)
     for parser in parsers:
         everyday = parser is not transfer
@@ -1531,14 +1609,14 @@ def build_transfer_parser(
             action="append",
             default=[],
             metavar="STATE",
-            choices=_kernel.UNOWNED_STATES,
+            choices=_MOVABLE_STATES,
             help="select every job of SRC in this state (repeatable; combinable with --job)",
         )
         _add_step_option(
             parser,
             help_text=(
                 "select only jobs at this step: the current activation's, else the initial step (repeatable; "
-                "narrows --job and --state; without --state, selects from every unowned state)"
+                "narrows --job and --state; without --state, selects from every unowned state but away)"
             ),
         )
         parser.add_argument(
@@ -1555,6 +1633,12 @@ def build_transfer_parser(
                 default=[],
                 metavar="TRANSFER_ID",
                 help="discard a hold whose jobs DST already has (repeatable)",
+            )
+            parser.add_argument(
+                "--keep",
+                action="store_true",
+                help="keep an away copy of each moved job in SRC; a later transfer back replaces it "
+                "(with --release: keep the held jobs as away copies)",
             )
             parser.add_argument(
                 "--hold",

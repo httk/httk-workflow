@@ -27,7 +27,7 @@ _SCHEDULER_STATE_PATTERN = re.compile(r"[A-Z_]{1,64}\Z")
 _REASON_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _DETAIL_PATTERN = re.compile(r"[ -~]{1,1000}\Z")
 _UUID_TEXT = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-_JOB_STATES = frozenset({"ready", "waiting", "paused", "failed", "succeeded", "cancelled", "running", "owned"})
+_JOB_STATES = frozenset({"ready", "waiting", "paused", "failed", "succeeded", "cancelled", "away", "running", "owned"})
 _JOB_ACTIONS = frozenset(
     {
         "cancel",

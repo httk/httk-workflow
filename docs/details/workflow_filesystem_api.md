@@ -90,7 +90,7 @@ WORKSPACE/
 │   └── seal.json                           the workspace seal, when sealed
 ├── jobs/
 │   ├── ready/<placement>/<job-key>~p<NNN>~<t>/
-│   ├── waiting/, paused/, failed/, succeeded/, cancelled/   likewise
+│   ├── waiting/, paused/, failed/, succeeded/, cancelled/, away/   likewise
 │   └── owned/<owner-id>/<job-key>~p<NNN>~<t>~<from>/        flat
 ├── workflows/<slug>--<h16>/                installed workflows
 ├── logs/managers/<owner-id>.log            one log per manager
@@ -100,7 +100,7 @@ WORKSPACE/
 ```
 
 Initialization creates the control directories `owners`, `requests`, `tmp`,
-`quarantine` and `exchange-jobs`, the seven state directories and `workflows/`;
+`quarantine` and `exchange-jobs`, the eight state directories and `workflows/`;
 everything else appears on demand.
 
 ### `format.json`
@@ -153,8 +153,9 @@ dotted names to JSON scalars; the protocol reads `seal.succeeded`, `seal.keys`,
 | `failed` | Ended with a failure; `continue`, `restart` and `override_step` revive it; a parent failed at its wait keeps `join` and `continue` reopens it. |
 | `succeeded` | Ended successfully; never changed by the protocol until `job unseal`, or unless the job is unlocked (§Unlocked jobs). |
 | `cancelled` | Cancelled by a request. |
+| `away` | An inert away copy of a job that `job push` or `job transfer --keep` moved elsewhere; never runs, only `job delete` or `job recover` act on it. |
 
-`succeeded`, `failed` and `cancelled` are terminal (`TERMINAL_STATES`); the six
+`succeeded`, `failed` and `cancelled` are terminal (`TERMINAL_STATES`); the seven
 states other than `owned` are the unowned states (`UNOWNED_STATES`).
 
 ### Placement rules

@@ -409,6 +409,9 @@ def restored_budget(
 
 
 def _refusal(job: JobDefinition, doc: StateDoc, from_state: str, action: str, no_copy: bool) -> str | None:
+    if from_state == "away" and action != "delete":
+        # An away job is an inert copy: only giving it up applies; `job recover` brings it back first.
+        return f"the job is away at {doc.away['locator'] if doc.away else '?'}; recover it first"
     terminal = from_state in TERMINAL_STATES
     unlocked = doc.unlocked is not None
     # An unlocked (debug-mode) job may be changed after it succeeded; cancelled stays final.
@@ -433,7 +436,7 @@ def _refusal(job: JobDefinition, doc: StateDoc, from_state: str, action: str, no
         return f"{action} applies to failed or paused jobs, not {from_state}"
     if action == "detach" and (job.parent is None or doc.detached is not None):
         return "the job has no parent link to detach"
-    if action == "delete" and not (terminal or from_state == "paused"):
+    if action == "delete" and not (terminal or from_state in ("paused", "away")):
         return f"only terminal or paused jobs are deleted, not {from_state}"
     if action == "delete" and from_state == "succeeded" and not (unsealed(doc) or unlocked):
         return "a succeeded job is never changed; release it with `job unseal` first"

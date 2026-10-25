@@ -59,6 +59,7 @@ def describe_job(workspace: Workspace, ref: JobRef, *, include_children: bool = 
         "workflow_pin": None if doc is None else _thaw(doc.workflow_pin),
         "workflow_override": None if doc is None else _thaw(doc.workflow_override),
         "unlocked": _thaw(unlocked),
+        "away": None if doc is None else _thaw(doc.away),
         "paths": {
             "payload": str(ref.path),
             "workdir": str(ref.path / "run"),
@@ -141,6 +142,13 @@ def render_job(report: Mapping[str, Any]) -> str:
         if isinstance(paths, Mapping) and paths.get("runner_copy"):
             text += "; runs its own runner copy"
         lines.append(_pair("unlocked", f"{text}; collect needs --force"))
+    away = report.get("away")
+    if isinstance(away, Mapping):
+        lines.append(
+            _pair(
+                "away", f"at {away.get('locator')} since {away.get('at')} (left {away.get('state')}, recover to resend)"
+            )
+        )
     if report.get("state") == OWNED:
         lines.append(_pair("owner", f"{report.get('owner_id')} (claimed from {report.get('claimed_from')})"))
     phase = report.get("phase")

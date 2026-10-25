@@ -15,12 +15,14 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote
-from httk.workflow import Workspace, _moving, hygiene
+from httk.workflow import Workspace, _kernel, _moving, hygiene
+from httk.workflow._state import Release, read_state_unowned
 from httk.workflow.projects import initialize_project
 from httk.workflow.registry import create_workspace
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command, transfer_command
-from test_moving import assert_in, find, place, single, tree
+from test_moving import assert_in, claim_root, find, job_ids_below, place, single, tree
+from v3_helpers import cli_owner
 
 
 class Crash(BaseException):
@@ -1375,3 +1377,187 @@ def test_push_validates_its_named_end_before_creating_the_default_workspace(
     assert everyday("push", plain, "no-such-workspace") == 2
     assert "no-such-workspace" in capsys.readouterr().err
     assert not (data_home() / "workspace").exists() and list_workspaces() == before
+
+
+# -- away copies ------------------------------------------------------------------------------------------------
+
+
+def away_of(workspace: Workspace, job_id: object) -> dict[str, Any]:
+    ref = find(workspace, job_id)
+    assert ref is not None and ref.state == "away"
+    doc = read_state_unowned(ref.path / "state.json")[0]
+    assert doc is not None and doc.away is not None
+    return dict(doc.away)
+
+
+def test_push_keeps_away_copies_and_no_keep_keeps_none(
+    project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    near, near_name, far, far_name = _remote_pair(tmp_path)
+    first = single(near, "ready", 321)
+    assert everyday("push", project, "--json", "-q", near_name, f"cluster:{far_name}") == 0
+    (outcome,) = outcomes(capsys)["transfers"]
+    assert outcome["status"] == "adopted" and outcome["kept"] is True
+    assert_in(far, [first])
+    away = away_of(near, first[0]["id"])
+    assert {name: away[name] for name in away if name != "at"} == {
+        "workspace_id": far.workspace_id,
+        "locator": f"cluster:{far_name}",
+        "transfer_id": outcome["transfer_id"],
+        "state": "ready",
+        "priority": 321,
+    }
+    assert find(near, first[0]["id"]).priority == 321  # type: ignore[union-attr]
+    assert outgoing(near) == []
+    # The human report says so, once; the away copy is never selected again.
+    second = single(near, "ready")
+    assert everyday("push", project, "-q", near_name, f"cluster:{far_name}") == 0
+    assert f"kept 1 away copies in {near.root} (httk job list --state away; httk job recover JOB to resend)" in (
+        capsys.readouterr().out
+    )
+    assert_in(far, [first, second])
+    third = single(near, "ready")
+    assert everyday("push", project, "--json", "-q", "--no-keep", near_name, f"cluster:{far_name}") == 0
+    assert [outcome["kept"] for outcome in outcomes(capsys)["transfers"]] == [False]
+    assert find(near, third[0]["id"]) is None
+    assert_in(far, [first, second, third])
+
+
+def test_transfer_keeps_only_with_keep(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    plain, kept = single(source, "failed", 30), single(source, "cancelled", 40)
+    assert run(tmp_path, "--json", "--job", str(plain[0]["id"]), source_name, target_name) == 0
+    assert [outcome["kept"] for outcome in outcomes(capsys)["transfers"]] == [False]
+    assert find(source, plain[0]["id"]) is None
+    # One filesystem: the adoption takes a copy of the hold, which the release keeps.
+    assert run(tmp_path, "--json", "--keep", "--job", str(kept[0]["id"]), source_name, target_name) == 0
+    assert [outcome["kept"] for outcome in outcomes(capsys)["transfers"]] == [True]
+    assert away_of(source, kept[0]["id"])["state"] == "cancelled"
+    assert_in(target, [plain, kept])
+    assert outgoing(source) == [] and not list((target.control / "tmp").iterdir())
+
+
+def test_push_then_pull_brings_the_finished_job_home_in_place_of_its_copy(
+    project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    near, near_name, far, far_name = _remote_pair(tmp_path)
+    mapping, _, _ = single(near, "ready", 321)
+    assert everyday("push", project, "-q", near_name, f"cluster:{far_name}") == 0
+    assert away_of(near, mapping["id"])["state"] == "ready"
+    capsys.readouterr()
+    with cli_owner(far) as owner:  # the job ran there
+        job = claim_root(far, owner, mapping["id"])
+        doc = job.read_state()
+        assert doc is not None
+        job.release(doc, Release("succeeded", 321))
+    assert everyday("pull", project, "--json", "-q", f"cluster:{far_name}", near_name) == 0
+    (outcome,) = outcomes(capsys)["transfers"]
+    assert outcome["status"] == "adopted" and outcome["kept"] is False
+    assert_in(near, [(mapping, "succeeded", 321)])
+    assert job_ids_below(near.jobs) == [mapping["id"]]
+    assert list(_kernel.list_jobs(near, "away")) == [] and list(_kernel.list_jobs(far, "away")) == []
+    assert find(far, mapping["id"]) is None and outgoing(far) == []
+
+
+def test_away_jobs_are_never_selected_implicitly_and_refused_by_name(
+    project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    near, near_name, _far, far_name = _remote_pair(tmp_path)
+    mapping, _, _ = single(near, "ready")
+    assert everyday("push", project, "-q", near_name, f"cluster:{far_name}") == 0
+    capsys.readouterr()
+    assert everyday("push", project, near_name, f"cluster:{far_name}") == 0
+    assert "no ready job to move" in capsys.readouterr().out
+    assert everyday("push", project, "--step", "start", near_name, f"cluster:{far_name}") == 0
+    assert "no job at step start to move" in capsys.readouterr().out
+    assert everyday("push", project, "--state", "away", near_name, f"cluster:{far_name}") == 2
+    assert "invalid choice: 'away'" in capsys.readouterr().err
+    assert everyday("push", project, "--json", "--job", str(mapping["id"]), near_name, f"cluster:{far_name}") == 1
+    (error,) = outcomes(capsys)["errors"]
+    assert error.endswith("is away; recover it first")
+    assert find(near, mapping["id"]).state == "away"  # type: ignore[union-attr]
+    assert run(project, "--hold", "--keep", "--job", str(mapping["id"]), near_name, "x") == 2
+    assert "--keep applies when a hold is released, not to --hold" in capsys.readouterr().err
+
+
+def test_a_remote_source_keeps_its_copies_through_the_release_leg(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    near, near_name, far, far_name = _remote_pair(tmp_path)
+    ready, failed = single(near, "ready", 12), single(near, "failed", 13)
+    assert everyday("push", project, "--json", "-q", f"cluster:{near_name}", far_name) == 0
+    assert [outcome["kept"] for outcome in outcomes(capsys)["transfers"]] == [True]
+    away = away_of(near, ready[0]["id"])
+    assert (away["workspace_id"], away["locator"]) == (far.workspace_id, str(far.root))
+    # An older remote that does not know --keep leaves the hold unreleased, and says why.
+    real = transfer_cli._remote
+
+    def older(end: Any, context: Any, arguments: Any, argv: list[str], cwd: str | None = None) -> tuple[int, str, str]:
+        if "--keep" in argv:
+            return 2, "", "httk: error: unrecognized arguments: --keep\n"
+        return real(end, context, arguments, argv, cwd)
+
+    monkeypatch.setattr(transfer_cli, "_remote", older)
+    argv = ["--json", "-q", "--keep", "--job", str(failed[0]["id"]), f"cluster:{near_name}", far_name]
+    assert run(project, *argv) == 1
+    (outcome,) = outcomes(capsys)["transfers"]
+    assert outcome["kept"] is False and "but the hold was not released" in outcome["message"]
+    assert "may run an older httk-workflow that keeps no away copies" in outcome["message"]
+    assert_in(far, [ready, failed])
+    (held,) = outgoing(near)
+    monkeypatch.setattr(transfer_cli, "_remote", real)
+    # The release form relays --keep to the remote that holds the transfer.
+    assert run(project, "--release", held, "--keep", f"cluster:{near_name}") == 0
+    assert capsys.readouterr().out == f"released {held}\n"
+    assert away_of(near, failed[0]["id"])["state"] == "failed"
+
+
+def test_recover_acts_on_a_local_workspace(project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _near, _near_name, _far, far_name = _remote_pair(tmp_path)
+    argv = ["job", "recover", "--workspace", f"cluster:{far_name}", "--all"]
+    assert command(argv, CLIContext("httk", project)) == 2
+    assert "is bound to the remote 'cluster', so it cannot recover away copies in it locally" in capsys.readouterr().err
+
+
+def test_a_pull_of_a_recovered_job_s_late_return_is_refused_and_stays_held(
+    project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    near, near_name, far, far_name = _remote_pair(tmp_path)
+    mapping, _, _ = single(near, "ready", 321)
+    assert everyday("push", project, "-q", near_name, f"cluster:{far_name}") == 0
+    context = CLIContext("httk", project)
+    assert command(["job", "recover", "--no-durable", "--workspace", near_name, "--all"], context) == 0
+    capsys.readouterr()
+    with cli_owner(far) as owner:  # the job ran there all the same: exactly the recovered members return
+        job = claim_root(far, owner, mapping["id"])
+        doc = job.read_state()
+        assert doc is not None
+        job.release(doc, Release("succeeded", 321))
+    assert everyday("pull", project, "--json", "-q", f"cluster:{far_name}", near_name) == 1
+    (outcome,) = outcomes(capsys)["transfers"]
+    assert outcome["status"] == "refused" and "kept" not in outcome
+    assert "was recovered here after it was pushed to workspace" in outcome["message"]
+    assert "bundle refused: bundle refused" not in outcome["message"]
+    assert len(outgoing(far)) == 1 and find(far, mapping["id"]) is None  # the result stays held there
+    assert_in(near, [(mapping, "ready", 321)])
+    assert job_ids_below(near.jobs) == [mapping["id"]]
+
+
+def test_kept_is_reported_only_for_copies_actually_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, source_name = registered(tmp_path, "a")
+    target, _target_name = registered(tmp_path, "b")
+    first, second = single(source, "failed"), single(source, "cancelled")
+    # A hold that records no destination workspace id: the release keeps no copies of it.
+    argv = ["job", "eject", "--no-durable", "--workspace", source_name, "--hold", str(first[0]["id"]), str(target.root)]
+    assert command(argv, CLIContext("httk", tmp_path)) == 0
+    capsys.readouterr()
+    assert run(tmp_path, "--json", "-q", "--resume", "--keep", source_name) == 0
+    assert [outcome["kept"] for outcome in outcomes(capsys)["transfers"]] == [False]
+    # A hold another actor released first: nothing was kept by this run.
+    monkeypatch.setattr(transfer_cli._moving, "release_hold", lambda *_arguments, **_options: False)
+    assert run(tmp_path, "--json", "-q", "--keep", "--job", str(second[0]["id"]), source_name, str(target.root)) == 0
+    assert [outcome["kept"] for outcome in outcomes(capsys)["transfers"]] == [False]
+    assert_in(target, [first, second])

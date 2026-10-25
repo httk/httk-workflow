@@ -181,8 +181,9 @@ with `httk job push kappa:runs` (every job waiting to start) after
 `httk workflow install --workspace kappa:runs …` installed their workflow
 there, and the finished ones brought back with `httk job pull kappa:runs`
 (every succeeded job); the end left out is the workspace the command runs in,
-else the default workspace. `httk job transfer SRC DST` is the general form;
-see {doc}`running`. Besides `ssh`, the packaged
+else the default workspace. A push leaves an `away` copy of each job in its
+source until the pull brings the job back. `httk job transfer SRC DST` is the
+general form; see {doc}`running`. Besides `ssh`, the packaged
 templates are `local` (a second tree on this machine), `mount` (files over a
 shared mount, commands through a separate executor) and `mount-daemon` (files
 as the only channel, through an exchange directory: the workspace's managers serve it, and the confined broker only starts, queries and cancels managers).

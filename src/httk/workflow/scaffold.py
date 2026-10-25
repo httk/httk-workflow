@@ -56,7 +56,7 @@ from collections.abc import Callable, Generator, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType, ModuleType
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast, overload
 
 from httk.core.building import BuildSpec
 from httk.core.digests import sha256_file, tree_digest
@@ -76,7 +76,7 @@ from ._embedded import embedded_digest, embedded_id
 from ._job import JobDefinition
 from ._util import interpreter_first_path, validate_inputs
 from .codes import code_environment
-from .errors import FormatError, WorkflowError
+from .errors import DuplicateTagError, FormatError, WorkflowError
 from .models import (
     JOB_WORKFLOW_DIRECTORY,
     LOGS_DIRECTORY,
@@ -86,6 +86,7 @@ from .models import (
     make_job_key,
     normalize_placement,
     normalize_resources,
+    parse_job_key,
     placement_text,
     validate_parameters,
     validate_resources,
@@ -1400,6 +1401,76 @@ def _sanitize_tag(name: str) -> str | None:
     return tag or None
 
 
+class _TagIndex:
+    """The tags of a workspace's jobs by exact placement, listed lazily and at most once per :func:`new_jobs` call.
+
+    Each placement's directory in every unowned state is listed once, ``owned/`` once, and only an owned job whose
+    tag is asked for has its ``job.json`` read (owned names carry no placement). Every job the call submits is added.
+    """
+
+    def __init__(self, workspace: Workspace) -> None:
+        self._workspace = workspace
+        self._tags: dict[PurePosixPath, dict[str, _kernel.JobRef]] = {}
+        self._owned: dict[str, list[_kernel.JobRef]] | None = None
+
+    def _listed(self, placement: PurePosixPath) -> dict[str, _kernel.JobRef]:
+        tags = self._tags.get(placement)
+        if tags is None:
+            tags = self._tags[placement] = {}
+            for state in _kernel.UNOWNED_STATES:
+                directory = self._workspace.jobs / state / placement
+                for name in _kernel.list_names(directory):
+                    try:
+                        ref = _kernel.JobRef.from_path(directory / name, state=state, placement=placement)
+                    except FormatError:
+                        continue  # a deeper placement, or not a job
+                    tag, _ = parse_job_key(ref.job_key)
+                    if tag is not None:
+                        tags.setdefault(tag, ref)
+        return tags
+
+    def existing(self, placement: PurePosixPath, tag: str) -> _kernel.JobRef | None:
+        """Return a job tagged *tag* at exactly *placement*, in any state, or ``None``.
+
+        :param placement: The placement.
+        :param tag: The tag.
+        :return: The job found first.
+        """
+
+        if (ref := self._listed(placement).get(tag)) is not None:
+            return ref
+        if self._owned is None:
+            self._owned = {}
+            root = self._workspace.jobs / _kernel.OWNED
+            for owner_id in _kernel.list_names(root):
+                for name in _kernel.list_names(root / owner_id):
+                    try:
+                        ref = _kernel.JobRef.from_path(root / owner_id / name, state=_kernel.OWNED, owner_id=owner_id)
+                    except FormatError:
+                        continue
+                    if (owned_tag := parse_job_key(ref.job_key)[0]) is not None:
+                        self._owned.setdefault(owned_tag, []).append(ref)
+        for ref in self._owned.get(tag, ()):
+            try:
+                if JobDefinition.from_path(ref.path / "job.json").placement == placement:
+                    return ref
+            except FormatError:
+                continue  # moved on or unreadable: fsck reports what stays
+        return None
+
+    def add(self, ref: _kernel.JobRef, tag: str) -> None:
+        """Record a job this call submitted.
+
+        :param ref: The submitted job.
+        :param tag: Its tag.
+        """
+
+        if ref.placement is not None:
+            self._listed(ref.placement).setdefault(tag, ref)
+
+
+# Only duplicate_tag="skip" can return None, so the other modes keep a plain ScaffoldedJob for callers.
+@overload
 def new_job(
     workspace: Workspace,
     workflow: str | os.PathLike[str],
@@ -1420,7 +1491,57 @@ def new_job(
     calls: Mapping[str, str] | None = None,
     call_parameters: Mapping[str, Mapping[str, object]] | None = None,
     embed_workflow: bool = False,
-) -> ScaffoldedJob:
+    duplicate_tag: Literal["refuse", "allow"] = "refuse",
+) -> ScaffoldedJob: ...
+
+
+@overload
+def new_job(
+    workspace: Workspace,
+    workflow: str | os.PathLike[str],
+    *,
+    inputs: Mapping[str, object] | None = None,
+    files: Mapping[str, str | os.PathLike[str]] | None = None,
+    parameters: Mapping[str, object] | None = None,
+    environment: Mapping[str, object] | None = None,
+    tag: str | None = None,
+    placement: str | PurePosixPath = DEFAULT_PLACEMENT,
+    priority: int | None = None,
+    step: str | None = None,
+    format: str | None = None,
+    name: str | None = None,
+    provenance: Mapping[str, object] | None = None,
+    install: bool = False,
+    move_inputs: Mapping[str, str | os.PathLike[str]] | None = None,
+    calls: Mapping[str, str] | None = None,
+    call_parameters: Mapping[str, Mapping[str, object]] | None = None,
+    embed_workflow: bool = False,
+    duplicate_tag: Literal["refuse", "skip", "allow"],
+) -> ScaffoldedJob | None: ...
+
+
+def new_job(
+    workspace: Workspace,
+    workflow: str | os.PathLike[str],
+    *,
+    inputs: Mapping[str, object] | None = None,
+    files: Mapping[str, str | os.PathLike[str]] | None = None,
+    parameters: Mapping[str, object] | None = None,
+    environment: Mapping[str, object] | None = None,
+    tag: str | None = None,
+    placement: str | PurePosixPath = DEFAULT_PLACEMENT,
+    priority: int | None = None,
+    step: str | None = None,
+    format: str | None = None,
+    name: str | None = None,
+    provenance: Mapping[str, object] | None = None,
+    install: bool = False,
+    move_inputs: Mapping[str, str | os.PathLike[str]] | None = None,
+    calls: Mapping[str, str] | None = None,
+    call_parameters: Mapping[str, Mapping[str, object]] | None = None,
+    embed_workflow: bool = False,
+    duplicate_tag: Literal["refuse", "skip", "allow"] = "refuse",
+) -> ScaffoldedJob | None:
     """Scaffold, submit, and describe one job of an installed *workflow*.
 
     *workflow* is the id or short name of a workflow installed in *workspace*
@@ -1483,34 +1604,43 @@ def new_job(
         directory, a git URI fetched into the fetch cache, a runner file) and its package copied into the job,
         pinned in ``job.json`` (workflow id ``embedded:<name>@<sha12>``). Refused for workflow format realizations,
         ``[workflow.build]``, fixed ``[workflow.calls]`` not installed in the workspace, and with *install*.
-    :return: The submitted job description.
+    :param duplicate_tag: What to do when a job of the same exact placement, in any state (owned included), already
+        carries the job's final tag (explicit or derived from an input or the instantiate hook): ``"refuse"`` raises
+        :class:`~httk.workflow.errors.DuplicateTagError`, ``"skip"`` logs a warning and submits nothing,
+        ``"allow"`` does not check. A tagless job is never checked. The check precedes the submission, so two
+        concurrent creators of one tag can both pass; ``httk workspace fsck`` reports the result.
+    :return: The submitted job description, or ``None`` when it was skipped.
+    :raises httk.workflow.errors.DuplicateTagError: If the tag is taken and *duplicate_tag* is ``"refuse"``.
     :raises ValueError: If the workflow is not installed (and *install* and *embed_workflow* are false), or workflow,
         inputs, placement, or job settings are invalid, or a file to move is not a regular file
         inside a succeeded job of *workspace* on its filesystem, or a call slot is unbound, bound to a
         workflow that does not fit it, or given parameters of the wrong type.
     """
 
-    [job] = new_jobs(
-        workspace,
-        workflow,
-        [{"move_inputs": move_inputs} if move_inputs else {}],
-        inputs=inputs,
-        files=files,
-        parameters=parameters,
-        environment=environment,
-        tag=tag,
-        placement=placement,
-        priority=priority,
-        step=step,
-        format=format,
-        name=name,
-        provenance=provenance,
-        install=install,
-        calls=calls,
-        call_parameters=call_parameters,
-        embed_workflow=embed_workflow,
+    jobs = list(
+        new_jobs(
+            workspace,
+            workflow,
+            [{"move_inputs": move_inputs} if move_inputs else {}],
+            inputs=inputs,
+            files=files,
+            parameters=parameters,
+            environment=environment,
+            tag=tag,
+            placement=placement,
+            priority=priority,
+            step=step,
+            format=format,
+            name=name,
+            provenance=provenance,
+            install=install,
+            calls=calls,
+            call_parameters=call_parameters,
+            embed_workflow=embed_workflow,
+            duplicate_tag=duplicate_tag,
+        )
     )
-    return job
+    return jobs[0] if jobs else None
 
 
 def new_jobs(
@@ -1533,6 +1663,7 @@ def new_jobs(
     calls: Mapping[str, str] | None = None,
     call_parameters: Mapping[str, Mapping[str, object]] | None = None,
     embed_workflow: bool = False,
+    duplicate_tag: Literal["refuse", "skip", "allow"] = "refuse",
 ) -> Generator[ScaffoldedJob, None, None]:
     """Scaffold and submit one job per member of *items*, lazily.
 
@@ -1572,10 +1703,14 @@ def new_jobs(
     :param embed_workflow: Embed the workflow in each job's own ``workflow/``, nothing installed; see
         :func:`new_job`.
         The package is resolved and snapshotted once; every job gets its own copy.
+    :param duplicate_tag: What to do with a job whose tag is taken in its placement; see :func:`new_job`. The jobs
+        this call submits count too, and each placement is listed once per call.
     :return: An iterator yielding each submitted job description.
     :yield: Each submitted job description.
+    :raises httk.workflow.errors.DuplicateTagError: At the first job whose tag is taken, with *duplicate_tag*
+        ``"refuse"``; the jobs before it stay submitted.
     :raises ValueError: If the workflow is not installed (and *install* is false), or workflow,
-        inputs, placement, job settings or call slot bindings are invalid.
+        inputs, placement, job settings, call slot bindings or *duplicate_tag* are invalid.
 
     .. code-block:: python
 
@@ -1587,6 +1722,9 @@ def new_jobs(
             print(job.job_key)
     """
 
+    if duplicate_tag not in ("refuse", "skip", "allow"):
+        raise ValueError(f"duplicate_tag must be 'refuse', 'skip' or 'allow': {duplicate_tag!r}")
+    tags = None if duplicate_tag == "allow" else _TagIndex(workspace)
     owner = _kernel.register_owner(workspace, kind="cli", label="job new", allocation=None, advertised={})
     snapshot: Path | None = None
     try:
@@ -1623,7 +1761,17 @@ def new_jobs(
                     moves=moves,
                     calls=bindings,
                 )
+                if tags is not None and job.tag and (existing := tags.existing(job.placement, job.tag)):
+                    raise DuplicateTagError(job.tag, job.placement, existing)
                 ref = _submit_staged(workspace, owner, scratch, staging)
+            except DuplicateTagError as exc:
+                if _undo_moves(workspace, moves):
+                    _drop_markers(workspace, moves)
+                if duplicate_tag == "refuse":
+                    raise
+                _LOGGER.warning("skipped tag %s: already %s (%s)", exc.tag, exc.existing.job_key, exc.existing.state)
+                _kernel.reconcile_scratch(owner, scratch)  # as Owner.close would, but now
+                continue
             except BaseException:
                 # A file that cannot go back keeps the markers, so closing the owner keeps the scratch holding it.
                 if _undo_moves(workspace, moves):
@@ -1632,6 +1780,8 @@ def new_jobs(
             finally:
                 for move in moves:
                     os.close(move.directory)
+            if tags is not None and job.tag is not None:
+                tags.add(ref, job.tag)
             if moves:
                 _drop_markers(workspace, moves)
                 _fs.remove_empty_dir(_fs.loc(scratch))

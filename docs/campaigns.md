@@ -91,7 +91,13 @@ job = campaign_submit(
 
 A job is created where the client runs, so a partition that points at a
 remote workspace is submitted to locally, moved with `httk job push` and
-fetched home with `httk job pull` ({doc}`running`).
+fetched home with `httk job pull` ({doc}`running`); the pushed jobs stay in
+the local partition as `away` copies (`httk job list --state away`) until the
+pull replaces them.
+
+A job with a `--tag` is created only once per placement, whatever state the
+existing one is in (an away copy counts): re-running the creation script with
+`--duplicate-tag skip` creates just the jobs that do not exist yet.
 
 ## Running and collecting across partitions
 

@@ -566,7 +566,9 @@ job yourself, deepest first, then the parent. `--state`, `--step` and `--placeme
 also select jobs of local workspaces only; give job ids for a remote one.
 `set_workflow` resolves `--workflow` on the remote side, against the remote
 workspace's installations; it is refused for a workspace daemon remote.
-{doc}`/details/remotes` covers what a remote binding accepts.
+{doc}`/details/remotes` covers what a remote binding accepts. A job lost on a
+remote after `job push` is returned from its `away` copy with
+`httk job recover JOB` and pushed again.
 
 ## See also
 

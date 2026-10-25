@@ -9,6 +9,8 @@ The check walks ``jobs/`` and reports:
 - ``unparsable_name``: an entry that is neither a placement directory nor a job directory name of its state (a
   file, a symlink, a malformed name, an unknown ``jobs/`` or ``owned/`` entry);
 - ``duplicate_job``: one job UUID in two places;
+- ``duplicate_tag``: one tag shared by jobs of one placement (in any state, owned included), which job creation
+  refuses unless asked to allow it, but two concurrent creators can both pass (noted, never unresolved);
 - ``orphan_owned``: ``jobs/owned/<owner-id>/`` without ``owners/<owner-id>/``;
 - ``tombstoned_owner_with_jobs``: a recovered owner (only ``dead.json`` left) that holds jobs, launches or
   scratch again; the ``dead_owners`` category of ``httk workspace gc`` recovers it;
@@ -40,6 +42,7 @@ from ._state import UNOWNED_STATES, read_state_unowned
 from .errors import FormatError, WorkflowError
 from .gc import quarantine
 from .manifests import require_quiescent_workspace
+from .models import parse_job_key
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .workspace import Workspace
@@ -55,10 +58,12 @@ class FsckFinding:
     """One thing the check found.
 
     :param entry: The path.
-    :param problem: ``unparsable_name``, ``duplicate_job``, ``orphan_owned``, ``tombstoned_owner_with_jobs``,
-        ``unreadable_state``, ``foreign_owner``, ``stale_exchange_index`` or ``unindexed_exchange_job``.
+    :param problem: ``unparsable_name``, ``duplicate_job``, ``duplicate_tag``, ``orphan_owned``,
+        ``tombstoned_owner_with_jobs``, ``unreadable_state``, ``foreign_owner``, ``stale_exchange_index`` or
+        ``unindexed_exchange_job``.
     :param detail: A human-readable explanation.
-    :param action: ``reported``, ``quarantined``, ``removed`` or ``indexed``.
+    :param action: ``reported``, ``quarantined``, ``removed``, ``indexed`` or ``noted`` (informational, not counted
+        as unresolved).
     :param job_key: The job key, when the name parses.
     :param job_id: The job UUID, when the name parses.
     """
@@ -222,6 +227,7 @@ def _check(workspace: "Workspace", owner: Owner | None) -> FsckReport:
     findings: list[FsckFinding] = []
     unparsable: list[Path] = []
     seen: dict[str, list[JobRef]] = {}
+    tagged: dict[tuple[PurePosixPath, str], list[JobRef]] = {}
     exchange_jobs: list[tuple[JobRef, PurePosixPath, str]] = []
     uid = os.geteuid()
     checked = 0
@@ -231,6 +237,8 @@ def _check(workspace: "Workspace", owner: Owner | None) -> FsckReport:
             continue
         checked += 1
         seen.setdefault(item.job_id, []).append(item)
+        if (tag := parse_job_key(item.job_key)[0]) is not None and (placement := _placement(item)) is not None:
+            tagged.setdefault((placement, tag), []).append(item)
         ids = {"job_key": item.job_key, "job_id": item.job_id}
         owner_uid = os.lstat(item.path).st_uid
         if owner_uid != uid:
@@ -254,6 +262,19 @@ def _check(workspace: "Workspace", owner: Owner | None) -> FsckReport:
                 )
                 for ref in refs
             )
+    for (placement, tag), refs in sorted(tagged.items(), key=lambda pair: (pair[0][0].parts, pair[0][1])):
+        if len({ref.job_id for ref in refs}) > 1:  # one job in two places is a duplicate_job
+            jobs = ", ".join(f"{ref.job_key} ({ref.state})" for ref in refs)
+            findings.append(
+                FsckFinding(
+                    refs[0].path,
+                    "duplicate_tag",
+                    f"tag {tag!r} is shared by {len(refs)} jobs in placement {placement.as_posix()!r}: {jobs}",
+                    action="noted",  # duplicates may be deliberate (duplicate_tag="allow")
+                    job_key=refs[0].job_key,
+                    job_id=refs[0].job_id,
+                )
+            )
     owners = workspace.control / "owners"
     for entry in _entries(workspace.jobs / _kernel.OWNED):
         if entry.is_dir(follow_symlinks=False) and not stat.S_ISDIR(_mode(owners / entry.name)):
@@ -270,6 +291,17 @@ def _check(workspace: "Workspace", owner: Owner | None) -> FsckReport:
     for finding in findings:
         counts[finding.problem] = counts.get(finding.problem, 0) + 1
     return FsckReport(workspace.workspace_id, checked, tuple(findings), counts)
+
+
+def _placement(ref: JobRef) -> PurePosixPath | None:
+    """Return a job's placement: from its location, or from ``job.json`` for an owned job (``None`` if unreadable)."""
+
+    if ref.placement is not None:
+        return ref.placement
+    try:
+        return JobDefinition.from_path(ref.path / "job.json").placement
+    except FormatError:
+        return None
 
 
 def _unparsable(workspace: "Workspace", owner: Owner | None, entries: list[Path]) -> list[FsckFinding]:

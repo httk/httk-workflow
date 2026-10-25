@@ -259,7 +259,7 @@ def campaign_submit(
 
     partition = assign_partition(key, index=index, project=project)
     workspace = _local_partition_workspace(partition, project)
-    return new_job(workspace, workflow, **job)  # type: ignore[arg-type]
+    return new_job(workspace, workflow, **job)  # type: ignore[call-overload]
 
 
 def campaign_submit_many(

@@ -153,7 +153,11 @@ $ httk workflow run --workspace kappa:runs --count 4
 
 `httk job push [SRC] DST` moves every `ready` job of SRC; the SRC left out is
 the workspace the command runs in, else the default workspace (the per-user
-one is created on first use).
+one is created on first use). SRC keeps an inert *away copy* of each pushed job
+(state `away`; `--no-keep` keeps none) so the jobs stay accounted for:
+`httk job list --state away` lists them, a pull of the finished jobs replaces
+them, and `httk job recover JOB` returns a job lost on the remote to the state
+it left, to push again. See *Away copies* in {doc}`workflow_cli`.
 
 Workflows travel with the jobs. A transfer (push, pull or `job transfer`, local
 or remote ends, either direction) installs in DST every workflow the moved jobs
