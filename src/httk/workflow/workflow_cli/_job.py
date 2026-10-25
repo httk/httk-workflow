@@ -11,6 +11,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -26,6 +27,7 @@ from httk.core.identity import (
 
 from .. import _fs, _kernel, _moving, _requests, _store
 from .._bundles import BundleError
+from .._children import newest_labeled
 from .._job import JobDefinition
 from .._kernel import JobRef
 from .._logging import LOG_LEVELS, configure_logging
@@ -694,13 +696,10 @@ def _with_failed_descendants(workspace: Workspace, refs: Sequence[JobRef]) -> li
     return expanded
 
 
-def _continue_notes(
-    workspace: Workspace, refs: Sequence[JobRef], action: str, *, tree: bool = False, local: bool = True
-) -> None:
+def _continue_notes(workspace: Workspace, refs: Sequence[JobRef], action: str, *, tree: bool = False) -> None:
     """Note, before a ``continue`` reopens a wait, the join children that would fail it again.
 
-    With *tree* the failed children are resumed, so only the others are noted; a remote (not *local*) note does
-    not suggest ``--tree``.
+    With *tree* the failed children are resumed, so only the others are noted.
     """
 
     if action != "continue":
@@ -720,12 +719,100 @@ def _continue_notes(
                     file=sys.stderr,
                 )
             elif child.state == "cancelled" or (child.state == "failed" and not tree):
-                suggestion = " (continue --tree also resumes failed descendants)" if local else ""
                 print(
                     f"note: {key} is still {child.state}; the reopened wait of {ref.job_key} fails again unless it "
-                    f"is resumed first{suggestion}",
+                    "is resumed first (continue --tree also resumes failed descendants)",
                     file=sys.stderr,
                 )
+
+
+def _stale_children(workspace: Workspace, ref: JobRef) -> list[tuple[str, JobRef]]:
+    """Return the failed or cancelled children a rerun spawn of *ref* would reuse, with their labels.
+
+    They are the newest recorded child per label that is found in the workspace (owned included), as the
+    SDK reuses them.
+    """
+
+    doc, _damage = read_state(ref)
+    newest = newest_labeled(() if doc is None else doc.children)
+    if not newest:
+        return []
+    found = _kernel.locate_many(
+        workspace,
+        [str(entry["job_id"]) for entry in newest.values()],
+        placements=[PurePosixPath(str(entry["placement"])) for entry in newest.values()],
+        # ponytail: one unsettled listing, so a child caught mid-rename is missed and the restart proceeds
+        # (the SDK still warns); settle the misses as the SDK does if that ever matters.
+        settle=False,
+    )
+    stale = [(label, found.get(str(entry["job_id"]))) for label, entry in newest.items()]
+    # An owned child counts by the state it was claimed from, as the SDK reuses it.
+    return [
+        (label, child)
+        for label, child in stale
+        if child is not None and (child.from_state or child.state) in {"failed", "cancelled"}
+    ]
+
+
+def _restart_refusal(workspace: Workspace, refs: Sequence[JobRef]) -> list[str]:
+    """Return why a ``restart`` of *refs* is pointless (one line per stale child, then the remedy), or nothing.
+
+    A restart reruns the spawning step, which reuses the existing children, failed and cancelled ones too.
+    """
+
+    lines: list[str] = []
+    parents: list[str] = []
+    for ref in refs:
+        stale = _stale_children(workspace, ref)
+        if stale:
+            parents.append(ref.job_key)
+        for label, child in stale:
+            state = child.from_state or child.state
+            code = ""
+            if state == "failed":
+                doc, _damage = read_state(child)
+                failure = None if doc is None else doc.failure
+                code = f" {failure.get('code')}" if failure is not None and failure.get("code") else ""
+            held = " (held by an owner)" if child.from_state else ""
+            lines.append(
+                f"error: {label} {child.job_key} is {state}{code}{held}; "
+                "a restart reruns the spawning step, which reuses it"
+            )
+    if lines:
+        lines.append(
+            "resume failed descendants and the parent with "
+            f"'httk job request continue --tree --reason TEXT {' '.join(parents)}'; "
+            "delete a child with 'httk job delete' to have the step create a fresh one; "
+            "or pass --force to restart anyway"
+        )
+    return lines
+
+
+def _serve_in_order(workspace: Workspace, posts: Sequence[tuple[JobRef, Callable[[], Path]]]) -> int:
+    """Post and serve one request at a time, in order, stopping at the first that does not resume its job.
+
+    Serving each before posting the next keeps a live manager from reopening an ancestor's wait while a
+    descendant is still failed (``continue --tree`` posts deepest first).
+
+    :param workspace: The workspace.
+    :param posts: Each job with the callable that posts its request and returns the request file.
+    :return: 0 when every job resumed, otherwise 1 (the rest are not posted).
+    """
+
+    for index, (ref, post) in enumerate(posts):
+        (outcome,) = serve_requests(workspace, [(ref, post())])
+        _print_outcome(outcome)
+        if outcome.status == "applied" and outcome.state != "failed":
+            continue
+        status = "applied but left the job failed" if outcome.status == "applied" else outcome.status
+        for rest, _post in posts[index + 1 :]:
+            print(
+                f"not posted: {rest.job_key} (an earlier request in the tree was {status}; "
+                "resolve it and rerun continue --tree)",
+                file=sys.stderr,
+            )
+        return 1
+    return 0
 
 
 def _continue_tree(
@@ -737,14 +824,10 @@ def _continue_tree(
     keep_budget: bool,
     identity: OperatorIdentity,
 ) -> int:
-    """Post and serve ``continue --tree`` one job at a time, deepest first, stopping at one that does not resume.
+    """Post and serve ``continue --tree`` one job at a time, deepest first, stopping at one that does not resume."""
 
-    Serving each before posting the next keeps a live manager from reopening an ancestor's wait while a
-    descendant is still failed.
-    """
-
-    for index, ref in enumerate(refs):
-        published = publish_job_requests(
+    def post(ref: JobRef) -> Path:
+        ((_ref, path),) = publish_job_requests(
             workspace,
             [ref],
             action="continue",
@@ -754,19 +837,9 @@ def _continue_tree(
             keep_budget=keep_budget,
             identity=identity,
         )
-        (outcome,) = serve_requests(workspace, published)
-        _print_outcome(outcome)
-        if outcome.status == "applied" and outcome.state != "failed":
-            continue
-        status = "applied but left the job failed" if outcome.status == "applied" else outcome.status
-        for rest in refs[index + 1 :]:
-            print(
-                f"not posted: {rest.job_key} (an earlier request in the tree was {status}; "
-                "resolve it and rerun continue --tree)",
-                file=sys.stderr,
-            )
-        return 1
-    return 0
+        return path
+
+    return _serve_in_order(workspace, [(ref, partial(post, ref)) for ref in refs])
 
 
 def publish_job_requests(
@@ -906,8 +979,6 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None and ":" in binding.name
-        if tree:
-            raise ValueError("--tree is applied locally and is not available for remote workspaces")
         if arguments.state or arguments.step:
             raise ValueError(
                 "--state, --step and --placement select jobs of a local workspace; give job ids for a remote one"
@@ -918,6 +989,8 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
                 raise ValueError(
                     f"{arguments.action} is not carried by the workspace daemon protocol; run it on the daemon host"
                 )
+            if tree:
+                raise ValueError("--tree is not carried by the workspace daemon protocol; run it on the daemon host")
             status, stdout = request_remote_jobs(binding, context, arguments, identity)
             sys.stdout.write(stdout)
             return status
@@ -945,6 +1018,12 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     if not refs:
         print("no jobs selected", file=sys.stderr)
         return 1
+    if arguments.action == "restart" and not arguments.force:
+        refusal = _restart_refusal(workspace, refs)
+        if refusal:
+            for line in refusal:
+                print(line, file=sys.stderr)
+            return 1
     if tree:
         refs = _with_failed_descendants(workspace, refs)
     # As `job unlock`: the parents of a debugged job take its results, so they are unlocked too (marker only).
@@ -1016,7 +1095,16 @@ def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLICont
         keep_budget=bool(arguments.keep_budget),
         workflow=arguments.workflow,
     )
+    tree = bool(arguments.tree)
+    if tree and arguments.action != "continue":
+        raise ValueError("--tree applies only to the continue action")
     refs = [resolve_job(workspace, selector) for selector in arguments.job_id]
+    if arguments.action == "restart" and not arguments.force:
+        refusal = _restart_refusal(workspace, refs)
+        if refusal:
+            raise ValueError("\n".join(refusal))
+    if tree:
+        refs = _with_failed_descendants(workspace, refs)
     _prevalidate(refs, arguments.action, arguments.override_step, force=bool(arguments.force))
     for ref in refs if arguments.action == "unlock" else ():
         # The envelope path posts exactly the signed requests: it cannot walk to the ancestors as `job unlock` does.
@@ -1030,8 +1118,8 @@ def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLICont
         # Resolved and checked against this (the far) side's installations; the client accepts the id it names.
         options["workflow"] = _switch_target(workspace, refs, arguments.workflow)
         print(f"{arguments.workflow} is installed here as {options['workflow']}", file=sys.stderr)
-    _continue_notes(workspace, refs, arguments.action, local=False)
-    document = {
+    _continue_notes(workspace, refs, arguments.action, tree=tree)
+    document: dict[str, object] = {
         "format": _ENVELOPES_FORMAT,
         "format_version": 2,
         "envelopes": [
@@ -1039,6 +1127,9 @@ def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLICont
         ],
         "job_keys": [ref.job_key for ref in refs],
     }
+    if tree:
+        # The envelopes are the expansion, deepest first: the client signs it and asks for it to be served in order.
+        document["tree"] = True
     print(json.dumps(document, separators=(",", ":")))
     return 0
 
@@ -1048,13 +1139,17 @@ def _validate_remote_envelopes(
 ) -> list[dict[str, object]]:
     """Check the far side's envelopes against exactly what was asked, so it cannot get anything else signed.
 
+    With ``--tree`` the far side expands the selection to failed descendants: every envelope must still be a
+    ``continue`` with the requested options, and every selector must be matched by one; the others are noted.
+
     :param document: The envelopes document the far side returned.
     :param arguments: The local request arguments.
     :param operator: The operator label the envelopes must carry.
-    :return: The envelopes, in selector order.
+    :return: The envelopes, in selector order (in the far side's serving order with ``--tree``).
     :raises ValueError: If the document is malformed or any envelope differs from the request.
     """
 
+    tree = bool(getattr(arguments, "tree", False))
     envelopes, keys = document.get("envelopes"), document.get("job_keys")
     if (
         document.get("format") != _ENVELOPES_FORMAT
@@ -1063,9 +1158,11 @@ def _validate_remote_envelopes(
         or not isinstance(keys, list)
         or not all(isinstance(item, dict) for item in envelopes)
         or not all(isinstance(item, str) for item in keys)
+        or (tree and document.get("tree") is not True)
     ):
         raise ValueError("remote did not return a valid request-envelopes document")
-    if len(envelopes) != len(arguments.job_id) or len(keys) != len(envelopes):
+    too_few = len(envelopes) < len(arguments.job_id)
+    if too_few or (len(envelopes) > len(arguments.job_id) and not tree) or len(keys) != len(envelopes):
         raise ValueError(
             f"remote returned {len(envelopes)} request envelopes for {len(arguments.job_id)} requested jobs"
         )
@@ -1079,22 +1176,15 @@ def _validate_remote_envelopes(
         keep_budget=bool(getattr(arguments, "keep_budget", False)),
         workflow=getattr(arguments, "workflow", None),
     )
-    expected = {
-        "priority": None,
-        "step": None,
-        "budget": None,
-        "workflow": None,
-        "destination": None,
-        "force": None,
-        "keep_budget": None,
-        **options,
-    }
+    # Every optional member the format knows (eject's tree and unlock's no_copy too, which `job request` never
+    # asks for): the far side may add none the request did not carry.
+    expected: dict[str, object] = {**dict.fromkeys(_requests._OPTIONS), **options}
     workflow = options.get("workflow")
     if isinstance(workflow, str) and not is_workflow_id(workflow) and envelopes:
         # A name (or NAME@REF) resolves on the far side: every envelope must name the one id it resolved to.
         expected["workflow"] = envelopes[0].get("workflow")
     expected.update(action=arguments.action, operator=operator, reason=arguments.reason)
-    for index, (envelope, key, selector) in enumerate(zip(envelopes, keys, arguments.job_id, strict=True)):
+    for index, (envelope, key) in enumerate(zip(envelopes, keys, strict=True)):
         try:
             _requests.validate_envelope(envelope)
             _, key_job_id = parse_job_key(key)
@@ -1105,18 +1195,44 @@ def _validate_remote_envelopes(
         for member, value in expected.items():
             if envelope.get(member) != value:
                 raise ValueError(f"request envelope {index} member {member!r} disagrees with the request")
-        job_id = envelope["job_id"]
-        if key_job_id != job_id:
+        if key_job_id != envelope["job_id"]:
             raise ValueError(f"request envelope {index} job key disagrees with its job id")
-        try:
-            uuid_selector = canonical_uuid(selector, "JOB") == selector
-        except (WorkflowError, ValueError):
-            uuid_selector = False
-        if uuid_selector and job_id != selector:
-            raise ValueError(f"request envelope {index} does not match UUID selector {selector!r}")
-        if not (job_id.startswith(selector) or key.startswith(selector)):
-            raise ValueError(f"request envelope {index} does not match requested selector {selector!r}")
+    if not tree:
+        for index, (envelope, key, selector) in enumerate(zip(envelopes, keys, arguments.job_id, strict=True)):
+            problem = _selector_mismatch(selector, envelope["job_id"], key)
+            if problem is not None:
+                raise ValueError(f"request envelope {index} {problem}")
+        return envelopes
+    if len({envelope["job_id"] for envelope in envelopes}) != len(envelopes):
+        raise ValueError("remote returned more than one request envelope for a job")
+    matched: set[int] = set()
+    for selector in arguments.job_id:
+        hits = [
+            index
+            for index, (envelope, key) in enumerate(zip(envelopes, keys, strict=True))
+            if _selector_mismatch(selector, envelope["job_id"], key) is None
+        ]
+        if not hits:
+            raise ValueError(f"no request envelope matches requested selector {selector!r}")
+        matched.update(hits)
+    for index, key in enumerate(keys):
+        if index not in matched:
+            print(f"note: continue --tree also resumes {key}", file=sys.stderr)
     return envelopes
+
+
+def _selector_mismatch(selector: str, job_id: object, key: str) -> str | None:
+    """Return how a job (its id and key) fails to match a requested selector, or ``None`` when it matches."""
+
+    try:
+        uuid_selector = canonical_uuid(selector, "JOB") == selector
+    except (WorkflowError, ValueError):
+        uuid_selector = False
+    if uuid_selector and job_id != selector:
+        return f"does not match UUID selector {selector!r}"
+    if not (str(job_id).startswith(selector) or key.startswith(selector)):
+        return f"does not match requested selector {selector!r}"
+    return None
 
 
 def request_remote_job_result(
@@ -1157,6 +1273,9 @@ def request_remote_job_result(
         argv.append("--force")
     if getattr(arguments, "keep_budget", False):
         argv.append("--keep-budget")
+    tree = bool(getattr(arguments, "tree", False))
+    if tree:
+        argv.append("--tree")
     argv.extend(arguments.job_id)
     result = run_adapter(
         target.bundle, "invoke", {"argv": argv}, timeout=arguments.adapter_timeout, interactive=interactive
@@ -1181,6 +1300,8 @@ def request_remote_job_result(
         publish.append(f"--timeout={arguments.timeout}")
     if getattr(arguments, "no_durable", False):
         publish.append("--no-durable")
+    if tree:
+        publish.append("--sequential")
     published = run_adapter(
         target.bundle, "invoke", {"argv": publish}, timeout=arguments.adapter_timeout, interactive=interactive
     )
@@ -1207,6 +1328,8 @@ def handle_job_publish_requests(arguments: argparse.Namespace, context: CLIConte
             raise ValueError(f"request document {index} is invalid: {exc}") from exc
         documents.append(document)
     _check_wait(arguments.wait, arguments.timeout, [str(document["action"]) for document in documents])
+    if arguments.sequential and any(document["action"] != "continue" for document in documents):
+        raise ValueError("--sequential is only valid with continue requests")
     # Every job is located before anything is posted.
     refs: list[JobRef] = []
     for document in documents:
@@ -1219,6 +1342,14 @@ def handle_job_publish_requests(arguments: argparse.Namespace, context: CLIConte
         if ref is None:
             raise ValueError(f"job does not exist: {document['job_id']}")
         refs.append(ref)
+    if arguments.sequential:
+        return _serve_in_order(
+            workspace,
+            [
+                (ref, partial(_kernel.post_request, workspace, document))
+                for ref, document in zip(refs, documents, strict=True)
+            ],
+        )
     published = [
         (ref, _kernel.post_request(workspace, document)) for ref, document in zip(refs, documents, strict=True)
     ]
@@ -2007,7 +2138,10 @@ def _add_request_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="accept reviving a job a decided join already consumed (continue, restart, override_step)",
+        help=(
+            "accept reviving a job a decided join already consumed (continue, restart, override_step), "
+            "and restart a job whose failed or cancelled children its rerun spawning step would reuse"
+        ),
     )
     parser.add_argument(
         "--keep-budget",
@@ -2200,8 +2334,8 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
         "request",
         summary="post an operator request",
         description=(
-            "Post one operator request per job; the job's owner applies it at its next boundary "
-            "(a manager claims an unowned job to apply it)"
+            "Post one operator request per job and apply it at once when no owner holds the job; "
+            "otherwise the owner applies it at its next boundary"
         ),
         handler=handle_job_request,
     )
@@ -2242,7 +2376,7 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
         action="store_true",
         help=(
             "with continue: also resume the failed descendants of a job that failed waiting on its children, "
-            "deepest first (local workspaces only)"
+            "deepest first (not over a mount-daemon binding)"
         ),
     )
     request.add_argument("--wait", action="store_true", help="wait until every pause request reaches paused")
@@ -2269,6 +2403,9 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
     envelopes.add_argument("--operator", required=True, help="the operator attribution label")
     envelopes.add_argument("--reason", required=True, help="why the request is being made")
     _add_request_options(envelopes)
+    envelopes.add_argument(
+        "--tree", action="store_true", help="with continue: also the failed descendants, deepest first"
+    )
     envelopes.add_argument("--json", action="store_true", required=True, help=argparse.SUPPRESS)
 
     publish = _leaf(
@@ -2285,6 +2422,11 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
     )
     publish.add_argument("--wait", action="store_true", help="wait for pause requests to reach paused")
     publish.add_argument("--timeout", type=float, metavar="SECONDS", help="stop waiting after SECONDS")
+    publish.add_argument(
+        "--sequential",
+        action="store_true",
+        help="post and serve continue requests one at a time, in order, stopping at one that does not resume",
+    )
     add_durability_arguments(publish)
 
 

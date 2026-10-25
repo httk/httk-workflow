@@ -1796,11 +1796,23 @@ def _job_collector(
             if snapshot is None:
                 return None, None, reason
             installed = replace(copy, package_override=snapshot)
-    elif installed.record.get("tree_sha256") != pinned:
+    elif (current := installed.record.get("tree_sha256")) != pinned:
+        assert isinstance(pinned, str)  # a locked job without a pin returned above
+        remedy = (
+            "reinstall the tree it ran with, or delete the job ('httk job delete JOB') and create it again so it "
+            "runs on the installed tree"
+            if record.state == "succeeded"
+            else "rerun the job on the installed tree ('httk job request restart --reason TEXT JOB', or 'continue "
+            "--tree' when it failed waiting on failed children), or reinstall the tree it ran with"
+        )
         return (
             None,
             None,
-            f"pinned runner tree was modified: workflow {workflow_id!r} was reinstalled since the job ran",
+            (
+                f"workflow {workflow_id!r} is installed here with digest {str(current)[:12]}, but the job's last "
+                f"launch pinned {pinned[:12]}: it was reinstalled since the job ran, or the job ran where another "
+                f"tree was installed under the same id; {remedy}"
+            ),
         )
     else:
         try:

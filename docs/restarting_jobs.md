@@ -504,10 +504,24 @@ fail again. `--tree` is valid only with `continue`.
 `restart` on a parent that failed at its wait reruns the spawning step. A child
 label is unique per parent job, and a spawn or call whose label names an
 existing child reuses it: nothing new is created and the new specification is
-ignored. A failed or cancelled child is reused too, so the parent fails at its
-wait again, and the runtime logs a warning saying so. Revive the child first
-(`continue` it), or delete it with `httk job delete` so the restarted step
-creates a fresh one. A child that no longer exists is created anew. The restart restores the declared allowance, so
+ignored. A failed or cancelled child would be reused too, so the parent would
+fail at its wait again. `restart` therefore refuses, and posts nothing, when the
+parent recorded such a child: it prints one `error:` line per failed or
+cancelled child (its label, job key, state and failure code) and the remedy,
+then exits non-zero (`1`; `2` over ssh, where the far side's lines are relayed):
+
+```console
+$ httk job request restart --reason "redo" PARENT
+error: x x--<uuid> is failed dependency_failure; a restart reruns the spawning step, which reuses it
+resume failed descendants and the parent with 'httk job request continue --tree --reason TEXT PARENT'; ...
+```
+
+Revive the child first (`continue` it, or `continue --tree` the parent), or
+delete it with `httk job delete` so the restarted step creates a fresh one.
+`--force` restarts anyway; the runtime then logs a warning for each failed or
+cancelled child it reuses. The check also applies to jobs selected with
+`--state` or `--step`, and to a remote workspace over ssh. A child that no
+longer exists is created anew. The restart restores the declared allowance, so
 it runs even with `maximum_attempts_per_activation = 1`; with `--keep-budget`
 the spawning step's attempt counts against the current limit, and such a
 `restart` fails right back with `retry_exhausted`. Alternatively,
@@ -531,8 +545,8 @@ a.gather("collect")
 
 A cancelled child cannot be revived by any request, so a join naming it stays
 impossible: `continue` on the parent fails again at once. A restart or `override_step` of
-the spawning step reuses the cancelled child too: delete it first, then restart
-the parent or `override_step` it. A deleted child makes a reopened wait fail with `dependency_failure`
+the spawning step reuses the cancelled child too (`restart` refuses unless
+`--force`): delete it first, then restart the parent or `override_step` it. A deleted child makes a reopened wait fail with `dependency_failure`
 after the join grace, a manager option that defaults to one hour.
 
 ### Parents with `on_impossible`
@@ -560,9 +574,14 @@ httk job request continue --reason "quota restored" silicon
 
 ## Remote workspaces
 
-`continue --tree` works on local workspaces only; it is refused for a remote
-`--workspace` binding. For a remote workspace, post one `continue` per failed
-job yourself, deepest first, then the parent. `--state`, `--step` and `--placement`
+`continue --tree` works on a remote workspace reached over ssh as it does
+locally: the far side expands the tree, your machine signs only `continue`
+requests (the selected jobs and their failed descendants, each noted on
+stderr), and the far side serves them one at a time, deepest first, stopping
+at the first that does not resume. A workspace daemon remote refuses `--tree`;
+there, post one `continue` per failed job yourself, deepest first, then the
+parent, or run it on the daemon host. The `restart` refusal above runs on the
+far side of an ssh remote too. `--state`, `--step` and `--placement`
 also select jobs of local workspaces only; give job ids for a remote one.
 `set_workflow` resolves `--workflow` on the remote side, against the remote
 workspace's installations; it is refused for a workspace daemon remote.

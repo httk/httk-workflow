@@ -31,10 +31,23 @@ def test_failed_remote_check_prints_no_empty_json_array(
     assert "remote nope:" in captured.err
 
 
-def _transport(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, terminal: bool, **settings: object) -> list[str]:
+def _transport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, terminal: bool, controlpath: str = "none", **settings: object
+) -> list[str]:
     monkeypatch.setattr(adapter_runtime, "_terminal_present", lambda: terminal)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    return adapter_runtime._ssh_transport(settings)
+    calls: list[list[str]] = []
+
+    def ssh_config(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, f"user u\ncontrolpath {controlpath}\nport 22\n", "")
+
+    monkeypatch.setattr(adapter_runtime.subprocess, "run", ssh_config)
+    argv = adapter_runtime._ssh_transport({"host": "h.example.test", **settings})
+    # Only the connection-sharing mode asks ssh what the user's configuration resolves.
+    assert all(call[-3:] == ["-G", "--", "h.example.test"] for call in calls)
+    assert bool(calls) == (terminal and settings.get("interactive_auth") == "yes")
+    return argv
 
 
 def test_default_transport_is_batch_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -49,6 +62,14 @@ def test_interactive_yes_shares_a_private_connection(monkeypatch: pytest.MonkeyP
     assert "NumberOfPasswordPrompts=2" in argv
     assert {"ControlMaster=auto", "ControlPersist=600", f"ControlPath={tmp_path}/httk/%C"} <= set(argv)
     assert ((tmp_path / "httk").stat().st_mode & 0o777) == 0o700
+
+
+def test_interactive_yes_reuses_the_users_configured_control_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    argv = _transport(monkeypatch, tmp_path, terminal=True, controlpath="/home/u/.ssh/cm-%C", interactive_auth="yes")
+    assert "NumberOfPasswordPrompts=2" in argv
+    assert not any(item.startswith("Control") for item in argv)
 
 
 def test_interactive_per_call_prompts_without_sharing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

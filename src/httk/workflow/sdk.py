@@ -43,6 +43,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Self, cast, overload
 
 from . import _kernel
+from ._children import newest_labeled
 from ._data import Transaction
 from ._durations import cap_maxtime
 from ._job import JobDefinition
@@ -766,11 +767,7 @@ class Attempt:
 
         if self._recorded is None:
             doc = self._own_state() if (self.payload / "state.json").exists() else None
-            newest: dict[str, dict[str, object]] = {}
-            for item in () if doc is None else doc.children:
-                entry = cast(dict[str, object], _thaw(item))
-                if entry.get("label") is not None:
-                    newest[str(entry["label"])] = entry
+            newest = newest_labeled(() if doc is None else doc.children)
             refs = self._locate_children(list(newest.values()))
             # A child caught mid-rename (a claim or release) is not gone: settle only the misses.
             missing = [entry for entry in newest.values() if str(entry["job_id"]) not in refs]

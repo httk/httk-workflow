@@ -276,6 +276,7 @@ def test_ssh_pull_reports_a_truncated_stream(tmp_path: Path, remote: Remote) -> 
 def test_ssh_transfer_shares_the_interactive_connection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(adapter_runtime, "_terminal_present", lambda: True)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(adapter_runtime, "_configured_control_path", lambda *_args: False)
     argv = adapter_runtime._ssh_tar_argv({"host": FAKE_HOST, "interactive_auth": "yes"}, "true")
     assert any(item.startswith("ControlPath=") for item in argv)
 

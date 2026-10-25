@@ -181,8 +181,19 @@ an installation (see {doc}`remotes`). Otherwise a job ejected, adopted, or
 transferred with `--no-workflows` into a workspace that lacks its workflow
 stays `ready` and unclaimed until the workflow is installed there; `job adopt`
 and `job transfer` warn about it, and `job why` and `workflow precheck` name
-it. Do not reinstall a workflow that running jobs
-use: the installed digest is recorded at launch (`workflow_pin`), not enforced.
+it. Do not reinstall a workflow that unfinished jobs
+use: an id is one workflow, and the installed digest is recorded at each launch
+(`workflow_pin`), not enforced. Nothing refuses a reinstall, but each
+consequence is reported: `workflow install` warns and names the unfinished
+jobs that use the id (running attempts lose the old tree, later steps run the
+new one); the manager logs a warning when a job's next launch runs a different
+tree than its last; `job why` reports a `workflow pin` check when the installed
+tree differs from the last launch's pin; and `httk collect` refuses such a job
+with both digests and the remedies: reinstall the tree it ran with, or rerun
+the job on the installed tree (`httk job request restart --reason TEXT JOB`
+for a failed or paused job, or `continue --tree` when it failed waiting on
+failed children; a succeeded job is deleted with `httk job delete` and created
+again).
 To edit the runner for one job only, unlock the job and edit its own copy of
 the package instead (`httk job unlock`, see {doc}`/restarting_jobs`).
 
@@ -868,8 +879,9 @@ job cannot be found, is moved to quarantine by `gc` after a day. `continue`,
 refused unless `--force` is given. The exception is a child that its parent's
 join still names: the parent failed at its wait with a retained join, or waits
 on the child again. Fixing the child and continuing it needs no `--force`. `continue --tree PARENT` resumes such a parent's failed
-descendants, deepest first, before the parent itself; see
-{doc}`/restarting_jobs`.
+descendants, deepest first, before the parent itself. `restart` of a job that
+recorded a failed or cancelled child, which its rerun spawning step would
+reuse, is refused unless `--force` is given; see {doc}`/restarting_jobs`.
 
 The retry budgets that bind a revival, a retry and an `advance` are the
 effective ones: the `retry_policy` limits in `job.json` with the `budget_override`
@@ -881,8 +893,11 @@ limits in history; `--keep-budget` keeps the limits as they are, so a job that
 failed for lack of budget then needs `set_budget` first. Automatic retries never
 raise a limit; see {doc}`/restarting_jobs`.
 
-`job request` exits `0` once the files are posted, and warns when no live
-manager serves the job. `--wait` (only for `pause`) waits until each job was
+`job request` posts the files and, as a short-lived CLI owner, applies each
+request at once to a job no owner holds. A job held by an owner (a manager, or
+a dead one until `gc` or reconciliation) gets it at that owner's next
+boundary, and its outcome prints `queued`. It exits `1` when a request is
+refused or uncertain. `--wait` (only for `pause`) waits until each job was
 observed `paused`, and exits `1` when a pause was superseded, dropped or timed
 out (`--timeout SECONDS`). `override_step` is checked against the steps the
 runner recorded after its first attempt; `--force` publishes anyway.

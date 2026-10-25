@@ -12,10 +12,11 @@ from httk.core.cli import CLIContext
 from httk.core.storage import content_id
 
 from conftest import register_ws
-from httk.workflow import Workspace, _store, collect, job_records
+from httk.workflow import Workspace, _kernel, _store, collect, job_records
 from httk.workflow import collecting as collecting_module
 from httk.workflow import scaffold as scaffold_module
 from httk.workflow.collecting import CollectedJob, JobRecord
+from httk.workflow.introspection import explain_job
 from httk.workflow.workflow_cli import command
 from test_workflow_packages import _MANIFEST, _package
 from v3_helpers import RUNNER, cli_owner, run, submit, workspace
@@ -530,15 +531,34 @@ def test_collect_degrades_a_pinned_tree_with_the_wrong_manifest_id(tmp_path: Pat
 
 
 def test_collect_degrades_a_reinstalled_workflow(tmp_path: Path) -> None:
-    workspace, _ = _finished(tmp_path)
+    workspace, original = _finished(tmp_path)
     (tmp_path / "package" / "collect.py").write_text(_DATA_POSTPROCESS + "\n# changed\n", encoding="utf-8")
     with cli_owner(workspace) as owner:
-        _store.install(workspace, owner, tmp_path / "package")
+        reinstalled = _store.install(workspace, owner, tmp_path / "package")
 
     item = next(collect(workspace, allow_job_collector=True))
     assert item.outputs == {}
     assert item.missing_collector is not None
-    assert "reinstalled since the job ran" in item.missing_collector
+    reason = item.missing_collector
+    assert "reinstalled since the job ran" in reason
+    assert f"digest {str(reinstalled.record['tree_sha256'])[:12]}" in reason
+    assert f"pinned {str(original.record['tree_sha256'])[:12]}" in reason
+    assert reason.endswith(
+        "reinstall the tree it ran with, or delete the job ('httk job delete JOB') and create it again so it runs "
+        "on the installed tree"
+    )
+    assert "unlock" not in reason
+    assert "pinned runner tree was modified" not in reason
+
+    # job why reports the mismatch for the succeeded job, which is otherwise left alone.
+    (ref,) = _kernel.list_jobs(workspace, "succeeded")
+    diagnosis = explain_job(workspace, ref)
+    assert diagnosis.summary == "this job succeeded; nothing is left to run"
+    (check,) = (check for check in diagnosis.checks if check.name == "workflow pin")
+    assert check.satisfied is False
+    assert str(original.record["tree_sha256"])[:12] in check.detail
+    assert "collect refuses this job until it reruns on the installed tree" in check.detail
+    assert any("reinstall the tree it ran with" in hint and "'httk job delete JOB'" in hint for hint in diagnosis.hints)
 
 
 def test_collect_degrades_an_unknown_language_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

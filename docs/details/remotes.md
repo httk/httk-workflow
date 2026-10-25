@@ -111,12 +111,16 @@ reaches the remote; a manager that runs unattended cannot reopen it.
 
 Where connection sharing is not an option, set `interactive_auth=yes`. ssh then
 prompts in your terminal for the password or code; httk never sees the secret.
-httk keeps its own shared connection open for 10 minutes after its last use
+Connection reuse comes from your own ssh `ControlMaster` configuration, which
+httk's ssh calls honor: when `~/.ssh/config` names a `ControlPath` for the
+host, httk adds no control options and ssh reuses your open master connection.
+That reuse needs a running master or `ControlMaster auto`: with `ControlMaster
+no` and no master open, every call authenticates again.
+Only when the configuration defines no `ControlPath` does httk keep its own
+shared connection open for 10 minutes after its last use
 (`ControlPersist=600`, with the socket under `$XDG_RUNTIME_DIR/httk` or
-`/tmp/httk-ssh-UID`), so a command such as `remote check` prompts once. That
-control socket replaces any `ControlPath` from `~/.ssh/config`: if you already
-share connections there, keep the default (or `per-call`), or you are prompted
-despite the open connection. Configuring checks connectivity,
+`/tmp/httk-ssh-UID`), so a command such as `remote check` prompts once.
+Configuring checks connectivity,
 so the configure command itself already prompts:
 
 ```console

@@ -87,6 +87,78 @@ def test_slurm_counts_accept_typed_gpus() -> None:
     assert slurm_counts({"SLURM_JOB_ID": "1", "SLURM_GPUS": "a100:x"}) == {}
 
 
+# sbatch --gres=gpu:4 --nodes=2 --ntasks-per-node=4 exports no SLURM_GPUS.
+_GRES = {
+    "SLURM_JOB_ID": "9",
+    "SLURM_JOB_NODELIST": "n[01-02]",
+    "SLURM_JOB_NUM_NODES": "2",
+    "SLURM_NTASKS": "8",
+    "SLURM_TASKS_PER_NODE": "4(x2)",
+    "SLURM_JOB_GPUS": "0,1,2,3",
+    "SLURM_GPUS_ON_NODE": "4",
+    "SLURMD_NODENAME": "n01",
+    "CUDA_VISIBLE_DEVICES": "0,1,2,3",
+}
+
+
+def test_slurm_gres_allocation_reports_its_gpus() -> None:
+    assert slurm_counts(_GRES) == {"procs": 8, "gpus": 8, "nodes": 2}
+    allocation = slurm_allocation(_GRES, run=_scontrol("n01 n02")[0])
+    assert allocation is not None and [node.gpus for node in allocation.nodes] == [4, 4]
+    ids_only = {key: value for key, value in _GRES.items() if key != "SLURM_GPUS_ON_NODE"}
+    assert slurm_counts(ids_only)["gpus"] == 8
+
+
+@pytest.mark.parametrize(
+    ("change", "per_node"),
+    [
+        # --gpus=8: the batch node's count is every node's when they add up.
+        ({"SLURM_GPUS": "8"}, [4, 4]),
+        # --gpus-per-task=1 follows each node's tasks exactly.
+        (
+            {
+                "SLURM_GPUS_PER_TASK": "1",
+                "SLURM_TASKS_PER_NODE": "6,2",
+                "SLURM_GPUS_ON_NODE": "6",
+                "SLURM_JOB_GPUS": "0,1,2,3,4,5",
+                "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5",
+            },
+            [6, 2],
+        ),
+        ({"SLURM_GPUS_PER_TASK": "1"}, [4, 4]),
+    ],
+)
+def test_slurm_gpus_and_per_task_allocations_bind_per_node(change: dict[str, str], per_node: list[int]) -> None:
+    allocation = slurm_allocation({**_GRES, **change}, run=_scontrol("n01 n02")[0])
+    assert allocation is not None and [node.gpus for node in allocation.nodes] == per_node
+
+
+@pytest.mark.parametrize("change", [{"SLURM_JOB_GPUS": ""}, {"SLURM_GPUS_ON_NODE": "0"}])
+def test_slurm_zero_gpus_store_no_count_and_keep_the_nodes(change: dict[str, str]) -> None:
+    environ = {key: value for key, value in _GRES.items() if key not in ("SLURM_GPUS_ON_NODE", "CUDA_VISIBLE_DEVICES")}
+    environ.update(change)
+    assert "gpus" not in slurm_counts(environ)
+    allocation = slurm_allocation(environ, run=_scontrol("n01 n02")[0])
+    assert allocation is not None and [node.gpus for node in allocation.nodes] == [0, 0]
+
+
+@pytest.mark.parametrize(
+    ("gpus", "expected"),
+    [
+        ({"SLURM_GPUS_PER_NODE": "a100:2"}, 4),
+        ({"SLURM_GPUS_PER_TASK": "1"}, 8),
+        # --gpus wins over every per-node or per-task form, and per node over per task.
+        ({"SLURM_GPUS": "3", "SLURM_GPUS_PER_NODE": "2", "SLURM_GPUS_PER_TASK": "1", "SLURM_GPUS_ON_NODE": "2"}, 3),
+        ({"SLURM_GPUS_PER_NODE": "2", "SLURM_GPUS_PER_TASK": "2", "SLURM_GPUS_ON_NODE": "2"}, 4),
+        ({"SLURM_GPUS_PER_TASK": "1", "SLURM_GPUS_ON_NODE": "2"}, 8),
+        ({"SLURM_GPUS_PER_NODE": "x", "SLURM_GPUS_ON_NODE": "1"}, 2),
+    ],
+)
+def test_slurm_counts_read_every_gpu_request_form(gpus: dict[str, str], expected: int) -> None:
+    environ = {"SLURM_JOB_ID": "1", "SLURM_JOB_NUM_NODES": "2", "SLURM_NTASKS": "8", **gpus}
+    assert slurm_counts(environ)["gpus"] == expected
+
+
 def test_slurm_allocation_lists_nodes_with_batch_host_gpu_ids() -> None:
     run, calls = _scontrol("n01\nn02\n")
     allocation = slurm_allocation(_TWO_NODES, run=run)

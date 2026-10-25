@@ -995,7 +995,16 @@ Installing copies the package's sources into the workspace store,
 calls, `requires`, runner, steps and initial step, and with `builds/` for
 registered builds. Reinstalling an id replaces its installation; jobs keep
 their workflow id, so users do not reinstall a workflow that queued jobs are
-using. `job new --workflow-dir DIR --install` reinstalls when the sources
+using. A reinstall is never refused, but `workflow install` warns and names
+the unfinished jobs that use the id, the manager logs a warning when a job's
+next launch runs a different tree than its last, `job why` reports the
+mismatch between the installed tree and the job's `workflow_pin` as a
+`workflow pin` check, and `httk collect` refuses the job with both digests and
+the remedies: reinstall the tree it ran with, or rerun it on the installed
+tree (`httk job request restart --reason TEXT JOB` for a failed or paused job,
+or `continue --tree` when it failed waiting on failed children; a succeeded job
+is deleted with `httk job delete` and created again).
+`job new --workflow-dir DIR --install` reinstalls when the sources
 of `DIR` have changed since the installation (compared by the installed
 digest's rules, ignoring `.git` and declared build artifacts), so an
 edited package directory is picked up by the next job. To iterate on a runner

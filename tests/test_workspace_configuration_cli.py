@@ -7,7 +7,11 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import fake_remote
-from httk.workflow.adapters import REMOTE_WORKSPACE_SETTINGS_COMMAND
+from httk.workflow.adapters import (
+    REMOTE_WORKSPACE_CONFIGURE_COMMAND,
+    REMOTE_WORKSPACE_POLICY_COMMAND,
+    REMOTE_WORKSPACE_SETTINGS_COMMAND,
+)
 from httk.workflow.errors import SealedError
 from httk.workflow.models import WorkspacePolicy
 from httk.workflow.projects import initialize_project
@@ -76,47 +80,105 @@ def test_configuration_and_prelude_mutations_obey_workspace_seals(tmp_path: Path
     assert (workspace.control / "format.json").read_bytes() == before
 
 
-# An older remote answers ``settings set`` with the bare stored value; a current one with an object.
-@pytest.mark.parametrize("set_reply", ['"new"', '{"app.command": "new"}'])
-def test_remote_configuration_uses_existing_settings_commands(
-    tmp_path: Path, monkeypatch, capsys, set_reply: str
-) -> None:
-    binding = WorkspaceBinding("remote:ws", "remote", None)
-    monkeypatch.setattr(_workspace, "_resolve_binding", lambda *_args: (binding, None))
-    calls = []
-
-    def remote_output(_binding, _context, argv, **_kwargs):
-        calls.append(argv)
-        mode = argv[len(REMOTE_WORKSPACE_SETTINGS_COMMAND)]
-        return (
-            0,
-            '[{"app.command": "new"}]' if mode == "show" else set_reply if mode == "set" else "",
-            "",
-        )
-
-    monkeypatch.setattr(_common, "remote_workspace_output", remote_output)
-    assert (
-        command(
-            ["workspace", "configure", "remote:ws", "--unset", "app.old", "--set", "app.command=new", "--json"],
-            CLIContext("httk", tmp_path),
-        )
-        == 0
-    )
-    assert json.loads(capsys.readouterr().out) == [{"app.command": "new"}]
+def test_remote_configuration_is_one_forwarded_command(tmp_path: Path, monkeypatch, capsys) -> None:
+    project, calls = _far_workspace(tmp_path, monkeypatch, {"app.old": 1, "app.gone": 2})
+    argv = ["workspace", "configure", "cluster:far", "--set", "a=1", "--set", "b=x", "--unset", "app.old"]
+    assert command([*argv, "--unset", "app.gone", "--json"], CLIContext("httk", project)) == 0
+    assert json.loads(capsys.readouterr().out) == [{"a": 1, "b": "x"}]
     assert calls == [
-        [*REMOTE_WORKSPACE_SETTINGS_COMMAND, "unset", "--key", "app.old", "ws"],
-        [*REMOTE_WORKSPACE_SETTINGS_COMMAND, "set", "--key", "app.command", "--value", "new", "ws"],
-        [*REMOTE_WORKSPACE_SETTINGS_COMMAND, "show", "--json", "ws"],
+        [*REMOTE_WORKSPACE_CONFIGURE_COMMAND, "--json"]
+        + ["--set", "a=1", "--set", "b=x", "--unset", "app.old", "--unset", "app.gone", "far"]
     ]
     calls.clear()
-    assert (
-        command(
-            ["workspace", "configure", "remote:ws", "--unset", "app.old", "--set", "bad key=new"],
-            CLIContext("httk", tmp_path),
-        )
-        == 1
-    )
+    # Local validation refuses before anything is sent.
+    bad = ["workspace", "configure", "cluster:far", "--unset", "app.old", "--set", "bad key=new"]
+    assert command(bad, CLIContext("httk", project)) == 1
     assert not calls
+
+
+def _far_workspace(tmp_path: Path, monkeypatch, settings: dict[str, object]) -> tuple[Path, list[list[str]]]:
+    """Bind ``cluster:far`` to a loopback remote and record every far-side command."""
+
+    project = tmp_path / "project"
+    initialize_project(project, name="one-call")
+    fake_remote(project, template="local", name="cluster")
+    create_workspace("far", tmp_path / "far")
+    if settings:
+        Workspace(tmp_path / "far").configure_settings(settings)
+    calls: list[list[str]] = []
+    original = _common.remote_workspace_output
+
+    def spy(binding, context, argv, **kwargs):
+        calls.append(list(argv))
+        return original(binding, context, argv, **kwargs)
+
+    monkeypatch.setattr(_common, "remote_workspace_output", spy)
+    return project, calls
+
+
+def test_settings_unset_removes_every_key_in_one_write(tmp_path: Path, monkeypatch, capsys) -> None:
+    create_workspace("ws", tmp_path / "ws")
+    Workspace(tmp_path / "ws").configure_settings({"a": 1, "b": 2, "c": 3})
+    writes = []
+    original = Workspace.configure_settings
+
+    def spy(self, changes, **kwargs):
+        writes.append((dict(changes), tuple(kwargs.get("unset", ()))))
+        return original(self, changes, **kwargs)
+
+    monkeypatch.setattr(Workspace, "configure_settings", spy)
+    context = CLIContext("httk", tmp_path)
+    assert command(["workspace", "settings", "unset", "--key", "a", "--key", "b", "ws"], context) == 0
+    assert json.loads(capsys.readouterr().out) == ["a", "b"]
+    assert writes == [({}, ("a", "b"))]
+    assert Workspace(tmp_path / "ws").settings == {"c": 3}
+    # A key that is not set refuses the whole removal.
+    assert command(["workspace", "settings", "unset", "--key", "c", "--key", "a", "ws"], context) == 1
+    assert Workspace(tmp_path / "ws").settings == {"c": 3}
+
+
+def test_remote_settings_unset_forwards_every_key_in_one_call(tmp_path: Path, monkeypatch, capsys) -> None:
+    project, calls = _far_workspace(tmp_path, monkeypatch, {"a": 1, "b": 2, "c": 3})
+    argv = ["workspace", "settings", "unset", "--key", "a", "--key", "b", "cluster:far"]
+    assert command(argv, CLIContext("httk", project)) == 0
+    assert json.loads(capsys.readouterr().out) == ["a", "b"]
+    assert calls == [[*REMOTE_WORKSPACE_SETTINGS_COMMAND, "unset", "--key", "a", "--key", "b", "far"]]
+    assert Workspace(tmp_path / "far").settings == {"c": 3}
+
+
+def test_remote_settings_unset_detects_an_older_remote(tmp_path: Path, monkeypatch, capsys) -> None:
+    project, _calls = _far_workspace(tmp_path, monkeypatch, {"a": 1, "b": 2})
+    # An older far side keeps only the last --key and prints nothing.
+    monkeypatch.setattr(_common, "remote_workspace_output", lambda *_args, **_kwargs: (0, "", ""))
+    context = CLIContext("httk", project)
+    assert command(["workspace", "settings", "unset", "--key", "a", "--key", "b", "cluster:far"], context) == 1
+    assert "predates repeatable --key" in capsys.readouterr().err
+    assert command(["workspace", "settings", "unset", "--key", "a", "cluster:far"], context) == 0
+    assert json.loads(capsys.readouterr().out) == ["a"]
+
+
+def test_remote_policy_verbs_are_one_forwarded_command_each(tmp_path: Path, monkeypatch, capsys) -> None:
+    project, calls = _far_workspace(tmp_path, monkeypatch, {})
+    context = CLIContext("httk", project)
+    argv = ["workspace", "policy", "set", "--key", "visibility_deadline_seconds", "--value", "72"]
+    assert command([*argv, "--key", "retention.trash_days", "--value", "9", "cluster:far"], context) == 0
+    policy = Workspace(tmp_path / "far").policy
+    assert policy.visibility_deadline_seconds == 72 and policy.retention.trash_days == 9
+    capsys.readouterr()
+    assert command(["workspace", "policy", "show", "--json", "cluster:far"], context) == 0
+    assert json.loads(capsys.readouterr().out)[0]["visibility_deadline_seconds"] == 72
+    assert (
+        command(["workspace", "policy", "unset", "--key", "visibility_deadline_seconds", "cluster:far"], context) == 0
+    )
+    default = WorkspacePolicy().visibility_deadline_seconds
+    assert Workspace(tmp_path / "far").policy.visibility_deadline_seconds == default
+    assert calls == [
+        [*REMOTE_WORKSPACE_POLICY_COMMAND, "set"]
+        + ["--key", "visibility_deadline_seconds", "--value", "72", "--key", "retention.trash_days", "--value", "9"]
+        + ["far"],
+        [*REMOTE_WORKSPACE_POLICY_COMMAND, "show", "--json", "far"],
+        [*REMOTE_WORKSPACE_POLICY_COMMAND, "unset", "--key", "visibility_deadline_seconds", "far"],
+    ]
 
 
 def test_settings_set_applies_every_pair_in_one_write(tmp_path: Path, monkeypatch, capsys) -> None:

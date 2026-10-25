@@ -48,6 +48,10 @@ httk workspace show default
 httk workspace configure default --unset vasp.command
 ```
 
+One `configure` call applies every `--set` and `--unset` in one validated
+write; for a workspace on a remote it is one forwarded command, so one ssh
+connection.
+
 The manager exports each scalar setting into the attempt environment under its
 `HTTK_` name, so `vasp.command` becomes `HTTK_VASP_COMMAND`. A real
 environment variable is a deployment override and wins over the workspace

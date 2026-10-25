@@ -744,6 +744,7 @@ def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
     with _kernel.register_owner(
         workspace, kind="cli", label="workflow install", allocation=None, advertised={}
     ) as owner:
+        present = {installed.id for installed in _store.list_installed(workspace)}
         for source in arguments.sources:
             try:
                 targets, siblings = _install_targets(source)
@@ -763,6 +764,8 @@ def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
                         )
                     rows.append(_installed_row(installed))
                     done.append(installed)
+                    if installed.id in present:
+                        _warn_reinstalled(workspace, installed.id)
             except _ERRORS as exc:
                 failed = True
                 print(f"{source}: {exc}", file=sys.stderr)
@@ -871,6 +874,21 @@ def _users(workspace: Workspace, workflow_id: str) -> list[str]:
         if (job := read_job(ref)[0]) is not None
         and (effective_workflow(job, read_state(ref)[0])[0] == workflow_id or workflow_id in bound_workflows(job))
     ]
+
+
+def _warn_reinstalled(workspace: Workspace, workflow_id: str) -> None:
+    """Warn on stderr when a reinstalled workflow is used by unfinished jobs (never refused: an id is one workflow)."""
+
+    # ponytail: printed right after the replace (the id is only known once install resolved the source); the
+    # list is the same either way. `job new --install` reinstalls without it; the manager's launch warning covers it.
+    users = _users(workspace, workflow_id)
+    if users:
+        shown = ", ".join(users[:10]) + (f" and {len(users) - 10} more" if len(users) > 10 else "")
+        print(
+            f"warning: reinstalling {workflow_id} while {len(users)} unfinished jobs use it: {shown}; "
+            "running attempts lose the old tree and later steps run the new one",
+            file=sys.stderr,
+        )
 
 
 def handle_workflow_uninstall(arguments: argparse.Namespace, context: Any) -> int:

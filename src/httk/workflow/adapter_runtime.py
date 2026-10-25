@@ -325,7 +325,9 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
     terminal is attached (:func:`_terminal_present`), so ssh can ask for a
     password or second factor on ``/dev/tty``; httk never sees the answer.
     ``yes`` also shares one connection for ten minutes through a control socket,
-    so the following ssh calls do not prompt again; ``per-call`` lets
+    so the following ssh calls do not prompt again, unless the user's own ssh
+    configuration already names a ``ControlPath`` for the destination: ssh then
+    reuses that master and httk adds no control options. ``per-call`` lets
     every call prompt, for sites that forbid connection sharing.
 
     :param settings: The persisted remote settings and their credentials.
@@ -345,7 +347,7 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
     # OpenSSH counts prompts per method, and a site may enter keyboard-interactive twice
     # (password, then one-time code); 2 allows that and bounds a typo to one retry.
     argv += ["-o", f"ConnectTimeout={_CONNECT_TIMEOUT}", "-o", "NumberOfPasswordPrompts=2"]
-    if mode == "yes":
+    if mode == "yes" and not _configured_control_path(argv, settings):
         argv += [
             "-o",
             "ControlMaster=auto",
@@ -355,6 +357,37 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
             f"ControlPath={_control_directory()}/%C",
         ]
     return argv
+
+
+def _configured_control_path(argv: Sequence[str], settings: Mapping[str, object]) -> bool:
+    """Return whether the user's ssh configuration names a ``ControlPath`` for this destination.
+
+    ``ssh -G`` only evaluates the configuration and opens no connection. Any
+    failure answers ``False``, so httk then shares its own connection.
+
+    :param argv: The ssh argument vector built so far, without destination.
+    :param settings: The persisted remote settings and their credentials.
+    :return: ``True`` when the resolved ``controlpath`` is anything but ``none``.
+    """
+
+    try:
+        completed = subprocess.run(
+            [*argv, "-G", "--", _ssh_destination(settings)],
+            text=True,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=_CONNECT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    if completed.returncode != 0:
+        return False
+    for line in completed.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key == "controlpath":
+            return value.strip() != "none"
+    return False
 
 
 def _login_hint(settings: Mapping[str, object], completed: "subprocess.CompletedProcess[str]") -> str:

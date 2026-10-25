@@ -763,7 +763,11 @@ are interpreted live, not historically.
 `--allow-job-collector` lets collection load the collect hook of the job's
 installed workflow package in the workspace, after checking that its tree
 digest still matches the job's `runner_provenance` (a workflow reinstalled or
-modified since the job ran is refused); refusals degrade only that job. See
+modified since the job ran is refused; a reinstall's refusal names both digests
+and the remedies: reinstalling the tree it ran with, or rerunning the job on
+the installed tree with `httk job request restart` (`continue --tree` when it
+failed waiting on failed children), a succeeded job by deleting it and creating
+it again); refusals degrade only that job. See
 {doc}`/details/workflow_packages` for the trust tiers and package hook
 contract.
 

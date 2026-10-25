@@ -1602,6 +1602,22 @@ class TaskManager:
             )
             return False
         present = os.path.lexists(owned.path / _store.RUNNER_COPY)
+        last = doc.workflow_pin or {}
+        if (
+            source == "installed"
+            and last.get("source") == "installed"
+            and last.get("id") == installed.id
+            and isinstance(previous := last.get("tree_sha256"), str)
+            and previous != tree_sha256
+        ):
+            _LOGGER.warning(
+                "job %s launches workflow %s with digest %s; its last launch ran %s (reinstalled in between): "
+                "later steps run the new tree and collect checks the last pin",
+                owned.job_key,
+                installed.id,
+                str(tree_sha256)[:12],
+                previous[:12],
+            )
         pin = {"id": installed.id, "tree_sha256": tree_sha256, "source": source, "workflow_present": present}
         doc = self._write(owned, doc.updated(workflow_pin=pin).with_phase("launching", attempt_id))
         payload = owned.path

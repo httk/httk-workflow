@@ -610,6 +610,40 @@ def _workflow_checks(
     return closure.ok and binding is None and tree_ok
 
 
+def _pin_check(workspace: Workspace, state: str, doc: StateDoc | None, report: _Diagnosing) -> None:
+    """Report when the installed tree differs from the one the job's last launch pinned (collect refuses that)."""
+
+    pin = None if doc is None else doc.workflow_pin
+    if pin is None or pin.get("source") != "installed" or not isinstance(pinned := pin.get("tree_sha256"), str):
+        return
+    try:
+        installed = _store.lookup(workspace, str(pin.get("id")))
+    except (ValueError, OSError):
+        return  # an unreadable store is the installed-workflow check's to report
+    current = None if installed is None or installed.id != pin.get("id") else installed.record.get("tree_sha256")
+    if not isinstance(current, str) or current == pinned:
+        return
+    report.check(
+        "workflow pin",
+        False,
+        f"the installed tree ({current[:12]}) differs from the one the last launch pinned ({pinned[:12]}); collect "
+        "refuses this job until it reruns on the installed tree",
+    )
+    assert doc is not None
+    if state in {"failed", "paused"} or (state == "succeeded" and doc.unlocked is not None):
+        report.hint(
+            "rerun it on the installed tree ('httk job request restart --reason TEXT JOB', or 'continue --tree' when "
+            "it failed waiting on failed children), or reinstall the tree it ran with"
+        )
+    elif state == "succeeded":
+        report.hint(
+            "reinstall the tree it ran with, or delete the job ('httk job delete JOB') and create it again so it "
+            "runs on the installed tree"
+        )
+    else:
+        report.hint("nothing to do yet: its next launch runs and pins the installed tree")
+
+
 def _manager_checks(
     workspace: Workspace,
     requirements: ClaimRequirements,
@@ -1031,6 +1065,8 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
             # A member is recovered with the root of its away tree.
             root = _moving.away_root(workspace, ref).job_key
             report.hint(f"if the job was lost there, run 'httk job recover {root}' and push it again")
+    if state not in {"cancelled", "away"}:
+        _pin_check(workspace, state, doc, report)
     if state in {"ready", "waiting", "paused"}:
         report.hint("drive it in the foreground with 'httk job debug [--workspace WS] JOB'")
     return Diagnosis(

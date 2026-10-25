@@ -86,10 +86,12 @@ class RunnerResolutionError(WorkflowError):
     """A shared runner cannot be resolved or verified.
 
     The failure carries the exact protocol failure ``code`` the manager records,
-    so an unresolvable runner (``runner_unavailable``), a runner whose bytes
-    disagree with the digest the job pinned (``runner_mismatch``), a
-    missing registration (``runner_not_built``), and a failed foreground build
-    (``runner_build_failed``) stay distinguishable to an operator.
+    so an unresolvable runner (``runner_unavailable``), a missing build for
+    this platform (``runner_not_built``), a failed platform probe or build
+    (``runner_build_failed``), an embedded ``workflow/`` that is missing,
+    refused or changed (``protocol_error``), and an installed code's
+    unavailable Bash API (``code_support_unavailable``) stay distinguishable to
+    an operator.
 
     :param code: Protocol failure code recorded by the manager.
     :param message: Human-readable failure description.

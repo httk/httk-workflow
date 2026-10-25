@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from ._manager_binding import Placement
 
 _LOGGER = logging.getLogger(__name__)
+#: The Slurm GPU variables that may carry typed counts such as ``a100:2``.
+_TYPED_GPUS = frozenset({"SLURM_GPUS", "SLURM_GPUS_PER_NODE", "SLURM_GPUS_PER_TASK"})
 _REPEATED = re.compile(r"([0-9]+)(?:\(x([0-9]+)\))?")
 _JOB_ID = re.compile(r"[1-9][0-9]{0,19}")
 _CLUSTER = re.compile(r"[A-Za-z0-9_.-]{1,256}")
@@ -70,7 +72,7 @@ def _integer(environ: Mapping[str, str], name: str, *, memory: bool = False) -> 
             elif suffix == "K":
                 divide_kibibytes = True
     try:
-        parsed = _slurm_gpus(value) if name == "SLURM_GPUS" else int(value)
+        parsed = _slurm_gpus(value) if name in _TYPED_GPUS else int(value)
     except ValueError:
         _LOGGER.warning("ignoring unparsable Slurm resource variable %s=%r", name, raw)
         return None
@@ -78,6 +80,37 @@ def _integer(environ: Mapping[str, str], name: str, *, memory: bool = False) -> 
         _LOGGER.warning("ignoring negative Slurm resource variable %s=%r", name, raw)
         return None
     return parsed // 1024 if divide_kibibytes else parsed * multiplier
+
+
+def _gpu_total(environ: Mapping[str, str], nodes: int | None, ntasks: int | None) -> int | None:
+    """Return the allocation's GPU count from whichever form of GPU request Slurm exported.
+
+    ``--gpus`` sets ``SLURM_GPUS``, ``--gpus-per-node`` ``SLURM_GPUS_PER_NODE``,
+    ``--gpus-per-task`` ``SLURM_GPUS_PER_TASK``, and ``--gres=gpu:N`` only the
+    batch node's ``SLURM_GPUS_ON_NODE`` and ``SLURM_JOB_GPUS``; the last two
+    count every node as the batch node.
+    """
+
+    total = _integer(environ, "SLURM_GPUS")
+    if total is not None:
+        return total
+    per_node = _integer(environ, "SLURM_GPUS_PER_NODE")
+    if per_node is not None and nodes is not None:
+        return per_node * nodes
+    per_task = _integer(environ, "SLURM_GPUS_PER_TASK")
+    if per_task is not None and ntasks is not None:
+        return per_task * ntasks
+    on_node = _batch_node_gpus(environ)
+    return None if on_node is None or nodes is None else on_node * nodes
+
+
+def _batch_node_gpus(environ: Mapping[str, str]) -> int | None:
+    """Return the batch node's GPU count, ``SLURM_GPUS_ON_NODE`` or the ids in ``SLURM_JOB_GPUS``."""
+
+    count = _integer(environ, "SLURM_GPUS_ON_NODE")
+    if count is None and "SLURM_JOB_GPUS" in environ:
+        count = len([item for item in environ["SLURM_JOB_GPUS"].split(",") if item.strip()])
+    return count
 
 
 def slurm_counts(environ: Mapping[str, str]) -> dict[str, int]:
@@ -90,12 +123,12 @@ def slurm_counts(environ: Mapping[str, str]) -> dict[str, int]:
     if "SLURM_JOB_ID" not in environ:
         return {}
     ntasks = _integer(environ, "SLURM_NTASKS")
-    gpus = _integer(environ, "SLURM_GPUS")
     nodes = _integer(environ, "SLURM_JOB_NUM_NODES")
+    gpus = _gpu_total(environ, nodes, ntasks)
     resources: dict[str, int] = {}
     if ntasks is not None:
         resources["procs"] = ntasks
-    if gpus is not None:
+    if gpus:  # zero GPUs is no capacity, as Allocation.capacity() omits it
         resources["gpus"] = gpus
     if nodes is not None:
         resources["nodes"] = nodes
@@ -230,19 +263,30 @@ def _slurm_hosts(environ: Mapping[str, str], run: Run) -> list[str] | None:
     return None
 
 
-def _gpu_counts(environ: Mapping[str, str], total: int, node_count: int) -> list[int] | None:
+def _gpu_counts(environ: Mapping[str, str], total: int, procs: list[int]) -> list[int] | None:
+    """Return each node's GPU count, or ``None`` when Slurm's variables do not determine it.
+
+    ``SLURM_GPUS_PER_NODE`` applies to every node, ``SLURM_GPUS_PER_TASK`` to
+    each node's tasks, and otherwise the batch node's own count is taken as
+    every node's; any of them must add up to *total*.
+    """
+
     if total == 0:
-        return [0] * node_count
-    if node_count == 1:
+        return [0] * len(procs)
+    if len(procs) == 1:
         return [total]
-    raw = environ.get("SLURM_GPUS_PER_NODE", "")
-    try:
-        count = _slurm_gpus(raw)
-    except ValueError:
+    per_node = _integer(environ, "SLURM_GPUS_PER_NODE")
+    per_task = _integer(environ, "SLURM_GPUS_PER_TASK")
+    batch = _batch_node_gpus(environ)
+    if per_node is not None:
+        counts = [per_node] * len(procs)
+    elif per_task is not None:
+        counts = [per_task * tasks for tasks in procs]
+    elif batch is not None:
+        counts = [batch] * len(procs)
+    else:
         return None
-    if count * node_count != total:
-        return None
-    return [count] * node_count
+    return counts if sum(counts) == total else None
 
 
 def slurm_cpus_per_proc(environ: Mapping[str, str]) -> int:
@@ -286,7 +330,7 @@ def slurm_allocation(
             return aggregate
         procs = per_node
     gpus = counts.get("gpus", 0)
-    per_node_gpus = _gpu_counts(environ, gpus, len(hosts))
+    per_node_gpus = _gpu_counts(environ, gpus, procs)
     if per_node_gpus is None:
         _LOGGER.warning("Slurm GPU distribution is unknown or nonuniform; using aggregate counts only")
         return aggregate

@@ -616,10 +616,12 @@ def _failed(
     *,
     state: str = "failed",
     started: bool = False,
+    spawned: tuple[tuple[str, dict[str, object]], ...] = (),
 ) -> _kernel.JobRef:
     """Place a failed job; with *waits_on* (``(job_id, job_key, placement)`` per child) it failed at its wait.
 
     *started* records a started attempt, so a revival needs a second one (beyond the default budget of one).
+    *spawned* records published children (``(label, mapping)`` each), the ones a rerun spawn reuses.
     """
 
     job = JobDefinition.from_mapping(mapping)
@@ -635,6 +637,12 @@ def _failed(
             for job_id, key, placement in waits_on
         ]
         doc = doc.updated(join={"condition": "all_succeeded", "count": 0, "next_step": "gather", "children": children})
+    if spawned:
+        records = []
+        for label, child in spawned:
+            job_id, key, placement = _link(child)
+            records.append({"label": label, "job_id": job_id, "job_key": key, "placement": placement})
+        doc = doc.with_children(records)
     with v3.cli_owner(workspace) as owner:
         staging = owner.scratch("submit") / "job"
         staging.mkdir()
@@ -701,7 +709,7 @@ def test_job_request_help_lists_restart_and_tree_only_on_request(tmp_path: Path,
     out = capsys.readouterr().out
     assert "continue, restart, override_step" in out and "--tree" in out
     assert command(["job", "request-envelopes", "--help"], _context(tmp_path)) == 0
-    assert "--tree" not in capsys.readouterr().out
+    assert "--tree" in capsys.readouterr().out
 
 
 def test_continue_tree_stops_at_a_descendant_that_does_not_resume(tmp_path: Path, capsys) -> None:
@@ -800,7 +808,7 @@ def test_continue_tree_notes_the_children_it_does_not_resume(tmp_path: Path, cap
     assert v3.find(workspace, parent.job_id).state == "waiting"
 
 
-def test_remote_envelopes_note_a_failed_child_without_suggesting_tree(tmp_path: Path, capsys) -> None:
+def test_remote_envelopes_note_a_failed_child_and_suggest_tree(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
     child_mapping, parent_mapping = _mapping(tmp_path, workspace, "child"), _mapping(tmp_path, workspace, "parent")
     _child_of(child_mapping, parent_mapping)
@@ -811,7 +819,7 @@ def test_remote_envelopes_note_a_failed_child_without_suggesting_tree(tmp_path: 
     assert command(argv, _context(tmp_path)) == 0
     err = capsys.readouterr().err
     assert f"note: {child.job_key} is still failed; the reopened wait of {parent.job_key} fails again" in err
-    assert "--tree" not in err
+    assert "continue --tree also resumes failed descendants" in err
 
 
 def test_continue_notes_a_held_child_and_tree_does_not_expand_it(tmp_path: Path, capsys) -> None:
@@ -839,3 +847,257 @@ def test_continue_notes_a_held_child_and_tree_does_not_expand_it(tmp_path: Path,
     assert line.startswith(f"{parent.job_id}\t")
     assert v3.find(workspace, parent.job_id).state == "waiting"
     assert v3.find(workspace, child.job_id).state == "failed"
+
+
+def _restart_family(tmp_path: Path, workspace: Workspace, child_state: str) -> tuple[_kernel.JobRef, ...]:
+    """A failed parent that spawned child ``x`` (left in *child_state*) and failed at its wait."""
+
+    child_mapping, parent_mapping = _mapping(tmp_path, workspace, "child"), _mapping(tmp_path, workspace, "parent")
+    _child_of(child_mapping, parent_mapping)
+    child = _failed(workspace, child_mapping, state=child_state)
+    parent = _failed(workspace, parent_mapping, (_link(child_mapping),), spawned=(("x", child_mapping),))
+    return parent, child
+
+
+@pytest.mark.parametrize(
+    ("child_state", "shown"), [("failed", "failed dependency_failure"), ("cancelled", "cancelled")]
+)
+def test_restart_refuses_a_job_whose_rerun_spawn_reuses_a_failed_or_cancelled_child(
+    tmp_path: Path, capsys, child_state: str, shown: str
+) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    parent, child = _restart_family(tmp_path, workspace, child_state)
+
+    assert command(_request_args(workspace_name, parent.job_id, action="restart"), _context(tmp_path)) == 1
+    captured = capsys.readouterr()
+    assert not captured.out and not _requests(workspace)
+    assert (
+        f"error: x {child.job_key} is {shown}; a restart reruns the spawning step, which reuses it\n"
+        f"resume failed descendants and the parent with "
+        f"'httk job request continue --tree --reason TEXT {parent.job_key}'; delete a child with 'httk job delete' "
+        "to have the step create a fresh one; or pass --force to restart anyway\n"
+    ) == captured.err
+    assert v3.find(workspace, parent.job_id).state == "failed"
+    # --state selections are checked too.
+    argv = ["job", "request", "restart", "--workspace", workspace_name, "--reason", "r", "--state", "failed"]
+    assert command(argv, _context(tmp_path)) == 1
+    assert "a restart reruns the spawning step" in capsys.readouterr().err and not _requests(workspace)
+
+    argv = [*_request_args(workspace_name, parent.job_id, action="restart"), "--force"]
+    assert command(argv, _context(tmp_path)) == 0
+    assert "\tapplied\t" in capsys.readouterr().out
+    assert v3.find(workspace, parent.job_id).state == "ready"
+
+
+def test_restart_of_a_job_whose_children_succeeded_is_not_refused(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    parent, _child = _restart_family(tmp_path, workspace, "succeeded")
+
+    assert command(_request_args(workspace_name, parent.job_id, action="restart"), _context(tmp_path)) == 0
+    assert "\tapplied\t" in capsys.readouterr().out
+    assert v3.find(workspace, parent.job_id).state == "ready"
+
+
+def test_request_envelopes_refuse_a_restart_that_reuses_a_failed_child(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    parent, child = _restart_family(tmp_path, workspace, "failed")
+    argv = ["job", "request-envelopes", "restart", "--workspace", workspace_name]
+    argv += ["--operator=Test User <tester@example.test>", "--reason=protocol", "--json", parent.job_id]
+
+    assert command(argv, _context(tmp_path)) == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert f"error: x {child.job_key} is failed dependency_failure; a restart reruns the spawning step" in captured.err
+    assert "or pass --force to restart anyway" in captured.err
+    assert command([*argv, "--force"], _context(tmp_path)) == 0
+    assert [envelope["job_id"] for envelope in json.loads(capsys.readouterr().out)["envelopes"]] == [parent.job_id]
+
+
+def _tree(tmp_path: Path, workspace: Workspace) -> tuple[_kernel.JobRef, _kernel.JobRef, _kernel.JobRef]:
+    tree = [_mapping(tmp_path, workspace, tag) for tag in ("grandchild", "child", "parent")]
+    _child_of(tree[0], tree[1])
+    _child_of(tree[1], tree[2])
+    grandchild = _failed(workspace, tree[0], started=True)
+    child = _failed(workspace, tree[1], (_link(tree[0]),))
+    parent = _failed(workspace, tree[2], (_link(tree[1]),))
+    return grandchild, child, parent
+
+
+def test_request_envelopes_tree_expands_deepest_first_and_publish_sequential_serves_in_order(
+    tmp_path: Path, capsys
+) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    grandchild, child, parent = _tree(tmp_path, workspace)
+    argv = ["job", "request-envelopes", "continue", "--workspace", workspace_name, "--tree", "--keep-budget"]
+    argv += ["--operator=Test User <tester@example.test>", "--reason=protocol", "--json", parent.job_id]
+    assert command(argv, _context(tmp_path)) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["tree"] is True
+    assert document["job_keys"] == [grandchild.job_key, child.job_key, parent.job_key]
+    pause = ["job", "request-envelopes", "pause", "--workspace", workspace_name, "--tree"]
+    pause += ["--operator=x", "--reason=r", "--json", parent.job_id]
+    assert command(pause, _context(tmp_path)) == 2
+    assert "--tree applies only to the continue action" in capsys.readouterr().err
+
+    # Kept as it is, the grandchild's budget is spent: it lands failed again and the rest are not posted.
+    seed = identity_key_paths("tester")[0]
+    publish = ["job", "publish-requests", "--workspace", workspace_name, "--sequential"]
+    for envelope in document["envelopes"]:
+        publish += ["--document", json.dumps(sign_document(envelope, seed_path=seed))]
+    assert command(publish, _context(tmp_path)) == 1
+    captured = capsys.readouterr()
+    (line,) = captured.out.splitlines()
+    assert line.startswith(f"{grandchild.job_id}\t") and line.endswith("state=failed")
+    for ref in (child, parent):
+        assert f"not posted: {ref.job_key} (an earlier request in the tree was applied but left the job failed" in (
+            captured.err
+        )
+    assert [v3.find(workspace, ref.job_id).state for ref in (grandchild, child, parent)] == ["failed"] * 3
+    assert not _requests(workspace)
+
+
+def test_publish_sequential_takes_only_continue_requests(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    ref = _job(tmp_path, workspace, "sequential")
+    signed = sign_document(_document(ref.job_id, "project/sequential"), seed_path=identity_key_paths("tester")[0])
+    argv = ["job", "publish-requests", "--workspace", workspace_name, "--sequential", "--document", json.dumps(signed)]
+    assert command(argv, _context(tmp_path)) == 2
+    assert "--sequential is only valid with continue requests" in capsys.readouterr().err
+    assert not _requests(workspace)
+
+
+def _remote_tree_arguments(*job_ids: str) -> argparse.Namespace:
+    return argparse.Namespace(
+        action="continue",
+        reason="tree",
+        job_id=list(job_ids),
+        priority=None,
+        override_step=None,
+        destination=None,
+        force=False,
+        keep_budget=False,
+        tree=True,
+        wait=False,
+        timeout=None,
+        adapter_timeout=None,
+    )
+
+
+def _envelopes_document(envelopes: list[dict[str, object]], *, tree: bool = True) -> dict[str, object]:
+    document: dict[str, object] = {
+        "format": "httk-workflow-request-envelopes",
+        "format_version": 2,
+        "envelopes": envelopes,
+        "job_keys": [f"tag--{envelope['job_id']}" for envelope in envelopes],
+    }
+    return {**document, "tree": True} if tree else document
+
+
+def test_remote_tree_envelopes_admit_only_extra_continues_and_need_every_selector(tmp_path: Path, capsys) -> None:
+    operator = "Test User <tester@example.test>"
+    parent, extra = str(uuid.uuid4()), str(uuid.uuid4())
+    continued = [{**_document(job_id), "action": "continue", "reason": "tree"} for job_id in (extra, parent)]
+    arguments = _remote_tree_arguments(parent)
+
+    assert job_cli._validate_remote_envelopes(_envelopes_document(continued), arguments, operator) == continued
+    assert capsys.readouterr().err == f"note: continue --tree also resumes tag--{extra}\n"
+    # The far side must claim the expansion, and without --tree the count stays strict.
+    with pytest.raises(ValueError, match="valid request-envelopes document"):
+        job_cli._validate_remote_envelopes(_envelopes_document(continued, tree=False), arguments, operator)
+    with pytest.raises(ValueError, match="2 request envelopes for 1 requested jobs"):
+        job_cli._validate_remote_envelopes(
+            _envelopes_document(continued), argparse.Namespace(**{**vars(arguments), "tree": False}), operator
+        )
+    with pytest.raises(ValueError, match="'action' disagrees"):
+        job_cli._validate_remote_envelopes(
+            _envelopes_document([{**continued[0], "action": "cancel"}, continued[1]]), arguments, operator
+        )
+    with pytest.raises(ValueError, match="no request envelope matches requested selector"):
+        job_cli._validate_remote_envelopes(_envelopes_document(continued[:1]), arguments, operator)
+    with pytest.raises(ValueError, match="more than one request envelope for a job"):
+        job_cli._validate_remote_envelopes(_envelopes_document([continued[1], continued[1]]), arguments, operator)
+
+
+def test_remote_continue_tree_forwards_tree_and_publishes_sequentially(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = str(uuid.uuid4())
+    envelope = {**_document(parent), "action": "continue", "reason": "tree"}
+    calls: list[list[str]] = []
+
+    def fake_adapter(_bundle: object, _verb: str, payload: dict[str, list[str]], **_options: object) -> dict:
+        calls.append(payload["argv"])
+        if len(calls) == 1:
+            return {"returncode": 0, "stdout": json.dumps(_envelopes_document([envelope])), "stderr": ""}
+        return {"returncode": 0, "stdout": "served\n", "stderr": ""}
+
+    monkeypatch.setattr(job_cli, "resolve_remote", lambda *_args, **_kwargs: argparse.Namespace(bundle=tmp_path))
+    monkeypatch.setattr(job_cli, "run_adapter", fake_adapter)
+    binding = job_cli.WorkspaceBinding("host:ws", "host", None)
+    identity = job_cli._resolve_request_identity(None)
+    result = job_cli.request_remote_job_result(binding, _context(tmp_path), _remote_tree_arguments(parent), identity)
+    assert result == (0, "served\n", "")
+    envelopes, publish = calls
+    assert envelopes[envelopes.index("--tree") + 1 :] == [parent]
+    assert "--sequential" in publish
+    (document,) = [json.loads(part.split("=", 1)[1]) for part in publish if part.startswith("--document=")]
+    assert document["job_id"] == parent and "signature" in document
+
+
+def test_mount_daemon_remotes_refuse_continue_tree(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
+    binding = job_cli.WorkspaceBinding("host:ws", "host", None)
+    monkeypatch.setattr(job_cli, "_resolve_binding", lambda *_args: (binding, None))
+    monkeypatch.setattr(job_cli, "resolve_remote", lambda *_args, **_kwargs: argparse.Namespace(bundle=tmp_path))
+    monkeypatch.setattr(job_cli, "read_metadata", lambda _bundle: {"kind": "mount-daemon"})
+    argv = ["job", "request", "continue", "--workspace", "host:ws", "--reason", "r", "--tree", str(uuid.uuid4())]
+    assert command(argv, _context(tmp_path)) == 2
+    assert "--tree is not carried by the workspace daemon protocol; run it on the daemon host" in (
+        capsys.readouterr().err
+    )
+
+
+@pytest.mark.parametrize(("child_state", "refused"), [("failed", True), ("ready", False)])
+def test_restart_counts_an_owned_child_by_the_state_it_was_claimed_from(
+    tmp_path: Path, capsys, child_state: str, refused: bool
+) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    parent, child = _restart_family(tmp_path, workspace, child_state)
+
+    with _kernel.register_owner(workspace, kind="manager", label="held", allocation=None, advertised={}) as owner:
+        owned = _kernel.claim(workspace, owner, child)
+        assert owned is not None
+        status = command(_request_args(workspace_name, parent.job_id, action="restart"), _context(tmp_path))
+        owned.give_back()
+    captured = capsys.readouterr()
+    if refused:
+        assert status == 1 and not _requests(workspace)
+        assert f"error: x {child.job_key} is failed dependency_failure (held by an owner); a restart" in captured.err
+    else:
+        assert status == 0 and "\tapplied\t" in captured.out
+
+
+@pytest.mark.parametrize(
+    ("action", "options", "extra"),
+    [("eject", {"destination": "out"}, {"tree": True}), ("unlock", {}, {"no_copy": True})],
+)
+def test_remote_envelopes_reject_an_option_member_the_request_did_not_carry(
+    action: str, options: dict[str, object], extra: dict[str, object]
+) -> None:
+    job_id = str(uuid.uuid4())
+    envelope = {**_document(job_id), "action": action, **options}
+    arguments = argparse.Namespace(
+        job_id=[job_id],
+        action=action,
+        reason="protocol",
+        priority=None,
+        override_step=None,
+        force=False,
+        destination=options.get("destination"),
+    )
+    document = _envelopes_document([envelope], tree=False)
+    document["job_keys"] = [f"tag--{job_id}"]
+    operator = "Test User <tester@example.test>"
+    assert job_cli._validate_remote_envelopes(document, arguments, operator) == [envelope]
+    (member,) = extra
+    with pytest.raises(ValueError, match=f"'{member}' disagrees"):
+        job_cli._validate_remote_envelopes({**document, "envelopes": [{**envelope, **extra}]}, arguments, operator)

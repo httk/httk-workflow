@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -501,6 +502,83 @@ def test_a_pause_posted_during_an_attempt_takes_effect_at_its_commit(
     doc = state_of(paused)
     assert doc.activation is not None and doc.activation["step"] == "finish"
     assert events(paused)[-2:] == ["request_applied", "released"]
+
+
+def _reinstall(ws: Workspace, tmp_path: Path) -> _store.Installed:
+    """Reinstall the demo package with a changed runner tree under the same id."""
+
+    runner = tmp_path / "demo" / "run"
+    runner.write_text(runner.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+    with cli_owner(ws) as owner:
+        return _store.install(ws, owner, tmp_path / "demo")
+
+
+def _reinstall_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [record.getMessage() for record in caplog.records if "reinstalled in between" in record.getMessage()]
+
+
+def test_a_step_launched_after_a_reinstall_logs_a_warning(
+    ws: Workspace, installed: _store.Installed, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    submit(ws, installed.id, {"start": "wait_then:finish", "finish": "succeed"})
+    with caplog.at_level(logging.WARNING, logger="httk.workflow.manager"), TaskManager(ws) as manager:
+        _wait_for(lambda: (manager.tick() or True) and any((ws.jobs / "owned").glob("*/*/run/waiting")))
+        assert not _reinstall_warnings(caplog)  # the first launch has no earlier pin
+        reinstalled = _reinstall(ws, tmp_path)
+        (go,) = (ws.jobs / "owned").glob("*/*/run")
+        (go / "go").touch()
+        manager.run_until_idle(timeout=30)
+    done = only(ws, "succeeded")
+    assert [item["step"] for item in attempts(done)] == ["start", "finish"]
+    new, old = str(reinstalled.record["tree_sha256"]), str(installed.record["tree_sha256"])
+    pin = state_of(done).workflow_pin
+    assert pin is not None and pin["tree_sha256"] == new
+    (warning,) = _reinstall_warnings(caplog)
+    assert warning == (
+        f"job {done.job_key} launches workflow {installed.id} with digest {new[:12]}; its last launch ran "
+        f"{old[:12]} (reinstalled in between): later steps run the new tree and collect checks the last pin"
+    )
+
+
+def test_job_why_reports_the_pin_of_a_ready_job_whose_workflow_was_reinstalled(
+    ws: Workspace,
+    installed: _store.Installed,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from httk.workflow import manager as manager_module
+    from httk.workflow.introspection import explain_job
+
+    submit(ws, installed.id, {"start": "succeed"})
+    _crash_then_recover(ws, monkeypatch, manager_module, "start_gated")
+    ready = only(ws, "ready")
+    assert not any(check.name == "workflow pin" for check in explain_job(ws, ready).checks)
+    _reinstall(ws, tmp_path)
+    diagnosis = explain_job(ws, ready)
+    (check,) = (check for check in diagnosis.checks if check.name == "workflow pin")
+    assert check.satisfied is False and str(installed.record["tree_sha256"])[:12] in check.detail
+    assert "nothing to do yet: its next launch runs and pins the installed tree" in diagnosis.hints
+    with caplog.at_level(logging.WARNING, logger="httk.workflow.manager"):
+        run(ws)
+    assert len(_reinstall_warnings(caplog)) == 1
+    assert not any(check.name == "workflow pin" for check in explain_job(ws, only(ws, "succeeded")).checks)
+
+
+def test_job_why_points_a_failed_job_whose_workflow_was_reinstalled_to_a_rerun(
+    ws: Workspace, installed: _store.Installed, tmp_path: Path
+) -> None:
+    from httk.workflow.introspection import explain_job
+
+    submit(ws, installed.id, {"start": "fail"})
+    run(ws)
+    _reinstall(ws, tmp_path)
+    diagnosis = explain_job(ws, only(ws, "failed"))
+    assert any(check.name == "workflow pin" and check.satisfied is False for check in diagnosis.checks)
+    assert (
+        "rerun it on the installed tree ('httk job request restart --reason TEXT JOB', or 'continue --tree' when it "
+        "failed waiting on failed children), or reinstall the tree it ran with"
+    ) in diagnosis.hints
 
 
 def _fail_stop_at(monkeypatch: pytest.MonkeyPatch, target: object, name: str) -> list[str]:

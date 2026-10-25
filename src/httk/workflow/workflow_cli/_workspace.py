@@ -5,7 +5,7 @@ import errno
 import json
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import redirect_stdout
 from copy import copy
 from datetime import UTC, datetime
@@ -20,12 +20,14 @@ from .. import _death, _kernel, _store
 from .._setting_catalog import annotate_setting, installed_workflow_settings, report_written_settings, use_color
 from ..adapters import (
     REMOTE_STATUS_COMMAND,
+    REMOTE_WORKSPACE_CONFIGURE_COMMAND,
     REMOTE_WORKSPACE_DELETE_COMMAND,
     REMOTE_WORKSPACE_FSCK_COMMAND,
     REMOTE_WORKSPACE_GC_COMMAND,
     REMOTE_WORKSPACE_INIT_COMMAND,
     REMOTE_WORKSPACE_LIST_COMMAND,
     REMOTE_WORKSPACE_MOVE_COMMAND,
+    REMOTE_WORKSPACE_POLICY_COMMAND,
     REMOTE_WORKSPACE_SETTINGS_COMMAND,
     REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND,
     resolve_remote,
@@ -545,12 +547,34 @@ def _print_policy(policy: Any, *, as_json: bool) -> int:
     return 0
 
 
+def _remote_policy(
+    arguments: argparse.Namespace, context: CLIContext, verb: str, tail: Sequence[str] = ()
+) -> tuple[Path | None, int]:
+    """Forward one ``workspace policy`` verb to a remote binding, or return the local root.
+
+    :param arguments: Parsed policy command arguments.
+    :param context: Current CLI invocation context.
+    :param verb: The policy verb, ``show``, ``set`` or ``unset``.
+    :param tail: Verb arguments forwarded verbatim; the far side validates them.
+    :return: The local workspace root and ``0``, or ``None`` and the far side's exit status.
+    """
+
+    binding, root = _resolve_binding(arguments, context)
+    if root is not None:
+        return root, 0
+    assert binding is not None
+    command = (*REMOTE_WORKSPACE_POLICY_COMMAND, verb)
+    return None, _remote_workspace_read(binding, context, command, arguments, flags=("--json",), tail=tail)
+
+
 def handle_workspace_policy_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Show the tunables one workspace shares with every process attaching it."""
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_policy_show)
-    root = _local_root(arguments, context, action="show its policy")
+    root, code = _remote_policy(arguments, context, "show")
+    if root is None:
+        return code
     return _print_policy(Workspace(root).policy, as_json=arguments.json)
 
 
@@ -560,7 +584,11 @@ def handle_workspace_policy_set(arguments: argparse.Namespace, context: CLIConte
     pairs = _key_value_pairs(arguments)
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_policy_set)
-    root = _local_root(arguments, context, action="change its policy")
+    root, code = _remote_policy(
+        arguments, context, "set", [part for key, text in pairs for part in ("--key", key, "--value", text)]
+    )
+    if root is None:
+        return code
     # A retention member is addressed directly so that setting one limit does
     # not require restating the whole object as JSON; every such pair merges
     # into one retention mapping seeded from the stored one.
@@ -586,6 +614,9 @@ def handle_workspace_policy_unset(arguments: argparse.Namespace, context: CLICon
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_policy_unset)
+    root, code = _remote_policy(arguments, context, "unset", ("--key", arguments.key))
+    if root is None:
+        return code
     defaults = WorkspacePolicy()
     key = arguments.key
     if key in POLICY_KEYS:
@@ -893,30 +924,25 @@ def handle_workspace_configure(arguments: argparse.Namespace, context: CLIContex
         Workspace._check_setting_collision(key, changes)
     for key in arguments.unset or ():
         _validate_setting_key(key)
-    _binding, root = _resolve_binding(arguments, context)
+    binding, root = _resolve_binding(arguments, context)
     if root is None:
-        # Existing remote peers expose individual settings operations. Stop on
-        # the first error; earlier remote changes have already been applied.
-        for key in arguments.unset or ():
-            item = copy(arguments)
-            item.key = key
-            item.json = False
-            code = handle_workspace_settings_unset(item, context)
-            if code:
-                return code
-        for key, value in pairs:
-            item = copy(arguments)
-            item.key, item.value = [key], [value]
-            item.json = False
-            with redirect_stdout(StringIO()):
-                code = handle_workspace_settings_set(item, context)
-            if code:
-                return code
-    else:
-        workspace = Workspace(root, durable=_durable(arguments))
-        require_cli_modifiable(workspace)
-        workspace.configure_settings(changes, unset=arguments.unset or ())
-        report_written_settings(changes, workflows=installed_workflow_settings(workspace))
+        assert binding is not None
+        # The far side runs this same handler: one validated write, then its settings show.
+        return _remote_workspace_read(
+            binding,
+            context,
+            REMOTE_WORKSPACE_CONFIGURE_COMMAND,
+            arguments,
+            flags=("--json", "--durable", "--no-durable"),
+            tail=[
+                *(part for text in arguments.settings or () for part in ("--set", text)),
+                *(part for key in arguments.unset or () for part in ("--unset", key)),
+            ],
+        )
+    workspace = Workspace(root, durable=_durable(arguments))
+    require_cli_modifiable(workspace)
+    workspace.configure_settings(changes, unset=arguments.unset or ())
+    report_written_settings(changes, workflows=installed_workflow_settings(workspace))
     item = copy(arguments)
     item.key = None
     return handle_workspace_settings_show(item, context)
@@ -955,7 +981,6 @@ def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLICon
             applied = json.loads(stdout)
         except ValueError as exc:
             raise ValueError(f"the remote did not answer settings set with JSON: {stdout[:200]!r}") from exc
-        # ponytail: keys only; an old remote's bare stored value that is itself an object naming the key passes.
         complete = isinstance(applied, dict) and changes.keys() <= applied.keys()
         if len(pairs) == 1 and not complete:
             # An older remote prints the one stored value bare.
@@ -973,24 +998,50 @@ def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLICon
 
 
 def handle_workspace_settings_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Remove one application setting from a workspace."""
+    """Remove application settings from a workspace in one write and print the removed keys as a JSON list.
+
+    A remote workspace receives every key in one forwarded command, and its
+    answer must name every key when several are given, so an older remote that
+    removes only the last one is detected rather than silently trusted.
+    """
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_settings_unset)
+    keys: list[str] = arguments.key
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
-        return _remote_workspace_read(
+        returncode, stdout, stderr = remote_workspace_read_output(
             binding,
             context,
             (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "unset"),
             arguments,
             flags=("--durable", "--no-durable"),
-            tail=("--key", arguments.key),
+            tail=[part for key in keys for part in ("--key", key)],
         )
+        if stderr:
+            sys.stderr.write(stderr)
+        if returncode:
+            if stdout:
+                sys.stdout.write(stdout if stdout.endswith("\n") else stdout + "\n")
+            return returncode
+        try:
+            removed = json.loads(stdout) if stdout.strip() else None
+        except ValueError:
+            removed = None
+        if not isinstance(removed, list) or not set(keys) <= set(removed):
+            if len(keys) > 1:
+                raise ValueError(
+                    "the remote httk-workflow predates repeatable --key and removed at most the last key; "
+                    "unset one key per call or upgrade it"
+                )
+            removed = keys  # An older remote prints nothing for its one key.
+        print(json.dumps(removed))
+        return 0
     workspace = Workspace(root, durable=_durable(arguments))
     require_cli_modifiable(workspace)
-    workspace.unset_setting(arguments.key)
+    workspace.configure_settings({}, unset=keys)
+    print(json.dumps(keys))
     return 0
 
 
@@ -1387,8 +1438,8 @@ def build_workspace_parser(
         "configure",
         summary="set or remove application configuration",
         description=(
-            "Remove settings, then store values. Local changes are validated together; remote changes run "
-            "as individual settings operations and stop at the first failure"
+            "Remove settings, then store values, validated together in one write; a remote workspace "
+            "receives the whole change in one forwarded command"
         ),
         handler=handle_workspace_configure,
     )
@@ -1447,12 +1498,18 @@ def build_workspace_parser(
     settings_unset = _leaf(
         settings_actions,
         "unset",
-        summary="remove one application setting",
-        description="Remove one application setting from a workspace",
+        summary="remove application settings",
+        description="Remove application settings from a workspace in one write",
         handler=handle_workspace_settings_unset,
     )
     _add_workspace_targets(settings_unset, help_text="the workspace to change")
-    settings_unset.add_argument("--key", required=True, metavar="KEY", help="the dotted setting name to remove")
+    settings_unset.add_argument(
+        "--key",
+        action="append",
+        required=True,
+        metavar="KEY",
+        help="remove these application settings (repeatable)",
+    )
     _add_by_path_argument(settings_unset)
     add_durability_arguments(settings_unset)
 

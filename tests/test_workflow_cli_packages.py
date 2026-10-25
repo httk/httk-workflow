@@ -616,6 +616,24 @@ def test_workflow_install_list_describe_and_uninstall_a_workspace_store(tmp_path
     assert "is not installed" in capfd.readouterr().err
 
 
+def test_workflow_install_over_an_id_unfinished_jobs_use_warns_and_installs(tmp_path: Path, capfd) -> None:
+    context = _context(tmp_path)
+    package = _package(tmp_path / "package", _MANIFEST)
+    name = _installed(tmp_path, context, package, capfd)
+    assert "warning:" not in capfd.readouterr().err  # a first install warns about nothing
+    job = new_job(Workspace(tmp_path / "workspace"), "tests.package", inputs={"structure": package / "run"})
+    (package / "run").write_text((package / "run").read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+
+    assert command(["install", "--workspace", name, str(package)], context) == 0
+    captured = capfd.readouterr()
+    assert (
+        f"warning: reinstalling local:tests.package while 1 unfinished jobs use it: {job.job_key}; running "
+        "attempts lose the old tree and later steps run the new one"
+    ) in captured.err
+    installed = _store.lookup(Workspace(tmp_path / "workspace"), "local:tests.package")
+    assert installed is not None and installed.record["tree_sha256"] == source_tree_digest(package)
+
+
 def test_workflow_install_refuses_a_sealed_workspace(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
     from httk.workflow.workflow_cli import _common
 

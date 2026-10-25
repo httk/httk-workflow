@@ -87,7 +87,7 @@ $ httk workflow run --count 4 --workspace default
 | `slurm.ntasks` | Number of Slurm tasks. |
 | `slurm.ntasks_per_node` | Slurm tasks per node. |
 | `slurm.mem` | Slurm memory allocation. |
-| `slurm.gres` | Slurm generic resource request. |
+| `slurm.gres` | Slurm generic resource request. A manager reads its GPU count from whichever form the job requested: `--gpus`, `--gpus-per-node`, `--gpus-per-task`, or `--gres=gpu:N`; each gives per-node counts when Slurm exports the per-node, per-task or batch-node GPU variables that determine them, and the aggregate count only otherwise. |
 | `slurm.reservation` | Slurm reservation. |
 | `slurm.export` | Launcher setting only, never read from workspace settings: sbatch `--export` mode for a workspace-daemon manager submission, `NONE` (default) or `NIL`. |
 | `slurm.sbatch_options` | Further `sbatch` options as one string of shell words, each `--name` or `--name=value`; see below. |

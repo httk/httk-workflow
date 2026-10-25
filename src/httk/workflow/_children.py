@@ -17,7 +17,7 @@ import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Self
+from typing import Self, cast
 
 from httk.workflow import _fs, _kernel
 from httk.workflow._bundles import EXCHANGE_POOL_PREFIX
@@ -35,7 +35,15 @@ from httk.workflow.models import (
     validate_label,
 )
 
-__all__ = ["SPAWN_FORMAT", "SPAWN_FORMAT_VERSION", "ChildPlan", "labeled_join", "publish_children", "validate_children"]
+__all__ = [
+    "SPAWN_FORMAT",
+    "SPAWN_FORMAT_VERSION",
+    "ChildPlan",
+    "labeled_join",
+    "newest_labeled",
+    "publish_children",
+    "validate_children",
+]
 
 SPAWN_FORMAT = "httk-workflow-spawn"
 SPAWN_FORMAT_VERSION = 2
@@ -444,3 +452,18 @@ def labeled_join(join: Mapping[str, object], plans: Sequence[ChildPlan]) -> dict
             raw = {**raw, "label": labels[raw["job_key"]]}
         referenced.append(raw)
     return {**join, "children": referenced}
+
+
+def newest_labeled(children: Sequence[Mapping[str, object]]) -> dict[str, dict[str, object]]:
+    """Return the newest published child entry per label: the children a spawn or call of that label reuses.
+
+    :param children: A parent's ``state.json`` ``children`` records, oldest first; label-less entries name none.
+    :return: The entries by label.
+    """
+
+    newest: dict[str, dict[str, object]] = {}
+    for item in children:
+        entry = cast(dict[str, object], _thaw(item))
+        if entry.get("label") is not None:
+            newest[str(entry["label"])] = entry
+    return newest
