@@ -1,0 +1,537 @@
+httk.workflow.codes
+===================
+
+.. py:module:: httk.workflow.codes
+
+.. autoapi-nested-parse::
+
+   Build support packages for simulation codes on the httk-workflow runtime.
+
+   *httk-workflow* bundles no support for any particular simulation code. Each code
+   is supported by its own distribution, conventionally ``httk-workflow-<code>``
+   (for example *httk-workflow-vasp*), which provides:
+
+   * the code library ``httk.codes.<code>`` in the ``httk.codes`` PEP 420
+     namespace: the Python helpers a runner calls, a Bash API file such as
+     ``httk-<code>.sh`` beside them, and a bridge module;
+   * the registry package ``httk.registry.codes.<code>``, which calls
+     :func:`httk.core.register.register_code` so the code is discovered at
+     ``import httk.core``.
+
+   The **bridge contract**: the registered bridge module defines
+   ``add_commands(subparsers)``, which adds subcommands named ``<code>-<verb>`` to
+   the argparse subparsers of the shell bridge (:mod:`httk.workflow.shell_bridge`),
+   and ``run_command(namespace) -> int``, which runs one of them. It returns ``0``
+   on success and :data:`BRIDGE_ABSENT` for a legitimately absent answer; an
+   exception it raises is reported as a refusal (exit code ``2``).
+
+   The **Bash API contract**: the registered Bash API file is exported to every
+   attempt, and to describe mode, as ``HTTK_WORKFLOW_<CODE>_BASH_API`` (for
+   example ``HTTK_WORKFLOW_VASP_BASH_API``); a Bash runner sources it after the
+   generic ``HTTK_WORKFLOW_BASH_API``, and each function it defines is one
+   invocation of one ``<code>-<verb>`` bridge subcommand through the generic
+   library's ``_httk_workflow_bridge``.
+
+   This module is the toolkit such a package builds on: the supervision, replay,
+   state-directory, and JSON helpers of the runtime, promoted to one public home,
+   plus the registry view of the installed codes.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.codes.JOB_STATE_DIRECTORY
+   httk.workflow.codes.BRIDGE_ABSENT
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.codes.ReplayableWorkdirBatch
+   httk.workflow.codes.CheckerSpec
+   httk.workflow.codes.Diagnostic
+   httk.workflow.codes.FollowSource
+   httk.workflow.codes.ProcessReport
+   httk.workflow.codes.ProcessSupervisor
+   httk.workflow.codes.SourceEvent
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.codes.read_json
+   httk.workflow.codes.utc_now
+   httk.workflow.codes.write_json_atomic
+   httk.workflow.codes.launch_command
+   httk.workflow.codes.installed_codes
+   httk.workflow.codes.code_environment
+
+
+Package Contents
+----------------
+
+.. py:function:: read_json(path)
+
+   Read a JSON object from *path*.
+
+
+.. py:function:: utc_now()
+
+   Return a UTC timestamp in the protocol's RFC 3339 representation.
+
+
+.. py:function:: write_json_atomic(path, value, *, durable = False, mode = None)
+
+   Atomically replace *path* with JSON.
+
+
+.. py:data:: JOB_STATE_DIRECTORY
+   :value: '.httk-job'
+
+
+.. py:class:: ReplayableWorkdirBatch(workdir, root, *, durable = False)
+
+   Build a sealed, idempotently replayable set of workdir changes.
+
+   :param workdir: Locate the workdir receiving the changes.
+   :param root: Locate the batch staging directory.
+   :param durable: Synchronize staged and applied batch directories.
+
+
+   .. py:attribute:: workdir
+
+
+   .. py:attribute:: root
+
+
+   .. py:attribute:: durable
+      :value: False
+
+
+
+   .. py:attribute:: transaction
+
+
+   .. py:method:: initialize(workdir, *, durable = False)
+      :classmethod:
+
+
+      Create a new workdir batch.
+
+      :param workdir: Locate the workdir receiving the changes.
+      :param durable: Synchronize the batch publications.
+      :return: The new replayable batch.
+
+
+
+   .. py:method:: seal()
+
+      Seal the batch for recovery.
+
+      :return: The sealed ready-directory path.
+
+
+
+   .. py:method:: commit()
+
+      Replay and retire the sealed batch.
+
+      :return: The applied batch path.
+
+
+
+   .. py:method:: recover(workdir, *, durable = False)
+      :staticmethod:
+
+
+      Replay every ready batch found in a workdir.
+
+      :param workdir: Locate the workdir containing ready batches.
+      :param durable: Synchronize replayed publications.
+      :return: The applied batch paths.
+
+
+
+.. py:class:: CheckerSpec
+
+   Describe a versioned executable checker.
+
+   :param argv: Supply the checker command and arguments.
+   :param required: Require the checker to remain available for the run.
+   :param sources: Select files the checker follows.
+
+
+   .. py:attribute:: argv
+      :type:  tuple[str, ...]
+
+
+   .. py:attribute:: required
+      :type:  bool
+      :value: True
+
+
+
+   .. py:attribute:: sources
+      :type:  tuple[FollowSource, ...]
+      :value: ()
+
+
+
+   .. py:method:: from_mapping(value)
+      :classmethod:
+
+
+      Validate and build a checker specification from a mapping.
+
+      :param value: Supply the serialized checker specification.
+      :return: The validated checker specification.
+      :raises ValueError: If the mapping has an invalid checker format or source.
+
+
+
+.. py:class:: Diagnostic
+
+   Describe a structured observation made while supervising a program.
+
+   :param code: Name the stable diagnostic code.
+   :param severity: Classify the diagnostic severity.
+   :param summary: Summarize the observation.
+   :param source: Identify the source that produced it.
+   :param evidence: Preserve supporting evidence when present.
+   :param stop: Request termination of the supervised command.
+
+
+   .. py:attribute:: code
+      :type:  str
+
+
+   .. py:attribute:: severity
+      :type:  DiagnosticSeverity
+
+
+   .. py:attribute:: summary
+      :type:  str
+
+
+   .. py:attribute:: source
+      :type:  str
+
+
+   .. py:attribute:: evidence
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: stop
+      :type:  bool
+      :value: False
+
+
+
+   .. py:method:: as_mapping()
+
+      Return the serialized diagnostic mapping.
+
+      :return: The diagnostic mapping.
+
+
+
+.. py:class:: FollowSource
+
+   Describe a file to follow while the child process is running.
+
+   A followed file is read from offset ``0``, including content that existed
+   before the run started, and the supervisor never truncates it. A code that
+   follows or parses a file it does not capture (VASP's ``OUTCAR``, for
+   example) must remove or rotate it before the run, or the previous run's
+   content is replayed into the monitors.
+
+   :param path: Locate the file to follow.
+   :param name: Identify the source in emitted events.
+   :param inactivity_timeout: Stop when no data arrives for this interval.
+
+
+   .. py:attribute:: path
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: name
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: inactivity_timeout
+      :type:  float | None
+      :value: None
+
+
+
+.. py:class:: ProcessReport
+
+   The complete result of one supervised command.
+
+   ``stdout`` and ``stderr`` are bounded: when an output path was given they
+   hold at most the run's tail limit and the file named by ``stdout_path`` or
+   ``stderr_path`` is authoritative; otherwise they hold at most the run's
+   capture limit. ``stdout_bytes`` and ``stderr_bytes`` always count every byte
+   the program produced, and ``stdout_truncated`` and ``stderr_truncated`` say
+   whether anything was dropped from the retained tail.
+
+   :param argv: Preserve the executed command.
+   :param started_at: Record when execution began.
+   :param finished_at: Record when execution ended.
+   :param returncode: Record the process return code.
+   :param termination: Record why execution ended.
+   :param stdout: Preserve the captured stdout tail.
+   :param stderr: Preserve the captured stderr tail.
+   :param diagnostics: Preserve emitted diagnostics.
+   :param stdout_path: Locate the authoritative stdout file when configured.
+   :param stderr_path: Locate the authoritative stderr file when configured.
+   :param stdout_bytes: Count all stdout bytes produced.
+   :param stderr_bytes: Count all stderr bytes produced.
+   :param stdout_truncated: Indicate that stdout was truncated.
+   :param stderr_truncated: Indicate that stderr was truncated.
+   :param dropped_diagnostics: Count diagnostics dropped from the middle.
+
+
+   .. py:attribute:: argv
+      :type:  tuple[str, ...]
+
+
+   .. py:attribute:: started_at
+      :type:  str
+
+
+   .. py:attribute:: finished_at
+      :type:  str
+
+
+   .. py:attribute:: returncode
+      :type:  int
+
+
+   .. py:attribute:: termination
+      :type:  str
+
+
+   .. py:attribute:: stdout
+      :type:  bytes
+
+
+   .. py:attribute:: stderr
+      :type:  bytes
+
+
+   .. py:attribute:: diagnostics
+      :type:  tuple[Diagnostic, ...]
+
+
+   .. py:attribute:: stdout_path
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: stderr_path
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: stdout_bytes
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: stderr_bytes
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: stdout_truncated
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: stderr_truncated
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: dropped_diagnostics
+      :type:  int
+      :value: 0
+
+
+
+   .. py:property:: timed_out
+      :type: bool
+
+
+      Report whether the process ended because of a timeout.
+
+      :return: Whether the termination reason starts with ``timeout``.
+
+
+   .. py:method:: as_mapping()
+
+      Return the serialized process report.
+
+      :return: The report mapping.
+
+
+
+   .. py:method:: write(path)
+
+      Write the serialized report atomically.
+
+      :param path: Locate the report file to write.
+      :return: The report path.
+
+
+
+.. py:class:: ProcessSupervisor(*, monitors = (), checkers = (), follow = ())
+
+   Run one command, stream its output, and terminate its process group safely.
+
+   Monitors and checkers observe the same event stream under one lock, so an
+   in-process monitor does not have to be thread-safe. Whatever happens during
+   a run - including an exception raised by the caller's monitor - the signal
+   handlers are restored, the child's process group is terminated and reaped,
+   the reader threads are joined, and the output handles are closed before
+   :meth:`run` returns or propagates.
+
+   :param monitors: Supply in-process event monitors.
+   :param checkers: Supply executable checker specifications.
+   :param follow: Supply files to follow during the run. Each is read from its
+       start, including content left by an earlier run; see :class:`FollowSource`.
+
+
+   .. py:attribute:: monitors
+      :value: ()
+
+
+
+   .. py:attribute:: checker_specs
+      :value: ()
+
+
+
+   .. py:attribute:: follow
+      :value: ()
+
+
+
+   .. py:method:: run(argv, *, timeout = None, cwd = None, environment = None, termination_grace = 10.0, stdout_path = None, stderr_path = None, append = False, stdout_sink = None, stderr_sink = None, tick_interval = DEFAULT_TICK_INTERVAL, follow_interval = DEFAULT_FOLLOW_INTERVAL, capture_limit = DEFAULT_CAPTURE_LIMIT, tail_limit = DEFAULT_TAIL_LIMIT, diagnostic_limit = DEFAULT_DIAGNOSTIC_LIMIT)
+
+      Run one command to completion and return its structured report.
+
+      :param argv: Supply the command and arguments.
+      :param timeout: Stop the command after this interval.
+      :param cwd: Select the command working directory.
+      :param environment: Supply the command environment.
+      :param termination_grace: Wait this long after requesting termination.
+      :param stdout_path: Write stdout to this authoritative file.
+      :param stderr_path: Write stderr to this authoritative file.
+      :param append: Append to ``stdout_path`` and ``stderr_path`` instead of
+          truncating them first. Truncation is the default, so a retry in a
+          persistent workdir never inherits the previous run's output; files the
+          command writes itself and the ``follow`` sources are not truncated.
+      :param stdout_sink: Forward stdout chunks to this sink as they arrive.
+      :param stderr_sink: Forward stderr chunks to this sink as they arrive.
+      :param tick_interval: Set the interval between tick events.
+      :param follow_interval: Set the interval between followed-file polls.
+      :param capture_limit: Bound retained output without an output file.
+      :param tail_limit: Bound retained output with an output file.
+      :param diagnostic_limit: Bound retained diagnostics.
+      :return: The structured process report.
+      :raises ValueError: If command or supervision limits are invalid.
+
+
+
+.. py:class:: SourceEvent
+
+   Describe one event delivered to a checker.
+
+   :param event: Identify the event kind.
+   :param source: Identify the stream or process that produced it.
+   :param line: Preserve the event line when one exists.
+   :param timestamp: Preserve the event timestamp, or generate one when absent.
+
+
+   .. py:attribute:: event
+      :type:  Literal['start', 'line', 'tick', 'source-eof', 'process-exit']
+
+
+   .. py:attribute:: source
+      :type:  str
+
+
+   .. py:attribute:: line
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: timestamp
+      :type:  str
+      :value: ''
+
+
+
+   .. py:method:: as_mapping()
+
+      Return the checker protocol mapping for this event.
+
+      :return: The serialized event mapping.
+
+
+
+.. py:data:: BRIDGE_ABSENT
+   :type:  int
+   :value: 1
+
+
+.. py:function:: launch_command(argv, *, launch = True)
+
+   Return ``argv`` with the attempt's launch prefix prepended.
+
+   The prefix is the shell-quoted argv in ``HTTK_WORKFLOW_LAUNCH``, set by the
+   workflow manager; it is absent or blank when the attempt has none.
+
+   :param argv: The code command, naming only the program (for example ``["vasp_std"]``).
+   :param launch: Whether to apply the launch prefix; ``False`` returns ``argv`` as given.
+   :return: The command to run.
+   :raises ValueError: If ``argv`` is empty, or starts with a parallel launcher
+       while a launch prefix would be prepended.
+
+
+.. py:function:: installed_codes()
+
+   Return every registered code-support package, sorted by name.
+
+   :return: The registered code-support metadata.
+
+
+.. py:function:: code_environment()
+
+   Return the ``HTTK_WORKFLOW_<CODE>_BASH_API`` variables of the installed codes.
+
+   :return: One variable per installed code that registers a Bash API.
+   :raises httk.workflow.errors.RunnerResolutionError: With code ``code_support_unavailable`` if an
+       installed code's Bash API resource cannot be found.
+
+

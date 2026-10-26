@@ -1,0 +1,83 @@
+httk.workflow.provenance
+========================
+
+.. py:module:: httk.workflow.provenance
+
+.. autoapi-nested-parse::
+
+   The ``provenance`` declaration vocabulary and its pure :class:`httk.core.Run` builder.
+
+   The declaration name is ``provenance``. Its document is an object whose members
+   are all optional:
+
+   .. code-block:: json
+
+       {
+         "workflow_declaration_uri": "https://raw.githubusercontent.com/httk/workflows-vasp/refs/tags/wf-decl-v0.1.0/vasp-relax/declaration.json",
+         "inputs":    {"initial_structure": {"type": "structures", "id": "<served id>"}},
+         "artifacts": {"relaxed_structure": {"type": "structures", "id": "..."}},
+         "outputs":   {"total_energy":      {"type": "records", "id": "..."}}
+       }
+
+   The object keys are edge labels, so labels are unique per side. Targets are
+   loose served-entry references. A document may be written as ``declared`` in
+   ``JobSpec.declarations`` at scaffold time, which suits externally known inputs,
+   and/or as ``observed`` with ``Attempt.declare("provenance", ...)`` at collect
+   time, when produced-entry ids exist. Consumers choose one complete document;
+   they never merge the two.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.provenance.PROVENANCE_DECLARATION
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.provenance.run_record
+
+
+Module Contents
+---------------
+
+.. py:data:: PROVENANCE_DECLARATION
+   :type:  Final
+   :value: 'provenance'
+
+
+.. py:function:: run_record(record)
+
+   Build the one :class:`httk.core.Run` represented by *record*.
+
+   The observed ``provenance`` document is selected wholesale when present;
+   otherwise the declared document is selected. Missing or ``None`` means no
+   edges. Its URI is used when that member is present, including explicit
+   ``null``; otherwise the observed-then-declared ``workflow`` declaration's
+   ``$id`` is used. Each edge member must map labels to exactly ``type`` and
+   ``id`` string members, and insertion order is preserved.
+
+   ``source_id`` is ``"<workspace_id>:<job_id>"``. ``immutable_id`` is left for
+   the store to mint. ``name`` is the job's name when it is a non-empty string
+   without surrounding whitespace, otherwise its job key. ``started_at`` is the
+   earliest parseable aware ``started_at`` and ``finished_at`` (also used as
+   ``last_modified``) the latest parseable aware ``finished_at`` timestamp in
+   the attempt timeline; absent or unparseable timestamps produce ``None``.
+   Children are not folded in: each child collects to its own ``Run``, while a
+   parent can name child products explicitly in its observed declaration. The
+   name and the first start and last end are folded into ``Run``; runner
+   identity, the rest of the attempt timeline, and failure deliberately stay
+   on the caller's ``JobRecord``, the extra-information channel.
+
+   :param record: Supply the mechanical readout of one collected job.
+   :return: The framework-owned run assembled from the selected declaration.
+   :raises ValueError: If a selected URI or edge violates the provenance
+       contract.
+
+

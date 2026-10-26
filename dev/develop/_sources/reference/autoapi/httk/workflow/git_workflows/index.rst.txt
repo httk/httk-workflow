@@ -1,0 +1,77 @@
+httk.workflow.git_workflows
+===========================
+
+.. py:module:: httk.workflow.git_workflows
+
+.. autoapi-nested-parse::
+
+   Reference workflow packages in Git repositories by URI.
+
+   A workflow URI has the form ``git+https://HOST/PATH[@REF][#SUBDIR]`` (see
+   ``httk.core.git_sources.parse_git_uri``): the repository is cloned at
+   ``REF``, and the workflow is the ``httk_workflow.toml`` package in ``SUBDIR``
+   (or in the repository root). The canonical URI always carries the full commit
+   hash; it is the workflow id a job records and identifies the workflow
+   *definition* (its code). A URI with no ``SUBDIR`` whose repository root holds an
+   ``httk_plugin.toml`` but no ``httk_workflow.toml`` names every workflow that
+   plugin lists (:func:`fetch_workflows`).
+
+   :func:`fetch_workflow` installs the workflow through the shared
+   ``httk.core.git_sources`` cache (kind ``"workflows"``), and
+   :func:`fetched_workflows` reads the installed entries without running git.
+   Workflow repositories pip-installed into this Python environment are offered
+   too, without installed entries and without the network.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.git_workflows.fetch_workflow
+   httk.workflow.git_workflows.fetch_workflows
+   httk.workflow.git_workflows.fetched_workflows
+
+
+Module Contents
+---------------
+
+.. py:function:: fetch_workflow(reference)
+
+   Fetch, install and return the workflow a git URI names.
+
+   A pinned URI whose commit is already cached runs no git at all. Every call
+   refreshes the installed entry's reference time, which decides which commit
+   the workflow's short name means. For the repository of a pip-installed
+   workflow repository, a ``wf-v*`` tag ref is its recorded commit, a version
+   it offers is returned without writing an installed entry, and any other
+   commit is taken from its local source when that holds it.
+
+   :param reference: Supply a ``git+…`` workflow URI.
+   :return: The provider, whose ``workflow_id`` is the canonical URI.
+   :raises ValueError: If the URI is invalid, git fails, or the package is missing or invalid.
+
+
+.. py:function:: fetch_workflows(reference)
+
+   Fetch the workflows a git URI names: one package, or every package a root httk_plugin.toml lists.
+
+   A URI with ``#SUBDIR``, or whose repository root holds ``httk_workflow.toml``,
+   names one package (:func:`fetch_workflow`). Otherwise a root
+   ``httk_plugin.toml`` names its listed workflows, each fetched under its
+   commit-pinned member URI, with the plugin's ``requires`` merged in, and
+   returned callees first.
+
+   :param reference: Supply a ``git+…`` workflow URI.
+   :return: The providers, in dependency order.
+   :raises ValueError: If the URI is invalid, git fails, or a package or the plugin manifest is missing or invalid.
+
+
+.. py:function:: fetched_workflows()
+
+   Return the installed git workflows keyed by canonical URI, without running git.
+
+   :return: The installed providers by canonical URI.
+
+
