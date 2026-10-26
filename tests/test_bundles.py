@@ -818,10 +818,11 @@ def test_trusted_payloads_are_job_content(tmp_path: Path) -> None:
     tiny = WalkLimits(entries=1, depth=1)
     with no_hang():
         assert validate_bundle(bundle, untrusted=False, limits=tiny) == manifest
+        # Without the hard link, so walk order cannot report it before the pipe.
+        (_member(bundle, 1) / "again.txt").unlink()
         with pytest.raises(BundleError, match="special"):
             validate_bundle(bundle, untrusted=True)
     (_member(bundle, 0) / "pipe").unlink()
-    (_member(bundle, 1) / "again.txt").unlink()
     with pytest.raises(BundleError, match="entries"):
         validate_bundle(bundle, untrusted=True, limits=tiny)
 
