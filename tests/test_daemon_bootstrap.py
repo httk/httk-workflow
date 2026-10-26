@@ -293,11 +293,13 @@ def test_broker_boundary_has_exact_roles_and_clean_launch(tmp_path: Path) -> Non
     assert not {"/workspace", "/run", "/daemon-root", "/tmp/daemon-root", "/control", "/daemon-policy.json"} & set(argv)
     assert [destination for _, destination in _pairs(argv, "--ro-bind-data")] == ["/tmp/daemon-policy.json"]
     readonly = _pairs(argv, "--ro-bind-fd")
+    # A config home outside /tmp is already visible through the read-only host root.
+    config_home = environment["HTTK_CONFIG_HOME"]
     assert {destination for _, destination in readonly} == {
         str(Path(policy["workspace"])),
         str(Path(policy["workspace"]) / ".httk-workspace/daemon"),
-        environment["HTTK_CONFIG_HOME"],
         "/tmp/daemon",
+        *([config_home] if Path(config_home).is_relative_to("/tmp") else []),
     }
     assert str(leak) not in observed["fds"].values()
     writable = _pairs(argv, "--bind-fd")
