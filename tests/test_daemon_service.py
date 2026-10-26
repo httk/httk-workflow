@@ -1675,7 +1675,8 @@ def test_recovery_answers_a_crashed_submission_and_a_late_winner_keeps_the_sched
         second.process_once(threading.Event())  # too early: still pending, nothing published
         with pytest.raises(FileNotFoundError):
             second.responses.read(f"{crashed.request_id}.json")
-        clock[0] += policy.command_timeout + service_module.KILL_GRACE_SECONDS + 61
+        # The ledger stamps the decision with the real clock, so advance from real time, not the frozen start.
+        clock[0] = time.time() + policy.command_timeout + service_module.KILL_GRACE_SECONDS + 61
         second.process_once(threading.Event())
         response = _read(second, crashed)
         assert (response.outcome, response.reason) == ("uncertain", "submission_unconfirmed")
