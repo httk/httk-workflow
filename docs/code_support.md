@@ -201,3 +201,8 @@ of the same name, given with `--collector DIR`, replaces the shipped one.
 - *httk-workflow-gromacs* — GROMACS (`httk.codes.gromacs`)
 - *httk-workflow-lammps* — LAMMPS (`httk.codes.lammps`)
 - *httk-workflow-orca* — ORCA (`httk.codes.orca`)
+- *httk-workflow-phonopy* — phonopy (`httk.codes.phonopy`), builds on *httk-workflow-vasp*
+
+Install a code package with `python -m pip install httk-workflow-<code>`, or
+through the metapackage with `python -m pip install "httk2[<code>]"`; all eight
+are installed by `python -m pip install "httk2[codes]"`.

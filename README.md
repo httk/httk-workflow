@@ -57,10 +57,15 @@ that has none.
 python -m pip install httk-workflow
 ```
 
-One optional extra exists. `httk-workflow[cwl]` adds the CWL *parser* needed to
+Three integration extras exist: `httk-workflow[cwl]`, `httk-workflow[jobflow]` and
+`httk-workflow[atomate2]`. The `cwl` extra adds the CWL *parser* needed to
 prepare the CWL realization; executing the normalized plan needs
 nothing extra, so the extra belongs only on the machine that creates the job.
 Python Workflow Definition documents need no extra at all.
+
+Simulation-code support is installed separately as `httk-workflow-<code>`, for
+example `python -m pip install httk-workflow-vasp` (or `python -m pip install "httk2[vasp]"`); see
+[code support](docs/code_support.md).
 
 ## Running tests
 
