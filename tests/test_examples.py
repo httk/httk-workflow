@@ -201,8 +201,10 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     assert (payload / "files" / "POSCAR").read_text(encoding="utf-8").splitlines()[0] == "silicon"
 
     # And the last documented command printed one collected record and the sweep summary.
+    # Earlier commands also print JSON (e.g. settings set), so only the tail is the collect output.
     records = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{") and line != "{"]
-    assert len(records) == 2
+    assert len(records) >= 2
+    records = records[-2:]
     assert records[0]["format"] == "httk-workflow-collected"
     _assert_pinned_relax(records[0]["workflow"], prefix)
     assert records[0]["missing_collector"] is None
