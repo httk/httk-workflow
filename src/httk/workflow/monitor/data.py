@@ -47,7 +47,9 @@ def remote_workspace_output(
 ) -> tuple[int, str, str]:
     """Relay one remote read without importing the CLI package eagerly.
 
-    The read is never interactive: ssh must not prompt underneath curses.
+    The read is never interactive: ssh must not prompt underneath curses. It
+    asks the adapter to share one connection, since the monitor polls and would
+    otherwise log in once per read.
 
     :param binding: Remote-qualified workspace binding.
     :param context: CLI context used to resolve the adapter.
@@ -58,7 +60,7 @@ def remote_workspace_output(
 
     from ..workflow_cli import remote_workspace_output as relay
 
-    return relay(binding, context, argv_tail, timeout=timeout, interactive=False)
+    return relay(binding, context, argv_tail, timeout=timeout, interactive=False, share_connection=True)
 
 
 class WorkspaceView:
@@ -384,8 +386,8 @@ class WorkspaceView:
             self._managers = (time.monotonic(), result)
         return list(result)
 
-    def refresh(self) -> None:
-        """Invalidate all cached reads and remembered visible rows."""
+    def expire(self) -> None:
+        """Invalidate cached reads, keeping visible rows and stdio follow offsets."""
 
         with self._lock:
             self._generation += 1
@@ -394,6 +396,12 @@ class WorkspaceView:
             self._details.clear()
             self._whys.clear()
             self._logs.clear()
+
+    def refresh(self) -> None:
+        """Invalidate all cached reads and remembered visible rows."""
+
+        self.expire()
+        with self._lock:
             self._rows.clear()
             self._tail_offsets.clear()
 

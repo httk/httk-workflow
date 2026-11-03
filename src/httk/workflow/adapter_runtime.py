@@ -319,7 +319,7 @@ def _control_directory() -> Path:
     return directory
 
 
-def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
+def _ssh_transport(settings: Mapping[str, object], *, share_connection: bool = False) -> list[str]:
     """Return the ``ssh`` argument vector that carries no remote command.
 
     By default ssh runs with ``BatchMode=yes``: key-based login only, never a
@@ -327,12 +327,16 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
     terminal is attached (:func:`_terminal_present`), so ssh can ask for a
     password or second factor on ``/dev/tty``; httk never sees the answer.
     ``yes`` also shares one connection for ten minutes through a control socket,
-    so the following ssh calls do not prompt again, unless the user's own ssh
-    configuration already names a ``ControlPath`` for the destination: ssh then
-    reuses that master and httk adds no control options. ``per-call`` lets
-    every call prompt, for sites that forbid connection sharing.
+    so the following ssh calls do not prompt again, also when they run without
+    a terminal, unless the user's own ssh configuration already names a
+    ``ControlPath`` for the destination: ssh then reuses that master and httk
+    adds no control options. *share_connection* asks for the same sharing in
+    the default mode, for a caller that polls (``workflow monitor``) and would
+    otherwise log in once per read. ``per-call`` never shares, for sites that
+    forbid connection sharing.
 
     :param settings: The persisted remote settings and their credentials.
+    :param share_connection: Whether to share a connection in the default mode.
     :return: The ssh argument vector without destination or command.
     :raises ValueError: If ``port`` or ``interactive_auth`` is malformed.
     """
@@ -345,11 +349,13 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
         argv += ["-p", port]
     mode = _interactive_auth(settings)
     if mode == "no" or not _terminal_present():
-        return [*argv, "-o", "BatchMode=yes", "-o", f"ConnectTimeout={_CONNECT_TIMEOUT}"]
-    # OpenSSH counts prompts per method, and a site may enter keyboard-interactive twice
-    # (password, then one-time code); 2 allows that and bounds a typo to one retry.
-    argv += ["-o", f"ConnectTimeout={_CONNECT_TIMEOUT}", "-o", "NumberOfPasswordPrompts=2"]
-    if mode == "yes" and not _configured_control_path(argv, settings):
+        argv += ["-o", "BatchMode=yes", "-o", f"ConnectTimeout={_CONNECT_TIMEOUT}"]
+    else:
+        # OpenSSH counts prompts per method, and a site may enter keyboard-interactive twice
+        # (password, then one-time code); 2 allows that and bounds a typo to one retry.
+        argv += ["-o", f"ConnectTimeout={_CONNECT_TIMEOUT}", "-o", "NumberOfPasswordPrompts=2"]
+    share = mode == "yes" or (mode == "no" and share_connection)
+    if share and not _configured_control_path(argv, settings):
         argv += [
             "-o",
             "ControlMaster=auto",
@@ -357,6 +363,12 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
             "ControlPersist=600",
             "-o",
             f"ControlPath={_control_directory()}/%C",
+            # A master whose connection died (suspend, network change) is noticed within a minute
+            # instead of stalling every shared call until the adapter timeout.
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=3",
         ]
     return argv
 
@@ -480,9 +492,10 @@ def _ssh_run(
     argv: Sequence[str],
     *,
     cwd: str | None = None,
+    share_connection: bool = False,
 ) -> "subprocess.CompletedProcess[str]":
     command = [
-        *_ssh_transport(settings),
+        *_ssh_transport(settings, share_connection=share_connection),
         "--",
         _ssh_destination(settings),
         _remote_command(settings, argv, cwd=cwd),
@@ -593,11 +606,11 @@ def _mount_transfer(source: Path, destination: Path, *, files: list[str] | None)
         _copy(source / relative, destination / relative)
 
 
-def _runner(kind: str, settings: Mapping[str, object]) -> _Runner:
+def _runner(kind: str, settings: Mapping[str, object], *, share_connection: bool = False) -> _Runner:
     if kind == "ssh":
 
         def remote(argv: Sequence[str], *, cwd: str | None = None) -> "subprocess.CompletedProcess[str]":
-            return _ssh_run(settings, argv, cwd=cwd)
+            return _ssh_run(settings, argv, cwd=cwd, share_connection=share_connection)
 
         return remote
 
@@ -934,7 +947,10 @@ def _invoke(kind: str, operation: str, request: Mapping[str, object]) -> None:
     settings = _settings(request)
     argv = _argv(request, operation)
     cwd = _cwd(request) if operation == "invoke" else None
-    completed = _runner(kind, settings)(argv, cwd=cwd)
+    share_connection = request.get("share_connection", False)
+    if not isinstance(share_connection, bool):
+        raise ValueError(f"{operation} share_connection must be a boolean")
+    completed = _runner(kind, settings, share_connection=share_connection)(argv, cwd=cwd)
     stderr = completed.stderr
     hint = _login_hint(settings, completed) if kind == "ssh" else ""
     if hint:

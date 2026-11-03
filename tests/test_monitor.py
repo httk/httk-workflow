@@ -563,3 +563,107 @@ def test_monitor_routes_mounted_job_requests_to_typed_daemon_helper(
     monkeypatch.setattr(monitor_actions, "request_remote_jobs", request)
     assert monitor_actions.request(view, "pause", ["12345678"], "pause for review") == "job\tqueued\trequest"
     assert called == [["12345678"]]
+
+
+def test_monitor_periodic_refresh_keeps_the_display_until_reads_land(tmp_path: Path) -> None:
+    """A timed refresh rereads the page and open detail without blanking either."""
+
+    workspace = Workspace.initialize(tmp_path / "keep")
+    job_id = _marker(workspace, "ready", "jobs", tag="kept")
+    view = WorkspaceView(workspace)
+    app = MonitorApp(object(), [view], 5.0)
+    app.state.rows = [{"job_id": job_id}]
+    app.state.counts = {"ready": 1}
+    app.state.detail_job = job_id
+    app.state.detail = {"job_id": job_id}
+    app.last_load = 1.0
+
+    app._schedule_load()
+
+    assert app.future is not None and app.detail_future is not None
+    assert app.state.rows == [{"job_id": job_id}]
+    assert app.state.counts == {"ready": 1}
+    assert app.state.detail == {"job_id": job_id}
+    app.future.result()
+    app.detail_future.result()
+    app._collect()
+    assert [row["job_id"] for row in app.state.rows] == [job_id]
+    assert app.state.detail is not None and app.state.detail["job_id"] == job_id
+    assert app.state.detail != {"job_id": job_id}
+    app.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_monitor_failed_remote_read_waits_for_an_explicit_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing remote read is not repeated on the timer, so it cannot pile up login attempts."""
+
+    view = WorkspaceView(WorkspaceBinding("cluster:station", "cluster", None), CLIContext("httk", Path.cwd()))
+    calls: list[object] = []
+
+    def refused(*args: object, **_kwargs: object) -> tuple[int, str, str]:
+        calls.append(args)
+        return 255, "", "Permission denied (publickey)."
+
+    monkeypatch.setattr(monitor_data, "remote_workspace_output", refused)
+    app = MonitorApp(object(), [view], 0.5)
+    app._schedule_load(force=True)
+    assert app.future is not None
+    with pytest.raises(RuntimeError):
+        app.future.result()
+    app._collect()
+    assert app.read_failed
+    assert "press r to retry" in app.state.status
+
+    app.last_load = 0.5
+    app._schedule_load()
+    assert app.future is None and len(calls) == 1
+    app._schedule_load(force=True)
+    assert app.future is not None and not app.read_failed
+    app.executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_monitor_failed_remote_detail_is_not_retried_every_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refused detail read pauses remote reads instead of being resubmitted on every key poll."""
+
+    view = WorkspaceView(WorkspaceBinding("cluster:station", "cluster", None), CLIContext("httk", Path.cwd()))
+    calls: list[object] = []
+
+    def refused(*args: object, **_kwargs: object) -> tuple[int, str, str]:
+        calls.append(args)
+        return 255, "", "Permission denied (publickey)."
+
+    monkeypatch.setattr(monitor_data, "remote_workspace_output", refused)
+    app = MonitorApp(object(), [view], 5.0)
+    app.state.rows = [{"job_id": "kept"}]
+    app.state.detail_job = "kept"
+    for _ in range(5):
+        app._load_detail()
+        if app.detail_future is not None:
+            with pytest.raises(RuntimeError):
+                app.detail_future.result()
+        app._collect()
+    assert len(calls) == 1
+    assert app.read_failed and "press r to retry" in app.state.status
+    app.executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_monitor_timed_refresh_keeps_explicit_reads_in_flight(tmp_path: Path) -> None:
+    """A diagnosis requested before a timed refresh still lands after it."""
+
+    workspace = Workspace.initialize(tmp_path / "explicit")
+    job_id = _marker(workspace, "ready", "jobs", tag="why")
+    view = WorkspaceView(workspace)
+    app = MonitorApp(object(), [view], 5.0)
+    app.state.detail_job = job_id
+    app.state.detail = {"job_id": job_id}
+    pending: Future[Any] = Future()
+    app.extra_future = pending
+    app.last_load = 1.0
+
+    app._schedule_load()
+    assert app.extra_future is pending
+    pending.set_result((app.state.generation, view, job_id, "why", {"summary": "waiting"}))
+    app._collect()
+    assert app.state.detail is not None and app.state.detail["why"] == {"summary": "waiting"}
+    assert app.future is not None
+    app.future.result()
+    app.executor.shutdown(wait=True, cancel_futures=True)

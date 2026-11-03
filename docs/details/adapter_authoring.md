@@ -256,6 +256,9 @@ did.
 | --- | --- | --- |
 | `argv` | array of nonempty strings, required | the command |
 | `cwd` | string, optional | the directory to run it in |
+| `share_connection` | boolean, optional | the caller polls (`workflow monitor`): keep one connection open across calls instead of logging in for each |
+
+An adapter that has no connection to share ignores `share_connection`.
 
 ```json
 {"argv": ["httk", "workflow", "workspace", "status", "/scratch/me/runs", "--json"],

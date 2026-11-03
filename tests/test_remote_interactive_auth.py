@@ -32,7 +32,13 @@ def test_failed_remote_check_prints_no_empty_json_array(
 
 
 def _transport(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, terminal: bool, controlpath: str = "none", **settings: object
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    terminal: bool,
+    controlpath: str = "none",
+    share_connection: bool = False,
+    **settings: object,
 ) -> list[str]:
     monkeypatch.setattr(adapter_runtime, "_terminal_present", lambda: terminal)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
@@ -43,10 +49,11 @@ def _transport(
         return subprocess.CompletedProcess(argv, 0, f"user u\ncontrolpath {controlpath}\nport 22\n", "")
 
     monkeypatch.setattr(adapter_runtime.subprocess, "run", ssh_config)
-    argv = adapter_runtime._ssh_transport({"host": "h.example.test", **settings})
-    # Only the connection-sharing mode asks ssh what the user's configuration resolves.
+    argv = adapter_runtime._ssh_transport({"host": "h.example.test", **settings}, share_connection=share_connection)
+    # Only a sharing call asks ssh what the user's configuration resolves.
+    mode = settings.get("interactive_auth", "no")
     assert all(call[-3:] == ["-G", "--", "h.example.test"] for call in calls)
-    assert bool(calls) == (terminal and settings.get("interactive_auth") == "yes")
+    assert bool(calls) == (mode == "yes" or (mode == "no" and share_connection))
     return argv
 
 
@@ -81,9 +88,30 @@ def test_interactive_per_call_prompts_without_sharing(monkeypatch: pytest.Monkey
 
 def test_interactive_without_a_terminal_keeps_batch_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     default = _transport(monkeypatch, tmp_path, terminal=False)
-    assert _transport(monkeypatch, tmp_path, terminal=False, interactive_auth="yes") == default
     assert "BatchMode=yes" in default
     assert "NumberOfPasswordPrompts=2" not in default
+    # Without a terminal, ``yes`` still joins the connection a foreground command opened.
+    shared = _transport(monkeypatch, tmp_path, terminal=False, interactive_auth="yes")
+    assert shared[: len(default)] == default
+    assert {"ControlMaster=auto", "ControlPersist=600", f"ControlPath={tmp_path}/httk/%C"} <= set(shared)
+
+
+def test_polling_caller_shares_a_batch_mode_connection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    argv = _transport(monkeypatch, tmp_path, terminal=False, share_connection=True)
+    assert "BatchMode=yes" in argv
+    assert {"ControlMaster=auto", "ControlPersist=600", f"ControlPath={tmp_path}/httk/%C"} <= set(argv)
+    # A dead master must fail fast rather than stall every shared call.
+    assert {"ServerAliveInterval=15", "ServerAliveCountMax=3"} <= set(argv)
+    configured = _transport(
+        monkeypatch, tmp_path, terminal=False, controlpath="/home/u/.ssh/cm-%C", share_connection=True
+    )
+    assert not any(item.startswith("Control") for item in configured)
+
+
+def test_per_call_never_shares(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    for terminal in (True, False):
+        argv = _transport(monkeypatch, tmp_path, terminal=terminal, share_connection=True, interactive_auth="per-call")
+        assert not any(item.startswith("Control") for item in argv)
 
 
 def test_unknown_interactive_mode_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -184,3 +212,36 @@ def test_monitor_manager_start_never_prompts(tmp_path: Path, monkeypatch: pytest
     view = WorkspaceView(WorkspaceBinding("cluster:station", "cluster", None), CLIContext("httk", tmp_path))
     assert actions.start_managers(view, 1) == "started 1 manager(s)"
     assert seen == [False]
+
+
+def test_monitor_reads_ask_for_a_shared_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from httk.workflow.monitor.data import WorkspaceView
+    from httk.workflow.registry import WorkspaceBinding
+    from httk.workflow.workflow_cli import _common
+
+    requests: list[dict[str, object]] = []
+
+    def capture(_bundle: object, _operation: str, request: dict[str, object], **_kwargs: object) -> dict[str, object]:
+        requests.append(request)
+        return {"returncode": 0, "stdout": '{"jobs": [], "counts": {}}', "stderr": ""}
+
+    monkeypatch.setattr(_common, "resolve_remote", lambda *_args, **_kwargs: SimpleNamespace(bundle="unused"))
+    monkeypatch.setattr(_common, "run_adapter", capture)
+    WorkspaceView(WorkspaceBinding("cluster:station", "cluster", None), CLIContext("httk", tmp_path)).page()
+    assert requests[0]["share_connection"] is True
+
+    shared: list[bool] = []
+
+    def ssh_run(_settings: object, _argv: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        shared.append(bool(kwargs["share_connection"]))
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(adapter_runtime, "_ssh_run", ssh_run)
+    adapter_runtime._invoke("ssh", "invoke", {"argv": ["true"], "share_connection": True})
+    adapter_runtime._invoke("ssh", "invoke", {"argv": ["true"]})
+    assert shared == [True, False]
+    with pytest.raises(ValueError, match="share_connection"):
+        adapter_runtime._invoke("ssh", "invoke", {"argv": ["true"], "share_connection": "yes"})
+    capsys.readouterr()

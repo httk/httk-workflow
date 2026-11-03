@@ -541,6 +541,7 @@ def remote_workspace_output(
     timeout: float | None = None,
     interactive: bool = True,
     cwd: str | None = None,
+    share_connection: bool = False,
 ) -> tuple[int, str, str]:
     """Invoke a remote workspace command and return status, stdout, stderr.
 
@@ -554,6 +555,8 @@ def remote_workspace_output(
     :param timeout: Adapter timeout override.
     :param interactive: Whether the adapter may prompt on this terminal.
     :param cwd: The remote working directory, or the login default when omitted.
+    :param share_connection: Ask the adapter to keep one connection open across
+        calls, for a caller that polls.
     :return: Remote return code, standard output, and standard error.
     """
 
@@ -563,7 +566,11 @@ def remote_workspace_output(
     result = run_adapter(
         target.bundle,
         "invoke",
-        {"argv": list(argv_tail), **({} if cwd is None else {"cwd": cwd})},
+        {
+            "argv": list(argv_tail),
+            **({} if cwd is None else {"cwd": cwd}),
+            **({"share_connection": True} if share_connection else {}),
+        },
         timeout=timeout,
         interactive=interactive,
     )

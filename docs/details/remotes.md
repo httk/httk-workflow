@@ -123,6 +123,9 @@ Only when the configuration defines no `ControlPath` does httk keep its own
 shared connection open for 10 minutes after its last use
 (`ControlPersist=600`, with the socket under `$XDG_RUNTIME_DIR/httk` or
 `/tmp/httk-ssh-UID`), so a command such as `remote check` prompts once.
+That connection sends a keepalive every 15 seconds, so one that died (after a
+suspend or a network change) is noticed within a minute. To close it at once,
+name its socket: `ssh -O exit -o ControlPath=$XDG_RUNTIME_DIR/httk/%C HOST`.
 Configuring checks connectivity,
 so the configure command itself already prompts:
 
@@ -136,8 +139,14 @@ command runs in a foreground terminal. Anything without one (a detached
 manager, a cron job, a backgrounded shell job) keeps batch mode and fails with a
 hint instead of hanging. The adapter's `timeout_seconds` (300 s for the `ssh`
 template) still bounds each operation, including the time you spend typing.
-`httk monitor` never prompts; for a remote that needs a second factor, open the
-shared connection first, for example with `httk remote check NAME`.
+`httk workflow monitor` never prompts; for a remote that needs a second factor,
+open the shared connection first, for example with `httk remote check NAME`.
+The monitor and other calls without a terminal join that connection while it is
+open, provided they resolve the same socket directory: a cron job without
+`XDG_RUNTIME_DIR` looks under `/tmp/httk-ssh-UID` and does not find a connection
+opened from a desktop session. The monitor also shares a connection with the
+default batch-mode login, so its reads and actions log in once and then reuse
+it until it has been idle for 10 minutes; `per-call` turns that off as well.
 
 ## Working with remote workspaces
 

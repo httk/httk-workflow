@@ -1243,6 +1243,7 @@ def request_remote_job_result(
     identity: OperatorIdentity,
     *,
     interactive: bool = True,
+    share_connection: bool = False,
 ) -> tuple[int, str, str]:
     """Build request documents remotely, sign them here, and post them remotely.
 
@@ -1251,10 +1252,12 @@ def request_remote_job_result(
     :param arguments: The request arguments (``action``, ``job_id``, ``reason`` and the options).
     :param identity: The signing identity.
     :param interactive: Whether the adapter may prompt on this terminal.
+    :param share_connection: Ask the adapter to keep one connection open across calls.
     :return: The far side's exit status, standard output and standard error.
     """
 
     target = resolve_remote(binding.remote, project=context.cwd)
+    shared = {"share_connection": True} if share_connection else {}
     remote_name = binding.name.split(":", 1)[1]
     argv = [
         *REMOTE_JOB_REQUEST_ENVELOPES_COMMAND,
@@ -1279,7 +1282,7 @@ def request_remote_job_result(
         argv.append("--tree")
     argv.extend(arguments.job_id)
     result = run_adapter(
-        target.bundle, "invoke", {"argv": argv}, timeout=arguments.adapter_timeout, interactive=interactive
+        target.bundle, "invoke", {"argv": argv, **shared}, timeout=arguments.adapter_timeout, interactive=interactive
     )
     stderr = str(result.get("stderr", ""))
     if result.get("returncode") != 0:
@@ -1304,7 +1307,11 @@ def request_remote_job_result(
     if tree:
         publish.append("--sequential")
     published = run_adapter(
-        target.bundle, "invoke", {"argv": publish}, timeout=arguments.adapter_timeout, interactive=interactive
+        target.bundle,
+        "invoke",
+        {"argv": publish, **shared},
+        timeout=arguments.adapter_timeout,
+        interactive=interactive,
     )
     return (
         int(published.get("returncode", 0) or 0),

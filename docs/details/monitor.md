@@ -64,6 +64,18 @@ show, why, and log are separate one-invocation reads when explicitly requested.
 Detail and other actions require canonical job IDs. Actions are dispatched
 through the existing request and manager command implementations.
 
+A timed refresh keeps the current page, counts and detail on screen until the
+new reads arrive, and the interval runs from the end of the previous read. The
+monitor's reads and actions ask the adapter to share one connection
+(`share_connection`): the `ssh` template then keeps a control socket open, as
+`interactive_auth=yes` does, and closes it after 10 idle minutes, so a session
+logs in once rather than once per refresh (a `--refresh` longer than that logs
+in once per refresh). When your own ssh configuration names a `ControlPath` for
+the host, ssh uses that instead; see [Remotes](remotes.md). After a failed
+remote read the monitor stops reading that workspace, on the timer and for new
+detail, until you press `r`, so an unreachable host or a refused login does not
+turn into a stream of login attempts.
+
 Some features are unavailable remotely:
 
 - Following standard output needs an adapter that exposes the payload

@@ -255,6 +255,7 @@ class MonitorApp:
         self.action_future: Future[ActionOutcome] | None = None
         self._pending_remove_ids: list[str] = []
         self.last_load = 0.0
+        self.read_failed = False
 
     def _load(
         self,
@@ -279,16 +280,18 @@ class MonitorApp:
 
     def _schedule_load(self, *, force: bool = False) -> None:
         now = time.monotonic()
-        if self.future is None and (force or now - self.last_load >= self.refresh_interval):
+        if force:
+            self.read_failed = False
+        due = not self.read_failed and now - self.last_load >= self.refresh_interval
+        if self.future is None and (force or due):
             if self.last_load and not force:
-                self.state.view.refresh()
-                self.state.generation += 1
-                self._drop_read_inflight()
-                self.state.rows = []
-                self.state.next_after = None
-                self.state.counts = {}
-                self.state.managers = []
-                self.state.detail = None
+                # The timed refresh keeps the rows, counts and detail on screen until the new reads
+                # land, and keeps the generation so explicit reads still in flight are not lost.
+                self.state.view.expire()
+                if self.state.detail_job is not None and self.detail_future is None:
+                    self.detail_future = self.executor.submit(
+                        self._detail_load, self.state.generation, self.state.view, self.state.detail_job
+                    )
             generation = self.state.generation
             view = self.state.view
             states = self.state.state_filter or tuple(JOB_STATES)
@@ -308,6 +311,8 @@ class MonitorApp:
     def _collect(self) -> None:
         if self.future is not None and self.future.done():
             self.state.loading = False
+            # The interval runs from the end of a read, so a slow remote is not read back to back.
+            self.last_load = time.monotonic()
             try:
                 generation, view, counts, page, managers = self.future.result()
                 if generation == self.state.generation and view is self.state.view:
@@ -316,10 +321,14 @@ class MonitorApp:
                     self.state.rows = list(page.jobs)
                     self.state.next_after = page.next_after
                     self.state.managers = managers
+                    shown = [row.get("job_id") for row in self.state.rows]
+                    # Keep the highlight on the job the detail pane shows when rows shift.
+                    if self.state.detail_job in shown:
+                        self.state.selected = shown.index(self.state.detail_job)
                     self.state.selected = min(self.state.selected, max(0, len(self.state.rows) - 1))
                     self.state.status = ""
             except Exception as exc:  # UI must survive an unavailable workspace
-                self.state.status = f"read error: {exc}"
+                self._read_error("read error", exc)
             self.future = None
         if self.detail_future is not None and self.detail_future.done():
             try:
@@ -327,7 +336,7 @@ class MonitorApp:
                 if generation == self.state.generation and view is self.state.view and job_id == self.state.detail_job:
                     self.state.detail = detail
             except Exception as exc:
-                self.state.status = f"detail error: {exc}"
+                self._read_error("detail error", exc)
             self.detail_future = None
         if self.tail_future is not None and self.tail_future.done():
             try:
@@ -379,6 +388,15 @@ class MonitorApp:
             else:
                 self.state.status = f"{view.name}: {message or 'action completed'}"
 
+    def _read_error(self, label: str, exc: Exception) -> None:
+        """Report a failed read; a remote one pauses remote reads until ``r``."""
+
+        self.state.status = f"{label}: {exc}"
+        if self.state.view.remote:
+            # Not retried on the timer: each retry is another login attempt.
+            self.read_failed = True
+            self.state.status += " (press r to retry)"
+
     def _draw(self) -> None:
         self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
@@ -408,6 +426,9 @@ class MonitorApp:
 
     def _load_detail(self) -> None:
         if self.state.detail_job is None or self.state.detail is not None or self.detail_future is not None:
+            return
+        if self.read_failed:
+            self.state.status = "remote reads paused after an error (press r to retry)"
             return
         job_id = self.state.detail_job
         generation = self.state.generation
@@ -516,7 +537,12 @@ class MonitorApp:
                 self._schedule_load(force=self.last_load == 0.0)
                 self._collect()
                 self._load_detail()
-                if self.state.follow and self.state.detail_job is not None and self.tail_future is None:
+                if (
+                    self.state.follow
+                    and self.state.detail_job is not None
+                    and self.tail_future is None
+                    and self.detail_future is None
+                ):
                     self.tail_future = self.executor.submit(
                         self._tail_load, self.state.generation, self.state.view, self.state.detail_job
                     )

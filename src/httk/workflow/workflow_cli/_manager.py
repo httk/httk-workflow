@@ -940,6 +940,7 @@ def submit_remote_manager_result(
     context: CLIContext,
     *,
     interactive: bool = True,
+    share_connection: bool = False,
 ) -> tuple[int, str, str]:
     """Invoke a remote manager command without writing to process streams.
 
@@ -947,6 +948,7 @@ def submit_remote_manager_result(
     :param arguments: The manager arguments.
     :param context: The invocation context.
     :param interactive: Whether the adapter may prompt on this terminal.
+    :param share_connection: Ask the adapter to keep one connection open across calls.
     :return: The far side's exit status, standard output and standard error.
     """
 
@@ -957,6 +959,7 @@ def submit_remote_manager_result(
         _remote_manager_argv(arguments, name),
         timeout=arguments.adapter_timeout,
         interactive=interactive,
+        share_connection=share_connection,
     )
 
 
