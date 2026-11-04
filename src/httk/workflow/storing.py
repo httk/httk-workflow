@@ -376,9 +376,10 @@ def _storage_layout(
 def _typed_record_classes(records: Sequence[type]) -> dict[str, type]:
     """Map each property IRI a typed record of the ``records`` family carries to that class.
 
-    A typed record declares exactly one property in ``__httk_property_definitions__``
-    and needs a ``from_data_record`` classmethod to be mapped; a class without them
-    is skipped with a warning. Derived (statistics) kinds of
+    A typed record is mapped by its core spec's definition IRI (it may also serve a
+    normalization count such as ``_httk_natoms``); any other record must declare exactly
+    one property in ``__httk_property_definitions__``. Both need a ``from_data_record``
+    classmethod to be mapped; a class without them is skipped with a warning. Derived (statistics) kinds of
     :class:`httk.core.TypedRecord` are skipped silently: they are keyed by an ad-hoc
     served IRI no generic record carries and are built with ``from_value`` only. This
     is the one place workflow reads the core typed-record spec
@@ -390,9 +391,10 @@ def _typed_record_classes(records: Sequence[type]) -> dict[str, type]:
         definitions = getattr(record, "__httk_property_definitions__", None)
         if record is DataRecord or not definitions:
             continue
-        if getattr(getattr(record, "__httk_typed_record__", None), "derivation", None) is not None:
+        spec = getattr(record, "__httk_typed_record__", None)
+        if getattr(spec, "derivation", None) is not None:
             continue
-        if not callable(getattr(record, "from_data_record", None)) or len(definitions) != 1:
+        if not callable(getattr(record, "from_data_record", None)) or (spec is None and len(definitions) != 1):
             # Its values would silently stay generic and unserved; the class owner must fix it.
             _LOGGER.warning(
                 "typed record %s is not used for collected values: it needs a from_data_record classmethod "
@@ -401,8 +403,8 @@ def _typed_record_classes(records: Sequence[type]) -> dict[str, type]:
                 extra={"context": "workflow"},
             )
             continue
-        (definition,) = definitions.values()
-        typed.setdefault(definition.definition_id, record)
+        definition_id = spec.definition_id if spec is not None else next(iter(definitions.values())).definition_id
+        typed.setdefault(definition_id, record)
     return typed
 
 
