@@ -7,7 +7,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -940,26 +940,28 @@ def submit_remote_manager_result(
     context: CLIContext,
     *,
     interactive: bool = True,
-    share_connection: bool = False,
+    relay: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
 ) -> tuple[int, str, str]:
     """Invoke a remote manager command without writing to process streams.
 
     :param binding: The remote workspace binding.
     :param arguments: The manager arguments.
     :param context: The invocation context.
-    :param interactive: Whether the adapter may prompt on this terminal.
-    :param share_connection: Ask the adapter to keep one connection open across calls.
+    :param interactive: Whether the adapter may prompt on this terminal; unused with ``relay``.
+    :param relay: Runs the remote command vector instead of one adapter ``invoke``, such as the monitor's
+        session; the adapter timeout is then unused too.
     :return: The far side's exit status, standard output and standard error.
     """
 
-    name = binding.name.split(":", 1)[1]
+    argv = _remote_manager_argv(arguments, binding.name.split(":", 1)[1])
+    if relay is not None:
+        return relay(argv)
     return remote_workspace_output(
         binding,
         context,
-        _remote_manager_argv(arguments, name),
+        argv,
         timeout=arguments.adapter_timeout,
         interactive=interactive,
-        share_connection=share_connection,
     )
 
 

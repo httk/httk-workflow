@@ -270,6 +270,7 @@ _GROUPS = (
     (("launcher",), "._launcher", "build_launcher_parser", False, True),
     (("campaign",), "._campaign", "build_campaign_parser", False, True),
     (("monitor",), "._monitor", "build_monitor_parser", False, False),
+    (("session",), "._session", "build_session_parser", False, False),
 )
 
 

@@ -1,20 +1,26 @@
 """Versioned JSON remote-adapter bundles."""
 
+import contextlib
 import importlib.resources
 import json
 import logging
 import os
+import queue
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any, Self
 
 from ._util import write_json_atomic
 from .adapter_runtime import _PRELUDE_RENAMED
@@ -43,6 +49,7 @@ __all__ = [
     "REMOTE_JOB_TRANSFER_COMMAND",
     "REMOTE_JOB_WHY_COMMAND",
     "REMOTE_MANAGER_COMMAND",
+    "REMOTE_SESSION_COMMAND",
     "REMOTE_STATUS_COMMAND",
     "REMOTE_TRANSFER_STATUS_COMMAND",
     "REMOTE_WORKSPACE_CONFIGURE_COMMAND",
@@ -58,7 +65,11 @@ __all__ = [
     "REQUEST_FORMAT",
     "RESULT_FORMAT",
     "SEED_SETTING_MAP",
+    "SESSION_FORMAT",
+    "SESSION_FORMAT_VERSION",
+    "AdapterSession",
     "RemoteTarget",
+    "SessionUnsupported",
     "add_remote",
     "import_v1_remote",
     "list_remotes",
@@ -85,6 +96,7 @@ ADAPTER_OPERATIONS = (
     "invoke",
     "push",
     "pull",
+    "session",
     "status",
 )
 
@@ -174,6 +186,11 @@ REMOTE_JOB_DELETE_COMMAND = ("httk", "job", "delete")
 REMOTE_JOB_SHOW_COMMAND = ("httk", "job", "show")
 REMOTE_JOB_LOG_COMMAND = ("httk", "job", "log")
 REMOTE_JOB_WHY_COMMAND = ("httk", "job", "why")
+REMOTE_SESSION_COMMAND = ("httk", "workflow", "session")
+#: The ``format`` the session's first (hello) line names.
+SESSION_FORMAT = "httk-workflow-session"
+#: The ``format_version`` the session's hello line names.
+SESSION_FORMAT_VERSION = 1
 
 
 def probe_remote_workspace(
@@ -650,6 +667,42 @@ def import_v1_remote(
     return destination
 
 
+def _request_file(
+    root: Path, operation: str, request: Mapping[str, object], unset_settings: Sequence[str] = ()
+) -> Path:
+    """Write one adapter request document to a private temporary file.
+
+    The file carries credentials: the caller deletes it once the adapter has read it.
+
+    :param root: The resolved adapter bundle path.
+    :param operation: The adapter operation name.
+    :param request: The operation request members.
+    :param unset_settings: Stored settings to omit.
+    :return: The request file path.
+    """
+
+    payload = {
+        "format": REQUEST_FORMAT,
+        "format_version": 2,
+        "operation": operation,
+        "adapter_dir": str(root),
+        # Persisted settings and their manifest-excluded credentials reach the
+        # adapter together, so splitting the two storage locations is invisible.
+        **dict(request),
+        "remote_settings": {key: value for key, value in remote_settings(root).items() if key not in unset_settings},
+    }
+    descriptor, temporary_name = tempfile.mkstemp(prefix="httk-adapter-", suffix=".json")
+    request_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+    except BaseException:
+        request_path.unlink(missing_ok=True)
+        raise
+    return request_path
+
+
 def run_adapter(
     bundle: str | os.PathLike[str],
     operation: str,
@@ -667,7 +720,8 @@ def run_adapter(
     :param timeout: The operation timeout, or the bundle default when omitted.
     :param unset_settings: Stored settings to omit when validating a configuration change.
     :param interactive: Whether the adapter may see this process's terminal (and
-        so let ssh prompt); False gives it no stdin, e.g. under a curses display.
+        so let ssh prompt); False gives it no stdin and no controlling terminal,
+        e.g. under a curses display.
     :return: The adapter result document.
     :raises TimeoutError: If the adapter exceeds its timeout.
     :raises ValueError: If the request or result violates the adapter protocol.
@@ -676,34 +730,24 @@ def run_adapter(
 
     if operation not in ADAPTER_OPERATIONS:
         raise ValueError(f"unknown adapter operation: {operation}")
+    if operation == "session":
+        raise ValueError("the session operation keeps its pipes open: use AdapterSession")
     root = Path(bundle).expanduser().resolve()
     metadata = validate_adapter_bundle(root)
     executable = root / ADAPTER_EXECUTABLE
-    payload = {
-        "format": REQUEST_FORMAT,
-        "format_version": 2,
-        "operation": operation,
-        "adapter_dir": str(root),
-        # Persisted settings and their manifest-excluded credentials reach the
-        # adapter together, so splitting the two storage locations is invisible.
-        **dict(request),
-        "remote_settings": {key: value for key, value in remote_settings(root).items() if key not in unset_settings},
-    }
-    descriptor, temporary_name = tempfile.mkstemp(prefix="httk-adapter-", suffix=".json")
-    request_path = Path(temporary_name)
+    request_path = _request_file(root, operation, request, unset_settings)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
-            stream.write("\n")
         limit = float(metadata.get("timeout_seconds", 60.0) if timeout is None else timeout)
         try:
             # stdin is inherited deliberately so an adapter can detect an attached
-            # terminal; interactive=False withholds it so nothing can prompt.
+            # terminal; interactive=False withholds it and the controlling
+            # terminal (a new session), so nothing can prompt.
             completed = subprocess.run(
                 [str(executable), str(request_path)],
                 text=True,
                 capture_output=True,
                 stdin=None if interactive else subprocess.DEVNULL,
+                start_new_session=not interactive,
                 timeout=limit,
                 check=False,
             )
@@ -729,3 +773,244 @@ def run_adapter(
     if completed.stderr:
         result["diagnostics"] = completed.stderr
     return result
+
+
+class SessionUnsupported(RuntimeError):
+    """The adapter refused the ``session`` operation, or its far side cannot serve a session.
+
+    Callers fall back to one ``invoke`` per command.
+    """
+
+
+#: How much of a session's standard error is kept for error messages.
+_SESSION_STDERR_TAIL = 16384
+#: How many lines a session skips before its hello (a login banner, a printing ``cli_prelude``).
+_SESSION_PREAMBLE_LINES = 1000
+
+
+def _queue_lines(stream: IO[str], lines: "queue.Queue[str | None]") -> None:
+    """Move *stream*'s lines into *lines*, then ``None`` at its end."""
+
+    try:
+        with stream:
+            for line in stream:
+                lines.put(line)
+    finally:
+        lines.put(None)
+
+
+def _keep_tail(stream: IO[str], tail: deque[str]) -> None:
+    """Drain *stream* into the bounded *tail*, so the far side never blocks on a full pipe."""
+
+    with stream:
+        for line in stream:
+            tail.extend(line)
+
+
+class AdapterSession:
+    """A long-lived far-side ``httk workflow session`` reached through the adapter ``session`` operation.
+
+    Each :meth:`run` is one request/response round trip over the session's pipes, so a caller that polls
+    logs in once instead of once per read. A failed round trip closes the session; the next :meth:`run`
+    opens a new one. Use it as a context manager, or call :meth:`close`.
+
+    :param bundle: The adapter bundle path.
+    :param timeout: The bound in seconds on opening the session and on each round trip, or the bundle's
+        ``timeout_seconds`` when omitted.
+    """
+
+    def __init__(self, bundle: str | os.PathLike[str], *, timeout: float | None = None) -> None:
+        self._root = Path(bundle).expanduser().resolve()
+        self._timeout = timeout
+        self._limit = 60.0
+        # ponytail: one lock serializes all round trips; open one session per worker if reads must overlap
+        self._lock = threading.RLock()
+        self._process: subprocess.Popen[str] | None = None
+        self._group = False
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        self._errors: deque[str] = deque(maxlen=_SESSION_STDERR_TAIL)
+        self._error_reader: threading.Thread | None = None
+        self._next_id = 0
+        self._closing = False
+
+    def __enter__(self) -> Self:
+        """Return this session; it opens on first use."""
+
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        """Close the session."""
+
+        self.close()
+
+    def open(self, *, interactive: bool = False) -> None:
+        """Start the session unless it is open, and wait for the far side's hello line.
+
+        :param interactive: Whether the adapter keeps this process's controlling terminal (and so lets ssh
+            prompt); False starts it in a new session without one.
+        :raises SessionUnsupported: If the adapter refuses the operation or the far side cannot serve a
+            session; callers fall back to ``invoke``.
+        :raises TimeoutError: If no hello arrives within the timeout.
+        :raises RuntimeError: If ssh itself fails (status 255), such as a refused login.
+        """
+
+        with self._lock:
+            if self._process is not None:
+                return
+            self._closing = False
+            metadata = validate_adapter_bundle(self._root)
+            self._limit = float(metadata.get("timeout_seconds", 60.0) if self._timeout is None else self._timeout)
+            request_path = _request_file(self._root, "session", {"argv": list(REMOTE_SESSION_COMMAND)})
+            try:
+                process = subprocess.Popen(
+                    [str(self._root / ADAPTER_EXECUTABLE), str(request_path)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                    start_new_session=not interactive,
+                )
+                self._process, self._group = process, not interactive
+                self._lines, self._errors = queue.Queue(), deque(maxlen=_SESSION_STDERR_TAIL)
+                threading.Thread(target=_queue_lines, args=(process.stdout, self._lines), daemon=True).start()
+                self._error_reader = threading.Thread(
+                    target=_keep_tail, args=(process.stderr, self._errors), daemon=True
+                )
+                self._error_reader.start()
+                deadline = time.monotonic() + self._limit
+                for _ in range(_SESSION_PREAMBLE_LINES):
+                    try:
+                        line = self._lines.get(timeout=max(0.0, deadline - time.monotonic()))
+                    except queue.Empty:
+                        raise TimeoutError(f"adapter session did not start within {self._limit:g} seconds") from None
+                    if line is None:
+                        try:
+                            status = process.wait(timeout=5.0)
+                        except subprocess.TimeoutExpired:
+                            status = None
+                        message = f"adapter session failed ({status}): {self._discard()}"
+                        if self._closing:  # close() killed it: not a reason to fall back and log in again
+                            raise RuntimeError("adapter session was closed")
+                        # 255 is ssh's own failure (connection or login refused): falling back would log in again.
+                        raise RuntimeError(message) if status == 255 else SessionUnsupported(message)
+                    try:
+                        document = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(document, dict):
+                        continue
+                    if document.get("format") == RESULT_FORMAT and document.get("ok") is False:
+                        raise SessionUnsupported(str(document.get("error", "the adapter refused the session")))
+                    if document.get("format") == SESSION_FORMAT:
+                        if document.get("format_version") != SESSION_FORMAT_VERSION:
+                            version = document.get("format_version")
+                            raise SessionUnsupported(f"unsupported remote session version: {version!r}")
+                        return
+                raise SessionUnsupported(f"no remote session hello within {_SESSION_PREAMBLE_LINES} lines")
+            except BaseException:
+                self._discard()
+                raise
+            finally:
+                request_path.unlink(missing_ok=True)
+
+    def run(self, argv: Sequence[str], *, cwd: str | None = None) -> tuple[int, str, str]:
+        """Run one pinned remote command in the session, opening it non-interactively first if needed.
+
+        :param argv: The pinned ``httk`` command vector.
+        :param cwd: The far-side working directory, or the session's own when omitted.
+        :return: The command's exit status, standard output and standard error.
+        :raises TimeoutError: If the round trip exceeds the timeout; the session is closed.
+        :raises RuntimeError: If the session ends during the round trip or answers out of protocol; it is
+            closed, and the next call opens a new one.
+        """
+
+        with self._lock:
+            if self._process is not None and self._process.poll() is not None:
+                self._discard()  # it ended between calls (an idle disconnect, say): open a new one
+            self.open()
+            process = self._process
+            assert process is not None and process.stdin is not None
+            self._next_id += 1
+            request: dict[str, object] = {"id": self._next_id, "argv": list(argv)}
+            if cwd is not None:
+                request["cwd"] = cwd
+            line = None
+            try:
+                process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+                process.stdin.flush()
+                line = self._lines.get(timeout=self._limit)
+            except queue.Empty:
+                self._discard()
+                raise TimeoutError(f"remote session request exceeded {self._limit:g} seconds") from None
+            except OSError:
+                pass  # a broken pipe: the session ended, reported below with its stderr
+            try:
+                response = None if line is None else json.loads(line)
+            except ValueError:
+                response = None
+            if (
+                not isinstance(response, dict)
+                or response.get("id") != request["id"]
+                or not isinstance(response.get("returncode"), int)
+                or not isinstance(response.get("stdout"), str)
+                or not isinstance(response.get("stderr"), str)
+            ):
+                detail = "the remote session ended" if line is None else f"bad remote session response {line[:200]!r}"
+                tail = self._discard()
+                raise RuntimeError(f"{detail}: {tail}" if tail else detail)
+            return response["returncode"], response["stdout"], response["stderr"]
+
+    def close(self) -> None:
+        """End the session: close its input so the far side exits, and kill it if it lingers.
+
+        A round trip in flight is not waited for: its process is killed, and that round trip fails, as
+        does a session still opening. A later :meth:`open` or :meth:`run` opens a new session.
+        """
+
+        if not self._lock.acquire(timeout=1.0):
+            self._closing = True  # set after losing the lock race, so an open() in flight cannot clear it
+            process = self._process
+            if process is not None and process.poll() is None:
+                with contextlib.suppress(OSError):
+                    if self._group:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        process.kill()
+            return
+        try:
+            self._closing = True
+            process = self._process
+            if process is None:
+                return
+            with contextlib.suppress(OSError):
+                if process.stdin is not None:
+                    process.stdin.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=2.0)
+            self._discard()
+        finally:
+            self._lock.release()
+
+    def _discard(self) -> str:
+        """Kill the session process if it still runs, reap it, and return its stderr tail."""
+
+        process, self._process = self._process, None
+        if process is None:
+            return ""
+        if process.poll() is None:
+            if self._group:
+                # Started in its own session, the adapter leads a process group: kill what it started too.
+                with contextlib.suppress(OSError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        process.wait()
+        with contextlib.suppress(OSError):
+            if process.stdin is not None:
+                process.stdin.close()
+        if self._error_reader is not None:
+            self._error_reader.join(timeout=1.0)
+        return "".join(self._errors).strip()

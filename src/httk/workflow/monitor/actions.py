@@ -79,7 +79,7 @@ def request(view: WorkspaceView, action: str, job_ids: Sequence[str], reason: st
             return stdout.strip()
         ensure_identity_key(identity)
         status, _stdout, _stderr = request_remote_job_result(
-            view.binding, context, arguments, identity, interactive=False, share_connection=True
+            view.binding, context, arguments, identity, relay=view.relay
         )
         if status:
             raise RuntimeError(f"job request failed with exit status {status}")
@@ -114,9 +114,7 @@ def start_managers(view: WorkspaceView, count: int, launcher: str | None = None)
         }
     )
     if view.remote:
-        status, _stdout, _stderr = submit_remote_manager_result(
-            view.binding, arguments, view.context, interactive=False, share_connection=True
-        )
+        status, _stdout, _stderr = submit_remote_manager_result(view.binding, arguments, view.context, relay=view.relay)
     else:
         assert view.binding.path is not None
         _mode, result = launch_workspace_managers(Path(view.binding.path), arguments, view.context)

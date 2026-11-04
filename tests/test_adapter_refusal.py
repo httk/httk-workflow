@@ -5,7 +5,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
-from httk.workflow.adapters import ADAPTER_OPERATIONS, add_remote, run_adapter
+from httk.workflow.adapters import ADAPTER_OPERATIONS, AdapterSession, SessionUnsupported, add_remote, run_adapter
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import command
 
@@ -36,8 +36,12 @@ def test_every_operation_of_an_unrecognized_kind_refuses_to_run_locally(tmp_path
     bundle = _unrecognized(project)
     (tmp_path / "source").mkdir()
     for operation in ADAPTER_OPERATIONS:
+        if operation == "session":
+            continue  # pipes stay open: AdapterSession below
         with pytest.raises(RuntimeError, match="'torque' is not implemented"):
             run_adapter(bundle, operation, _request(operation, tmp_path))
+    with pytest.raises(SessionUnsupported, match="'torque' is not implemented"):
+        AdapterSession(bundle).open()
     assert not (tmp_path / "destination").exists()
 
 

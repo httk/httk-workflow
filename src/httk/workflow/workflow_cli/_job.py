@@ -1243,7 +1243,7 @@ def request_remote_job_result(
     identity: OperatorIdentity,
     *,
     interactive: bool = True,
-    share_connection: bool = False,
+    relay: Callable[[Sequence[str]], tuple[int, str, str]] | None = None,
 ) -> tuple[int, str, str]:
     """Build request documents remotely, sign them here, and post them remotely.
 
@@ -1251,13 +1251,22 @@ def request_remote_job_result(
     :param context: The invocation context.
     :param arguments: The request arguments (``action``, ``job_id``, ``reason`` and the options).
     :param identity: The signing identity.
-    :param interactive: Whether the adapter may prompt on this terminal.
-    :param share_connection: Ask the adapter to keep one connection open across calls.
+    :param interactive: Whether the adapter may prompt on this terminal; unused with ``relay``.
+    :param relay: Runs each remote command vector instead of one adapter ``invoke`` per command, such as
+        the monitor's session; the adapter timeout is then unused too.
     :return: The far side's exit status, standard output and standard error.
     """
 
     target = resolve_remote(binding.remote, project=context.cwd)
-    shared = {"share_connection": True} if share_connection else {}
+
+    def invoke(vector: list[str]) -> dict[str, Any]:
+        if relay is not None:
+            returncode, stdout, stderr = relay(vector)
+            return {"returncode": returncode, "stdout": stdout, "stderr": stderr}
+        return run_adapter(
+            target.bundle, "invoke", {"argv": vector}, timeout=arguments.adapter_timeout, interactive=interactive
+        )
+
     remote_name = binding.name.split(":", 1)[1]
     argv = [
         *REMOTE_JOB_REQUEST_ENVELOPES_COMMAND,
@@ -1281,9 +1290,7 @@ def request_remote_job_result(
     if tree:
         argv.append("--tree")
     argv.extend(arguments.job_id)
-    result = run_adapter(
-        target.bundle, "invoke", {"argv": argv, **shared}, timeout=arguments.adapter_timeout, interactive=interactive
-    )
+    result = invoke(argv)
     stderr = str(result.get("stderr", ""))
     if result.get("returncode") != 0:
         return int(result.get("returncode", 1) or 1), "", stderr
@@ -1306,13 +1313,7 @@ def request_remote_job_result(
         publish.append("--no-durable")
     if tree:
         publish.append("--sequential")
-    published = run_adapter(
-        target.bundle,
-        "invoke",
-        {"argv": publish, **shared},
-        timeout=arguments.adapter_timeout,
-        interactive=interactive,
-    )
+    published = invoke(publish)
     return (
         int(published.get("returncode", 0) or 0),
         str(published.get("stdout", "")),

@@ -1,6 +1,7 @@
 """Bounded readers used by the workflow monitor."""
 
 import json
+import logging
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -13,6 +14,9 @@ from ..adapters import (
     REMOTE_JOB_LOG_COMMAND,
     REMOTE_JOB_SHOW_COMMAND,
     REMOTE_JOB_WHY_COMMAND,
+    AdapterSession,
+    SessionUnsupported,
+    resolve_remote,
 )
 from ..errors import WorkflowError
 from ..introspection import (
@@ -28,6 +32,8 @@ from ..introspection import (
 from ..models import normalize_placement
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, resolve_workspace
 from ..workspace import Workspace
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _first_mapping(value: object) -> dict[str, Any]:
@@ -47,8 +53,9 @@ def remote_workspace_output(
 ) -> tuple[int, str, str]:
     """Relay one remote read without importing the CLI package eagerly.
 
-    The read is never interactive: ssh must not prompt underneath curses. It
-    asks the adapter to share one connection, since the monitor polls and would
+    This is the fallback for a remote that cannot serve a session. The read is
+    never interactive: ssh must not prompt underneath curses. It asks the
+    adapter to share one connection, since the monitor polls and would
     otherwise log in once per read.
 
     :param binding: Remote-qualified workspace binding.
@@ -111,6 +118,11 @@ class WorkspaceView:
         self._logs: dict[str, tuple[int, list[dict[str, Any]]]] = {}
         self._rows: dict[str, dict[str, Any]] = {}
         self._tail_offsets: dict[str, int] = {}
+        self._session: AdapterSession | None = None
+        self._fallback = False
+        # A session failure stays until refresh() (the monitor's r): no read reaches the remote before that.
+        self._session_error: Exception | None = None
+        self._relay_lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -124,6 +136,83 @@ class WorkspaceView:
 
         return self.binding.remote != LOCAL_REMOTE
 
+    def _adapter_session(self) -> AdapterSession | None:
+        """Return this remote view's session, creating it, or None once the view has fallen back."""
+
+        with self._lock:
+            if self._fallback:
+                return None
+            if self._session is None:
+                bundle = resolve_remote(self.binding.remote, project=getattr(self.context, "cwd", None)).bundle
+                self._session = AdapterSession(bundle, timeout=self.adapter_timeout)
+            return self._session
+
+    def _fall_back(self, exc: SessionUnsupported) -> None:
+        """Use one adapter call per read from now on, since the remote cannot serve a session."""
+
+        _LOGGER.info("%s: no remote session (%s); reading through one adapter call per read", self.name, exc)
+        with self._lock:
+            self._fallback, self._session = True, None
+
+    def connect(self) -> None:
+        """Open a remote view's session on this terminal, so ssh may prompt before the display starts.
+
+        A remote that cannot serve a session makes the view fall back to one adapter call per read. Any other
+        failure is kept and raised by every :meth:`relay` until :meth:`refresh`, without another login attempt.
+        """
+
+        if not self.remote or self.context is None:
+            return
+        session = self._adapter_session()
+        if session is None:
+            return
+        try:
+            session.open(interactive=True)
+        except SessionUnsupported as exc:
+            self._fall_back(exc)
+        except (RuntimeError, TimeoutError) as exc:
+            self._session_error = exc
+
+    def close(self) -> None:
+        """End a remote view's session, if one is open."""
+
+        with self._lock:
+            session = self._session
+        if session is not None:
+            session.close()
+
+    def relay(self, argv: Sequence[str]) -> tuple[int, str, str]:
+        """Run one complete remote command vector for this remote view.
+
+        It goes through the view's session, opened non-interactively when needed, or through one adapter
+        call when the remote cannot serve a session. A session failure is kept: every later call raises it
+        without reaching the remote, until :meth:`refresh` allows one new attempt.
+
+        :param argv: The complete far-side command vector.
+        :return: The remote exit status, standard output and standard error.
+        :raises ValueError: Without a CLI context.
+        :raises RuntimeError: If the session's login or connection fails, now or since the last
+            :meth:`refresh` (including in :meth:`connect`).
+        :raises TimeoutError: If the session did not answer within the adapter timeout.
+        """
+
+        if self.context is None:
+            raise ValueError("a CLI context is required to read a remote workspace")
+        session = self._adapter_session()
+        if session is not None:
+            # Checked and set under one lock, so concurrent reads after a retry make one attempt between them.
+            with self._relay_lock:
+                if self._session_error is not None:
+                    raise self._session_error
+                try:
+                    return session.run(argv)
+                except SessionUnsupported as exc:
+                    self._fall_back(exc)
+                except (RuntimeError, TimeoutError) as exc:
+                    self._session_error = exc
+                    raise
+        return remote_workspace_output(self.binding, self.context, argv, timeout=self.adapter_timeout)
+
     def _remote_json(
         self,
         command: Sequence[str],
@@ -133,15 +222,8 @@ class WorkspaceView:
     ) -> object:
         """Run one JSON read through the non-printing remote relay."""
 
-        if self.context is None:
-            raise ValueError("a CLI context is required to read a remote workspace")
         argv = [*command, *flags, *tail, self.binding.name.split(":", 1)[1]]
-        status, stdout, stderr = remote_workspace_output(
-            self.binding,
-            self.context,
-            argv,
-            timeout=self.adapter_timeout,
-        )
+        status, stdout, stderr = self.relay(argv)
         if status:
             detail = stderr.strip() or f"exit status {status}"
             raise RuntimeError(f"remote read failed: {detail}")
@@ -398,12 +480,13 @@ class WorkspaceView:
             self._logs.clear()
 
     def refresh(self) -> None:
-        """Invalidate all cached reads and remembered visible rows."""
+        """Invalidate all cached reads and remembered visible rows, and allow a failed session one new attempt."""
 
         self.expire()
         with self._lock:
             self._rows.clear()
             self._tail_offsets.clear()
+            self._session_error = None
 
 
 __all__ = ["WorkspaceView"]

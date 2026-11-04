@@ -57,24 +57,36 @@ cursor continues the filter scan. A human table request without a limit scans
 the complete selected stream. 
 ## Remote workspaces
 
-Remote workspaces use the existing adapter JSON read protocol. Page, show,
-history, and diagnosis requests are separate bounded adapter calls: a page
-refresh combines the page and filtered counts in one adapter invocation, and
-show, why, and log are separate one-invocation reads when explicitly requested.
-Detail and other actions require canonical job IDs. Actions are dispatched
-through the existing request and manager command implementations.
+Remote workspaces use the existing JSON read protocol. When the monitor
+starts, before its display opens, it opens one session per remote workspace: a
+far-side `httk workflow session` reached through the remote's adapter. With
+`interactive_auth=yes` this is where ssh prompts for a password or second
+factor. Every page, detail, diagnosis, history, request and manager start then
+runs through that session, so the whole monitor run costs one login and one
+remote `httk` start per workspace. A page refresh combines the page and
+filtered counts in one request; show, why, and log are separate requests made
+when explicitly requested. A session answers one request at a time, so a long
+diagnosis or history read delays the next refresh until it returns. Detail and other actions require canonical job IDs.
+Actions are dispatched through the existing request and manager command
+implementations.
+
+If the remote's adapter or its `httk` cannot serve a session (an older far
+side), the monitor falls back to one bounded adapter call per read and action.
+Those calls ask the adapter to share one connection (`share_connection`): the
+`ssh` template then keeps a control socket open, as `interactive_auth=yes`
+does, and closes it after 10 idle minutes, so the monitor logs in once rather
+than once per refresh (a `--refresh` longer than that logs in once per
+refresh). When your own ssh configuration names a `ControlPath` for the host,
+ssh uses that instead; see [Remotes](remotes.md).
 
 A timed refresh keeps the current page, counts and detail on screen until the
-new reads arrive, and the interval runs from the end of the previous read. The
-monitor's reads and actions ask the adapter to share one connection
-(`share_connection`): the `ssh` template then keeps a control socket open, as
-`interactive_auth=yes` does, and closes it after 10 idle minutes, so a session
-logs in once rather than once per refresh (a `--refresh` longer than that logs
-in once per refresh). When your own ssh configuration names a `ControlPath` for
-the host, ssh uses that instead; see [Remotes](remotes.md). After a failed
-remote read the monitor stops reading that workspace, on the timer and for new
-detail, until you press `r`, so an unreachable host or a refused login does not
-turn into a stream of login attempts.
+new reads arrive, and the interval runs from the end of the previous read.
+After a failed remote read, including a login refused when the monitor started,
+nothing more is sent to that workspace, on the timer or for new detail, until
+you press `r` or complete an action; either makes one new attempt to reconnect,
+without prompting.
+An unreachable host or a refused login therefore does not turn into a stream
+of login attempts.
 
 Some features are unavailable remotely:
 

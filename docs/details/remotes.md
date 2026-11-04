@@ -139,14 +139,19 @@ command runs in a foreground terminal. Anything without one (a detached
 manager, a cron job, a backgrounded shell job) keeps batch mode and fails with a
 hint instead of hanging. The adapter's `timeout_seconds` (300 s for the `ssh`
 template) still bounds each operation, including the time you spend typing.
-`httk workflow monitor` never prompts; for a remote that needs a second factor,
-open the shared connection first, for example with `httk remote check NAME`.
-The monitor and other calls without a terminal join that connection while it is
-open, provided they resolve the same socket directory: a cron job without
-`XDG_RUNTIME_DIR` looks under `/tmp/httk-ssh-UID` and does not find a connection
-opened from a desktop session. The monitor also shares a connection with the
-default batch-mode login, so its reads and actions log in once and then reuse
-it until it has been idle for 10 minutes; `per-call` turns that off as well.
+`httk workflow monitor` prompts at most once per remote workspace, when it
+starts and before its display opens, if `interactive_auth` is `yes` and a
+terminal is attached; it then keeps that one connection, a far-side
+`httk workflow session`, for its whole run. Since the session is a single
+connection, `per-call` makes no difference to it. Calls without a terminal,
+including the monitor's reconnect after `r`, join a shared connection opened
+earlier, for example by `httk remote check NAME`, while it is open, provided
+they resolve the same socket directory: a cron job without `XDG_RUNTIME_DIR`
+looks under `/tmp/httk-ssh-UID` and does not find a connection opened from a
+desktop session. Against a far side that cannot serve a session, the monitor
+falls back to one call per read and shares a connection even with the default
+batch-mode login, so its reads and actions log in once and then reuse it until
+it has been idle for 10 minutes; `per-call` turns that sharing off as well.
 
 ## Working with remote workspaces
 

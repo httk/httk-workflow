@@ -144,19 +144,18 @@ def test_monitor_remote_page_forwards_counts_and_filters(monkeypatch: pytest.Mon
 
     binding = WorkspaceBinding("cluster:station", "cluster", None)
     context = CLIContext("httk", Path.cwd())
-    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    calls: list[list[str]] = []
 
-    def fake_output(*args: object, **kwargs: object) -> tuple[int, str, str]:
-        calls.append((args, dict(kwargs)))
+    def fake_relay(_view: WorkspaceView, argv: list[str]) -> tuple[int, str, str]:
+        calls.append(argv)
         return 0, '{"jobs": [], "next_after": null, "counts": {"ready": 3}}', ""
 
-    monkeypatch.setattr(monitor_data, "remote_workspace_output", fake_output)
+    monkeypatch.setattr(WorkspaceView, "relay", fake_relay)
     view = WorkspaceView(binding, context)
     view.page(("ready",), "jobs/sub", "needle", "after-cursor", 7)
 
     assert len(calls) == 1
-    args = calls[0][0]
-    assert args[2] == [
+    assert calls[0] == [
         "httk",
         "job",
         "list",
@@ -182,16 +181,16 @@ def test_monitor_remote_default_detail_forwards_no_children(monkeypatch: pytest.
 
     binding = WorkspaceBinding("cluster:station", "cluster", None)
     context = CLIContext("httk", Path.cwd())
-    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    calls: list[list[str]] = []
 
-    def fake_output(*args: object, **kwargs: object) -> tuple[int, str, str]:
-        calls.append((args, dict(kwargs)))
+    def fake_relay(_view: WorkspaceView, argv: list[str]) -> tuple[int, str, str]:
+        calls.append(argv)
         return 0, '[{"job_id": "job"}]', ""
 
-    monkeypatch.setattr(monitor_data, "remote_workspace_output", fake_output)
+    monkeypatch.setattr(WorkspaceView, "relay", fake_relay)
     WorkspaceView(binding, context).detail("job")
 
-    assert calls[0][0][2] == [
+    assert calls[0] == [
         "httk",
         "job",
         "show",
@@ -599,11 +598,11 @@ def test_monitor_failed_remote_read_waits_for_an_explicit_retry(monkeypatch: pyt
     view = WorkspaceView(WorkspaceBinding("cluster:station", "cluster", None), CLIContext("httk", Path.cwd()))
     calls: list[object] = []
 
-    def refused(*args: object, **_kwargs: object) -> tuple[int, str, str]:
-        calls.append(args)
+    def refused(_view: WorkspaceView, argv: list[str]) -> tuple[int, str, str]:
+        calls.append(argv)
         return 255, "", "Permission denied (publickey)."
 
-    monkeypatch.setattr(monitor_data, "remote_workspace_output", refused)
+    monkeypatch.setattr(WorkspaceView, "relay", refused)
     app = MonitorApp(object(), [view], 0.5)
     app._schedule_load(force=True)
     assert app.future is not None
@@ -627,11 +626,11 @@ def test_monitor_failed_remote_detail_is_not_retried_every_loop(monkeypatch: pyt
     view = WorkspaceView(WorkspaceBinding("cluster:station", "cluster", None), CLIContext("httk", Path.cwd()))
     calls: list[object] = []
 
-    def refused(*args: object, **_kwargs: object) -> tuple[int, str, str]:
-        calls.append(args)
+    def refused(_view: WorkspaceView, argv: list[str]) -> tuple[int, str, str]:
+        calls.append(argv)
         return 255, "", "Permission denied (publickey)."
 
-    monkeypatch.setattr(monitor_data, "remote_workspace_output", refused)
+    monkeypatch.setattr(WorkspaceView, "relay", refused)
     app = MonitorApp(object(), [view], 5.0)
     app.state.rows = [{"job_id": "kept"}]
     app.state.detail_job = "kept"

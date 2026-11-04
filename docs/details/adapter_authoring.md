@@ -419,6 +419,40 @@ sends a health request when the daemon is pinned (otherwise it only checks
 `exchange.json`); success means the matching daemon answered `ready`. It
 does not install software or validate compute-node confinement.
 
+## The optional `session` operation
+
+A caller that polls, such as `workflow monitor`, would otherwise pay one login
+and one remote `httk` start per read. `session` instead starts one long-lived
+far-side process and talks to it over the adapter's own pipes, as rsync does.
+It is optional: an adapter that does not implement it refuses it (or fails),
+and the caller then falls back to one `invoke` per command. The caller also
+falls back when the far side cannot serve a session, for example because its
+`httk` predates the session command. The maintained `local`, `ssh` and `mount`
+kinds implement it; `mount-daemon` refuses it.
+
+Beyond the standard request envelope, `session` accepts exactly:
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `argv` | array of nonempty strings, required | the command to run, `["httk", "workflow", "session"]` |
+
+There is no `cwd`: each request inside the session carries its own.
+
+On success the adapter prints **no result document**. It replaces itself
+(`exec`) with a process that runs `argv` where the adapter's work belongs, with
+the adapter's own stdin, stdout and stderr inherited, so the caller writes
+requests to the far side's stdin and reads responses from its stdout. That
+stdout is the caller's protocol stream: the adapter must not print anything of
+its own to stdout before the exec. A refusal is the ordinary `ok: false` result
+document with exit `0`, as for any refused operation. If `argv[0]` is the
+literal `httk`, the remote's `httk_command` applies, and so does `cli_prelude`,
+exactly as for `invoke`.
+
+The caller tolerates lines a login banner or a printing `cli_prelude` puts
+ahead of the far side's output. The wire format is that of the hidden
+`httk workflow session` command: one hello line, then one JSON response line
+per JSON request line, until the caller closes stdin.
+
 ## Settings and credentials
 
 `httk remote configure --set KEY=VALUE NAME` sorts every assignment by

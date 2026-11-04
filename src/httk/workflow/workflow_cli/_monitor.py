@@ -47,9 +47,14 @@ def handle_monitor(arguments: argparse.Namespace, context: CLIContext) -> int:
     from ..monitor.ui import run_curses
 
     try:
+        for view in views:
+            view.connect()  # before curses takes the terminal: ssh may prompt here
         return int(curses.wrapper(run_curses, views, arguments.refresh) or 0)
     except curses.error as exc:
         raise ValueError(f"could not initialize the curses terminal: {exc}") from exc
+    finally:
+        for view in views:
+            view.close()
 
 
 def build_monitor_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:

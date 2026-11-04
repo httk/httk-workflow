@@ -185,14 +185,26 @@ def test_non_interactive_adapter_gets_no_stdin(tmp_path: Path, monkeypatch: pyte
     seen: list[object] = []
 
     def capture(*args: object, **kwargs: object) -> object:
-        seen.append(kwargs.get("stdin"))
+        seen.append((kwargs.get("stdin"), bool(kwargs.get("start_new_session"))))
         raise LookupError("captured")
 
     monkeypatch.setattr(adapters.subprocess, "run", capture)
     for interactive in (True, False):
         with pytest.raises(LookupError):
             run_adapter(bundle, "status", {"argv": ["true"]}, interactive=interactive)
-    assert seen == [None, subprocess.DEVNULL]
+    assert seen == [(None, False), (subprocess.DEVNULL, True)]
+
+
+def _without_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every monitor session unsupported, so its reads take the per-call fallback."""
+
+    from httk.workflow.monitor import data
+
+    def unsupported(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
+        raise adapters.SessionUnsupported("no session here")
+
+    monkeypatch.setattr(data, "resolve_remote", lambda *_args, **_kwargs: SimpleNamespace(bundle="unused"))
+    monkeypatch.setattr(adapters.AdapterSession, "run", unsupported)
 
 
 def test_monitor_manager_start_never_prompts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -203,15 +215,16 @@ def test_monitor_manager_start_never_prompts(tmp_path: Path, monkeypatch: pytest
 
     seen: list[object] = []
 
-    def capture(*_args: object, **kwargs: object) -> dict[str, object]:
-        seen.append(kwargs.get("interactive"))
+    def capture(_bundle: object, _operation: str, request: dict[str, object], **kwargs: object) -> dict[str, object]:
+        seen.append((kwargs.get("interactive"), request.get("share_connection")))
         return {"returncode": 0, "stdout": "", "stderr": ""}
 
+    _without_session(monkeypatch)
     monkeypatch.setattr(_common, "resolve_remote", lambda *_args, **_kwargs: SimpleNamespace(bundle="unused"))
     monkeypatch.setattr(_common, "run_adapter", capture)
     view = WorkspaceView(WorkspaceBinding("cluster:station", "cluster", None), CLIContext("httk", tmp_path))
     assert actions.start_managers(view, 1) == "started 1 manager(s)"
-    assert seen == [False]
+    assert seen == [(False, True)]
 
 
 def test_monitor_reads_ask_for_a_shared_connection(
@@ -221,16 +234,19 @@ def test_monitor_reads_ask_for_a_shared_connection(
     from httk.workflow.registry import WorkspaceBinding
     from httk.workflow.workflow_cli import _common
 
-    requests: list[dict[str, object]] = []
+    requests: list[tuple[dict[str, object], object]] = []
 
-    def capture(_bundle: object, _operation: str, request: dict[str, object], **_kwargs: object) -> dict[str, object]:
-        requests.append(request)
+    def capture(_bundle: object, _operation: str, request: dict[str, object], **kwargs: object) -> dict[str, object]:
+        requests.append((request, kwargs.get("interactive")))
         return {"returncode": 0, "stdout": '{"jobs": [], "counts": {}}', "stderr": ""}
 
+    _without_session(monkeypatch)
     monkeypatch.setattr(_common, "resolve_remote", lambda *_args, **_kwargs: SimpleNamespace(bundle="unused"))
     monkeypatch.setattr(_common, "run_adapter", capture)
-    WorkspaceView(WorkspaceBinding("cluster:station", "cluster", None), CLIContext("httk", tmp_path)).page()
-    assert requests[0]["share_connection"] is True
+    view = WorkspaceView(WorkspaceBinding("cluster:station", "cluster", None), CLIContext("httk", tmp_path))
+    view.page()
+    view.page()
+    assert [(request["share_connection"], interactive) for request, interactive in requests] == [(True, False)] * 2
 
     shared: list[bool] = []
 

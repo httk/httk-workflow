@@ -263,22 +263,28 @@ def _remote_httk(argv: Sequence[str], settings: Mapping[str, object]) -> list[st
 def _terminal_present() -> bool:
     """Return whether this process may prompt on its controlling terminal.
 
-    ``ssh`` reads passwords and keyboard-interactive answers from ``/dev/tty``.
-    A terminal on stdin is not enough: a backgrounded process that reads
-    ``/dev/tty`` is stopped by ``SIGTTIN``, so the process must also be in the
-    terminal's foreground process group. Anything else -- an unattended
-    manager, a cron job, a backgrounded shell job -- must never block on a
-    prompt and keeps batch mode.
+    ``ssh`` reads passwords and keyboard-interactive answers from ``/dev/tty``,
+    so the controlling terminal is what counts, not stdin (which carries the
+    protocol in a ``session``). Having one is not enough: a backgrounded
+    process that reads ``/dev/tty`` is stopped by ``SIGTTIN``, so the process
+    must also be in the terminal's foreground process group. Anything else --
+    an unattended manager, a cron job, a backgrounded shell job, an adapter
+    started in a new session -- must never block on a prompt and keeps batch
+    mode.
 
-    :return: True only for a foreground process attached to a terminal.
+    :return: True only for a foreground process with a controlling terminal.
     """
 
     try:
-        if sys.stdin is None:  # started with fd 0 closed
-            return False
-        return sys.stdin.isatty() and os.tcgetpgrp(sys.stdin.fileno()) == os.getpgrp()
-    except (OSError, ValueError):
+        terminal = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+    except OSError:  # no controlling terminal
         return False
+    try:
+        return os.tcgetpgrp(terminal) == os.getpgrp()
+    except OSError:
+        return False
+    finally:
+        os.close(terminal)
 
 
 def _interactive_auth(settings: Mapping[str, object]) -> str:
@@ -958,6 +964,36 @@ def _invoke(kind: str, operation: str, request: Mapping[str, object]) -> None:
     _result(operation, returncode=completed.returncode, stdout=completed.stdout, stderr=stderr)
 
 
+def _session(kind: str, request: Mapping[str, object]) -> None:
+    """Replace this process with ``argv`` run where the adapter's work belongs, keeping its stdio.
+
+    The command is built as the one-shot runners build theirs, but the adapter
+    execs it instead of running it: the caller talks to it over this process's
+    own stdin and stdout, and no result document is printed.
+
+    :param kind: The adapter kind.
+    :param request: The request: ``argv``.
+    :raises ValueError: If a request member or setting is malformed.
+    """
+
+    settings = _settings(request)
+    argv = _argv(request, "session")
+    if kind == "ssh":
+        transport = _ssh_transport(settings)
+        if "ServerAliveInterval=15" not in transport:
+            # A session holds its caller's lock per round trip: a dead connection must end it within a
+            # minute, not after the adapter timeout, in every sharing mode.
+            transport += ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
+        command = [*transport, "--", _ssh_destination(settings), _remote_command(settings, argv)]
+    elif kind == "mount":
+        command = [*_exec_command(settings), _remote_command(settings, argv)]
+    else:
+        command = _local_httk(argv, settings)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execvp(command[0], command)
+
+
 def _deliver(kind: str, request: Mapping[str, object]) -> None:
     """Stream a batch of files as an uncompressed tar on the stdin of one ``httk`` command where it runs.
 
@@ -1058,6 +1094,8 @@ def main(argv: list[str] | None = None) -> int:
             _invoke(kind, operation, request)
         elif operation == "deliver":
             _deliver(kind, request)
+        elif operation == "session":
+            _session(kind, request)
         else:
             raise ValueError(f"unsupported maintained adapter operation: {operation}")
     except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
