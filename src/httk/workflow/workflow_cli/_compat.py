@@ -8,6 +8,7 @@ from httk.workflow.collecting import _CollectEnvironmentError
 from httk.workflow.compat.v1 import collect_finished_tree
 
 from ..storing import _collected_mapping, store_collected
+from ._collect import add_records_option, records_option
 from ._common import CLIContext, _group, _leaf
 
 
@@ -17,6 +18,7 @@ def handle_v1_collect(arguments: argparse.Namespace, context: CLIContext) -> int
     del context
     if arguments.into is not None and arguments.id_base is None:
         raise ValueError("--id-base is required with --into")
+    selection = records_option(arguments)
     failed = False
     for root in arguments.roots:
         try:
@@ -31,7 +33,11 @@ def handle_v1_collect(arguments: argparse.Namespace, context: CLIContext) -> int
                 # --into retains the root sweep for its provenance storage pass.
                 items = list(collected_items)
                 reports = store_collected(
-                    items, arguments.into, id_base=arguments.id_base, id_series=arguments.id_series
+                    items,
+                    arguments.into,
+                    id_base=arguments.id_base,
+                    id_series=arguments.id_series,
+                    entry_records=selection,
                 )
                 for item, report in zip(items, reports):
                     if not arguments.degraded or item.missing_collector is not None:
@@ -93,6 +99,7 @@ def add_v1_collect_arguments(parser: argparse.ArgumentParser) -> None:
         default="1",
         help="entry-id campaign series (default: 1)",
     )
+    add_records_option(parser)
 
 
 def build_v1_parser(

@@ -157,7 +157,7 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
     from ..collecting import CollectedJob, job_records
     from ..collecting import collect as collect_jobs
     from ..storing import _collected_mapping, store_collected
-    from ._collect import _emit_collect_summary
+    from ._collect import _emit_collect_summary, records_option
 
     if arguments.into is not None and arguments.raw:
         raise ValueError("--into cannot be combined with --raw")
@@ -167,6 +167,7 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
         raise ValueError("--no-bare-runs only applies with --into")
     if arguments.degraded and arguments.raw:
         raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
+    selection = records_option(arguments)
     config = read_campaign(context.cwd)
     selected = sorted(arguments.partition or config.partitions)
     states = arguments.state or DEFAULT_COLLECT_STATES
@@ -226,6 +227,7 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
             id_base=arguments.id_base,
             id_series=arguments.id_series,
             bare_runs=not arguments.no_bare_runs,
+            entry_records=selection,
         )
         for item, report in zip(items, reports):
             degraded += item.missing_collector is not None
@@ -296,7 +298,7 @@ def build_campaign_parser(
 ) -> None:
     """Declare the ``campaign`` group: a partition map over many workspaces."""
 
-    from ._collect import _positive_int
+    from ._collect import _positive_int, add_records_option
 
     _, group = _group(
         subparsers,
@@ -515,6 +517,7 @@ def build_campaign_parser(
         default="1",
         help="entry-id campaign series (default: 1)",
     )
+    add_records_option(collect_parser)
 
     managers = _leaf(
         group,

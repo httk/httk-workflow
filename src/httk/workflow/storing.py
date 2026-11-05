@@ -11,6 +11,7 @@ postprocess execution as its own run, fed by the stored run of its job.
 """
 
 import contextlib
+import importlib
 import json
 import logging
 import re
@@ -273,10 +274,69 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
     return mapping
 
 
+def _entry_family_name(entry_type: str) -> tuple[str | None, list[BaseException]]:
+    """Name the registered entry family of *entry_type*, with the import failures met looking for it."""
+
+    from httk.core.register import known_entry_families, resolve_entry_family
+
+    import_failures: list[BaseException] = []
+    for candidate in known_entry_families():
+        try:
+            family = resolve_entry_family(candidate)
+        except (ImportError, ModuleNotFoundError) as exc:
+            import_failures.append(exc)
+            continue
+        if getattr(family, "type", None) == entry_type:
+            return candidate, import_failures
+    return None, import_failures
+
+
+def _record_selection(entry_records: Mapping[str, Sequence[str]]) -> dict[str, tuple[str, ...]]:
+    """Validate a per-entry-type record selection into each type's record registry names, in order.
+
+    :param entry_records: Map entry types to registered record names.
+    :return: Map each entry type to its selected record registry names.
+    :raises ValueError: If an entry type or record is unknown, a record is not of
+        its type's family, or a type selects no record or one record twice.
+    """
+
+    from httk.core.register import known_entry_records, resolve_entry_record
+
+    selection: dict[str, tuple[str, ...]] = {}
+    for entry_type, records in entry_records.items():
+        family_name, import_failures = _entry_family_name(entry_type)
+        if family_name is None:
+            detail = f" ({import_failures[-1]})" if import_failures else ""
+            raise ValueError(f"cannot select records for unknown entry type {entry_type!r}{detail}")
+        if isinstance(records, str) or not records:
+            raise ValueError(f"select a non-empty sequence of records for entry type {entry_type!r}")
+        family_records = known_entry_records(family_name)
+        names: list[str] = []
+        for name in records:
+            # A non-name (a record class) is never in the registry, so it is refused here as unknown.
+            if name not in family_records:
+                problem = (
+                    f"unknown record {name!r}"
+                    if name not in known_entry_records()
+                    else f"record {name!r} is not of entry type {entry_type!r}"
+                )
+                raise ValueError(f"{problem}; entry type {entry_type!r} has: {', '.join(family_records)}")
+            try:
+                resolve_entry_record(name)
+            except (ImportError, TypeError, ValueError) as exc:
+                raise ValueError(f"record {name!r} cannot be resolved: {exc}") from exc
+            if name in names:
+                raise ValueError(f"record {name!r} is selected twice for entry type {entry_type!r}")
+            names.append(name)
+        selection[entry_type] = tuple(names)
+    return selection
+
+
 def _storage_layout(
     items: list[CollectedJob],
     persisted: Mapping[str, Sequence[str]] | None = None,
     extra_types: Sequence[str] = (),
+    selected: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[dict[type, tuple[type, ...]], dict[int, str]]:
     """Resolve the lazy core entry registry for the values this sweep stores.
 
@@ -285,12 +345,15 @@ def _storage_layout(
     position is part of the store's id numbering and a reorder is never an
     additive upgrade. A new family (and a new store) uses the pinned core order
     for ``records`` and name order otherwise. *extra_types* names the entry
-    types needed beyond ``records``, ``runs`` and those of *items*.
+    types needed beyond ``records``, ``runs`` and those of *items*. An entry
+    type in *selected* (validated by :func:`_record_selection`) is declared even
+    when no item stores it, with only the record names given for it, appended
+    after any persisted ones.
     """
 
-    from httk.core.register import known_entry_families, known_entry_records, resolve_entry_family, resolve_entry_record
+    from httk.core.register import known_entry_records, resolve_entry_family, resolve_entry_record
 
-    required_types = {"records", "runs", *extra_types}
+    required_types = {"records", "runs", *extra_types, *(selected or ())}
     failures: dict[int, str] = {}
     for index, item in enumerate(items):
         if item.references:
@@ -312,17 +375,7 @@ def _storage_layout(
 
     required_families: set[str] = set()
     for entry_type in required_types:
-        family_name: str | None = None
-        import_failures: list[BaseException] = []
-        for candidate in known_entry_families():
-            try:
-                family = resolve_entry_family(candidate)
-            except (ImportError, ModuleNotFoundError) as exc:
-                import_failures.append(exc)
-                continue
-            if getattr(family, "type", None) == entry_type:
-                family_name = candidate
-                break
+        family_name, import_failures = _entry_family_name(entry_type)
         if family_name is None:
             detail = f": {import_failures[-1]}" if import_failures else ""
             message = f"cannot store entry type {entry_type!r}: no registered entry family{detail}"
@@ -345,7 +398,10 @@ def _storage_layout(
                 raise
             continue
         names = known_entry_records(family_name)
-        if family_name == "records":
+        chosen = (selected or {}).get(str(getattr(family, "type", "")))
+        if chosen is not None:
+            names = list(chosen)
+        elif family_name == "records":
             names = [name for name in _CORE_RECORDS_ORDER if name in names] + [
                 name for name in names if name not in _CORE_RECORDS_ORDER
             ]
@@ -414,6 +470,64 @@ def _typed(value: object, typed: Mapping[str, type]) -> object:
     if isinstance(value, DataRecord) and value.definition_id in typed:
         return cast(Any, typed[value.definition_id]).from_data_record(value)
     return value
+
+
+#: The explicit conversions collection applies to a value of a selected entry type
+#: whose storage record is not selected, keyed by the first selected record's
+#: registry name: the value class whose constructor builds that record's value.
+_CONVERSIONS = {
+    "atomistic-numeric-unitcell-structure": ("httk.atomistic", "NumericUnitcellStructure"),
+    "atomistic-unitcell-structure": ("httk.atomistic", "UnitcellStructureView"),
+}
+
+
+def _selected(value: object, selection: Mapping[str, Sequence[str]], typed: Mapping[str, type]) -> object:
+    """Return *value* as a value its entry type's record *selection* stores, converting it when needed.
+
+    A value of an unselected entry type is returned as is. A value whose storage
+    record (after :func:`_typed`) is selected is unchanged; any other is converted
+    by :data:`_CONVERSIONS` for the first selected record, a lossy conversion the
+    selection asked for. A :class:`~httk.workflow.collecting.StructureInput` has
+    its main converted and its alternative, unless already a selected record,
+    rebuilt as the converted main's record with the staged file carried over.
+
+    :param value: The collected value.
+    :param selection: The validated selection of :func:`_record_selection`.
+    :param typed: The typed records of the ``records`` family, by property definition.
+    :return: The value to store.
+    :raises ValueError: If no conversion to the first selected record is defined,
+        or the conversion refuses the value.
+    :raises TypeError: If the value is not storable.
+    """
+
+    entry_type = getattr(value, "type", None)
+    names = selection.get(entry_type) if isinstance(entry_type, str) else None
+    if names is None:
+        return value
+    from httk.core.register import resolve_entry_record
+
+    allowed = tuple(resolve_entry_record(name) for name in names)
+    if isinstance(value, StructureInput):
+        main = _selected(value.main, selection, typed)
+        alternative = value.alternative
+        if type(alternative) not in allowed:
+            record = resolve_storage_record(main)
+            from_structure = getattr(record, "from_structure", None)
+            if from_structure is None:
+                raise ValueError(f"no file-recording alternative of {record.__name__} is defined")
+            alternative = replace(from_structure(main), source_file=alternative.source_file)
+        return replace(value, main=main, alternative=alternative)
+    value = _typed(value, typed)
+    if resolve_storage_record(value) in allowed:
+        return value
+    conversion = _CONVERSIONS.get(names[0])
+    if conversion is None:
+        raise ValueError(f"no conversion to {names[0]} is defined")
+    module, name = conversion
+    try:
+        return getattr(importlib.import_module(module), name)(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"cannot convert to {names[0]}: {exc}") from exc
 
 
 def _persisted_record_order(path: Path) -> dict[str, tuple[str, ...]] | None:
@@ -825,6 +939,7 @@ def store_collected(
     ledger_keys: Sequence[tuple[str, bytes]] = (),
     bare_runs: bool = True,
     upgrade: bool = False,
+    entry_records: Mapping[str, Sequence[str]] | None = None,
 ) -> list[dict[str, object]]:
     """Save one bounded collected sweep into a file-backed SQLite store.
 
@@ -866,6 +981,22 @@ def store_collected(
     no such link is stored uncited, with a warning and its role in
     ``"references_uncited"``.
 
+    By default a new store declares every registered record of each entry
+    family the sweep needs. *entry_records* selects the records of an entry
+    type instead: a new store declares exactly those, in the given order, and
+    an existing store that lacks one needs *upgrade*. A value of a selected
+    type whose storage record is not selected is converted to the first
+    selected record, where a conversion is defined
+    (``atomistic-numeric-unitcell-structure`` builds a
+    ``NumericUnitcellStructure``, lossy by this explicit choice;
+    ``atomistic-unitcell-structure`` builds a ``UnitcellStructureView``). A
+    value without a conversion, or one the conversion refuses (a structure
+    with assemblies as numeric), fails its job with ``"storage_error"``; it is
+    never dropped or stored as an unselected record. Run edges and
+    ``product_of`` references follow the converted entries. Selecting
+    ``records`` keeps generic ``DataRecord`` values only if it lists
+    ``core-data-record``.
+
     Each report is the job's collected summary plus ``"stored"`` (the stored
     entry ids, run id, any reference ids and uncited output roles, or ``None`` when nothing was stored, with
     ``"skipped"`` saying why), ``"storage_error"`` when the job could not be
@@ -884,20 +1015,26 @@ def store_collected(
     :param upgrade: Apply an additive layout upgrade the store needs (new record
         kinds or families, for example a typed record a newer *httk* ships)
         instead of refusing. Keep a backup of the store first.
+    :param entry_records: Map entry types (``"structures"``) to the registered
+        record names (``"atomistic-numeric-unitcell-structure"``) to declare and
+        store them as, or ``None`` for every registered record.
     :return: One report mapping per collected job.
-    :raises ValueError: If *httk-store* is unavailable, or the store at *path*
-        was created for a different set of entry types, predates typed records, or
-        needs an additive upgrade and *upgrade* is false.
+    :raises ValueError: If *httk-store* is unavailable, *entry_records* names an
+        unknown entry type or record, a record outside its type's family, or an
+        empty or repeated selection, or the store at *path* was created for a
+        different set of entry types, predates typed records, or needs an
+        additive upgrade and *upgrade* is false.
     """
 
     _require_store()
+    selection = None if entry_records is None else _record_selection(entry_records)
     from httk.store.backend.schema import SchemaError  # pyright: ignore[reportMissingImports]
     from httk.store.store_common import EntryMetadataConflictError  # pyright: ignore[reportMissingImports]
 
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        layout, failures = _storage_layout(items, _persisted_record_order(target))
+        layout, failures = _storage_layout(items, _persisted_record_order(target), selected=selection)
     except (ImportError, ModuleNotFoundError, TypeError, ValueError) as exc:
         raise ValueError(
             f"{target} cannot resolve its stored entry layout: {exc}. Restore the missing entry registration and "
@@ -940,14 +1077,28 @@ def store_collected(
         # A dataclass entry is stored only as a record of its family; anything else
         # would land in a private table no provider serves.
         members = {record for records in layout.values() for record in records}
+        # Each value's selected form, converted once for the member check and the save.
+        conversions: dict[tuple[int, str, int], Any] = {}
+
+        def _stored_form(index: int, role: str, value: Any) -> Any:
+            """Return *value* as the record selection stores it, cached per job, role and value."""
+            if not selection:
+                return value
+            key = (index, role, id(value))
+            if key not in conversions:
+                conversions[key] = _selected(value, selection, typed)
+            return conversions[key]
+
         for index, item in enumerate(items):
             for role, value in (*item.outputs.items(), *item.inputs.items()):
                 if index in failures:
                     break
                 try:
-                    stored_as = _typed(value.alternative if isinstance(value, StructureInput) else value, typed)
-                except (TypeError, ValueError) as exc:
-                    # A value the typed record refuses (a list-valued total energy) fails this job only.
+                    form = _stored_form(index, role, value)
+                    stored_as = _typed(form.alternative if isinstance(form, StructureInput) else form, typed)
+                except (SchemaError, TypeError, ValueError) as exc:
+                    # A value the typed or selected record refuses (a list-valued total energy, an
+                    # unstorable or unconvertible structure) fails this job only.
                     failures[index] = f"cannot store role {role!r}: {exc}"
                     break
                 if is_dataclass(stored_as) and type(stored_as) not in members:
@@ -1074,14 +1225,16 @@ def store_collected(
                         if getattr(value, "product_of", ()):
                             deferred_outputs.setdefault(index, []).append((role, value))
                             continue
+                        form = _stored_form(index, role, value)
                         if isinstance(value, StructureInput):
                             # The main is stored as any structure; the alternative records the staged
                             # file under it, addressed as <main id>~<kind>, which the run's edge names.
+                            # Edges name the collected (unconverted) readings, so they key the remap.
                             main_key = content_id(value.main)
                             revised |= _save_output(
                                 item,
                                 role,
-                                value.main,
+                                form.main,
                                 original_key=main_key,
                                 pending_remap=pending_remap,
                                 entry_ids=entry_ids,
@@ -1091,14 +1244,14 @@ def store_collected(
                             # name one content: saving it again is a no-op, and another reading has another main.
                             # ponytail: assumes the main id follows content (readers return views, which the
                             # ledger cannot pin); a ledger-pinned main would need its alternative revised too.
-                            store.save(value.alternative, alternative_of=main_id, alternative_kind=value.kind)
+                            store.save(form.alternative, alternative_of=main_id, alternative_kind=value.kind)
                             pending_remap[content_id(value.alternative)] = f"{main_id}~{value.kind}"
                             entry_ids.append(f"{main_id}~{value.kind}")
                             continue
                         revised |= _save_output(
                             item,
                             role,
-                            value,
+                            form,
                             original_key=content_id(value),
                             pending_remap=pending_remap,
                             entry_ids=entry_ids,
@@ -1135,7 +1288,7 @@ def store_collected(
                     for role, value in deferred_outputs.get(index, ()):
                         # The run's output edge names the record by its pre-rewrite
                         # content id, so that is the key the remap must carry.
-                        rewritten = _rewrite_product_of(value, store, remap)
+                        rewritten = _rewrite_product_of(_stored_form(index, role, value), store, remap)
                         revised |= _save_output(
                             item,
                             role,

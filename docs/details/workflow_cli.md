@@ -969,14 +969,18 @@ See {doc}`monitor` for the panes, keys, and read budget.
 | --- | --- |
 | `--state`, `--step`, `--placement`, `--job JOB` (repeatable; not with `--placement`), `--raw`, `--allow-job-collector`, `--force` | a workspace only |
 | `--dry-run`, `--prefer NAME`, `--exclude PATTERN`, `--collector DIR` | a calculation tree only |
-| `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--no-id-ledger`, `--id-ledger PATH`, `--no-bare-runs`, `--upgrade`, `--degraded`, `--fail-fast`, `--batch-size N` | both |
+| `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--no-id-ledger`, `--id-ledger PATH`, `--no-bare-runs`, `--upgrade`, `--records TYPE=NAME[,NAME...]`, `--degraded`, `--fail-fast`, `--batch-size N` | both |
 
 An option for the other kind of target is refused. For a workspace, `collect`
 streams one `CollectedJob` summary per finished job as JSON lines; `--raw`
 streams `JobRecord` records. With `--into`, a sealed id ledger at
 `<into>.ids.sqlite` keeps entry ids stable across rebuilds
-({doc}`/details/stable_ids`), and `--upgrade` lets an existing store take an
-additive layout change. Every form ends with one
+({doc}`/details/stable_ids`), `--upgrade` lets an existing store take an
+additive layout change, and `--records TYPE=NAME[,NAME...]` (repeatable, once
+per type) declares and stores that entry type only as the named registered
+records, converting other values to the first, for example
+`--records structures=atomistic-numeric-unitcell-structure` for a float-only
+structure store (see {doc}`/details/collecting`). Every form ends with one
 `httk-workflow-collect-summary` line, and the command exits nonzero when any
 job was degraded, failed to store, or had an unreadable `job.json`. A job in
 debug mode (`job unlock`) is degraded unless `--force` is given, which collects
@@ -992,7 +996,7 @@ itself: `httk collect WS --postprocess NAME [--job JOB]... [--state S]
 [--step STEP] [--placement P] [--into STORE --id-base BASE [--upgrade]]`. The job must
 already be collected into the store. It is refused together with `--raw`,
 `--allow-job-collector`, `--no-bare-runs`, `--fail-fast`, `--batch-size`,
-`--degraded`, tree-only options and tree targets, and ends with one
+`--degraded`, `--records`, tree-only options and tree targets, and ends with one
 `httk-workflow-postprocess-collect-summary` line. See
 {doc}`/details/collecting`.
 
@@ -1030,7 +1034,9 @@ httk v1 collect --workflow-dir PKG --into results.sqlite --id-base httk.v1 ROOT
 `v1 collect` ends with one `httk-workflow-v1-collect-summary` line reporting
 `finished`, `unfinished_by_status`, and `skipped_no_rundir`. Each collected
 report carries `identity_stable`: `false` for a task whose identity is
-path-derived because it has no `ht.manifest`.
+path-derived because it has no `ht.manifest`. With `--into`,
+`--records TYPE=NAME[,NAME...]` selects the stored record kinds as for
+`httk collect`.
 
 ## Remotes
 
@@ -1237,7 +1243,7 @@ exception: the daemon accepts only commands signed by a key in its own
 | `campaign remove` | clear campaign configuration, keeping jobs and workspaces | `--force` skips confirmation |
 | `campaign show` | show the partition map | `--json` |
 | `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--install`, `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
-| `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--step`, `--placement`, `--raw`, `--into PATH`, `--id-base BASE`, `--id-series SERIES`, … |
+| `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--step`, `--placement`, `--raw`, `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--records TYPE=NAME[,NAME...]`, … |
 | `campaign start-<wbr>managers` | start a manager per selected partition | `--partition`, `--workers`, `--worker-resource`, `--count`, `--launcher`, `--idle-timeout`, `--adapter-timeout` |
 
 A campaign is a thin convention over registered workspaces: a partition map,

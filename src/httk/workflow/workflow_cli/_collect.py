@@ -13,7 +13,13 @@ from ..errors import ResolutionMiss, SealError
 from ..introspection import selector_is_path
 from ..postprocessing import collect_postprocess
 from ..seals import default_workspace_keys, tree_ledger_keys
-from ..storing import _collected_mapping, _postprocess_mapping, store_collected, store_postprocess
+from ..storing import (
+    _collected_mapping,
+    _postprocess_mapping,
+    _record_selection,
+    store_collected,
+    store_postprocess,
+)
 from ..workspace import Workspace
 from ._common import _LOGGER, _add_step_option, _leaf, _local_root
 
@@ -38,6 +44,7 @@ _NOT_POSTPROCESS = (
     ("fail_fast", "--fail-fast"),
     ("batch_size", "--batch-size"),
     ("degraded", "--degraded"),
+    ("records", "--records"),
     *_TREE_ONLY,
 )
 
@@ -49,6 +56,49 @@ def _positive_int(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
+
+
+def add_records_option(parser: argparse.ArgumentParser) -> None:
+    """Declare the repeatable ``--records TYPE=NAME[,NAME...]`` collect option.
+
+    :param parser: The collect parser the option is added to.
+    """
+
+    parser.add_argument(
+        "--records",
+        action="append",
+        metavar="TYPE=NAME[,NAME...]",
+        help=(
+            "with --into, declare and store entries of this type only as these registered records, in order, "
+            "converting other values to the first (structures=atomistic-numeric-unitcell-structure stores "
+            "float structures, a lossy choice); repeatable, once per type (default: every registered record)"
+        ),
+    )
+
+
+def records_option(arguments: argparse.Namespace) -> dict[str, tuple[str, ...]] | None:
+    """Parse and validate the ``--records`` options into an ``entry_records`` selection.
+
+    :param arguments: The parsed collect arguments.
+    :return: The selection by entry type, or ``None`` when no ``--records`` was given.
+    :raises ValueError: If a value is malformed, a type is given twice, ``--into``
+        is missing, or the selection names an unknown type or record.
+    """
+
+    if not arguments.records:
+        return None
+    if arguments.into is None:
+        raise ValueError("--records only applies with --into")
+    selection: dict[str, list[str]] = {}
+    for value in arguments.records:
+        entry_type, separator, text = value.partition("=")
+        names = text.split(",")
+        if not separator or not entry_type or not all(names):
+            raise ValueError(f"--records must be spelled TYPE=NAME[,NAME...], not {value!r}")
+        if entry_type in selection:
+            raise ValueError(f"--records names entry type {entry_type!r} twice; list its records in one option")
+        selection[entry_type] = names
+    return _record_selection(selection)
 
 
 def _emit_collect_summary(
@@ -282,6 +332,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
         raise ValueError("--job cannot be combined with --placement")
     if arguments.degraded and arguments.raw:
         raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
+    selection = records_option(arguments)
     skipped = 0
     unclaimed = 0
 
@@ -368,6 +419,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             ledger_keys=ledger_keys,
             bare_runs=not arguments.no_bare_runs,
             upgrade=arguments.upgrade,
+            entry_records=selection,
         )
         for item, report in zip(items, reports):
             degraded += item.missing_collector is not None
@@ -517,6 +569,7 @@ def build_collect_parser(
             "keep a backup of the store first"
         ),
     )
+    add_records_option(parser)
     parser.add_argument(
         "--no-id-ledger",
         action="store_true",

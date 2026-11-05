@@ -665,6 +665,39 @@ whose entry-type layout does not match the sweep fails fast. The error names
 the store path, the entry types the sweep needs and the layout difference, and
 ends with `Collect into a new store file.`
 
+### Choosing record kinds
+
+By default a new store declares every registered record kind of each entry
+type the sweep stores, and structures are stored as the exact
+`UnitcellStructureRecord`. `--records TYPE=NAME[,NAME...]` (repeatable, once
+per type, `--into` only) declares just the named registered records for that
+type, in the given order, and stores its entries as them:
+
+```sh
+httk collect --into results.sqlite --id-base mydb \
+    --records structures=atomistic-numeric-unitcell-structure
+```
+
+builds a float-only store whose structures are `NumericUnitcellStructureRecord`
+rows. A collected value whose record is not selected is converted to the first
+selected record. Conversion to `atomistic-numeric-unitcell-structure` is lossy
+(exact numbers become floats); naming it is the explicit request for that.
+`atomistic-unitcell-structure` converts numeric structures back to exact ones.
+Other records have no conversion. A value without one, or one the conversion
+refuses (a structure with assemblies, symmetry or a chemical composition as
+numeric), makes that job a `"storage_error"`; it is never dropped or stored as
+an unselected record. A staged structure input's main entry and its
+file-recording alternative are both stored in the selected record, with the
+staged file kept as `source_file`, and run edges and `product_of` references
+name the stored entries. Selecting `records` replaces the default list, so it
+must name `core-data-record` to keep storing generic `DataRecord` values.
+
+An existing store keeps the records it declares. Selecting one it lacks
+appends it, which needs `--upgrade`. `--records` does not apply to
+`--postprocess`, which stores only files and runs. In Python, pass
+`store_collected(..., entry_records={"structures": ["atomistic-numeric-unitcell-structure"]})`;
+records are selected by registered name only.
+
 ### Literature references
 
 A job whose workflow package declares `[workflow.references.<LABEL>]` (see
@@ -1002,7 +1035,8 @@ and the analysis kinds such as `_httk_bulk_modulus` when *httk-analyse* is
 installed. Other definitions stay generic records: stored, but their values
 are not served.
 
-A store's layout declares every registered record kind, so it depends on the
+A store's layout declares every registered record kind, unless
+[`--records`](#choosing-record-kinds) selects them, so it depends on the
 installed packages. When a newer *httk* or a newly installed package brings
 another record kind, an existing store is refused with a message naming
 `--upgrade`. Rerun with `--upgrade` (`upgrade=True`) to append the new kinds.
