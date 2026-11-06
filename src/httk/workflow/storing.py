@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from httk.core import DataRecord, FileRecord, ReferenceRecord, Run, RunEdge
-from httk.core.storage import content_id, resolve_storage_record
+from httk.core.storage import content_id, project_storage_record, resolve_storage_record
+from httk.core.storage.identity import CANONICAL_SOURCE_ATTRIBUTE
 
 from .collecting import CollectedJob, JobRecord, StructureInput
 from .id_keys import UnstableIdentityError, ledger_key
@@ -475,6 +476,7 @@ def _typed(value: object, typed: Mapping[str, type]) -> object:
 #: The explicit conversions collection applies to a value of a selected entry type
 #: whose storage record is not selected, keyed by the first selected record's
 #: registry name: the value class whose constructor builds that record's value.
+#: A record not keyed here is built through its own canonical-source projection instead.
 _CONVERSIONS = {
     "atomistic-numeric-unitcell-structure": ("httk.atomistic", "NumericUnitcellStructure"),
     "atomistic-unitcell-structure": ("httk.atomistic", "UnitcellStructureView"),
@@ -487,16 +489,20 @@ def _selected(value: object, selection: Mapping[str, Sequence[str]], typed: Mapp
     A value of an unselected entry type is returned as is. A value whose storage
     record (after :func:`_typed`) is selected is unchanged; any other is converted
     by :data:`_CONVERSIONS` for the first selected record, a lossy conversion the
-    selection asked for. A :class:`~httk.workflow.collecting.StructureInput` has
-    its main converted and its alternative, unless already a selected record,
-    rebuilt as the converted main's record with the staged file carried over.
+    selection asked for, or else, when the value is an instance of that record's
+    ``__httk_canonical_source__``, built from the record's ``__httk_project__``. A
+    :class:`~httk.workflow.collecting.StructureInput` has its main converted and
+    its alternative, unless already a selected record, rebuilt as the converted
+    main's record (the main itself when that is already a selected record) with
+    the staged file carried over as its ``source_file``.
 
     :param value: The collected value.
     :param selection: The validated selection of :func:`_record_selection`.
     :param typed: The typed records of the ``records`` family, by property definition.
     :return: The value to store.
     :raises ValueError: If no conversion to the first selected record is defined,
-        or the conversion refuses the value.
+        the conversion refuses the value, or a staged structure input's record
+        cannot carry its file.
     :raises TypeError: If the value is not storable.
     """
 
@@ -511,22 +517,39 @@ def _selected(value: object, selection: Mapping[str, Sequence[str]], typed: Mapp
         main = _selected(value.main, selection, typed)
         alternative = value.alternative
         if type(alternative) not in allowed:
-            record = resolve_storage_record(main)
-            from_structure = getattr(record, "from_structure", None)
-            if from_structure is None:
-                raise ValueError(f"no file-recording alternative of {record.__name__} is defined")
-            alternative = replace(from_structure(main), source_file=alternative.source_file)
+            base: Any
+            if type(main) in allowed:
+                base = main
+            else:
+                record = resolve_storage_record(main)
+                from_structure = getattr(record, "from_structure", None)
+                if from_structure is None:
+                    raise ValueError(f"no file-recording alternative of {record.__name__} is defined")
+                base = from_structure(main)
+            if "source_file" not in {item.name for item in fields(base)}:
+                raise ValueError(
+                    f"{type(base).__name__} declares no source_file field to record a staged structure input"
+                )
+            alternative = replace(base, source_file=alternative.source_file)
         return replace(value, main=main, alternative=alternative)
     value = _typed(value, typed)
     if resolve_storage_record(value) in allowed:
         return value
     conversion = _CONVERSIONS.get(names[0])
-    if conversion is None:
+    if conversion is not None:
+        module, name = conversion
+        try:
+            return getattr(importlib.import_module(module), name)(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"cannot convert to {names[0]}: {exc}") from exc
+    record = allowed[0]
+    source = getattr(record, CANONICAL_SOURCE_ATTRIBUTE, None)
+    if not (isinstance(source, type) and isinstance(value, source)):
         raise ValueError(f"no conversion to {names[0]} is defined")
-    module, name = conversion
     try:
-        return getattr(importlib.import_module(module), name)(value)
-    except (TypeError, ValueError) as exc:
+        return record(**project_storage_record(record, value))
+    except Exception as exc:
+        # The projection is foreign user code: any failure fails this job, never the sweep.
         raise ValueError(f"cannot convert to {names[0]}: {exc}") from exc
 
 

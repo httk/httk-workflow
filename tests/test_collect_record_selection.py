@@ -1,19 +1,32 @@
 """Record selection during collection: ``store_collected(entry_records=...)`` and ``--records``."""
 
+import datetime
 import hashlib
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, cast
+from typing import Annotated, Any, ClassVar, cast
 
 import pytest
-from httk.core import DataRecord, Run, RunEdge
+from httk.core import DataRecord, FileRecord, Run, RunEdge
 from httk.core.cli import CLIContext
-from httk.core.storage import content_id
+from httk.core.storage import (
+    IdentitySkip,
+    IdentitySkipWhenNone,
+    Indexed,
+    Shape,
+    StorageInfo,
+    StoredPropertyProjection,
+    Unique,
+    content_id,
+    float_matrix,
+)
 
 from conftest import register_ws
 from httk.workflow import job_records, store_collected
-from httk.workflow.collecting import JobRecord
+from httk.workflow.collecting import JobRecord, collect
 from httk.workflow.storing import _record_selection, _storage_layout
 from httk.workflow.workflow_cli import command
 from test_collect_fallback import _finished as _finished_job
@@ -29,8 +42,96 @@ from test_collect_inputs import _finished as _finished_inputs
 
 pytest.importorskip("httk.store")
 pytest.importorskip("httk.atomistic")
+from httk.atomistic import UnitcellStructure
 
 _NUMERIC = {"structures": ["atomistic-numeric-unitcell-structure"]}
+_SITES = "test-collect-selection-sites-structure"
+_FILELESS = "test-collect-selection-fileless-structure"
+
+
+@dataclass(frozen=True)
+class SiteRow:
+    """One site of :class:`SitesStructureRecord`: its fractional position and element."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="test_collect_selection_site", dedup="none")
+
+    x: float
+    y: float
+    z: float
+    symbol: str
+
+
+@dataclass(frozen=True)
+class SitesStructureRecord:
+    """A user-defined structure layout: a float basis and a table of sites."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="test_collect_selection_sites_structure")
+    __httk_canonical_source__: ClassVar = UnitcellStructure
+    __httk_stored_properties__: ClassVar[Mapping[str, StoredPropertyProjection]] = {
+        "structure_features": StoredPropertyProjection(response=lambda record: [])
+    }
+
+    basis: Annotated[tuple[tuple[float, ...], ...], Shape(3, 3)]
+    sites: tuple[SiteRow, ...]
+    source_file: Annotated[FileRecord | None, IdentitySkipWhenNone()] = None
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+    last_modified: Annotated[datetime.datetime | None, IdentitySkip()] = field(default=None, compare=False)
+
+    @property
+    def type(self) -> str:
+        """Return the entry type name."""
+        return "structures"
+
+    @classmethod
+    def __httk_project__(cls, structure: Any) -> Mapping[str, object]:
+        if any(len(species.chemical_symbols) != 1 for species in structure.species):
+            raise KeyError("a site row carries exactly one element")
+        symbol_of = {s.name: s.chemical_symbols[0] for s in structure.species}
+        positions = zip(structure.fractional_site_positions, structure.species_at_sites, strict=True)
+        return {
+            "basis": float_matrix(structure.lattice_vectors, 3, rows=3),
+            "sites": tuple(SiteRow(float(x), float(y), float(z), symbol_of[n]) for (x, y, z), n in positions),
+            "source_file": None,
+            "id": None,
+            "immutable_id": None,
+            "last_modified": structure.last_modified,
+        }
+
+
+@dataclass(frozen=True)
+class FilelessSitesStructureRecord:
+    """:class:`SitesStructureRecord` without a ``source_file`` field."""
+
+    __httk_storage__: ClassVar[StorageInfo] = StorageInfo(storage_name="test_collect_selection_fileless_structure")
+    __httk_canonical_source__: ClassVar = UnitcellStructure
+    __httk_stored_properties__: ClassVar = SitesStructureRecord.__httk_stored_properties__
+
+    basis: Annotated[tuple[tuple[float, ...], ...], Shape(3, 3)]
+    sites: tuple[SiteRow, ...]
+    id: Annotated[str | None, IdentitySkip(), Indexed()] = field(default=None, compare=False)
+    immutable_id: Annotated[str | None, IdentitySkip(), Unique()] = field(default=None, compare=False)
+    last_modified: Annotated[datetime.datetime | None, IdentitySkip()] = field(default=None, compare=False)
+
+    @property
+    def type(self) -> str:
+        """Return the entry type name."""
+        return "structures"
+
+    @classmethod
+    def __httk_project__(cls, structure: Any) -> Mapping[str, object]:
+        return {k: v for k, v in SitesStructureRecord.__httk_project__(structure).items() if k != "source_file"}
+
+
+@pytest.fixture
+def sites_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Register :class:`SitesStructureRecord` for one test, leaving the shared registry untouched."""
+
+    from httk.core.register import entries, register_entry_record
+
+    monkeypatch.setattr(entries, "_entry_records", dict(entries._entry_records))
+    register_entry_record(name=_SITES, family="structures", record=f"{__name__}:SitesStructureRecord")
+    register_entry_record(name=_FILELESS, family="structures", record=f"{__name__}:FilelessSitesStructureRecord")
 
 
 @pytest.fixture(scope="module")
@@ -298,3 +399,112 @@ def test_a_selected_value_without_a_storage_record_fails_only_its_job(tmp_path: 
     )
     assert "cannot store role 'structure'" in str(reports[0]["storage_error"])
     assert "storage_error" not in reports[1] and reports[1]["stored"]
+
+
+@pytest.mark.usefixtures("sites_record")
+def test_a_user_record_is_built_through_its_canonical_projection(tmp_path: Path, record: JobRecord) -> None:
+    from httk.atomistic import Cell, Species, UnitcellStructureView
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+
+    path = tmp_path / "sites.sqlite"
+    structure = UnitcellStructureView(
+        UnitcellStructure(
+            Cell([[2, 0, 0], [0, 2, 0], [0, 0, 2]]),
+            [[0, 0, 0], [Fraction(1, 2), Fraction(1, 2), Fraction(1, 2)]],
+            [Species("Na", ("Na",), (1,)), Species("Cl", ("Cl",), (1,))],
+            ["Na", "Cl"],
+        )
+    )
+    (report,) = store_collected(
+        [_item(record, "a", structure)], str(path), id_base="httk.t", entry_records={"structures": [_SITES]}
+    )
+    assert "storage_error" not in report, report["storage_error"]
+    assert _structure_records(path) == (SitesStructureRecord,)
+    with Backend.sqlite(path) as database:
+        store = SqlStore(database)
+        searcher = store.searcher()
+        variable = searcher.variable(SitesStructureRecord)
+        rows = [row.entry for row in searcher.results(entry=variable)]
+    assert len(rows) == 1
+    assert [site.symbol for site in rows[0].sites] == ["Na", "Cl"]
+    assert rows[0].basis == ((2.0, 0.0, 0.0), (0.0, 2.0, 0.0), (0.0, 0.0, 2.0))
+
+
+@pytest.mark.usefixtures("sites_record")
+def test_a_user_record_does_not_convert_a_value_outside_its_canonical_source(tmp_path: Path, record: JobRecord) -> None:
+    from httk.atomistic import NumericUnitcellStructure, NumericUnitcellStructureRecord
+
+    numeric = NumericUnitcellStructureRecord.from_structure(NumericUnitcellStructure(_view()))
+    (report,) = store_collected(
+        [_item(record, "a", numeric)],
+        str(tmp_path / "sites.sqlite"),
+        id_base="httk.t",
+        entry_records={"structures": [_SITES]},
+    )
+    assert f"no conversion to {_SITES} is defined" in str(report["storage_error"])
+
+
+@pytest.mark.usefixtures("sites_record")
+def test_a_refused_user_projection_fails_only_its_job(tmp_path: Path, record: JobRecord) -> None:
+    from httk.atomistic import Cell, Species, UnitcellStructureView
+
+    alloy = UnitcellStructureView(
+        UnitcellStructure(
+            Cell([[1, 0, 0], [0, 1, 0], [0, 0, 1]]),
+            [[0, 0, 0]],
+            [Species("SiGe", ("Si", "Ge"), (Fraction(1, 2), Fraction(1, 2)))],
+            ["SiGe"],
+        )
+    )
+    reports = store_collected(
+        [_item(record, "bad", alloy), _item(record, "good", _view())],
+        str(tmp_path / "sites.sqlite"),
+        id_base="httk.t",
+        entry_records={"structures": [_SITES]},
+    )
+    # A KeyError, not only TypeError/ValueError, from user projection code fails just this job.
+    assert f"cannot convert to {_SITES}: 'a site row carries exactly one element'" in str(reports[0]["storage_error"])
+    assert reports[0].get("stored") is None
+    assert "storage_error" not in reports[1] and reports[1]["stored"]
+
+
+@pytest.mark.usefixtures("sites_record")
+def test_collect_records_stores_a_staged_structure_input_as_a_user_record(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+
+    ws = _finished_inputs(tmp_path, members={"files/POSCAR": _DIAMOND})
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, ws.root, "stored")
+    path = tmp_path / "results.sqlite"
+    argv = ["collect", "--workspace", name, "--allow-job-collector", "--into", str(path), "--id-base", "httk.t"]
+    assert command([*argv, "--records", f"structures={_SITES}"], context) == 0
+    report = json.loads(capsys.readouterr().out.splitlines()[0])
+    assert "storage_error" not in report, report["storage_error"]
+    main_id, alternative_id = _structure_ids(report)
+    with Backend.sqlite(path) as database:
+        searcher = SqlStore(database).searcher(only_main_alt=False)
+        variable = searcher.variable(SitesStructureRecord)
+        searcher.add(variable.id == main_id)
+        rows = {row.entry.immutable_id.rsplit("~", 1)[0]: row.entry for row in searcher.results(entry=variable)}
+    assert set(rows) == {main_id, alternative_id}
+    assert rows[main_id].source_file is None
+    assert rows[alternative_id].source_file.sha256 == hashlib.sha256(_DIAMOND.encode()).hexdigest()
+    assert rows[alternative_id].sites == rows[main_id].sites
+
+
+@pytest.mark.usefixtures("sites_record")
+def test_a_staged_structure_input_needs_a_source_file_field(tmp_path: Path, record: JobRecord) -> None:
+    ws = _finished_inputs(tmp_path, members={"files/POSCAR": _DIAMOND})
+    staged = list(collect(ws, allow_job_collector=True))
+    reports = store_collected(
+        [*staged, _item(record, "good", _view())],
+        str(tmp_path / "s.sqlite"),
+        id_base="httk.t",
+        entry_records={"structures": [_FILELESS]},
+    )
+    assert "FilelessSitesStructureRecord declares no source_file field to record a staged structure input" in str(
+        reports[0]["storage_error"]
+    )
+    assert "storage_error" not in reports[-1] and reports[-1]["stored"]

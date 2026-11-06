@@ -683,14 +683,19 @@ rows. A collected value whose record is not selected is converted to the first
 selected record. Conversion to `atomistic-numeric-unitcell-structure` is lossy
 (exact numbers become floats); naming it is the explicit request for that.
 `atomistic-unitcell-structure` converts numeric structures back to exact ones.
-Other records have no conversion. A value without one, or one the conversion
-refuses (a structure with assemblies, symmetry or a chemical composition as
-numeric), makes that job a `"storage_error"`; it is never dropped or stored as
-an unselected record. A staged structure input's main entry and its
-file-recording alternative are both stored in the selected record, with the
-staged file kept as `source_file`, and run edges and `product_of` references
-name the stored entries. Selecting `records` replaces the default list, so it
-must name `core-data-record` to keep storing generic `DataRecord` values.
+A record outside that table is built from a value that is an instance of the
+record's own `__httk_canonical_source__`, through its `__httk_project__` (the
+protocol `store.save(value, as_record=...)` uses); any other value has no
+conversion. A value without one, or one the conversion refuses (a structure
+with assemblies, symmetry or a chemical composition as numeric), makes that
+job a `"storage_error"`; it is never dropped or stored as an unselected record.
+A staged structure input's main entry is stored in the selected record. Its
+file-recording alternative is stored in the selected record too, with the
+staged file kept as `source_file`, when that record declares a `source_file`
+field; otherwise the job is a `"storage_error"`. Run edges and `product_of`
+references name the stored entries. Selecting `records` replaces the default
+list, so it must name `core-data-record` to keep storing generic `DataRecord`
+values.
 
 An existing store keeps the records it declares. Selecting one it lacks
 appends it, which needs `--upgrade`. `--records` does not apply to
