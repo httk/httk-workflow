@@ -18,7 +18,7 @@ from httk.workflow.packages import parse_workflow_manifest
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from test_job_transfer import adapter_calls, outcomes, outgoing, project, registered, run, starts  # noqa: F401
-from test_moving import client_bundle, find, place, single
+from test_moving import client_bundle, find, io_workers, place, single  # noqa: F401 (io_workers: fixture)
 from v3_helpers import cli_owner, job_mapping
 
 GIT_ID = "git+https://example.test/workflows.git@" + "a" * 40 + "#callee"

@@ -121,7 +121,14 @@ from ._common import (
     remote_workspace_output,
 )
 from ._daemon_jobs import request_remote_jobs
-from ._transfer import _MOVABLE_STATES, _protocol_workspace, adopt_document, build_transfer_parser, eject_once
+from ._transfer import (
+    _MOVABLE_STATES,
+    _protocol_workspace,
+    adopt_document,
+    build_transfer_parser,
+    eject_once,
+    run_batch,
+)
 
 _ENVELOPES_FORMAT = "httk-workflow-request-envelopes"
 #: The option each action requires (and that no other action takes), by request member.
@@ -1916,7 +1923,7 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
             _kernel.register_owner(workspace, kind="cli", label="job adopt", allocation=None, advertised={})
         )
         # One wait of the visibility deadline for every bundle's absent jobs, not one a bundle.
-        absent = _moving.settle_absent(workspace, sources)
+        settled = _moving.settle_absent(workspace, sources)
     except _ERRORS as exc:
         stack.close()
         # Nothing of the stream was adopted: its landing goes, and with --json the one document says so.
@@ -1929,15 +1936,25 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
         print(json.dumps({"bundles": [], "workspace_id": workspace_id, "refused": str(exc)}, indent=2))
         return 2
     entries: list[dict[str, object]] = []
+
+    def adopt(index: int) -> tuple[dict[str, object], list[tuple[bool, str]]]:
+        source, bundle = sources[index], bundles[index]
+        foreign = _foreign_bundle(workspace, source) if arguments.stdin_tar else None
+        if foreign is None:
+            return _adopt_one(workspace, owner, source, bundle, arguments, settled.absent)
+        _fs.discard(_fs.loc(source), trash_dir=workspace.control / "tmp", durable=workspace.durable)
+        return {"bundle": bundle, "status": "refused", "message": foreign}, [(True, f"{bundle}: {foreign}")]
+
+    def show(_index: int, adopted: tuple[dict[str, object], list[tuple[bool, str]]]) -> None:
+        entry, lines = adopted
+        for to_stderr, line in lines:
+            print(line, file=sys.stderr if to_stderr else sys.stdout)
+        entries.append(entry)
+
     with stack:
-        for source, bundle in zip(sources, bundles, strict=True):
-            foreign = _foreign_bundle(workspace, source) if arguments.stdin_tar else None
-            if foreign is not None:
-                print(f"{bundle}: {foreign}", file=sys.stderr)
-                _fs.discard(_fs.loc(source), trash_dir=workspace.control / "tmp", durable=workspace.durable)
-                entries.append({"bundle": bundle, "status": "refused", "message": foreign})
-                continue
-            entries.append(_adopt_one(workspace, owner, source, bundle, arguments, absent))
+        # Outside the try above: an unexpected error after bundles were adopted prints no "refused" document.
+        serial = {index for index, source in enumerate(sources) if source in settled.serial}
+        run_batch(owner, adopt, range(len(sources)), workspace.io_workers, serial=serial, emit=show)
     incoming = (workspace.control / "transfers" / "incoming").resolve()
     for parent in parents | {source.parent.resolve() for source in sources}:
         if parent.parent == incoming:
@@ -2039,32 +2056,30 @@ def _adopt_one(
     bundle: str,
     arguments: argparse.Namespace,
     absent: frozenset[str],
-) -> dict[str, object]:
-    """Adopt one bundle of ``job adopt`` (*absent* settled for the batch), printing its human output: its entry."""
+) -> tuple[dict[str, object], list[tuple[bool, str]]]:
+    """Adopt one bundle of ``job adopt`` (*absent* settled for the batch): its entry, and its human output lines
+    (``True`` for standard error), which the caller prints."""
 
     try:
         report = _moving.adopt(workspace, owner, source, untrusted=False, absent=absent)
     except _ERRORS as exc:
-        print(f"{bundle}: {exc}", file=sys.stderr)
         status = "refused" if isinstance(exc, BundleError) else "failed"
-        return {"bundle": bundle, "status": status, "message": str(exc)}
+        return {"bundle": bundle, "status": status, "message": str(exc)}, [(True, f"{bundle}: {exc}")]
     if report is None:
-        print(f"{bundle}: another actor took the bundle first", file=sys.stderr)
-        return {"bundle": bundle, "status": "taken", "message": "another actor took the bundle first"}
+        message = "another actor took the bundle first"
+        return {"bundle": bundle, "status": "taken", "message": message}, [(True, f"{bundle}: {message}")]
     if arguments.move and report.copied:
         _fs.discard(_fs.loc(source), trash_dir=source.parent, durable=workspace.durable)
+    lines: list[tuple[bool, str]] = []
     if report.missing_workflows:
-        print(
-            f"warning: these workflows are not installed, so their jobs wait: {', '.join(report.missing_workflows)}",
-            file=sys.stderr,
-        )
+        missing = ", ".join(report.missing_workflows)
+        lines.append((True, f"warning: these workflows are not installed, so their jobs wait: {missing}"))
     if report.already_adopted and not arguments.json:
-        print(f"{bundle}: already adopted")
+        lines.append((False, f"{bundle}: already adopted"))
     elif not arguments.json:
-        for ref in report.published:
-            print(f"{ref.job_key}\t{ref.state}\t{ref.path}")
+        lines += [(False, f"{ref.job_key}\t{ref.state}\t{ref.path}") for ref in report.published]
     status = "already_adopted" if report.already_adopted else "adopted"
-    return {"bundle": bundle, "status": status, **adopt_document(report)}
+    return {"bundle": bundle, "status": status, **adopt_document(report)}, lines
 
 
 # ---------------------------------------------------------------------------

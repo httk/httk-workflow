@@ -35,6 +35,25 @@ def _no_faults() -> Iterator[None]:
     _fs.set_fault_injector(None)
 
 
+@pytest.fixture(autouse=True, params=[1, 8], ids=["io.workers=1", "io.workers=8"])
+def io_workers(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> int:
+    """Run every test with the batch loops plain (1) and pooled (8); the transfer suites import this fixture.
+
+    The setting is stored in every workspace the test initializes, so far ends run in other processes (the
+    ``local`` and stand-in ssh remotes) use it too.
+    """
+
+    initialize = Workspace.initialize.__func__  # type: ignore[attr-defined]
+
+    def seeded(cls: type[Workspace], *arguments: Any, **options: Any) -> Workspace:
+        workspace = initialize(cls, *arguments, **options)
+        workspace.configure_settings({"io.workers": request.param})
+        return workspace
+
+    monkeypatch.setattr(Workspace, "initialize", classmethod(seeded))
+    return request.param
+
+
 def parent_link(parent: dict[str, object], workspace_id: str) -> dict[str, object]:
     return {
         "workspace_id": workspace_id,

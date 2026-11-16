@@ -15,7 +15,7 @@ from httk.workflow import Workspace, _fs, _kernel
 from httk.workflow.registry import create_workspace
 from httk.workflow.seals import seal_workspace
 from httk.workflow.workflow_cli import command
-from test_moving import assert_in, claim_root, find, single, tree
+from test_moving import assert_in, claim_root, find, io_workers, single, tree  # noqa: F401 (io_workers: fixture)
 from v3_helpers import cli_owner
 
 

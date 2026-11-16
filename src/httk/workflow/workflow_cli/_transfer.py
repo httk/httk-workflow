@@ -9,13 +9,14 @@ release the hold keeping the moved jobs in SRC as ``away`` copies, which a later
 """
 
 import argparse
+import contextlib
 import json
 import re
 import shlex
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Collection, Sequence
 from contextlib import redirect_stdout
 from copy import copy
 from dataclasses import dataclass, replace
@@ -25,7 +26,7 @@ from typing import Any, cast
 
 from httk.core.cli import CLIContext
 
-from .. import _fs, _kernel, _moving, _store
+from .. import _fs, _kernel, _moving, _pool, _store
 from .._bundles import BundleError, read_manifest
 from .._manager_scheduling import current_step
 from .._util import write_json_atomic
@@ -539,6 +540,77 @@ def _owner(workspace: Workspace, label: str) -> _kernel.Owner:
     return _kernel.register_owner(workspace, kind="cli", label=label, allocation=None, advertised={})
 
 
+def run_batch[T, R](
+    owner: _kernel.Owner,
+    function: Callable[[T], R],
+    items: Sequence[T],
+    workers: int,
+    *,
+    serial: Collection[int] = (),
+    emit: Callable[[int, R], None] | None = None,
+) -> list[R]:
+    """Run *function* on every item of one command of *owner*: up to *workers* at once, then the items at the
+    indices in *serial* one after another, in order; *emit* sees every result in input order.
+
+    While a pool runs, *owner* counts one operation in flight (:meth:`~httk.workflow._kernel.Owner.enter_flight`),
+    left only once no pooled item can run any more, so that the owner fail-stops rather than closes under one.
+    With ``workers <= 1`` this is the plain loop over every item in order. When an item fails, the results of the
+    items that finished are still emitted, in input order, before the failure is raised.
+
+    :param owner: The command's owner.
+    :param function: The per-item work, which must not print.
+    :param items: The items.
+    :param workers: The ``io.workers`` of the workspace the items act on.
+    :param serial: The indices of items whose outcome depends on the order of the others.
+    :param emit: Called as ``emit(index, result)`` in the calling thread, in input order.
+    :return: The results, in input order.
+    """
+
+    results: dict[int, R] = {}
+    shown = 0
+
+    def record(index: int, result: R) -> None:
+        nonlocal shown
+        results[index] = result
+        while shown in results:
+            shown += 1
+            if emit is not None:
+                emit(shown - 1, results[shown - 1])
+
+    pooled = [] if workers <= 1 else [index for index in range(len(items)) if index not in serial]
+    pool = len(pooled) > 1
+    if pool:
+        owner.enter_flight()
+    try:
+        _pool.run_ordered(
+            lambda index: function(items[index]),
+            pooled,
+            workers,
+            lambda position, result: record(pooled[position], result),
+            # Left only once no pooled item can run any more, while a pool's SIGINT handler is still installed.
+            on_quiet=owner.leave_flight if pool else None,
+        )
+        for index in range(len(items)):
+            if index not in results:
+                record(index, function(items[index]))
+    except BaseException:
+        if emit is not None:
+            with contextlib.suppress(BaseException):  # the first exception is the one raised
+                for index in sorted(index for index in results if index >= shown):
+                    emit(index, results[index])  # held back behind a serial item that did not run
+        raise
+    return [results[index] for index in range(len(items))]
+
+
+def _repeats(items: Sequence[str]) -> set[int]:
+    """The indices of items that repeat an earlier one."""
+
+    first: dict[str, int] = {}
+    for index, item in enumerate(items):
+        first.setdefault(item, index)
+    return {index for index, item in enumerate(items) if first[item] != index}
+
+
 def eject_once(
     workspace: Workspace,
     owner: _kernel.Owner,
@@ -615,8 +687,11 @@ def _holds(
     return [_moving.Hold.from_mapping(hold) for hold in document["holds"]]
 
 
-def _parent_here(ref: _kernel.JobRef, present: set[str], *, step: bool) -> tuple[bool, str | None, str | None]:
-    """Return whether *ref* moves only with its root, and (with *step*) its step or why that is unknown.
+def _parent_here(
+    ref: _kernel.JobRef, present: set[str], *, step: bool
+) -> tuple[bool, str | None, str | None, str | None]:
+    """Return whether *ref* moves only with its root, (with *step*) its step or why that is unknown, and the job
+    id of its ``job.json`` parent (``None`` without one, or when ``job.json`` is unreadable).
 
     A job moves only in its root's tree when it is a non-detached child of a job
     in *present*. ``state.json`` is read only for such a child or for the step.
@@ -624,14 +699,15 @@ def _parent_here(ref: _kernel.JobRef, present: set[str], *, step: bool) -> tuple
 
     job, job_error = read_job(ref)
     if job is None:
-        return False, None, f"{ref.job_key}: {job_error}" if step else None
-    child = job.parent is not None and str(job.parent.get("job_id")) in present
+        return False, None, f"{ref.job_key}: {job_error}" if step else None, None
+    parent = None if job.parent is None else str(job.parent.get("job_id"))
+    child = parent is not None and parent in present
     if not (child or step):
-        return False, None, None
+        return False, None, None, parent
     doc, state_error = read_state(ref)
     if step and state_error is not None:
-        return False, None, f"{ref.job_key}: its step is unknown: {state_error}"
-    return child and (doc is None or doc.detached is None), current_step(job, doc) if step else None, None
+        return False, None, f"{ref.job_key}: its step is unknown: {state_error}", parent
+    return child and (doc is None or doc.detached is None), current_step(job, doc) if step else None, None, parent
 
 
 def _hold_jobs(
@@ -653,7 +729,7 @@ def _hold_jobs(
         if steps is not None:
             named, refs = refs, []
             for ref in named:
-                _, step, damage = _parent_here(ref, set(), step=True)
+                _, step, damage, _ = _parent_here(ref, set(), step=True)
                 if damage is not None:
                     errors.append(damage)
                 elif step in steps:
@@ -664,6 +740,9 @@ def _hold_jobs(
                         file=sys.stderr,
                     )
         children: list[_kernel.JobRef] = []
+        # Held one by one: the --job selectors, then (concurrently, unless a listed root has its parent here, whose
+        # hold looks at that parent's children) the listed roots.
+        explicit, sequential = len(refs), False
         if arguments.state or (steps is not None and not arguments.jobs):
             seen = {ref.job_id for ref in refs}
             # Listed in full first: holding moves jobs out of the directories the listing walks.
@@ -673,7 +752,7 @@ def _hold_jobs(
             for ref in listed:
                 if ref.job_id not in seen:
                     seen.add(ref.job_id)
-                    parent_here, step, damage = _parent_here(ref, present, step=steps is not None)
+                    parent_here, step, damage, parent = _parent_here(ref, present, step=steps is not None)
                     if damage is not None:
                         errors.append(damage)
                         continue
@@ -681,31 +760,45 @@ def _hold_jobs(
                         continue
                     # A child whose parent is here moves only in its root's tree, never on its own.
                     (children if parent_here else refs).append(ref)
+                    sequential = sequential or (not parent_here and parent in present)
         moving: set[str] = set()
+
+        def hold_one(ref: _kernel.JobRef) -> _moving.Hold | str:
+            try:
+                outcome = eject_once(
+                    workspace,
+                    owner,
+                    ref,
+                    None,
+                    tree=arguments.tree,
+                    locator=dst.locator,
+                    destination_workspace_id=dst.workspace_id,
+                    # Only --hold prints the holds; a transfer drives them from the source's listing.
+                    workflows=arguments.hold,
+                )
+            except _ERRORS as exc:
+                return f"{ref.job_key}: {exc}"
+            assert not isinstance(outcome, _moving.EjectReport)
+            return outcome
+
+        def record(_index: int, outcome: _moving.Hold | str) -> None:
+            if isinstance(outcome, str):
+                errors.append(outcome)
+            else:
+                holds.append(outcome)
+                moving.update(outcome.members)
+
+        workers = workspace.io_workers
         with _owner(workspace, "job transfer") as owner:
-            for ref in refs:
+            for index, ref in enumerate(refs):
+                if index == explicit and not sequential and workers > 1:
+                    # Disjoint trees: no listed root has a parent here, so none is in another's tree.
+                    listed_roots = [root for root in refs[index:] if root.job_key not in moving]
+                    run_batch(owner, hold_one, listed_roots, workers, emit=record)
+                    break
                 if ref.job_key in moving:
                     continue  # it went with an earlier selected tree
-                try:
-                    outcome = eject_once(
-                        workspace,
-                        owner,
-                        ref,
-                        None,
-                        tree=arguments.tree,
-                        locator=dst.locator,
-                        destination_workspace_id=dst.workspace_id,
-                        # Only --hold prints the holds; a transfer drives them from the source's listing.
-                        workflows=arguments.hold,
-                    )
-                except _ERRORS as exc:
-                    outcome = f"{ref.job_key}: {exc}"
-                if isinstance(outcome, str):
-                    errors.append(outcome)
-                else:
-                    assert isinstance(outcome, _moving.Hold)
-                    holds.append(outcome)
-                    moving.update(outcome.members)
+                record(index, hold_one(ref))
         if left := sum(ref.job_key not in moving for ref in children):
             print(
                 f"{left} selected job(s) have a parent in {src.locator} and move only with their root "
@@ -868,9 +961,17 @@ def _deliver(
                 _adapter(src, context, arguments, "pull", outgoing, str(scratch / "outgoing"), ids)
                 sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
             _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
-            absent = _moving.settle_absent(dst.workspace, sources)
-            for transfer_id, source in zip(ids, sources, strict=True):
-                entries[transfer_id] = _adopt_local(dst.workspace, owner, source, absent)
+            workspace = dst.workspace
+            settled = _moving.settle_absent(workspace, sources)
+            serial = {index for index, source in enumerate(sources) if source in settled.serial}
+            adopted = run_batch(
+                owner,
+                lambda source: _adopt_local(workspace, owner, source, settled.absent),
+                sources,
+                workspace.io_workers,
+                serial=serial,
+            )
+            entries.update(zip(ids, adopted, strict=True))
         except _ERRORS as exc:
             failure = exc
         finally:
@@ -944,27 +1045,32 @@ def _take_back(src: _End, holds: list[_moving.Hold], reason: str) -> dict[str, d
     """Adopt the holds of a local *src* back into it after *dst* refused them before adopting any: the outcome
     members by transfer id (``not_moved``, or ``failed`` when one cannot be taken back and stays held)."""
 
-    assert src.workspace is not None
+    workspace = src.workspace
+    assert workspace is not None
     updates: dict[str, dict[str, Any]] = {}
     message = f"refused before anything was adopted: {reason}; the jobs are back in {src.locator}"
-    with _owner(src.workspace, "job transfer") as owner:
+    with _owner(workspace, "job transfer") as owner:
         sources = [Path(hold.path) for hold in holds]
-        absent = _moving.settle_absent(src.workspace, sources)
-        for hold, source in zip(holds, sources, strict=True):
+        settled = _moving.settle_absent(workspace, sources)
+
+        def take(source: Path) -> dict[str, Any]:
             failure: str | None
             try:
-                report = _moving.adopt(src.workspace, owner, source, untrusted=False, absent=absent)
+                report = _moving.adopt(workspace, owner, source, untrusted=False, absent=settled.absent)
             except _ERRORS as exc:
                 report, failure = None, str(exc)
             else:
                 failure = None if report is not None else "another actor took the hold first"
             if failure is None:
-                updates[hold.transfer_id] = {"status": "not_moved", "message": message}
-            else:
-                updates[hold.transfer_id] = {
-                    "status": "failed",
-                    "message": f"refused before anything was adopted: {reason}; taking it back failed: {failure}",
-                }
+                return {"status": "not_moved", "message": message}
+            return {
+                "status": "failed",
+                "message": f"refused before anything was adopted: {reason}; taking it back failed: {failure}",
+            }
+
+        serial = {index for index, source in enumerate(sources) if source in settled.serial}
+        taken = run_batch(owner, take, sources, workspace.io_workers, serial=serial)
+        updates.update((hold.transfer_id, update) for hold, update in zip(holds, taken, strict=True))
     return updates
 
 
@@ -1233,15 +1339,18 @@ def _release(
 
     _say(arguments, f"releasing {len(transfer_ids)} hold(s) on {src.locator}")
     if src.workspace is not None:
-        with _owner(src.workspace, "job transfer") as owner:
-            released = {
-                transfer_id
-                for transfer_id in transfer_ids
-                if _moving.release_hold(
-                    src.workspace, owner, transfer_id, keep=arguments.keep, destination_workspace_id=destination_id
-                )
-            }
-        return [], released
+        workspace = src.workspace
+        with _owner(workspace, "job transfer") as owner:
+            done = run_batch(
+                owner,
+                lambda transfer_id: _moving.release_hold(
+                    workspace, owner, transfer_id, keep=arguments.keep, destination_workspace_id=destination_id
+                ),
+                transfer_ids,
+                workspace.io_workers,
+                serial=_repeats(transfer_ids),
+            )
+        return [], {transfer_id for transfer_id, ok in zip(transfer_ids, done, strict=True) if ok}
     argv = _release_argv(transfer_ids, arguments.keep, destination_id)
     code, out, err = _remote(src, context, arguments, [*argv, src.plain])
     if code not in (0, 1):
@@ -1445,13 +1554,17 @@ def _handle_release(arguments: argparse.Namespace, context: CLIContext) -> int:
         sys.stdout.write(out)
         sys.stderr.write(err)
         return code
-    with _owner(src.workspace, "job transfer --release") as owner:
-        released = [
-            _moving.release_hold(
-                src.workspace, owner, transfer_id, keep=arguments.keep, destination_workspace_id=destination_id
-            )
-            for transfer_id in arguments.release
-        ]
+    workspace = src.workspace
+    with _owner(workspace, "job transfer --release") as owner:
+        released = run_batch(
+            owner,
+            lambda transfer_id: _moving.release_hold(
+                workspace, owner, transfer_id, keep=arguments.keep, destination_workspace_id=destination_id
+            ),
+            arguments.release,
+            workspace.io_workers,
+            serial=_repeats(arguments.release),
+        )
     for transfer_id, done in zip(arguments.release, released, strict=True):
         if done:
             print(f"released {transfer_id}")

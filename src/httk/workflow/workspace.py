@@ -6,6 +6,7 @@ import os
 import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
@@ -32,6 +33,11 @@ _LOGGER = logging.getLogger(__name__)
 LAYOUT = "jobs-v3"
 WORKFLOWS_DIRECTORY = "workflows"
 
+
+#: The application setting of how many jobs a batch command (hold, adopt, release) works on at once.
+IO_WORKERS = "io.workers"
+#: Its value when unset, or when the stored value is invalid.
+DEFAULT_IO_WORKERS = 8
 
 #: The largest accepted ``format.json``.
 _FORMAT_LIMIT = 1 << 20
@@ -80,6 +86,14 @@ def _validate_setting_value(key: str, value: object) -> object:
     if value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool)):
         return value
     raise ValueError(f"application setting {key!r} must be a JSON scalar, not {type(value).__name__}")
+
+
+def _validate_io_workers(value: object) -> int:
+    """Return a valid ``io.workers`` value: an integer from 1 to 32."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 32:
+        raise ValueError(f"application setting {IO_WORKERS} must be an integer from 1 to 32, not {value!r}")
+    return value
 
 
 def _setting_variable_name(key: str) -> str:
@@ -377,6 +391,7 @@ class Workspace:
             _fs.write_file(_fs.loc(self.control / "format.json"), written + b"\n", durable=self.durable)
             if json_bytes(_read_format(self.control)) == written:
                 self.format = stored
+                self.__dict__.pop("io_workers", None)  # resolved again from the new settings
                 return result
         raise WorkflowError(f"concurrent writers kept replacing {self.control / 'format.json'}; run the command again")
 
@@ -440,6 +455,22 @@ class Workspace:
 
         return _validate_settings(_section(self.format, "settings"))
 
+    @cached_property
+    def io_workers(self) -> int:
+        """Return how many jobs a batch command works on at once: the ``io.workers`` setting, default 8.
+
+        Read once per workspace object (again after its settings are re-read or written), from the settings
+        loaded with it; an invalid stored value gives the default and one warning, never an error.
+
+        :return: An integer from 1 to 32.
+        """
+
+        try:
+            return _validate_io_workers(self.settings.get(IO_WORKERS, DEFAULT_IO_WORKERS))
+        except (FormatError, ValueError) as exc:
+            _LOGGER.warning("using %s = %d: %s", IO_WORKERS, DEFAULT_IO_WORKERS, exc)
+            return DEFAULT_IO_WORKERS
+
     def refresh_format(self) -> dict[str, object]:
         """Re-read ``format.json`` and refresh the enabled :attr:`extensions` from it.
 
@@ -467,6 +498,7 @@ class Workspace:
             )
         self.extensions = _extensions(stored)
         self.format = stored
+        self.__dict__.pop("io_workers", None)  # resolved again from the new settings
         return stored
 
     def read_settings(self) -> dict[str, object]:
@@ -538,6 +570,8 @@ class Workspace:
             for key, value in changes.items():
                 _validate_setting_key(key)
                 _validate_setting_value(key, value)
+                if key == IO_WORKERS:
+                    _validate_io_workers(value)
                 self._check_setting_collision(key, settings)
                 settings[key] = value
             stored["settings"] = settings
@@ -559,6 +593,8 @@ class Workspace:
         """
 
         merged = _validate_settings(seeds)
+        if IO_WORKERS in merged:
+            _validate_io_workers(merged[IO_WORKERS])
 
         def seed(stored: dict[str, Any]) -> dict[str, object]:
             current = _validate_settings(_section(stored, "settings"))

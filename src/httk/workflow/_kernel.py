@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import stat
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -663,8 +664,16 @@ class Owner:
         self.owner_id = _check_owner_id(owner_id)
         self.record: Mapping[str, object] = MappingProxyType(dict(record))
         self.path = _owner_dir(workspace, owner_id)
+        # The lock guards _held, _building, _retired_while_building, _trash and _flights for the threads of one
+        # command (httk.workflow._pool); no filesystem call runs under it.
+        self._lock = threading.Lock()
         self._held: dict[Path, OwnedJob] = {}
+        # Paths whose handle adopt_owned is building outside the lock (how many builders), and those of them whose
+        # held handle was retired meanwhile: such a build must not publish a handle. Both empty when idle.
+        self._building: dict[Path, int] = {}
+        self._retired_while_building: set[Path] = set()
         self._trash: Path | None = None
+        self._flights = 0
 
     def __enter__(self) -> Self:
         """Return the owner."""
@@ -676,11 +685,21 @@ class Owner:
     ) -> None:
         """Close on a normal exit; on an interrupt, return quiescent jobs first; otherwise touch nothing.
 
+        While a pooled operation is still in flight (:meth:`enter_flight`) nothing is touched either: that is a
+        fail-stop, leaving every owned job for recovery.
+
         :param exc_type: The exception type, if any.
         :param exc: The exception, if any.
         :param traceback: The traceback, if any.
         """
 
+        with self._lock:
+            flights, held = self._flights, list(self._held.values())
+        if flights:
+            _LOGGER.warning(
+                "owner %s exits with %d operations in flight; its jobs are left for recovery", self.owner_id, flights
+            )
+            return
         if exc_type is None:
             self.close()
             return
@@ -688,12 +707,24 @@ class Owner:
             # Fail-stop (§5.2): an error leaves every owned job for recovery once this process is proven dead.
             return
         try:
-            for job in list(self._held.values()):
+            for job in held:
                 if job._attempt is None:
                     job.give_back()
             self.close()
         except Exception:
             _LOGGER.warning("owner %s could not return its jobs on interrupt", self.owner_id, exc_info=True)
+
+    def enter_flight(self) -> None:
+        """Count one operation of a pooled batch as running; :meth:`__exit__` fail-stops until it leaves."""
+
+        with self._lock:
+            self._flights += 1
+
+    def leave_flight(self) -> None:
+        """Count one operation counted by :meth:`enter_flight` as finished."""
+
+        with self._lock:
+            self._flights -= 1
 
     def check_alive(self) -> None:
         """Fail-stop check: this owner has no tombstone and its ``owner.json`` names it.
@@ -779,7 +810,8 @@ class Owner:
         :return: ``True`` while a handle from :meth:`adopt_owned` or :func:`claim` is unreleased.
         """
 
-        return ref.path in self._held
+        with self._lock:
+            return ref.path in self._held
 
     def owned(self) -> list[JobRef]:
         """List ``owned/<owner-id>/``: every job this owner holds on disk, held by this process or not.
@@ -803,35 +835,56 @@ class Owner:
         if ref.state != OWNED or ref.owner_id != self.owner_id:
             raise ValueError(f"{ref.path} is not owned by {self.owner_id}")
         # One handle per job and process: the quiescence bookkeeping must not be forked.
-        if (held := self._held.get(ref.path)) is not None:
+        path = ref.path
+        with self._lock:
+            held = self._held.get(path)
+            if held is None:
+                self._building[path] = self._building.get(path, 0) + 1
+        if held is not None:
             return held
-        if not _fs.exists(_fs.loc(ref.path)):
-            raise OwnerLost(f"{ref.path} left owned/{self.owner_id}/")
-        job = self._held[ref.path] = OwnedJob(self, ref)
-        return job
+        try:
+            if not _fs.exists(_fs.loc(path)):
+                raise OwnerLost(f"{path} left owned/{self.owner_id}/")
+            job = OwnedJob(self, ref)  # reads job.json: built outside the lock, inserted unless another thread won
+            with self._lock:
+                if path in self._retired_while_building:
+                    # Another thread's handle of this job was released or extracted meanwhile.
+                    raise OwnerLost(f"{path} left owned/{self.owner_id}/")
+                return self._held.setdefault(path, job)
+        finally:
+            with self._lock:
+                if builders := self._building.pop(path) - 1:
+                    self._building[path] = builders
+                else:
+                    self._retired_while_building.discard(path)
 
     def close(self) -> None:
         """Return unheld owned jobs, reconcile scratch and remove this owner's directories when nothing is left.
 
-        :raises httk.workflow.errors.WorkflowError: While this process holds jobs, or when owned jobs remain.
+        :raises httk.workflow.errors.WorkflowError: While this process holds jobs or has operations in flight, or
+            when owned jobs remain.
         """
 
-        if self._held:
-            raise WorkflowError(f"owner {self.owner_id} still holds {len(self._held)} jobs")
+        with self._lock:
+            holding, flights = len(self._held), self._flights
+        if holding or flights:
+            raise WorkflowError(f"owner {self.owner_id} still holds {holding} jobs, {flights} operations in flight")
         # §5.2 self-healing: jobs in owned/<self>/ this process never held go back unchanged; nothing launches.
         for ref in self.owned():
             self.adopt_owned(ref).give_back()
         if self.owned():
             raise WorkflowError(f"owner {self.owner_id} still owns jobs after self-healing")
         workspace = self.workspace
-        kept = [
-            path for path in _own_scratch(workspace, self.owner_id, self._trash) if not reconcile_scratch(self, path)
-        ]
+        with self._lock:
+            trash = self._trash
+        kept = [path for path in _own_scratch(workspace, self.owner_id, trash) if not reconcile_scratch(self, path)]
         _fs.remove_empty_dir(_fs.loc(_owned_dir(workspace, self.owner_id)))
         launches = self.path / "launches"
         # The trash goes before owner.json: an owner-named scratch must never outlive its owner's record.
-        if self._trash is not None:
-            reconcile_scratch(self, self._trash)
+        with self._lock:
+            trash = self._trash
+        if trash is not None:
+            reconcile_scratch(self, trash)
         if not kept and not list_names(launches):
             _fs.remove_file(_fs.loc(self.path / "owner.json"), durable=workspace.durable)
             _fs.remove_file(_fs.loc(self.path / "heartbeat.json"), durable=workspace.durable)
@@ -855,12 +908,22 @@ class Owner:
         """
 
         target = path if isinstance(path, _fs.Loc) else _fs.loc(path)
-        if target.at is None and target.path == self._trash:
-            self._trash, trash_dir = None, target.path.parent
+        with self._lock:
+            trash = self._trash
+            itself = target.at is None and target.path == trash
+            if itself:
+                self._trash = None
+        if itself:
+            trash_dir = target.path.parent
+        elif trash is None or not _fs.exists(_fs.loc(trash)):
+            # ponytail: threads that find no trash at once each create one; close (or recovery) discards the
+            # extra ones as ordinary discardable scratch. One shared creation would need the lock across _fs.
+            trash_dir = self.scratch("trash")
+            with self._lock:
+                if self._trash == trash:
+                    self._trash = trash_dir
         else:
-            if self._trash is None or not _fs.exists(_fs.loc(self._trash)):
-                self._trash = self.scratch("trash")
-            trash_dir = self._trash
+            trash_dir = trash
         _fs.discard(target, trash_dir=trash_dir, durable=self.workspace.durable)
 
 
@@ -1291,7 +1354,11 @@ class OwnedJob:
 
     def _retire(self) -> None:
         self._released = True
-        self.owner._held.pop(self.path, None)
+        with self.owner._lock:
+            if self.path in self.owner._building:
+                self.owner._retired_while_building.add(self.path)
+            if self.owner._held.get(self.path) is self:
+                del self.owner._held[self.path]
 
 
 def _request_id(name: str, job_id: str) -> str | None:

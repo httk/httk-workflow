@@ -7,7 +7,10 @@ cluster of ``conftest``; every adapter call is real.
 """
 
 import json
+import os
 import re
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -22,7 +25,16 @@ from httk.workflow.projects import initialize_project
 from httk.workflow.registry import create_workspace
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command, transfer_command
-from test_moving import assert_in, claim_root, find, job_ids_below, place, single, tree
+from test_moving import (  # noqa: F401 (io_workers: fixture)
+    assert_in,
+    claim_root,
+    find,
+    io_workers,
+    job_ids_below,
+    place,
+    single,
+    tree,
+)
 from v3_helpers import cli_owner
 
 
@@ -371,6 +383,19 @@ def _remote_pair(tmp_path: Path) -> tuple[Workspace, str, Workspace, str]:
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(tmp_path, "far")
     return near, near_name, far, far_name
+
+
+def test_a_far_end_process_runs_with_the_parametrized_io_workers(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    _, _, far, _ = _remote_pair(tmp_path)
+    code = "import sys; from httk.workflow import Workspace; print(Workspace(sys.argv[1]).io_workers)"
+    source = str(Path(__file__).resolve().parents[1] / "src")
+    environment = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [source, os.environ.get("PYTHONPATH")]))}
+    answer = subprocess.run(
+        [sys.executable, "-c", code, str(far.root)], env=environment, capture_output=True, text=True, check=True
+    )
+    assert int(answer.stdout) == request.getfixturevalue("io_workers")
 
 
 def test_local_to_remote_and_back(project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

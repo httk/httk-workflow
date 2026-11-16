@@ -67,7 +67,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Self, cast
+from typing import TYPE_CHECKING, NamedTuple, Self, cast
 
 from httk.workflow import _fs, _kernel, _store
 from httk.workflow._bundles import (
@@ -967,7 +967,20 @@ def _redelivered(workspace: "Workspace", record: _Record) -> bool:
     )
 
 
-def settle_absent(workspace: "Workspace", bundles: Sequence[Path]) -> frozenset[str]:
+class Settled(NamedTuple):
+    """What :func:`settle_absent` found for a batch of bundles.
+
+    :param absent: The job UUIDs absent across the visibility deadline (for :func:`adopt`'s ``absent``).
+    :param serial: The bundles whose adoptions depend on one another's order: each shares a job UUID with, holds
+        the parent of the root of, or has its root's parent in another bundle of the batch (transitively). The
+        others may be adopted concurrently.
+    """
+
+    absent: frozenset[str]
+    serial: frozenset[Path]
+
+
+def settle_absent(workspace: "Workspace", bundles: Sequence[Path]) -> Settled:
     """Settle once which members of trusted *bundles*, and which of their roots' parents, are not in *workspace*.
 
     One wait of the visibility deadline for a batch of adoptions, instead of one for each: :func:`adopt` given
@@ -976,25 +989,55 @@ def settle_absent(workspace: "Workspace", bundles: Sequence[Path]) -> frozenset[
 
     :param workspace: The workspace the bundles are adopted into.
     :param bundles: The bundle directories, before any of them is adopted.
-    :return: The job UUIDs absent across the visibility deadline.
+    :return: The absent job UUIDs, and the bundles to adopt one after another.
     """
 
     wanted: dict[str, PurePosixPath] = {}
+    # Per bundle: its member UUIDs and its root's parent UUID, for the components of related bundles.
+    related: list[tuple[set[str], str | None]] = []
     for bundle in bundles:
+        related.append((set(), None))
         try:
             read = read_manifest(bundle / "bundle.json")
             if read is None:
                 continue
             manifest = read[1]
             wanted.update((member.job_id, member.placement) for member in manifest.members)
+            related[-1] = ({member.job_id for member in manifest.members}, None)
             parent = JobDefinition.from_path(manifest.member_dir(bundle, manifest.members[0]) / "job.json").parent
             if parent is not None:
                 parent_id = canonical_uuid(str(parent.get("job_id")), "parent job_id")
                 wanted[parent_id] = normalize_placement(str(parent.get("placement")))
+                related[-1] = (related[-1][0], parent_id)
         except (BundleError, FormatError, OSError, ValueError):
             continue
     found = _kernel.locate_many(workspace, list(wanted), placements=list(wanted.values()), settle=True, poll=False)
-    return frozenset(wanted.keys() - found.keys())
+    return Settled(frozenset(wanted.keys() - found.keys()), _serial(bundles, related))
+
+
+def _serial(bundles: Sequence[Path], related: list[tuple[set[str], str | None]]) -> frozenset[Path]:
+    """The bundles in a component of more than one under "shares a job UUID with" or "holds the root's parent of"."""
+
+    holders: dict[str, list[int]] = {}
+    for index, (members, _parent) in enumerate(related):
+        for job_id in members:
+            holders.setdefault(job_id, []).append(index)
+    group = list(range(len(bundles)))
+
+    def root(index: int) -> int:
+        while group[index] != index:
+            group[index] = group[group[index]]  # path halving
+            index = group[index]
+        return index
+
+    for index, (members, parent) in enumerate(related):
+        for job_id in (*members, *(() if parent is None else (parent,))):
+            for other in holders.get(job_id, ()):
+                group[root(other)] = root(index)
+    sizes: dict[int, int] = {}
+    for index in range(len(bundles)):
+        sizes[root(index)] = sizes.get(root(index), 0) + 1
+    return frozenset(bundle for index, bundle in enumerate(bundles) if sizes[root(index)] > 1)
 
 
 def _presence(

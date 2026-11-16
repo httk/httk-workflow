@@ -31,7 +31,7 @@ _ENGINE = "httk-workflow"
 _JOBFLOW = "httk-workflow jobflow runner"
 #: Namespaces whose keys nothing outside httk-workflow reads.
 _ENGINE_NAMESPACES = frozenset(
-    {"manager", "slurm", "confine", "environment", "seal", "postprocess", "children", "httk_v1"}
+    {"manager", "slurm", "confine", "environment", "seal", "postprocess", "children", "httk_v1", "io"}
 )
 _ENVIRONMENT_PREFIX = "confine.environment."
 _NO_WORKFLOWS: Mapping[str, tuple[str, ...]] = MappingProxyType({})
@@ -66,6 +66,7 @@ def _engine_keys(layer: SettingLayer) -> frozenset[str]:
             "seal.keys",
             "postprocess.directory",
             "children.placement",
+            "io.workers",
             "httk_v1.timeout",
             "httk_v1.wrapper",
             "httk_v1.log_compression",
