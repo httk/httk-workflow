@@ -1149,7 +1149,7 @@ def test_a_batch_adoption_settles_once(
 
     source, source_name = registered(tmp_path, "a")
     target, target_name = registered(tmp_path, "b")
-    target.set_policy({"visibility_deadline_seconds": 0.2})  # two settle steps
+    target.set_policy({"visibility_deadline_seconds": 0.2})  # one unpolled settle wait
     plan = jobs(source, 20)
     pauses: list[float] = []
     real = _kernel._pause
@@ -1163,7 +1163,8 @@ def test_a_batch_adoption_settles_once(
     assert len(outcomes(capsys)["transfers"]) == 20
     assert_in(target, plan)
     # One settle of every member's absence for the batch, not one a bundle (which would be some 40 pauses).
-    assert len(pauses) <= 3
+    # Absence is settled unpolled: one pause of the whole deadline, not backing-off 0.1 s steps.
+    assert len(pauses) == 1 and pauses[0] > _kernel._SETTLE_STEP
 
 
 def test_a_hold_call_that_times_out_is_reported_and_its_holds_driven(

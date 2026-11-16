@@ -26,6 +26,7 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType, TracebackType
 from typing import NamedTuple, Protocol, Self
@@ -121,6 +122,7 @@ _DAMAGE_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EIO})
 _RECORD_LIMIT = 1 << 20
 _ROUNDS = 8
 _SETTLE_STEP = 0.1
+_SETTLE_CAP = 1.0
 _NO_PLACEMENT = PurePosixPath()
 
 
@@ -1400,31 +1402,49 @@ def _scan(
     include_owned: bool,
     exhaustive: bool,
     cache: ListingCache,
+    *,
+    final: bool = False,
 ) -> dict[str, JobRef]:
     found: dict[str, JobRef] = {}
 
     def match(ref: JobRef) -> None:
-        if ref.job_id in wanted:
-            found.setdefault(ref.job_id, ref)
+        # Within a final scan, a later observation replaces an earlier one: the job has moved since. This is best
+        # effort: references are hints, and a duplicate UUID or a late-showing removal from owned/ can still yield
+        # a stale reference, as before.
+        if ref.job_id in wanted and (final or ref.job_id not in found):
+            found[ref.job_id] = ref
 
+    def match_names(directory: Path, names: Sequence[str], build: Callable[[Path], JobRef]) -> None:
+        for name in names:
+            # The UUID ends the job key (the text before the first "~"): parse only the names that could match.
+            if name.partition("~")[0][-36:] in wanted:
+                try:
+                    match(build(directory / name))
+                except FormatError:
+                    continue
+
+    def match_owned(listings: ListingCache) -> None:
+        root = workspace.jobs / OWNED
+        for owner_id in listings.names(root):
+            if _OWNER_ID.fullmatch(owner_id):
+                directory = root / owner_id
+                match_names(directory, list_names(directory), partial(JobRef.from_path, state=OWNED, owner_id=owner_id))
+
+    # The final scan lists owned/ before and after the unowned states: a job claimed or released during it is seen.
+    if include_owned and final:
+        match_owned(cache)
     for state in UNOWNED_STATES:
+        if final and wanted <= found.keys():
+            return found
         if exhaustive:
             for ref in list_jobs(workspace, state):
                 match(ref)
             continue
         for placement in placements:
             directory = _state_dir(workspace, state, placement)
-            for name in cache.names(directory):
-                try:
-                    match(JobRef.from_path(directory / name, state=state, placement=placement))
-                except FormatError:
-                    continue
-    if include_owned:
-        root = workspace.jobs / OWNED
-        for owner_id in cache.names(root):
-            if _OWNER_ID.fullmatch(owner_id):
-                for ref in _owned_refs(root / owner_id, owner_id):
-                    match(ref)
+            match_names(directory, cache.names(directory), partial(JobRef.from_path, state=state, placement=placement))
+    if include_owned and not (final and wanted <= found.keys()):
+        match_owned(ListingCache() if final else cache)
     return found
 
 
@@ -1437,15 +1457,21 @@ def _settled(
     settle: bool,
     exhaustive: bool = False,
     cache: ListingCache | None = None,
+    poll: bool = True,
 ) -> dict[str, JobRef]:
-    found = _scan(workspace, wanted, placements, include_owned, exhaustive, cache or ListingCache())
-    if not settle:
-        return found
-    # I6: absence is concluded only from fresh listings spanning the visibility deadline.
+    # I6: absence is concluded only from a listing started after the visibility deadline (the final scan). Polling
+    # backs off from _SETTLE_STEP to _SETTLE_CAP; without polling, the misses wait out the deadline once.
+    # The deadline runs from the end of the first scan: a move made during it is visible to the final one.
+    final = settle and workspace.visibility_deadline <= 0
+    found = _scan(workspace, wanted, placements, include_owned, exhaustive, cache or ListingCache(), final=final)
     deadline = time.monotonic() + workspace.visibility_deadline
-    while (missing := wanted - found.keys()) and (remaining := deadline - time.monotonic()) > 0:
-        _pause(min(_SETTLE_STEP, remaining))
-        found |= _scan(workspace, missing, placements, include_owned, exhaustive, ListingCache())
+    step = _SETTLE_STEP
+    while settle and not final and (missing := wanted - found.keys()):
+        if (remaining := deadline - time.monotonic()) > 0:
+            _pause(min(step, remaining) if poll else remaining)
+            step = min(2 * step, _SETTLE_CAP)
+        final = time.monotonic() >= deadline
+        found |= _scan(workspace, missing, placements, include_owned, exhaustive, ListingCache(), final=final)
     return found
 
 
@@ -1458,6 +1484,7 @@ def locate(
     settle: bool = False,
     exhaustive: bool = False,
     cache: ListingCache | None = None,
+    poll: bool = True,
 ) -> JobRef | None:
     """Find a job by UUID at its placement in the unowned states, and optionally in every ``owned/<id>/``.
 
@@ -1468,6 +1495,8 @@ def locate(
     :param settle: Repeat a miss across the visibility deadline before answering ``None``.
     :param exhaustive: Walk every placement (interactive use only).
     :param cache: Listings shared by one pass (not used by the settle retries).
+    :param poll: Retry a settled miss with a backing-off pause (a job expected to appear); ``False`` waits out
+        the visibility deadline once and lists again (a job expected absent).
     :return: The reference, or ``None``.
     """
 
@@ -1481,6 +1510,7 @@ def locate(
         settle=settle,
         exhaustive=exhaustive,
         cache=cache,
+        poll=poll,
     )
     return found.get(job_id)
 
@@ -1493,6 +1523,7 @@ def locate_many(
     settle: bool,
     cache: ListingCache | None = None,
     include_owned: bool = True,
+    poll: bool = True,
 ) -> dict[str, JobRef]:
     """Find many jobs with one listing pass, settled once for all misses.
 
@@ -1502,12 +1533,14 @@ def locate_many(
     :param settle: Repeat the misses across one visibility deadline.
     :param cache: Listings shared by one pass.
     :param include_owned: Also list each ``owned/<owner-id>/``.
+    :param poll: Retry settled misses with a backing-off pause (jobs expected to appear); ``False`` waits out the
+        visibility deadline once and lists the misses again (jobs expected absent).
     :return: The references found, by job UUID.
     """
 
     wanted = {canonical_uuid(job_id, "job_id") for job_id in job_ids}
     normalized = sorted({normalize_placement(item) for item in placements}, key=lambda item: item.parts)
-    return _settled(workspace, wanted, normalized, include_owned=include_owned, settle=settle, cache=cache)
+    return _settled(workspace, wanted, normalized, include_owned=include_owned, settle=settle, cache=cache, poll=poll)
 
 
 def submit(

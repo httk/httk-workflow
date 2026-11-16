@@ -386,7 +386,7 @@ def test_adopt_settles_once_for_several_bundles(
 ) -> None:
     source, source_name = registered(tmp_path, "a")
     target, target_name = registered(tmp_path, "b")
-    target.set_policy({"visibility_deadline_seconds": 0.2})  # two settle steps
+    target.set_policy({"visibility_deadline_seconds": 0.2})  # one unpolled settle wait
     jobs = [single(source, "succeeded", 10 + index) for index in range(10)]
     bundles = [_eject(source_name, str(mapping["id"]), tmp_path / "out", capsys) for mapping, _, _ in jobs]
     pauses: list[float] = []
@@ -400,4 +400,5 @@ def test_adopt_settles_once_for_several_bundles(
     assert command(["job", "adopt", "--workspace", target_name, *map(str, bundles)], context(tmp_path)) == 0
     assert_in(target, jobs)
     # One settle for the whole batch, not one a bundle (which would be some 20 pauses).
-    assert len(pauses) <= 3
+    # Absence is settled unpolled: one pause of the whole deadline, not backing-off 0.1 s steps.
+    assert len(pauses) == 1 and pauses[0] > _kernel._SETTLE_STEP

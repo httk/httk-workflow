@@ -993,7 +993,7 @@ def settle_absent(workspace: "Workspace", bundles: Sequence[Path]) -> frozenset[
                 wanted[parent_id] = normalize_placement(str(parent.get("placement")))
         except (BundleError, FormatError, OSError, ValueError):
             continue
-    found = _kernel.locate_many(workspace, list(wanted), placements=list(wanted.values()), settle=True)
+    found = _kernel.locate_many(workspace, list(wanted), placements=list(wanted.values()), settle=True, poll=False)
     return frozenset(wanted.keys() - found.keys())
 
 

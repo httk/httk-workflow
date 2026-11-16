@@ -6,6 +6,7 @@ import re
 import shutil
 from collections.abc import Callable, Iterator
 from pathlib import Path, PurePosixPath
+from typing import NoReturn
 
 import pytest
 
@@ -349,11 +350,11 @@ def test_open_listing_closes_its_descriptor_when_listing_fails(tmp_path: Path, m
         opened.append(real_open(*args, **kwargs))  # type: ignore[arg-type]
         return opened[-1]
 
-    def listdir(path: object) -> list[str]:
+    def scandir(path: object) -> NoReturn:
         raise OSError(errno.EIO, "io")
 
     monkeypatch.setattr(os, "open", tracking_open)
-    monkeypatch.setattr(os, "listdir", listdir)
+    monkeypatch.setattr(os, "scandir", scandir)
     with pytest.raises(OSError):
         _fs._open_listing(None, str(tmp_path / "d"))
     (descriptor,) = opened
@@ -891,19 +892,18 @@ def test_discard_never_follows_a_directory_swapped_for_a_symlink(
 ) -> None:
     outside = _tree(tmp_path / "outside", "precious")
     _tree(tmp_path / "job" / "swap")
-    real_remove_leaf = _fs._remove_leaf
+    real_open_listing = _fs._open_listing
     swapped: list[int] = []
 
-    def remove_leaf(at: int | None, name: str) -> bool:
-        removed = real_remove_leaf(at, name)
-        if name == "swap" and not removed and not swapped:
-            # Between the lstat and the open, the directory becomes a symlink to precious data.
+    def open_listing(at: int | None, name: str) -> tuple[int, list[tuple[str, bool]]] | None:
+        if name == "swap" and not swapped:
+            # Between the listing and the open, the directory becomes a symlink to precious data.
             os.rename("swap", tmp_path / "aside", src_dir_fd=at)
             os.symlink(outside, "swap", dir_fd=at)
             swapped.append(1)
-        return removed
+        return real_open_listing(at, name)
 
-    monkeypatch.setattr(_fs, "_remove_leaf", remove_leaf)
+    monkeypatch.setattr(_fs, "_open_listing", open_listing)
     discard(loc(tmp_path / "job"), trash_dir=tmp_path / "trash", durable=False)
     assert swapped == [1]
     assert (outside / "precious").read_text() == "content"

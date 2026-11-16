@@ -841,7 +841,22 @@ def _remove_leaf(at: int | None, name: str) -> bool:
     return True
 
 
-def _open_listing(parent: int | None, name: str) -> tuple[int, list[str]] | None:
+def _remove_listed(at: int, name: str) -> bool:
+    # A listed non-directory: unlink without a lstat; False when it became a directory to walk meanwhile.
+    if _fault is not None:
+        _fault("remove", "before", Loc(Path(name), at), None)
+    try:
+        os.unlink(name, dir_fd=at)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        if exc.errno not in (errno.EISDIR, errno.EPERM):
+            raise
+        return _remove_leaf(at, name)
+    return True
+
+
+def _open_listing(parent: int | None, name: str) -> tuple[int, list[tuple[str, bool]]] | None:
     # None when the directory vanished or was swapped for a non-directory: the next pass sees it.
     try:
         descriptor = os.open(name, _DIR_FLAGS, dir_fd=parent)
@@ -850,7 +865,9 @@ def _open_listing(parent: int | None, name: str) -> tuple[int, list[str]] | None
             return None
         raise
     try:
-        return descriptor, os.listdir(descriptor)
+        # is_dir answers from the listing's d_type; a DT_UNKNOWN entry costs one internal lstat.
+        with os.scandir(descriptor) as listing:
+            return descriptor, [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in listing]
     except BaseException:
         os.close(descriptor)
         raise
@@ -860,7 +877,7 @@ def _remove_pass(at: int | None, name: str) -> bool:
     # One bottom-up pass over descriptors opened O_NOFOLLOW; False when it must be repeated.
     if _remove_leaf(at, name):
         return True
-    stack: list[tuple[int | None, str, int, list[str]]] = []
+    stack: list[tuple[int | None, str, int, list[tuple[str, bool]]]] = []
     complete = True
     try:
         opened = _open_listing(at, name)
@@ -868,13 +885,14 @@ def _remove_pass(at: int | None, name: str) -> bool:
             return False
         stack.append((at, name, *opened))
         while stack:
-            parent, child, descriptor, names = stack[-1]
-            if names:
-                entry = names.pop()
-                if not _remove_leaf(descriptor, entry):
+            parent, child, descriptor, entries = stack[-1]
+            if entries:
+                entry, is_dir = entries.pop()
+                if is_dir or not _remove_listed(descriptor, entry):
                     opened = _open_listing(descriptor, entry)
                     if opened is None:
-                        complete = False
+                        # Gone or no longer a directory since the listing: settle it now, or in the next pass.
+                        complete = _remove_leaf(descriptor, entry) and complete
                     else:
                         stack.append((descriptor, entry, *opened))
                 continue

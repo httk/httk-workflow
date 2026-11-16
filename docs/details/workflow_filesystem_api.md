@@ -300,9 +300,13 @@ attempt's `launch/` directory, and a job's `logs/` while the job may be live.
 Another node's change may take up to the visibility deadline
 (`policy.visibility_deadline_seconds`) to become visible. A destructive or
 ownership decision that rests on absence MUST repeat its observation until the
-deadline has passed: `locate`/`locate_many` with `settle` re-list every 0.1 s
-across one deadline (tree members, presumed duplicates, vanished join children,
-jobs of stale requests); recovery waits one deadline and re-lists before it
+deadline has passed: `locate`/`locate_many` with `settle` re-list across one
+deadline, counted from the end of their first listing (tree members, presumed
+duplicates, vanished join children, jobs of stale requests). Jobs expected to
+appear are retried with pauses doubling from 0.1 s up to 1 s; jobs expected
+absent (`poll=False`) wait the whole deadline once. The final listing starts
+after the deadline and lists `owned/` before and after the unowned states, so
+a claim or release during it is seen. Recovery waits one deadline and re-lists before it
 removes a dead owner's directories; the death proof waits one deadline before
 it lists a dead owner's launches; the shared-memory sweep lists launch records
 twice, one deadline apart. Where a missed observation heals itself, callers
