@@ -4,12 +4,14 @@ import glob
 import json
 import logging
 import os
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .. import _fs, _kernel
+from .. import _fs, _kernel, _pool
 from .._job import JobDefinition
 from .._kernel import OWNED, JobRef
 from .._manager_scheduling import current_step
@@ -31,6 +33,10 @@ _RUNLOG_TAIL_BYTES = 65536
 LOG_LIMIT = 16 << 20
 #: The largest JSON document of a job a reader accepts.
 JSON_LIMIT = 1 << 20
+#: How many rows' documents a filtered page reads at once with more than one ``io.workers``.
+_READ_AHEAD = 64
+
+type _Documents = tuple[tuple[StateDoc | None, str | None], tuple[JobDefinition | None, str | None]]
 
 
 @dataclass(frozen=True)
@@ -507,6 +513,24 @@ def _stream_after(
                 yield ref
 
 
+def _read_row(ref: JobRef) -> _Documents | Exception:
+    # An unexpected error is kept for the loop: it surfaces only if the loop reaches this job, as it did unpooled.
+    try:
+        return read_state(ref), read_job(ref)
+    except Exception as exc:
+        return exc
+
+
+class _Ahead:
+    """A listed job, and its documents (or the error reading them) once read, possibly ahead of the loop."""
+
+    __slots__ = ("documents", "ref")
+
+    def __init__(self, ref: JobRef) -> None:
+        self.ref = ref
+        self.documents: _Documents | Exception | None = None
+
+
 def _tag_matches(ref: JobRef, tag_contains: str | None) -> bool:
     if tag_contains is None:
         return True
@@ -525,6 +549,9 @@ def list_jobs(
     steps: Iterable[str] | None = None,
 ) -> JobListPage:
     """Return one page of rows, reading job documents only for its rows (with *steps*, for every examined job).
+
+    With more than one ``io.workers`` the documents are read in chunks, up to that many jobs at once; the rows,
+    the cursor and the warnings are those of the one-by-one reading (a *steps* filter may read up to 63 more jobs).
 
     :param workspace: The workspace.
     :param states: The states to list; every state when ``None``.
@@ -545,14 +572,81 @@ def list_jobs(
     wanted_steps = None if steps is None else frozenset(steps)
     filtered = tag_contains is not None or wanted_steps is not None
     scan_limit = max(limit * 100, 10_000) if filtered and limit is not None else None
+    workers = workspace.io_workers
+    rows: list[dict[str, Any]] = []
+    # The jobs taken from the listing ahead of the loop (for a pooled read), ending with the listing's error if
+    # taking one more failed, and how many were taken in all.
+    ahead: deque[_Ahead | Exception] = deque()
+    drawn = 0
 
-    def matching(ref: JobRef) -> tuple[StateDoc | None, str | None] | None:
+    def take() -> _Ahead | None:
+        """The next listed job, in listing order; a listing error taken ahead is raised here, where it occurred."""
+
+        nonlocal drawn
+        if ahead:
+            entry = ahead.popleft()
+            if isinstance(entry, Exception):
+                raise entry
+            return entry
+        ref = next(stream, None)
+        if ref is None:
+            return None
+        drawn += 1
+        return _Ahead(ref)
+
+    def documents(entry: _Ahead) -> _Documents:
+        """The job's ``state.json`` and ``job.json``, read with those of the next jobs that will need them."""
+
+        if entry.documents is None:
+            _read_ahead(entry)
+        assert entry.documents is not None
+        if isinstance(entry.documents, Exception):
+            raise entry.documents
+        return entry.documents
+
+    def _read_ahead(entry: _Ahead) -> None:
+        """Read the documents of *entry* and of the next jobs that will need them."""
+
+        nonlocal drawn
+        # A chunk holds at most the rows still wanted (without a filter every read job is a row; with a tag filter
+        # only the tags that match are read), and 64 with a filter (a --step filter may read up to that many beyond
+        # the page). It never takes a job past the scan limit from the listing.
+        size = 1
+        if workers > 1:
+            wanted = _READ_AHEAD if limit is None else max(1, limit - len(rows))
+            size = _READ_AHEAD if wanted_steps is not None else min(wanted, _READ_AHEAD) if filtered else wanted
+        unread = (
+            later
+            for later in ahead
+            if isinstance(later, _Ahead) and later.documents is None and _tag_matches(later.ref, tag_contains)
+        )
+        chunk = [entry, *islice(unread, size - 1)]
+        while len(chunk) < size and (scan_limit is None or drawn < scan_limit):
+            if ahead and isinstance(ahead[-1], Exception):
+                break  # the listing failed there: nothing follows
+            try:
+                ref = next(stream, None)
+            except Exception as exc:
+                ahead.append(exc)  # raised by take() if the loop gets that far, as without the read-ahead
+                break
+            if ref is None:
+                break
+            drawn += 1
+            ahead.append(later := _Ahead(ref))
+            if _tag_matches(ref, tag_contains):
+                chunk.append(later)
+        for later, read in zip(
+            chunk, _pool.run_ordered(_read_row, [later.ref for later in chunk], workers), strict=True
+        ):
+            later.documents = read
+
+    def matching(entry: _Ahead) -> tuple[StateDoc | None, str | None] | None:
         """The job's state document and step when it passes the filters, else ``None``."""
 
+        ref = entry.ref
         if not _tag_matches(ref, tag_contains):
             return None
-        doc, state_error = read_state(ref)
-        job, job_error = read_job(ref)
+        (doc, state_error), (job, job_error) = documents(entry)
         if wanted_steps is None:
             return doc, None if job is None or state_error is not None else current_step(job, doc)
         if job is None or state_error is not None:
@@ -562,14 +656,14 @@ def list_jobs(
         step = current_step(job, doc)
         return (doc, step) if step in wanted_steps else None
 
-    rows: list[dict[str, Any]] = []
     examined = 0
     last: JobRef | None = None
     next_after: str | None = None
-    for ref in stream:
+    while (entry := take()) is not None:
+        ref = entry.ref
         if limit is not None and len(rows) >= limit:
             # The page is full; it has a next page only if another matching job follows.
-            if _tag_matches(ref, tag_contains) if wanted_steps is None else matching(ref) is not None:
+            if _tag_matches(ref, tag_contains) if wanted_steps is None else matching(entry) is not None:
                 next_after = _ref_cursor(last) if last is not None else None
                 break
             examined += 1
@@ -578,7 +672,7 @@ def list_jobs(
                 break
             continue
         examined += 1
-        if (found := matching(ref)) is not None:
+        if (found := matching(entry)) is not None:
             doc, step = found
             placement = job_placement(ref)
             rows.append(

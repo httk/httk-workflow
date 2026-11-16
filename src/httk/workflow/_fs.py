@@ -20,11 +20,13 @@ import logging
 import os
 import stat
 import tarfile
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import IO, Literal, Protocol
 
+from httk.workflow._pool import Feed
 from httk.workflow.errors import FormatError, WorkflowError
 
 __all__ = [
@@ -1142,6 +1144,11 @@ _SOURCE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _IN_THE_WAY = frozenset({errno.ELOOP, errno.ENOTDIR, errno.EISDIR})
 #: A hostile time is not fatal either: ``ValueError`` for NaN, ``OverflowError`` for one out of range.
 _TIME_ERRORS = (OSError, OverflowError, ValueError)
+#: A pooled extraction hands a regular member of at most this many bytes, read into memory, to a worker.
+_POOLED_SIZE = 1 << 20
+#: The members a pooled extraction keeps handed out and unwritten, per worker, and their bytes in all.
+_POOLED_TASKS = 4
+_POOLED_BYTES = 64 << 20
 
 type _Parts = tuple[str, ...]
 
@@ -1338,10 +1345,19 @@ def _member_parts(member: tarfile.TarInfo, name: str, target: str) -> _Parts:
     return parts
 
 
+def _sparse(member: tarfile.TarInfo) -> bool:
+    return member.sparse is not None or member.type == tarfile.GNUTYPE_SPARSE
+
+
+def _link_parts(linkname: str) -> _Parts:
+    # A hard link's source, lexically, as _member_parts treats a name (``..`` is refused by the caller).
+    return tuple(part for part in linkname.split("/") if part not in ("", "."))
+
+
 def _extract_regular(landing: _Landing, archive: tarfile.TarFile, member: tarfile.TarInfo, parts: _Parts) -> None:
     if not parts:
         raise tarfile.OutsideDestinationError(member, landing.target)
-    if member.sparse is not None or member.type == tarfile.GNUTYPE_SPARSE:
+    if _sparse(member):
         # Its map could claim any size (a dense write fills it, a sparse one leaves a huge apparent file).
         raise tarfile.FilterError(f"{member.name!r} is a sparse member; sparse members are not accepted")
     parent = landing.directory(member, parts[:-1], create=True)
@@ -1393,7 +1409,7 @@ def _extract_hard_link(landing: _Landing, member: tarfile.TarInfo, parts: _Parts
         raise tarfile.OutsideDestinationError(member, landing.target)
     if member.linkname.startswith("/"):
         raise tarfile.AbsoluteLinkError(member)
-    source_parts = tuple(part for part in member.linkname.split("/") if part not in ("", "."))
+    source_parts = _link_parts(member.linkname)
     if ".." in source_parts:
         raise tarfile.LinkOutsideDestinationError(
             member, os.path.normpath(os.path.join(landing.target, member.linkname))
@@ -1463,7 +1479,191 @@ def _restore_directory_times(landing: _Landing) -> None:
             pass
 
 
-def extract_tar(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | None = None) -> None:
+def _extract_member(
+    landing: _Landing, archive: tarfile.TarFile, member: tarfile.TarInfo, rename: tuple[str, str] | None
+) -> None:
+    name = member.name
+    if rename is not None:
+        # The landing directory holds the user's other files, so only one regular file may arrive there.
+        if name != rename[0] or not member.isreg():
+            raise tarfile.FilterError(f"unexpected member in a single-file pull: {name!r}")
+        name = rename[1]
+    _dispatch(landing, archive, member, _member_parts(member, name, landing.target))
+
+
+def _dispatch(landing: _Landing, archive: tarfile.TarFile, member: tarfile.TarInfo, parts: _Parts) -> None:
+    if member.isdir():
+        _extract_directory(landing, member, parts)
+    elif member.isreg():
+        _extract_regular(landing, archive, member, parts)
+    elif member.issym():
+        _extract_symlink(landing, member, parts)
+    elif member.islnk():
+        _extract_hard_link(landing, member, parts)
+    else:
+        raise tarfile.SpecialFileError(member)
+
+
+@dataclass(frozen=True)
+class _Write:
+    """A regular member handed to a worker: its data, and a duplicate of its directory's descriptor, which it owns."""
+
+    member: tarfile.TarInfo
+    parent: int
+    parts: _Parts
+    data: bytes
+
+
+def _write_member(landing: _Landing, task: _Write) -> None:
+    # A worker's part, exactly the sequential path's for a regular file: anchored no-follow open, write, the data
+    # filter's mode and the member's time (not fatal), close; a refusal is translated as there.
+    try:
+        descriptor = landing.create(task.member, task.parent, task.parts, _EXTRACT_FLAGS)
+        try:
+            write_all(descriptor, task.data)
+            _finish_member(descriptor, task.member)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(task.parent)
+
+
+def _close_write(task: _Write) -> None:
+    os.close(task.parent)  # a task no worker took
+
+
+def _folded(parts: _Parts) -> _Parts:
+    # Case-folded, so that names a case-insensitive filesystem confuses also wait for each other.
+    return tuple(part.casefold() for part in parts)
+
+
+class _Reader:
+    """The reading thread of a pooled extraction: the only reader of the stream and writer of the landing's state.
+
+    It resolves and creates every directory, handles every member but the small regular ones itself, and updates
+    the received bytes and the written names (a small regular member counts as written once it is handed out).
+    Before acting on a member whose name, an ancestor or a descendant of it, or whose hard-link source, has a write
+    in flight (names compared normalized and case-folded) it waits for those writes.
+
+    :param landing: The extraction's state.
+    :param archive: The stream, opened ``r|``.
+    :param feed: The workers' feed.
+    """
+
+    def __init__(self, landing: _Landing, archive: tarfile.TarFile, feed: Feed[_Write]) -> None:
+        self.landing = landing
+        self.archive = archive
+        self.feed = feed
+        self.members = iter(archive)
+        #: A member taken from the stream but not acted on, because the feed stopped while it waited.
+        self.held: tarfile.TarInfo | None = None
+        # Under the feed's condition: the task writing each folded name, and how many of them are at or below each
+        # folded name (pruned of finished tasks lazily).
+        self.tasks: dict[_Parts, int] = {}
+        self.below: Counter[_Parts] = Counter()
+
+    def read(self) -> bool:
+        """Act on every member in stream order; stop before the next one once the feed stopped.
+
+        :return: Whether the stream's members are exhausted.
+        """
+
+        while True:
+            member = self.held
+            if member is None:
+                if self.feed.stopped:
+                    return False
+                member = next(self.members, None)
+                if member is None:
+                    return True
+                self.held = member
+            if not self.handle(member):
+                return False
+            self.held = None
+
+    def handle(self, member: tarfile.TarInfo) -> bool:
+        """Act on one member, after its waits; nothing is done when the feed stops during them.
+
+        :param member: The member.
+        :return: Whether it was acted on.
+        """
+
+        landing = self.landing
+        parts = _member_parts(member, member.name, landing.target)
+        keys = [_folded(parts)]
+        if (
+            member.islnk()
+            and not member.linkname.startswith("/")
+            and ".." not in (source := _link_parts(member.linkname))
+        ):
+            keys.append(_folded(source))
+        if not self.feed.wait(lambda: all(self.clear(key) for key in keys)):
+            return False
+        if not (member.isreg() and parts and not _sparse(member) and member.size <= _POOLED_SIZE):
+            _dispatch(landing, self.archive, member, parts)
+            return True
+        if not self.feed.wait(lambda: self.feed.room(member.size)):
+            return False
+        parent = landing.directory(member, parts[:-1], create=True)
+        source_file = self.archive.extractfile(member)
+        if source_file is None:  # pragma: no cover - tarfile returns a reader for every regular member
+            raise tarfile.FilterError(f"{member.name!r} has no data")
+        with source_file:
+            data = source_file.read()
+        landing.received += len(data)
+        submitted = self.feed.submitted
+        descriptor = os.dup(parent)  # the cached one may be closed before a worker takes the task
+        try:
+            index = self.feed.submit(_Write(member, descriptor, parts, data), len(data))
+        except BaseException:
+            if self.feed.submitted == submitted:
+                os.close(descriptor)  # never handed over
+            raise
+        del data  # the feed holds the only reference, until a worker takes the task
+        key = keys[0]
+        with self.feed.condition:
+            self.tasks[key] = index
+            for depth in range(1, len(key) + 1):
+                self.below[key[:depth]] += 1
+        landing.written.add(parts)
+        return True
+
+    def clear(self, key: _Parts) -> bool:
+        """Whether no write in flight is at, above or below *key*; call it under the feed's condition.
+
+        :param key: A folded name.
+        :return: Whether the member may be acted on.
+        """
+
+        if len(self.tasks) > 2 * self.feed.max_tasks:
+            self.prune()  # keeps the bookkeeping as small as the feed's bound
+        if not self.conflicts(key):
+            return True
+        self.prune()
+        return not self.conflicts(key)
+
+    def conflicts(self, key: _Parts) -> bool:
+        """Whether a recorded write is at, below or above *key*.
+
+        :param key: A folded name.
+        :return: Whether one is.
+        """
+
+        return self.below[key] > 0 or any(key[:depth] in self.tasks for depth in range(1, len(key)))
+
+    def prune(self) -> None:
+        """Forget the writes that finished."""
+
+        for key, index in list(self.tasks.items()):
+            if self.feed.finished(index):
+                del self.tasks[key]
+                for depth in range(1, len(key) + 1):
+                    self.below[key[:depth]] -= 1
+                    if not self.below[key[:depth]]:
+                        del self.below[key[:depth]]
+
+
+def extract_tar(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | None = None, workers: int = 1) -> None:
     """Extract an untrusted tar stream under *target*, never resolving a path by name.
 
     *target* is opened once, following a symlink there; every member below it is reached through directory
@@ -1489,9 +1689,9 @@ def extract_tar(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | No
     - Devices, FIFOs and other types are refused; ownership is ignored.
 
     Mode and time failures are not fatal. Nothing is fsynced. A refused member stops the extraction and leaves
-    what was extracted before it. A stream cut short, even exactly at a member boundary, is refused after its
-    last complete member; a damaged (non-zero, invalid) header after the members ends the stream as tarfile reads
-    it and is not detected.
+    what was extracted before it (see *workers* for what more it may leave). A stream cut short, even exactly at a
+    member boundary, is refused after its last complete member; a damaged (non-zero, invalid) header after the
+    members ends the stream as tarfile reads it and is not detected.
 
     Threat model: the stream is untrusted; *target* is this process's own directory (not always a fresh one: a
     reused push token, a single-file pull's chosen directory), which only trusted local actors write. A concurrent
@@ -1501,6 +1701,20 @@ def extract_tar(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | No
     :param stream: The binary tar stream, read once.
     :param target: The existing directory to extract into.
     :param rename: ``(member, name)`` for a single file: the only member accepted, a regular file written as *name*.
+    :param workers: With more than one (and no *rename*), regular members of at most 1 MiB are read into memory
+        by this thread and written by up to that many worker threads (at most 4 per worker or 64 MiB handed out
+        at once), each through a duplicate of its directory's descriptor; everything else, and every directory
+        resolution, stays in this thread, which waits for the writes in flight below, at or above a member's name
+        (compared case-folded, not Unicode-normalized: names a filesystem such as macOS's treats as equal only
+        after normalization are not serialized) before acting on it. On a failure or an interrupt no write is
+        running any more when this raises. The failure raised is the first one this thread or a worker met, which
+        in rare interleavings is not the first in stream order, and a member a worker took just as another write
+        failed is then not written. Members after the refused one may have been applied too, symlink and
+        hard-link members replacing earlier entries included (the caller discards the landing). A ``SIGINT`` is
+        acted on between members only, not inside a stalled read of the stream or a large member this thread
+        writes. Under a custom ``SIGINT`` handler that returns, a refusal this thread meets may be raised before
+        the members already handed out are written, so the refusal reported may be a later one than the
+        sequential extraction reports.
     :raises tarfile.FilterError: For a refused member; a subclass (``OutsideDestinationError``,
         ``SpecialFileError``, ``AbsoluteLinkError``, ``LinkOutsideDestinationError``) where one applies.
     :raises tarfile.TarError: If the stream is malformed or cut short.
@@ -1510,24 +1724,18 @@ def extract_tar(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | No
     landing = _Landing(target)
     try:
         with tarfile.open(fileobj=stream, mode="r|") as archive:
-            for member in archive:
-                name = member.name
-                if rename is not None:
-                    # The landing directory holds the user's other files, so only one regular file may arrive there.
-                    if name != rename[0] or not member.isreg():
-                        raise tarfile.FilterError(f"unexpected member in a single-file pull: {name!r}")
-                    name = rename[1]
-                parts = _member_parts(member, name, landing.target)
-                if member.isdir():
-                    _extract_directory(landing, member, parts)
-                elif member.isreg():
-                    _extract_regular(landing, archive, member, parts)
-                elif member.issym():
-                    _extract_symlink(landing, member, parts)
-                elif member.islnk():
-                    _extract_hard_link(landing, member, parts)
-                else:
-                    raise tarfile.SpecialFileError(member)
+            if workers > 1 and rename is None:
+                feed = Feed(
+                    partial(_write_member, landing),
+                    _close_write,
+                    max_tasks=_POOLED_TASKS * workers,
+                    max_weight=_POOLED_BYTES,
+                )
+                # Returns, or raises, only once no write runs any more (directory times are restored after it).
+                feed.run(_Reader(landing, archive, feed).read, workers)
+            else:
+                for member in archive:
+                    _extract_member(landing, archive, member, rename)
             # tarfile ends the iteration quietly when the stream stops at a member boundary (nothing of the next
             # header read) or inside a header (part of it read): a whole block read where the next header starts
             # tells a cut stream from one that reached its end. Not detected: tarfile also ends quietly on a damaged

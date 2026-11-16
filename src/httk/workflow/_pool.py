@@ -21,7 +21,7 @@ import threading
 from collections.abc import Callable, Sequence
 from types import FrameType
 
-__all__ = ["run_ordered"]
+__all__ = ["Feed", "run_ordered"]
 
 #: How often a waiting caller looks at a stop recorded by the signal handler (which cannot notify).
 _POLL = 0.1
@@ -322,3 +322,261 @@ def run_ordered[T, R](
         if previous is not None:
             signal.signal(signal.SIGINT, previous)  # type: ignore[arg-type]  # one SIGINT pending now is still ours
     return pool.deliver(caught, previous)
+
+
+class Feed[T](_Pool[int, None]):
+    """Tasks the calling thread submits one at a time (the reader of a stream), run by worker threads.
+
+    The scheme is :func:`run_ordered`'s: the threads start before anything is queued, a task is run exactly once
+    by the worker that takes it, completion is observed through counters under the one condition, a failed task
+    stops the feed, and on the main thread ``SIGINT`` is recorded while the feed lives and delivered once every
+    running task has finished. Every wait (:meth:`wait`) is a loop on that condition that also ends once the feed
+    stopped or every worker left, so a failure always wakes the calling thread. When no thread can be started,
+    :meth:`submit` runs each task in the calling thread.
+
+    A task belongs to the feed from the moment :meth:`submit` is called: *body* releases its resources when it runs
+    it, and *discard* releases them, in the calling thread after every worker stopped, when it never ran. The feed
+    drops its reference to a task as soon as a worker takes it (or it is discarded), so a long stream keeps only
+    the pending tasks' data alive.
+
+    :param body: Runs one task, releasing its resources whatever happens.
+    :param discard: Releases the resources of a task that never ran.
+    :param max_tasks: How many submitted tasks may be unfinished at once (see :meth:`room`).
+    :param max_weight: How much weight submitted tasks may have unfinished at once (see :meth:`room`).
+    """
+
+    def __init__(
+        self, body: Callable[[T], None], discard: Callable[[T], None], *, max_tasks: int, max_weight: int
+    ) -> None:
+        super().__init__(self._serve, (), None)
+        # A worker runs function(items[index]): with the indices themselves as items, _serve gets the index.
+        self.items = range(sys.maxsize)
+        self.body = body
+        self.discard = discard
+        self.max_tasks = max_tasks
+        self.max_weight = max_weight
+        # Guarded by the condition: the submitted tasks no one took yet (task, weight) by index, the indices of the
+        # unfinished ones, their count and weight, and how many were submitted.
+        self.tasks: dict[int, tuple[T, int]] = {}
+        self.unsettled: set[int] = set()
+        self.pending = 0
+        self.pending_weight = 0
+        self.submitted = 0
+        self.inline = False  # tasks run in the calling thread: no thread started, or the feed resumed there
+        # Resumed in the calling thread after a previous SIGINT handler returned: the stop flag stays set for the
+        # workers (one starting late takes nothing), and no longer stops the calling thread (see stopped).
+        self.resumed = False
+
+    @property
+    def stopped(self) -> bool:
+        """Whether the calling thread must stop submitting: the feed stopped and was not resumed inline."""
+
+        return self.stop and not self.resumed
+
+    def _serve(self, index: int) -> None:
+        with self.condition:
+            claimed = self.tasks.pop(index, None)  # from here on the task is this thread's alone
+        if claimed is None:  # pragma: no cover - a task is taken once; this only guards that
+            return
+        task, weight = claimed
+        del claimed
+        try:
+            self.body(task)
+        except BaseException:
+            with self.condition:
+                # Stopped before the task counts as finished: no waiter goes on past a failed task.
+                self.stop = True
+                self._settle(index, weight)
+            raise
+        finally:
+            del task
+        with self.condition:
+            self._settle(index, weight)
+
+    def _settle(self, index: int, weight: int) -> None:
+        self.unsettled.discard(index)
+        self.pending -= 1
+        self.pending_weight -= weight
+        self.condition.notify_all()
+
+    def finished(self, index: int) -> bool:
+        """Whether the task *index* finished; call it under :attr:`condition` (as :meth:`wait` does).
+
+        :param index: The index :meth:`submit` returned.
+        :return: Whether it finished (succeeded or failed).
+        """
+
+        return index not in self.unsettled
+
+    def idle(self) -> bool:
+        """Whether every submitted task finished; call it under :attr:`condition` (as :meth:`wait` does).
+
+        :return: Whether nothing is pending.
+        """
+
+        return not self.pending
+
+    def room(self, weight: int) -> bool:
+        """Whether a task of *weight* may be submitted now; call it under :attr:`condition` (as :meth:`wait` does).
+
+        :param weight: The task's weight.
+        :return: Whether nothing is pending, or both bounds still hold with the task added.
+        """
+
+        return not self.pending or (self.pending < self.max_tasks and self.pending_weight + weight <= self.max_weight)
+
+    def wait(self, ready: Callable[[], bool]) -> bool:
+        """Wait under :attr:`condition` until *ready* holds, the feed stopped, or every worker left.
+
+        :param ready: The predicate, called under the condition.
+        :return: Whether *ready* held before the feed stopped (``False`` once it stopped, even when *ready* holds).
+        """
+
+        with self.condition:
+            while not self.stopped:
+                if ready():
+                    return True
+                if self.left >= self.started:
+                    return False  # nobody is left to make progress
+                self.condition.wait(_POLL)  # also how a stop recorded by the signal handler is seen
+            return False
+
+    def submit(self, task: T, weight: int) -> int:
+        """Queue *task* for a worker, or run it here when the feed runs inline; it never waits for room.
+
+        :param task: The task, which belongs to the feed from now on.
+        :param weight: Its weight for :meth:`room`.
+        :return: The task's index, for :meth:`finished`.
+        """
+
+        with self.condition:
+            index = self.submitted
+            self.tasks[index] = (task, weight)
+            self.submitted += 1
+            self.outcomes.append(None)
+            self.unsettled.add(index)
+            self.pending += 1
+            self.pending_weight += weight
+        del task
+        if self.inline:
+            self._run_here(index)
+        else:
+            self.queue.put(index)  # after a stop it is never taken, and discarded after the drain
+        return index
+
+    def _run_here(self, index: int) -> None:
+        try:
+            self._serve(index)
+        except BaseException as exc:
+            self.outcomes[index] = (False, exc)
+            raise
+        self.outcomes[index] = (True, None)
+
+    def run(self, reader: Callable[[], bool], workers: int) -> None:
+        """Start up to *workers* threads and call *reader*, which submits tasks; return once every task finished.
+
+        *reader* returns ``True`` when it submitted everything, ``False`` when it saw the feed stop (:attr:`stopped`;
+        it then stops before acting on anything more). The tasks submitted before *reader* returned or raised still
+        run, so the failure raised is normally the first in submission order (a failed task's, else the reader's);
+        a stop ends that wait at once, and a task a worker took just as another failed is then not run. Then, as in
+        :func:`run_ordered`: every running task finishes (saying once on standard error what is waited for when
+        interrupted), the tasks that never ran are discarded, and the first exception or the recorded interrupt is
+        raised, an interrupt winning. An interrupt is seen by *reader* only between its waits, never inside its own
+        work. When a previous custom ``SIGINT`` handler returns, the tasks that never ran run here, in order, and
+        *reader* is called again to go on inline; but when *reader* had also failed, its failure is raised and the
+        tasks that never ran are discarded, so the failure raised may be a later one in submission order than one
+        those tasks would have met.
+
+        :param reader: Submits the tasks, waiting with :meth:`wait` (for :meth:`room`, say) before each.
+        :param workers: The most tasks running at once.
+        :raises RuntimeError: If the feed stopped with neither a failure nor an interrupt (a defect).
+        """
+
+        previous: object = None
+        caught: BaseException | None = None
+        done = False
+        try:
+            try:
+                previous = self.install()
+                if not self.start(workers):
+                    self.inline = True  # as under a login node's task limit: the calling thread runs every task
+                try:
+                    done = reader()
+                except BaseException as exc:
+                    if isinstance(_interrupt(exc), (KeyboardInterrupt, SystemExit)):
+                        raise
+                    caught = exc
+                self.wait(self.idle)
+            except BaseException as exc:
+                self.stop = True
+                caught = exc
+                self.interrupted = self.interrupted or isinstance(_interrupt(exc), (KeyboardInterrupt, SystemExit))
+            self.quiesce()
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGINT, previous)  # type: ignore[arg-type]  # one SIGINT pending now is still ours
+        self._deliver(caught, done, previous, reader)
+
+    def _deliver(self, caught: BaseException | None, done: bool, previous: object, reader: Callable[[], bool]) -> None:
+        """After the drain and the handler's restoration: raise what stopped the feed, or go on inline."""
+
+        resumed = False
+        try:
+            first = None if caught is None else _interrupt(caught)
+            if isinstance(first, (KeyboardInterrupt, SystemExit)):
+                raise first
+            failed = self.failure()
+            other = failed if failed is not None else first
+            interrupt = self.absorbed
+            if interrupt is None and self.signals and previous is signal.default_int_handler:
+                interrupt = KeyboardInterrupt()
+            if interrupt is not None:
+                if other is not None and interrupt.__context__ is None:
+                    interrupt.__context__ = other
+                raise interrupt
+            if self.signals and previous == signal.SIG_DFL:
+                signal.raise_signal(signal.SIGINT)
+                raise KeyboardInterrupt  # not reached unless the default action did not end the process
+            if self.signals and callable(previous):
+                try:
+                    previous(signal.SIGINT, None)  # once, however many arrived
+                except BaseException as exc:
+                    if other is not None and exc.__context__ is None:
+                        exc.__context__ = other
+                    raise
+            if other is not None:
+                raise other  # as it was raised: a task failure keeps its own cause
+            if done and not self.tasks:
+                return
+            if not self.signals:
+                raise RuntimeError("the feed stopped with neither a failure nor an interrupt")
+            # A previous handler let the interrupt pass: the rest runs here, as the plain loop would. The stop flag
+            # stays set, so that a worker thread starting only now takes nothing.
+            resumed = True
+            self.resumed = True
+            self.inline = True
+            try:
+                for index in sorted(self.tasks):
+                    self._run_here(index)
+            except BaseException:
+                self._discard_untaken()
+                raise
+            if not done and not reader():
+                raise RuntimeError("the feed stopped with neither a failure nor an interrupt")
+        finally:
+            if not resumed:
+                self._discard_untaken()
+
+    def _discard_untaken(self) -> None:
+        """Release every task that never ran, once; called only when no worker can take one any more."""
+
+        error: BaseException | None = None
+        while self.tasks:
+            index = min(self.tasks)
+            task, _ = self.tasks.pop(index)
+            try:
+                self.discard(task)
+            except BaseException as exc:  # release the others first
+                error = error if error is not None else exc
+        if error is not None:
+            raise error

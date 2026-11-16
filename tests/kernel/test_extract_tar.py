@@ -11,20 +11,25 @@ import functools
 import io
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
+import time
+import types
 from collections import Counter
 from collections.abc import Callable, Collection, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, cast
 
 import pytest
 
-from httk.workflow import _fs, adapter_runtime
+from httk.workflow import Workspace, _fs, _pool, adapter_runtime
+from httk.workflow.workflow_cli._job import receive_tar
 
 MTIME = 1_000_000_000
 
@@ -48,8 +53,12 @@ def old_extract(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | No
         archive.extractall(target, filter=checked)
 
 
-def new_extract(stream: IO[bytes], target: Path) -> None:
-    _fs.extract_tar(stream, target)
+def new_extract(stream: IO[bytes], target: Path, *, workers: int = 1) -> None:
+    _fs.extract_tar(stream, target, workers=workers)
+
+
+#: The extractor sequential (today's path) and pooled (the far side of a push with ``io.workers`` 8).
+WORKERS = pytest.mark.parametrize("workers", [1, 8], ids=["sequential", "pooled"])
 
 
 def member(
@@ -477,12 +486,18 @@ CASES = [
 
 
 def check_verdict(
-    verdict: str, old_data: bytes, new_data: bytes, tmp_path: Path, setup: Setup | None, error: type[Exception]
+    verdict: str,
+    old_data: bytes,
+    new_data: bytes,
+    tmp_path: Path,
+    setup: Setup | None,
+    error: type[Exception],
+    workers: int = 1,
 ) -> None:
     """Run the oracle on *old_data* and the new extractor on *new_data* (the same members) and check *verdict*."""
 
     old_target, old_error = run(old_extract, old_data, tmp_path / "old", setup)
-    new_target, new_error = run(new_extract, new_data, tmp_path / "new", setup)
+    new_target, new_error = run(functools.partial(new_extract, workers=workers), new_data, tmp_path / "new", setup)
     assert outside_untouched(tmp_path / "old") and outside_untouched(tmp_path / "new")
     assert linked_files(new_target) == []  # never a hard link
     if new_error is not None:
@@ -518,6 +533,7 @@ def oracle_relinks_over_existing_names() -> bool:
     return True
 
 
+@WORKERS
 @pytest.mark.parametrize(
     ("case", "fmt"),
     [
@@ -527,14 +543,14 @@ def oracle_relinks_over_existing_names() -> bool:
         if fmt in case.formats
     ],
 )
-def test_differential_against_the_stdlib_filters(tmp_path: Path, case: Case, fmt: int) -> None:
+def test_differential_against_the_stdlib_filters(tmp_path: Path, case: Case, fmt: int, workers: int) -> None:
     # Members naming the outside name each run's own outside directory.
     old_data = archive(case.build(tmp_path / "old" / "outside"), fmt)
     new_data = archive(case.build(tmp_path / "new" / "outside"), fmt)
     verdict = case.verdict
     if verdict == RELAX_HARDLINK and oracle_relinks_over_existing_names():
         verdict = COPY  # a newer oracle accepts too, aliasing where the new extractor copies
-    check_verdict(verdict, old_data, new_data, tmp_path, case.setup, case.error)
+    check_verdict(verdict, old_data, new_data, tmp_path, case.setup, case.error, workers)
 
 
 def test_the_verdict_list_covers_every_recorded_difference() -> None:
@@ -589,9 +605,10 @@ def gnu_tar(source: Path, names: Sequence[str], *options: str) -> bytes:
 
 
 @needs_tar
+@WORKERS
 @pytest.mark.parametrize("fmt", ["gnu", "posix", "ustar"])
 @pytest.mark.parametrize("selection", ["top", "nested", "dot"])
-def test_differential_on_gnu_tar_archives(tmp_path: Path, fmt: str, selection: str) -> None:
+def test_differential_on_gnu_tar_archives(tmp_path: Path, fmt: str, selection: str, workers: int) -> None:
     # The three shapes a pull sends: a batch of top-level names, a batch of nested paths (their parents implicit),
     # and a whole tree (``-- .``, whose first member names the target itself).
     source = job_tree(tmp_path / "src")
@@ -604,7 +621,7 @@ def test_differential_on_gnu_tar_archives(tmp_path: Path, fmt: str, selection: s
         os.unlink(source / "job--c7f0b2" / ("long-" + "n" * 200))  # ustar cannot carry the long name
     data = gnu_tar(source, names, f"--format={fmt}")
     assert ("." in dated_directories(data)) == (selection == "dot")
-    check_verdict(COPY, data, data, tmp_path, None, tarfile.FilterError)
+    check_verdict(COPY, data, data, tmp_path, None, tarfile.FilterError, workers)
 
 
 def allocated(root: Path) -> int:
@@ -766,8 +783,9 @@ def _source_view(root: Path) -> dict[str, tuple[object, ...]]:
     return found
 
 
+@WORKERS
 @pytest.mark.parametrize("writer", ["tarfile", pytest.param("gnu-tar", marks=needs_tar)])
-def test_a_job_tree_round_trips(tmp_path: Path, writer: str) -> None:
+def test_a_job_tree_round_trips(tmp_path: Path, writer: str, workers: int) -> None:
     source = job_tree(tmp_path / "src")
     names = sorted(os.listdir(source))
     if writer == "tarfile":
@@ -780,7 +798,7 @@ def test_a_job_tree_round_trips(tmp_path: Path, writer: str) -> None:
         data = gnu_tar(source, names)
     target = tmp_path / "landing"
     target.mkdir()
-    _fs.extract_tar(io.BytesIO(data), target)
+    _fs.extract_tar(io.BytesIO(data), target, workers=workers)
     assert _source_view(target) == _source_view(source)
     copy = target / "job--c7f0b2" / "outputs" / "INCAR.copy"
     assert copy.stat().st_nlink == 1 and copy.read_text(encoding="utf-8") == "ENCUT = 520\n"
@@ -1278,3 +1296,548 @@ def test_names_that_are_not_utf_8_are_extracted_as_bytes(tmp_path: Path, fmt: in
 def _no_leftover_audit() -> Iterator[None]:
     yield
     assert _audit == []
+
+
+# -- pooled extraction (workers > 1) ---------------------------------------------------------------------------------
+
+#: How long a pooled test waits for something that should happen at once before calling it a failure.
+PATIENCE = 10.0
+
+
+@dataclass
+class Writes:
+    """The worker writes of pooled extractions: how many run now, the most at once, and each one's span."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    running: int = 0
+    peak: int = 0
+    started: list[str] = field(default_factory=list)
+    spans: list[tuple[str, float, float]] = field(default_factory=list)
+    #: Seconds a worker sleeps before creating the named file.
+    delay: dict[str, float] = field(default_factory=dict)
+    #: The thread that wrote each name.
+    threads: dict[str, int] = field(default_factory=dict)
+
+    def span(self, name: str) -> list[tuple[float, float]]:
+        return [(begin, end) for found, begin, end in self.spans if found == name]
+
+
+@pytest.fixture
+def writes(monkeypatch: pytest.MonkeyPatch) -> Writes:
+    record = Writes()
+    real = _fs._write_member
+
+    def tracked(landing: Any, task: Any) -> None:
+        name = "/".join(task.parts)
+        with record.lock:
+            record.running += 1
+            record.peak = max(record.peak, record.running)
+            record.started.append(name)
+            record.threads[name] = threading.get_ident()
+        begin = time.monotonic()
+        try:
+            time.sleep(record.delay.get(name, 0))
+            real(landing, task)
+        finally:
+            with record.lock:
+                record.running -= 1
+                record.spans.append((name, begin, time.monotonic()))
+
+    monkeypatch.setattr(_fs, "_write_member", tracked)
+    return record
+
+
+def gated_writes(monkeypatch: pytest.MonkeyPatch, gates: dict[bytes, Callable[[], object]]) -> None:
+    """Run ``gates[prefix]`` before writing data that starts with *prefix* (a sleep, a wait, a failure)."""
+
+    real = _fs.write_all
+
+    def write(descriptor: int, data: bytes) -> None:
+        for prefix, gate in gates.items():
+            if bytes(data[: len(prefix)]) == prefix:
+                gate()
+        real(descriptor, data)
+
+    monkeypatch.setattr(_fs, "write_all", write)
+
+
+def slow(seconds: float = 0.2) -> Callable[[], None]:
+    return lambda: time.sleep(seconds)
+
+
+def full_disk() -> None:
+    raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def pooled(members: Sequence[Member], target: Path, workers: int = 4) -> None:
+    _fs.extract_tar(io.BytesIO(archive(members)), target, workers=workers)
+
+
+@pytest.fixture
+def default_sigint() -> Iterator[None]:
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signals reach only the main thread")
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    yield
+    signal.signal(signal.SIGINT, previous)
+
+
+def test_pooled_writes_run_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes) -> None:
+    # Without overlap the serialization tests below would pass vacuously.
+    gated_writes(monkeypatch, {b"slow": slow(0.05)})
+    pooled([F(f"f{index}", b"slow") for index in range(16)], tmp_path)
+    assert writes.peak >= 2 and len(writes.started) == 16 and writes.running == 0
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
+def test_a_failing_member_stops_the_pooled_extraction_with_nothing_running_and_no_descriptor_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    gated_writes(monkeypatch, {b"slow": slow(0.05), b"fail": full_disk})
+    members = [F(f"d/f{index}", b"fail" if index == 5 else b"slow") for index in range(40)]
+    before = open_descriptors()
+    with pytest.raises(OSError) as raised:
+        pooled([D("d"), *members], tmp_path)
+    assert raised.value.errno == errno.ENOSPC and not isinstance(raised.value, tarfile.TarError)
+    assert writes.running == 0
+    started = len(writes.started)
+    assert "d/f5" in writes.started and started < 40
+    time.sleep(0.2)
+    assert len(writes.started) == started  # nothing started after the raise
+    assert open_descriptors() == before
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
+def test_a_worker_failing_while_the_reader_waits_on_a_full_queue_wakes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    # Two workers, so at most 8 tasks handed out: f0 (failing) and f1 run parked, f2..f7 queued, the reader waits
+    # for room at f8 when f0 fails.
+    blocked, fail, release = threading.Event(), threading.Event(), threading.Event()
+    real_room = _pool.Feed.room
+
+    def room(feed: Any, weight: int) -> bool:
+        free = real_room(feed, weight)
+        if not free:
+            blocked.set()
+        return free
+
+    def failing() -> None:
+        fail.wait(PATIENCE)
+        full_disk()
+
+    monkeypatch.setattr(_pool.Feed, "room", room)
+    gated_writes(monkeypatch, {b"fail": failing, b"park": lambda: release.wait(PATIENCE)})
+    members = [F(f"f{index}", b"fail" if index == 0 else b"park") for index in range(20)]
+    seen: list[bool] = []
+
+    def orchestrate() -> None:
+        seen.append(blocked.wait(PATIENCE))  # the reader is waiting for room now
+        fail.set()
+        time.sleep(0.3)
+        release.set()
+
+    helper = threading.Thread(target=orchestrate)
+    before = open_descriptors()
+    helper.start()
+    began = time.monotonic()
+    try:
+        with pytest.raises(OSError) as raised:
+            pooled(members, tmp_path, workers=2)
+    finally:
+        fail.set()
+        release.set()
+        helper.join()
+    assert time.monotonic() - began < PATIENCE
+    assert seen == [True] and raised.value.errno == errno.ENOSPC
+    assert sorted(writes.started) == ["f0", "f1"] and writes.running == 0
+    assert open_descriptors() == before  # the six queued tasks' descriptors were closed untaken
+    assert sorted(os.listdir(tmp_path)) == ["f0", "f1"]  # f0 created before its write failed, as without workers
+
+
+def test_normalized_duplicate_names_wait_for_each_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    gated_writes(monkeypatch, {b"slow": slow()})
+    pooled([F("a/b", b"slow first"), F("./a//b", b"second")], tmp_path)
+    (_, first_end), (second_begin, _) = writes.span("a/b")
+    assert first_end <= second_begin
+    assert (tmp_path / "a" / "b").read_bytes() == b"second"
+
+
+def test_case_variant_names_wait_for_each_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    gated_writes(monkeypatch, {b"slow": slow()})
+    pooled([F("Dir/NAME", b"slow upper"), F("dir/name", b"lower")], tmp_path)
+    ((_, upper_end),) = writes.span("Dir/NAME")
+    ((lower_begin, _),) = writes.span("dir/name")
+    assert upper_end <= lower_begin
+
+
+def test_a_symlink_member_waits_for_a_queued_file_of_the_same_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    gated_writes(monkeypatch, {b"slow": slow()})
+    pooled([F("x", b"slow"), S("x", "elsewhere")], tmp_path)
+    assert os.readlink(tmp_path / "x") == "elsewhere"
+
+
+def test_a_member_below_a_name_queued_as_a_file_is_refused_as_without_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    writes.delay["a"] = 0.2  # so that, without the wait, "a" would be made a directory before the file is created
+    errors = []
+    for workers in (1, 4):
+        target = tmp_path / str(workers)
+        target.mkdir()
+        with pytest.raises(tarfile.FilterError) as raised:
+            pooled([F("a", b"slow"), F("a/b", b"x")], target, workers)
+        errors.append((type(raised.value), str(raised.value).replace(str(target), "<target>")))
+        assert (target / "a").read_bytes() == b"slow"
+    assert errors[0] == errors[1] and "which is not a directory" in errors[0][1]
+
+
+def test_a_hard_link_waits_for_its_queued_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    gated_writes(monkeypatch, {b"slow": slow()})
+    data = b"slow" + bytes(range(256)) * 40
+    pooled([F("a", data), H("h", "a"), H("g", "h")], tmp_path)
+    assert (tmp_path / "h").read_bytes() == (tmp_path / "g").read_bytes() == data
+    assert (tmp_path / "h").stat().st_nlink == 1
+
+
+def test_directory_times_are_restored_after_every_pooled_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    gated_writes(monkeypatch, {b"slow": slow(0.02)})
+    members = [D(".", MTIME + 1), D("d", MTIME + 2), D("d/e", MTIME + 3)]
+    members += [F(f"d/f{index}", b"slow") for index in range(10)] + [F(f"d/e/g{index}", b"x") for index in range(10)]
+    snapshots = []
+    for workers in (1, 8):
+        target = tmp_path / str(workers)
+        target.mkdir()
+        pooled(members, target, workers)
+        assert (target / "d").stat().st_mtime == MTIME + 2 and (target / "d" / "e").stat().st_mtime == MTIME + 3
+        assert target.stat().st_mtime == MTIME + 1
+        snapshots.append(snapshot(target, target, {".", "d", "d/e"}))
+    assert snapshots[0] == snapshots[1] and writes.peak >= 2
+
+
+@pytest.mark.parametrize("failing_start", [1, 3])
+def test_failed_thread_starts_leave_the_writes_to_the_started_threads_or_this_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes, failing_start: int
+) -> None:
+    original = threading.Thread.start
+    starts = Counter[str]()
+
+    def start(thread: threading.Thread) -> None:
+        starts["calls"] += 1
+        if starts["calls"] >= failing_start:
+            raise RuntimeError("can't start new thread")
+        original(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    members = [D("d"), *(F(f"d/f{index}", bytes([index])) for index in range(30)), H("h", "d/f3")]
+    pooled(members, tmp_path, workers=8)
+    monkeypatch.undo()
+    assert sorted(writes.started) == sorted(f"d/f{index}" for index in range(30))
+    assert all((tmp_path / "d" / f"f{index}").read_bytes() == bytes([index]) for index in range(30))
+    assert (tmp_path / "h").read_bytes() == bytes([3])
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
+def test_two_real_interrupts_during_a_pooled_extraction_wait_for_every_running_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writes: Writes,
+    default_sigint: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    release = threading.Event()
+    gated_writes(monkeypatch, {b"park": lambda: release.wait(PATIENCE)})
+    main = threading.main_thread().ident
+    assert main is not None
+    at_raise: list[int] = []
+
+    def interrupt() -> None:
+        deadline = time.monotonic() + PATIENCE
+        while len(writes.started) < 4 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        signal.pthread_kill(main, signal.SIGINT)
+        time.sleep(0.2)  # the reader is now draining: the writes are still parked
+        signal.pthread_kill(main, signal.SIGINT)
+        time.sleep(0.2)
+        release.set()
+
+    helper = threading.Thread(target=interrupt)
+    before = open_descriptors()
+    helper.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            try:
+                pooled([F(f"f{index}", b"park") for index in range(40)], tmp_path)
+            finally:
+                at_raise.append(writes.running)
+    finally:
+        release.set()
+        helper.join()
+    assert at_raise == [0] and len(writes.started) == 4 and len(writes.spans) == 4
+    time.sleep(0.1)
+    assert len(writes.started) == 4  # no write starts after the stop
+    assert open_descriptors() == before  # the queued tasks' descriptors were closed untaken
+    assert capsys.readouterr().err.count("waiting for 4 running operations to finish") == 1
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_a_custom_sigint_handler_that_returns_lets_the_extraction_finish_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signals reach only the main thread")
+    calls: list[int] = []
+    release = threading.Event()
+    gated_writes(monkeypatch, {b"park": lambda: release.wait(PATIENCE)})
+    main = threading.main_thread().ident
+    assert main is not None
+
+    def interrupt() -> None:
+        deadline = time.monotonic() + PATIENCE
+        while len(writes.started) < 4 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        signal.pthread_kill(main, signal.SIGINT)
+        signal.pthread_kill(main, signal.SIGINT)
+        time.sleep(0.2)
+        release.set()
+
+    previous = signal.signal(signal.SIGINT, lambda signum, _frame: calls.append(signum))
+    helper = threading.Thread(target=interrupt)
+    helper.start()
+    try:
+        members = [D("d"), *(F(f"d/f{index}", b"park%d" % index) for index in range(40)), H("h", "d/f39")]
+        pooled(members, tmp_path)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        release.set()
+        helper.join()
+    assert calls == [signal.SIGINT]
+    assert sorted(writes.started) == sorted(f"d/f{index}" for index in range(40))
+    assert all((tmp_path / "d" / f"f{index}").read_bytes() == b"park%d" % index for index in range(40))
+    assert (tmp_path / "h").read_bytes() == b"park39"
+
+
+def _receiving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, members: Sequence[Member]) -> tuple[Workspace, Path]:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    workspace.configure_settings({"io.workers": 4})
+    data = archive(members)
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(data)))
+    return workspace, workspace.control / "transfers" / "incoming" / "landing"
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
+def test_receive_tar_discards_the_landing_only_after_every_write_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    gated_writes(monkeypatch, {b"slow": slow(0.2), b"fail": full_disk})
+    members = [D("job"), F("job/a", b"slow"), F("job/b", b"slow"), F("job/c", b"fail"), F("job/d", b"slow")]
+    workspace, landing = _receiving(tmp_path, monkeypatch, members)
+    assert workspace.io_workers == 4
+    real_discard = _fs.discard
+    running_at_discard: list[int] = []
+
+    def discard(target: _fs.Loc, **kwargs: Any) -> None:
+        running_at_discard.append(writes.running)
+        real_discard(target, **kwargs)
+
+    monkeypatch.setattr(_fs, "discard", discard)
+    before = open_descriptors()
+    with pytest.raises(ValueError, match="refused the stream"):
+        receive_tar(workspace, landing)
+    assert running_at_discard == [0] and writes.peak >= 2
+    assert not landing.exists() and open_descriptors() == before
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
+def test_receive_tar_interrupted_raises_only_after_every_write_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes, default_sigint: None
+) -> None:
+    release = threading.Event()
+    gated_writes(monkeypatch, {b"park": lambda: release.wait(PATIENCE)})
+    workspace, landing = _receiving(tmp_path, monkeypatch, [D("job"), *(F(f"job/f{i}", b"park") for i in range(30))])
+    main = threading.main_thread().ident
+    assert main is not None
+
+    def interrupt() -> None:
+        deadline = time.monotonic() + PATIENCE
+        while len(writes.started) < 4 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        signal.pthread_kill(main, signal.SIGINT)
+        time.sleep(0.2)
+        release.set()
+
+    helper = threading.Thread(target=interrupt)
+    before = open_descriptors()
+    helper.start()
+    at_raise: list[int] = []
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            try:
+                receive_tar(workspace, landing)
+            finally:
+                at_raise.append(writes.running)
+    finally:
+        release.set()
+        helper.join()
+    # An interrupt is not a refused stream: the landing stays (as without workers), with no write left running.
+    assert at_raise == [0] and len(writes.spans) == len(writes.started) == 4
+    assert open_descriptors() == before and landing.is_dir()
+
+
+def test_a_pooled_refusal_before_a_reading_thread_refusal_is_the_one_raised(tmp_path: Path, writes: Writes) -> None:
+    # The worker meets "d" (a directory in the landing) late; the reader refuses "../escape" first.
+    writes.delay["d"] = 0.3
+    errors = []
+    for workers in (1, 4):
+        target = tmp_path / str(workers)
+        (target / "d").mkdir(parents=True)
+        with pytest.raises(tarfile.FilterError) as raised:
+            pooled([F("first"), F("d", b"x"), F("../escape")], target, workers)
+        errors.append((type(raised.value), str(raised.value).replace(str(target), "<target>")))
+    assert errors[0] == errors[1] and errors[0][0] is tarfile.FilterError and "'d'" in errors[0][1]
+    assert sorted(writes.started) == ["d", "first"]  # both written by workers in the pooled run
+
+
+def test_members_handed_out_before_a_reading_thread_refusal_are_all_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    gated_writes(monkeypatch, {b"slow": slow(0.05)})
+    members = [F(f"f{index}", b"slow %d" % index) for index in range(10)]
+    with pytest.raises(tarfile.OutsideDestinationError):
+        pooled([*members, F("../escape")], tmp_path, workers=2)
+    assert all((tmp_path / f"f{index}").read_bytes() == b"slow %d" % index for index in range(10))
+    assert len(writes.spans) == 10 and writes.running == 0
+
+
+def _pending_peaks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int, int]]:
+    """Record, after every submission, the feed's pending tasks, their weight and the tasks still alive."""
+
+    import weakref
+
+    peaks: list[tuple[int, int, int]] = []
+    alive: list[weakref.ref[Any]] = []
+    real_submit = _pool.Feed.submit
+
+    def submit(self: Any, task: Any, weight: int) -> int:
+        alive.append(weakref.ref(task))
+        index = real_submit(self, task, weight)
+        with self.condition:
+            peaks.append((self.pending, self.pending_weight, sum(ref() is not None for ref in alive)))
+        return index
+
+    monkeypatch.setattr(_pool.Feed, "submit", submit)
+    return peaks
+
+
+def test_the_byte_bound_limits_what_is_handed_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    monkeypatch.setattr(_fs, "_POOLED_BYTES", 2500)
+    gated_writes(monkeypatch, {b"slow": slow(0.01)})
+    peaks = _pending_peaks(monkeypatch)
+    pooled([F(f"f{index}", b"slow" + bytes(996)) for index in range(30)], tmp_path, workers=8)
+    assert max(weight for _, weight, _ in peaks) == 2000  # a third 1000-byte member would pass 2500
+    assert max(pending for pending, _, _ in peaks) == 2
+    assert len(writes.spans) == 30
+
+
+def test_a_long_pooled_stream_keeps_only_the_pending_members_in_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    import tracemalloc
+
+    gated_writes(monkeypatch, {b"slow": slow(0.001)})
+    peaks = _pending_peaks(monkeypatch)
+    data = archive([F(f"f{index}", b"slow" + bytes(64 << 10)) for index in range(300)])  # 19.7 MB of members
+    tracemalloc.start()
+    try:
+        _fs.extract_tar(io.BytesIO(data), tmp_path, workers=4)
+        current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # At most 16 pending (4 per worker), the 4 being written and the reader's own: never the whole stream, whose
+    # members' data alone would be 19.7 MB.
+    assert peak < 6 << 20 and current < 1 << 20, (peak, current)
+    assert max(alive for _, _, alive in peaks) <= 16 + 4 + 2
+    assert max(weight for _, weight, _ in peaks) <= 64 << 20 and len(writes.spans) == 300
+
+
+def test_members_above_1_mib_stay_in_the_reading_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    real = _fs._extract_regular
+    seen: dict[str, int] = {}
+
+    def extract_regular(landing: Any, archive: Any, info: tarfile.TarInfo, parts: Any) -> None:
+        seen[info.name] = threading.get_ident()
+        real(landing, archive, info, parts)
+
+    monkeypatch.setattr(_fs, "_extract_regular", extract_regular)
+    caller = threading.get_ident()
+    members = [F("big", b"b" * ((1 << 20) + 1)), F("edge", b"e" * (1 << 20)), F("small", b"s")]
+    pooled(members, tmp_path)
+    assert seen == {"big": caller}
+    assert sorted(writes.threads) == ["edge", "small"] and caller not in writes.threads.values()
+    assert (tmp_path / "big").stat().st_size == (1 << 20) + 1 and (tmp_path / "edge").stat().st_size == 1 << 20
+
+
+@pytest.mark.parametrize("workers", [1, 4])
+def test_pooled_bytes_count_for_the_hard_link_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes, workers: int
+) -> None:
+    monkeypatch.setattr(_fs, "_HARD_LINK_FACTOR", 1)
+    monkeypatch.setattr(_fs, "_HARD_LINK_ALLOWANCE", 0)
+    (tmp_path / "ok").mkdir()
+    pooled([F("a", bytes(100)), H("h", "a")], tmp_path / "ok", workers)
+    assert (tmp_path / "ok" / "h").read_bytes() == bytes(100)
+    (tmp_path / "over").mkdir()
+    with pytest.raises(tarfile.FilterError, match="hard-link copies would write more than 100 bytes"):
+        pooled([F("a", bytes(100)), H("h", "a"), H("g", "a")], tmp_path / "over", workers)
+    assert bool(writes.started) == (workers > 1)
+
+
+def test_a_custom_sigint_handler_returning_after_the_reader_finished_lets_every_parked_member_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writes: Writes
+) -> None:
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signals reach only the main thread")
+    calls: list[int] = []
+    release = threading.Event()
+    gated_writes(monkeypatch, {b"park": lambda: release.wait(PATIENCE)})
+    main = threading.main_thread().ident
+    assert main is not None
+
+    def interrupt() -> None:
+        deadline = time.monotonic() + PATIENCE
+        while len(writes.started) < 4 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        time.sleep(0.2)  # the reader has handed out all ten members (16 fit) and waits for them
+        signal.pthread_kill(main, signal.SIGINT)
+        time.sleep(0.2)
+        release.set()
+
+    previous = signal.signal(signal.SIGINT, lambda signum, _frame: calls.append(signum))
+    helper = threading.Thread(target=interrupt)
+    helper.start()
+    try:
+        members = [D("d", MTIME + 5), *(F(f"d/f{index}", b"park%d" % index) for index in range(10))]
+        pooled(members, tmp_path)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        release.set()
+        helper.join()
+    assert calls == [signal.SIGINT]
+    # Four ran in workers before the interrupt; the six never taken ran here once the handler let it pass.
+    assert sorted(writes.started) == sorted(f"d/f{index}" for index in range(10))
+    assert all((tmp_path / "d" / f"f{index}").read_bytes() == b"park%d" % index for index in range(10))
+    assert (tmp_path / "d").stat().st_mtime == MTIME + 5

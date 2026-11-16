@@ -444,7 +444,7 @@ as they are read, so a file the source keeps growing ends the copy. It is not
 atomic: callers copy to a private or partial name and move or deliver it
 afterwards.
 
-**`extract_tar(stream, target, rename=None)`** extracts an untrusted tar
+**`extract_tar(stream, target, rename=None, workers=1)`** extracts an untrusted tar
 stream (a pull's local side, `job adopt --stdin-tar`, `workflow install
 --stdin-tar`) without resolving any path by name. `target` is opened once,
 following a symlink there; every member below it is reached through directory
@@ -472,8 +472,20 @@ member boundary, is refused (`tarfile.ReadError`) after its last complete
 member; a damaged (non-zero, invalid) header after the members is not
 detected: tarfile ends the stream there, as before. With
 `rename=(member, name)` only that one regular member is accepted, written as
-`name`. The stream is untrusted; the landing is written only by trusted local
-actors (a directory moved by one during the extraction redirects its later
+`name`. With `workers` above 1 (`job adopt --stdin-tar` and `workflow install
+--stdin-tar` pass the workspace's `io.workers`), regular members of at most
+1 MiB are read into memory by the reading thread and written by worker threads
+through duplicated directory descriptors, everything else staying in the
+reading thread, which waits for the writes in flight at, above or below a
+member's (case-folded, not Unicode-normalized) name and stops and drains them
+before raising; the failure raised is the first the reader or a worker met
+(rarely not the first in stream order, and a member a worker took just then
+is dropped), later members, symlink and hard-link replacements included, may
+already be applied (the caller discards the landing), and a `SIGINT` is acted
+on between members only (under a custom `SIGINT` handler that returns, a
+refusal of the reading thread may be raised before members already handed out
+are written, so it may be a later refusal than the sequential extraction's). The stream is untrusted; the landing is written only
+by trusted local actors (a directory moved by one during the extraction redirects its later
 members through a cached descriptor). Recorded differences from tarfile's
 `data`/`tar` filters:
 

@@ -612,3 +612,212 @@ def test_on_quiet_is_called_when_the_pool_cannot_even_install(monkeypatch: pytes
     with pytest.raises(KeyboardInterrupt):
         run_ordered(lambda item: item, list(range(6)), 3, on_quiet=lambda: quiet.append(True))
     assert quiet == [True]
+
+
+# -- Feed: tasks submitted one at a time by a reading thread --------------------------------------------------------
+
+
+class Task:
+    """A submitted task: its number and a payload whose lifetime the tests follow."""
+
+    def __init__(self, number: int, size: int = 0) -> None:
+        self.number = number
+        self.payload = bytes(size)
+
+
+class Ledger:
+    """What a feed's body and discard saw: each task's runs (and threads) and discards."""
+
+    def __init__(self, delay: float = 0.0, failing: int | None = None) -> None:
+        self.lock = threading.Lock()
+        self.runs: Counter[int] = Counter()
+        self.threads: dict[int, int] = {}
+        self.discarded: Counter[int] = Counter()
+        self.delay = delay
+        self.failing = failing
+
+    def body(self, task: Task) -> None:
+        with self.lock:
+            self.runs[task.number] += 1
+            self.threads[task.number] = threading.get_ident()
+        time.sleep(self.delay)
+        if task.number == self.failing:
+            raise Boom(task.number)
+
+    def discard(self, task: Task) -> None:
+        with self.lock:
+            self.discarded[task.number] += 1
+
+
+def feeding(feed: _pool.Feed[Task], count: int, weight: int = 1, size: int = 0) -> Callable[[], bool]:
+    """A reader submitting *count* tasks, each after waiting for room; called again, it goes on where it stopped."""
+
+    position = [0]
+
+    def reader() -> bool:
+        while position[0] < count:
+            if not feed.wait(lambda: feed.room(weight)):
+                return False
+            feed.submit(Task(position[0], size), weight)
+            position[0] += 1
+        return True
+
+    return reader
+
+
+def test_a_feed_runs_every_task_once_within_its_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    ledger = Ledger(delay=0.002)
+    feed = _pool.Feed(ledger.body, ledger.discard, max_tasks=3, max_weight=10)
+    peaks: list[tuple[int, int]] = []
+    real_submit = _pool.Feed.submit
+
+    def submit(self: _pool.Feed[Task], task: Task, weight: int) -> int:
+        index = real_submit(self, task, weight)
+        with self.condition:
+            peaks.append((self.pending, self.pending_weight))
+        return index
+
+    monkeypatch.setattr(_pool.Feed, "submit", submit)
+    feed.run(feeding(feed, 40, weight=4), 4)
+    assert ledger.runs == Counter({number: 1 for number in range(40)}) and not ledger.discarded
+    assert max(pending for pending, _ in peaks) == 2 and max(weight for _, weight in peaks) == 8  # 3 tasks weigh 12
+    assert feed.idle() and not feed.tasks and all(feed.finished(index) for index in range(40))
+    assert threading.get_ident() not in ledger.threads.values()
+
+
+def test_room_admits_one_task_of_any_weight_when_nothing_is_pending() -> None:
+    feed: _pool.Feed[Task] = _pool.Feed(lambda _task: None, lambda _task: None, max_tasks=2, max_weight=10)
+    assert feed.room(1000)
+    feed.pending, feed.pending_weight = 1, 5
+    assert feed.room(5) and not feed.room(6)
+    feed.pending = 2
+    assert not feed.room(0)
+
+
+def test_a_failed_task_stops_the_feed_before_it_settles_and_untaken_tasks_are_discarded_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = Ledger(delay=0.01, failing=3)
+    feed = _pool.Feed(ledger.body, ledger.discard, max_tasks=8, max_weight=1 << 30)
+    settled: list[tuple[int, bool]] = []
+    real_settle = _pool.Feed._settle
+
+    def settle(self: _pool.Feed[Task], index: int, weight: int) -> None:
+        settled.append((index, self.stop))
+        real_settle(self, index, weight)
+
+    monkeypatch.setattr(_pool.Feed, "_settle", settle)
+    with pytest.raises(Boom):
+        feed.run(feeding(feed, 60), 2)
+    assert (3, True) in settled
+    submitted = feed.submitted
+    assert ledger.discarded and set(ledger.runs) | set(ledger.discarded) == set(range(submitted))
+    assert not set(ledger.runs) & set(ledger.discarded) and max((ledger.runs + ledger.discarded).values()) == 1
+    assert not feed.tasks and submitted < 60
+
+
+def test_tasks_submitted_before_the_reader_fails_still_run_and_its_failure_is_raised() -> None:
+    ledger = Ledger(delay=0.02)
+    feed = _pool.Feed(ledger.body, ledger.discard, max_tasks=8, max_weight=1 << 30)
+    submit = feeding(feed, 6)
+
+    def reader() -> bool:
+        submit()
+        raise ValueError("refused")
+
+    with pytest.raises(ValueError, match="refused"):
+        feed.run(reader, 2)
+    assert ledger.runs == Counter({number: 1 for number in range(6)}) and not ledger.discarded
+
+
+def test_without_any_thread_a_feed_runs_every_task_in_the_calling_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    def start(_thread: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    ledger = Ledger()
+    feed = _pool.Feed(ledger.body, ledger.discard, max_tasks=2, max_weight=10)
+    feed.run(feeding(feed, 10), 4)
+    assert ledger.runs == Counter({number: 1 for number in range(10)})
+    assert set(ledger.threads.values()) == {threading.get_ident()}
+
+
+def test_a_feed_keeps_no_task_once_a_worker_took_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    import weakref
+
+    ledger = Ledger(delay=0.001)
+    feed = _pool.Feed(ledger.body, ledger.discard, max_tasks=8, max_weight=1 << 30)
+    alive: list[weakref.ref[Task]] = []
+    peak = [0]
+    real_submit = _pool.Feed.submit
+
+    def submit(self: _pool.Feed[Task], task: Task, weight: int) -> int:
+        alive.append(weakref.ref(task))
+        index = real_submit(self, task, weight)
+        peak[0] = max(peak[0], sum(ref() is not None for ref in alive))
+        return index
+
+    monkeypatch.setattr(_pool.Feed, "submit", submit)
+    feed.run(feeding(feed, 300, size=64 << 10), 2)
+    # The pending tasks, the two running and the reader's own: never the whole stream.
+    assert peak[0] <= 8 + 2 + 2
+    assert not feed.tasks and all(ref() is None for ref in alive)
+
+
+def test_a_worker_starting_late_takes_nothing_once_the_feed_resumed_inline(monkeypatch: pytest.MonkeyPatch) -> None:
+    if threading.current_thread() is not threading.main_thread():
+        pytest.skip("signals reach only the main thread")
+    main = threading.main_thread().ident
+    assert main is not None
+    caller = threading.get_ident()
+    late, release = threading.Event(), threading.Event()
+    real_work = _pool.Feed.work
+    entered = Counter[str]()
+
+    def work(self: _pool.Feed[Task]) -> None:
+        entered["threads"] += 1
+        if entered["threads"] == 3:
+            late.wait(PATIENCE)  # started, but enters the loop only after the feed resumed inline
+        real_work(self)
+
+    class Parked(Ledger):
+        def body(self, task: Task) -> None:
+            if task.number < 2:
+                release.wait(PATIENCE)
+            elif threading.get_ident() == caller:
+                time.sleep(0.02)  # the inline tasks give a late worker every chance to take one
+            super().body(task)
+
+    ledger = Parked()
+    feed = _pool.Feed(ledger.body, ledger.discard, max_tasks=6, max_weight=1 << 30)
+    monkeypatch.setattr(_pool.Feed, "work", work)
+    calls: list[int] = []
+
+    def custom(signum: int, _frame: object) -> None:
+        calls.append(signum)
+        late.set()
+
+    def interrupt() -> None:
+        deadline = time.monotonic() + PATIENCE
+        while len(ledger.runs) < 2 and feed.pending < 6 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        time.sleep(0.05)
+        signal.pthread_kill(main, signal.SIGINT)
+        time.sleep(0.2)
+        release.set()
+
+    previous = signal.signal(signal.SIGINT, custom)
+    helper = threading.Thread(target=interrupt)
+    helper.start()
+    try:
+        feed.run(feeding(feed, 30), 3)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        late.set()
+        release.set()
+        helper.join()
+    time.sleep(0.1)
+    assert calls == [signal.SIGINT]
+    assert ledger.runs == Counter({number: 1 for number in range(30)}) and not ledger.discarded
+    # Only the two parked tasks ran in workers; the rest ran here once the handler let the interrupt pass.
+    assert {number for number, thread in ledger.threads.items() if thread != caller} == {0, 1}

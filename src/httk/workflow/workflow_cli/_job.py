@@ -26,7 +26,7 @@ from httk.core.identity import (
     sign_document,
 )
 
-from .. import _fs, _kernel, _moving, _requests, _store
+from .. import _fs, _kernel, _moving, _pool, _requests, _store
 from .._bundles import BundleError, read_manifest
 from .._children import newest_labeled
 from .._job import JobDefinition
@@ -1531,9 +1531,11 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
         "next_after": page.next_after,
     }
     if arguments.counts:
-        document["counts"] = {
-            state: count_jobs(workspace, state, arguments.placement) for state in arguments.state or JOB_STATES
-        }
+        states = list(arguments.state or JOB_STATES)
+        counted = _pool.run_ordered(
+            lambda state: count_jobs(workspace, state, arguments.placement), states, workspace.io_workers
+        )
+        document["counts"] = dict(zip(states, counted, strict=True))
     print(json.dumps(document, indent=2))
     return 0
 
@@ -1994,8 +1996,10 @@ def _receive_bundles(workspace: Workspace, token: str | None) -> tuple[Path, lis
 def receive_tar(workspace: Workspace, landing: Path) -> list[str]:
     """Extract the tar stream on standard input into *landing* (created when absent): its top-level directories.
 
-    The extraction filters of the adapter's pull are the trust boundary; every top-level entry must be a
-    directory. A stream that fails either is refused whole and *landing* discarded, so nothing of it is used.
+    The anchored extraction of the adapter's pull (:func:`httk.workflow._fs.extract_tar`) is the trust boundary,
+    writing small files with up to the workspace's ``io.workers`` threads; every top-level entry must be a
+    directory. A stream that fails either is refused whole and *landing* discarded (only after every write of the
+    extraction finished), so nothing of it is used.
 
     :param workspace: The workspace *landing* belongs to (its ``tmp/`` takes the discarded landing).
     :param landing: The directory to extract into.
@@ -2005,11 +2009,9 @@ def receive_tar(workspace: Workspace, landing: Path) -> list[str]:
 
     import tarfile
 
-    from ..adapter_runtime import _extract
-
     landing.mkdir(parents=True, exist_ok=True)
     try:
-        _extract(sys.stdin.buffer, landing)
+        _fs.extract_tar(sys.stdin.buffer, landing, workers=workspace.io_workers)
         with os.scandir(landing) as found:
             entries = sorted(found, key=lambda entry: entry.name)
         for entry in entries:

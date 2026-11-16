@@ -457,7 +457,7 @@ class Workspace:
 
     @cached_property
     def io_workers(self) -> int:
-        """Return how many jobs a batch command works on at once: the ``io.workers`` setting, default 8.
+        """Return how many jobs a batch command works on at once, from the ``io.workers`` setting (default 8).
 
         Read once per workspace object (again after its settings are re-read or written), from the settings
         loaded with it; an invalid stored value gives the default and one warning, never an error.

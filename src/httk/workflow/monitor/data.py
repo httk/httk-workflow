@@ -7,7 +7,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .. import _fs, _kernel
+from .. import _fs, _kernel, _pool
 from .._kernel import JobRef
 from ..adapters import (
     REMOTE_JOB_LIST_COMMAND,
@@ -268,7 +268,11 @@ class WorkspaceView:
             result = {state: int(raw.get(state, 0)) for state in selected} if isinstance(raw, Mapping) else {}
         else:
             assert self.workspace is not None
-            result = {state: count_jobs(self.workspace, state, prefix) for state in selected}
+            workspace = self.workspace
+            counted = _pool.run_ordered(
+                lambda state: count_jobs(workspace, state, prefix), selected, workspace.io_workers
+            )
+            result = dict(zip(selected, counted, strict=True))
         self._remember_counts(selected, prefix, result)
         return dict(result)
 
