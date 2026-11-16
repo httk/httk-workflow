@@ -5,9 +5,11 @@ destination), never by a return code: NFS can report an error for a rename that
 happened (a retransmission), and ``ENOENT`` can come from a concurrently pruned
 parent directory. Only atomic rename and basic POSIX are used: no file locks,
 no hard links, and no symlink is created except where a trusted :func:`copy_tree`
-copies one as a symlink. Plain :class:`Loc` values address trusted
-directories; anchored ones address a name below a directory descriptor that an
-untrusted party may write.
+copies one as a symlink and where :func:`extract_tar` extracts a symlink member
+of an untrusted tar stream (its text kept, never followed). Plain :class:`Loc`
+values address trusted directories; anchored ones address a name below a
+directory descriptor that an untrusted party may write; :func:`extract_tar`
+reaches every member of a stream through such descriptors.
 """
 
 import base64
@@ -17,9 +19,11 @@ import hashlib
 import logging
 import os
 import stat
+import tarfile
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal, Protocol
+from typing import IO, Literal, Protocol
 
 from httk.workflow.errors import FormatError, WorkflowError
 
@@ -47,6 +51,7 @@ __all__ = [
     "digest_regular",
     "discard",
     "exists",
+    "extract_tar",
     "fresh_token",
     "loc",
     "lstat",
@@ -1116,6 +1121,423 @@ def copy_tree(src: Path | Loc, dst: Path, *, durable: bool, limits: WalkLimits |
         os.close(source)
     if durable:
         _fsync_parent(loc(dst))
+
+
+#: Directory descriptors one :func:`extract_tar` keeps open below its target, least recently used closed first.
+_EXTRACT_DIRECTORIES = 64
+#: Linux's ``PATH_MAX``, which counts the separator after *target* and the terminating NUL: *target*, ``/`` and
+#: the member name together must stay below it.
+_EXTRACT_PATH_MAX = 4096
+#: The deepest accepted member, in path components below *target*.
+_EXTRACT_DEPTH = 256
+_EXTRACT_CHUNK = 1 << 20
+#: Hard-link copies may write at most this many times the regular-file bytes the stream itself carried so far,
+#: plus the allowance: a file under a few names passes, a small stream copied without end does not.
+_HARD_LINK_FACTOR = 8
+_HARD_LINK_ALLOWANCE = 1 << 30
+_EXTRACT_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC
+_SOURCE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+#: What an anchored open or create reports for an entry of the wrong kind in the way: a symlink (``ELOOP``, or
+#: ``ENOTDIR`` for an ``O_DIRECTORY`` open), a non-directory component, or a directory where a file goes.
+_IN_THE_WAY = frozenset({errno.ELOOP, errno.ENOTDIR, errno.EISDIR})
+#: A hostile time is not fatal either: ``ValueError`` for NaN, ``OverflowError`` for one out of range.
+_TIME_ERRORS = (OSError, OverflowError, ValueError)
+
+type _Parts = tuple[str, ...]
+
+
+def _in_the_way(member: tarfile.TarInfo, parent: int, name: str, path: str, what: str) -> tarfile.FilterError:
+    # Only on a refusal: a symlink in the way could lead out of the landing; anything else is just in the way.
+    try:
+        found = os.lstat(name, dir_fd=parent)
+    except OSError:
+        found = None
+    if found is not None and stat.S_ISLNK(found.st_mode):
+        return tarfile.OutsideDestinationError(member, path)
+    return tarfile.FilterError(f"{member.name!r} would be extracted to {path!r}, {what}")
+
+
+def _data_mode(mode: int) -> int:
+    # tarfile's data filter: no high bits, no group/other write, exec bits only when owner-executable, owner rw.
+    mode &= 0o755
+    if not mode & 0o100:
+        mode &= ~0o111
+    return mode | 0o600
+
+
+def _finish_member(descriptor: int, member: tarfile.TarInfo) -> None:
+    # Mode and time are not fatal, as in tarfile, whose chmod and utime failures are non-fatal ExtractErrors.
+    try:
+        os.fchmod(descriptor, _data_mode(member.mode))
+    except OSError:
+        pass
+    try:
+        os.utime(descriptor, (member.mtime, member.mtime))
+    except _TIME_ERRORS:
+        pass
+
+
+class _Landing:
+    """The state of one extraction: *target*, opened once following symlinks, and cached directories below.
+
+    Every directory below *target* is opened ``O_DIRECTORY|O_NOFOLLOW`` relative to its parent's descriptor, so a
+    symlink at any component makes the open fail; a path is never resolved by name.
+
+    :param target: The directory extracted into; a symlink to a directory is followed.
+    """
+
+    def __init__(self, target: Path) -> None:
+        self.target = str(target)
+        self.root = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        self._cache: OrderedDict[_Parts, int] = OrderedDict()
+        #: The regular files this stream wrote, by normalized path: the only names a hard link may copy.
+        self.written: set[_Parts] = set()
+        #: The directory members, whose times are restored after the last member.
+        self.directories: dict[_Parts, tarfile.TarInfo] = {}
+        #: Regular-file bytes read from the stream, and bytes written by hard-link copies.
+        self.received = 0
+        self.copied = 0
+
+    def close(self) -> None:
+        """Close every descriptor."""
+
+        try:
+            for descriptor in self._cache.values():
+                os.close(descriptor)
+        finally:
+            self._cache.clear()
+            os.close(self.root)
+
+    def path(self, parts: _Parts) -> str:
+        """Return the display path of *parts* below the target.
+
+        :param parts: The components below the target.
+        :return: The joined path, for messages only.
+        """
+
+        return os.path.join(self.target, *parts)
+
+    def directory(self, member: tarfile.TarInfo, parts: _Parts, *, create: bool) -> int:
+        """Return a descriptor of the directory *parts* below the target; the landing keeps and closes it.
+
+        The descriptor stays valid only until the next call, which may close it to make room.
+
+        :param member: The member being extracted, for a refusal.
+        :param parts: The components below the target.
+        :param create: Create a missing component with the default mode.
+        :return: The directory descriptor.
+        :raises tarfile.FilterError: When a component is a symlink or not a directory.
+        :raises FileNotFoundError: When a component is missing and *create* is false.
+        """
+
+        if not parts:
+            return self.root
+        cached = self._cache.get(parts)
+        if cached is not None:
+            self._cache.move_to_end(parts)
+            return cached
+        known = len(parts) - 1
+        while known and parts[:known] not in self._cache:
+            known -= 1
+        descriptor = self.directory(member, parts[:known], create=False)
+        for depth in range(known + 1, len(parts) + 1):
+            descriptor = self._open(member, descriptor, parts[:depth], create=create)
+        return descriptor
+
+    def _open(self, member: tarfile.TarInfo, parent: int, parts: _Parts, *, create: bool) -> int:
+        name = parts[-1]
+        try:
+            child = os.open(name, _DIR_FLAGS, dir_fd=parent)
+        except FileNotFoundError:
+            if not create:
+                raise
+            try:
+                os.mkdir(name, dir_fd=parent)
+            except FileExistsError:
+                pass
+            child = self._open_existing(member, parent, parts)
+        except OSError as exc:
+            if exc.errno in _IN_THE_WAY:
+                raise _in_the_way(member, parent, name, self.path(parts), "which is not a directory") from exc
+            raise
+        self._cache[parts] = child
+        while len(self._cache) > _EXTRACT_DIRECTORIES:
+            os.close(self._cache.popitem(last=False)[1])
+        return child
+
+    def _open_existing(self, member: tarfile.TarInfo, parent: int, parts: _Parts) -> int:
+        try:
+            return os.open(parts[-1], _DIR_FLAGS, dir_fd=parent)
+        except OSError as exc:
+            # Linux reports a symlink opened O_DIRECTORY|O_NOFOLLOW as ENOTDIR, not ELOOP.
+            if exc.errno in _IN_THE_WAY:
+                raise _in_the_way(member, parent, parts[-1], self.path(parts), "which is not a directory") from exc
+            raise
+
+    def remove_in_the_way(self, member: tarfile.TarInfo, parent: int, parts: _Parts) -> None:
+        """Unlink the non-directory entry at *parts*, never following it; an absent entry is fine.
+
+        :param member: The member being extracted, for a refusal.
+        :param parent: The descriptor of the entry's directory.
+        :param parts: The entry's components below the target.
+        :raises tarfile.FilterError: When the entry is a directory.
+        """
+
+        try:
+            os.unlink(parts[-1], dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            # Linux reports unlink of a directory as EISDIR, POSIX as EPERM, which can also be a real denial.
+            if exc.errno == errno.EISDIR or (exc.errno == errno.EPERM and self._is_directory(parent, parts[-1])):
+                raise tarfile.FilterError(
+                    f"{member.name!r} would be extracted to {self.path(parts)!r}, which is a directory"
+                ) from exc
+            raise
+
+    @staticmethod
+    def _is_directory(parent: int, name: str) -> bool:
+        try:
+            return stat.S_ISDIR(os.lstat(name, dir_fd=parent).st_mode)
+        except OSError:
+            return False
+
+    def create(self, member: tarfile.TarInfo, parent: int, parts: _Parts, flags: int) -> int:
+        """Open the regular file *parts* for writing with *flags*, which include ``O_NOFOLLOW``.
+
+        :param member: The member being extracted, for a refusal.
+        :param parent: The descriptor of the file's directory.
+        :param parts: The file's components below the target.
+        :param flags: The open flags.
+        :return: The open descriptor; the caller closes it.
+        :raises tarfile.FilterError: When a symlink or a directory is at the name.
+        """
+
+        try:
+            return os.open(parts[-1], flags, 0o600, dir_fd=parent)
+        except OSError as exc:
+            if exc.errno in _IN_THE_WAY or (exc.errno == errno.EEXIST and flags & os.O_EXCL):
+                raise _in_the_way(member, parent, parts[-1], self.path(parts), "where another entry is") from exc
+            raise
+
+
+def _member_parts(member: tarfile.TarInfo, name: str, target: str) -> _Parts:
+    # Lexical only: a leading "/" is stripped, empty and "." components dropped, and ".." refused outright.
+    relative = name.lstrip("/")
+    parts = tuple(part for part in relative.split("/") if part not in ("", "."))
+    if ".." in parts:
+        raise tarfile.OutsideDestinationError(member, os.path.normpath(os.path.join(target, relative)))
+    if "\0" in name:
+        raise tarfile.FilterError(f"{member.name!r} has a NUL character in its name")
+    if len(parts) > _EXTRACT_DEPTH:
+        raise tarfile.FilterError(f"{member.name!r} is deeper than {_EXTRACT_DEPTH} components")
+    if len(os.fsencode(target)) + 1 + len(os.fsencode("/".join(parts))) >= _EXTRACT_PATH_MAX:
+        raise tarfile.FilterError(f"{member.name!r} below {target!r} reaches {_EXTRACT_PATH_MAX} bytes")
+    if not member.isdir() and name.endswith(("/", "/.")):
+        raise tarfile.FilterError(f"{member.name!r} is not a directory, but its name ends like one")
+    return parts
+
+
+def _extract_regular(landing: _Landing, archive: tarfile.TarFile, member: tarfile.TarInfo, parts: _Parts) -> None:
+    if not parts:
+        raise tarfile.OutsideDestinationError(member, landing.target)
+    if member.sparse is not None or member.type == tarfile.GNUTYPE_SPARSE:
+        # Its map could claim any size (a dense write fills it, a sparse one leaves a huge apparent file).
+        raise tarfile.FilterError(f"{member.name!r} is a sparse member; sparse members are not accepted")
+    parent = landing.directory(member, parts[:-1], create=True)
+    # Without O_EXCL: an existing regular file at the name is written in place, as tarfile does.
+    descriptor = landing.create(member, parent, parts, _EXTRACT_FLAGS)
+    try:
+        source = archive.extractfile(member)
+        if source is None:  # pragma: no cover - tarfile returns a reader for every regular member
+            raise tarfile.FilterError(f"{member.name!r} has no data")
+        with source:
+            while chunk := source.read(_EXTRACT_CHUNK):
+                landing.received += len(chunk)
+                write_all(descriptor, chunk)
+        _finish_member(descriptor, member)
+    finally:
+        os.close(descriptor)
+    landing.written.add(parts)
+
+
+def _extract_directory(landing: _Landing, member: tarfile.TarInfo, parts: _Parts) -> None:
+    if parts:
+        parent = landing.directory(member, parts[:-1], create=True)
+        try:
+            # The default mode: a member's own bits (setuid, sticky, world-writable) are never applied.
+            os.mkdir(parts[-1], dir_fd=parent)
+        except FileExistsError:
+            # An existing directory is accepted (and now cached); anything else is refused.
+            landing.directory(member, parts, create=False)
+    landing.directories[parts] = member
+
+
+def _extract_symlink(landing: _Landing, member: tarfile.TarInfo, parts: _Parts) -> None:
+    if not parts:
+        raise tarfile.OutsideDestinationError(member, landing.target)
+    if not member.linkname or "\0" in member.linkname:
+        raise tarfile.FilterError(f"{member.name!r} is a symlink with an empty link text or a NUL in it")
+    parent = landing.directory(member, parts[:-1], create=True)
+    # The link text is kept verbatim (job trees legitimately carry absolute targets) and never followed here.
+    try:
+        os.symlink(member.linkname, parts[-1], dir_fd=parent)  # noqa: TID251
+    except FileExistsError:
+        landing.remove_in_the_way(member, parent, parts)
+        os.symlink(member.linkname, parts[-1], dir_fd=parent)  # noqa: TID251
+    landing.written.discard(parts)
+
+
+def _extract_hard_link(landing: _Landing, member: tarfile.TarInfo, parts: _Parts) -> None:
+    if not parts:
+        raise tarfile.OutsideDestinationError(member, landing.target)
+    if member.linkname.startswith("/"):
+        raise tarfile.AbsoluteLinkError(member)
+    source_parts = tuple(part for part in member.linkname.split("/") if part not in ("", "."))
+    if ".." in source_parts:
+        raise tarfile.LinkOutsideDestinationError(
+            member, os.path.normpath(os.path.join(landing.target, member.linkname))
+        )
+    if source_parts == parts and parts in landing.written:
+        return  # GNU tar links a name it was given twice to itself: the file is already there.
+    if source_parts == parts or source_parts not in landing.written:
+        raise tarfile.FilterError(
+            f"{member.name!r} is a hard link to {member.linkname!r}, which is not a regular file this stream "
+            "extracted under another name"
+        )
+    # Copied, never linked: the source is opened first, so an existing destination (even one already
+    # hard-linked to the source) can then be unlinked and created afresh.
+    source_parent = landing.directory(member, source_parts[:-1], create=False)
+    try:
+        source = os.open(source_parts[-1], _SOURCE_FLAGS, dir_fd=source_parent)
+    except OSError as exc:
+        if exc.errno in _IN_THE_WAY:
+            raise _in_the_way(
+                member, source_parent, source_parts[-1], landing.path(source_parts), "which is not a regular file"
+            ) from exc
+        raise
+    try:
+        found = os.fstat(source)
+        if not stat.S_ISREG(found.st_mode):
+            raise tarfile.FilterError(
+                f"{member.name!r} is a hard link to {member.linkname!r}, which is not a regular file"
+            )
+        budget = _HARD_LINK_FACTOR * landing.received + _HARD_LINK_ALLOWANCE
+        if landing.copied + found.st_size > budget:
+            raise _amplified(member, budget)
+        parent = landing.directory(member, parts[:-1], create=True)
+        landing.remove_in_the_way(member, parent, parts)
+        descriptor = landing.create(member, parent, parts, _CREATE_FLAGS)
+        try:
+            while chunk := os.read(source, _EXTRACT_CHUNK):
+                landing.copied += len(chunk)
+                if landing.copied > budget:
+                    raise _amplified(member, budget)
+                write_all(descriptor, chunk)
+            _finish_member(descriptor, member)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(source)
+    landing.written.add(parts)
+
+
+def _amplified(member: tarfile.TarInfo, budget: int) -> tarfile.FilterError:
+    return tarfile.FilterError(
+        f"{member.name!r}: hard-link copies would write more than {budget} bytes, {_HARD_LINK_FACTOR} times the "
+        f"stream's own file bytes plus {_HARD_LINK_ALLOWANCE}"
+    )
+
+
+def _restore_directory_times(landing: _Landing) -> None:
+    # Deepest first, after every member, as tarfile does; a failure is not fatal, as in tarfile.
+    for parts, member in sorted(landing.directories.items(), key=lambda item: len(item[0]), reverse=True):
+        times = (member.mtime, member.mtime)
+        try:
+            if parts:
+                parent = landing.directory(member, parts[:-1], create=False)
+                os.utime(parts[-1], times, dir_fd=parent, follow_symlinks=False)
+            else:
+                os.utime(landing.root, times)
+        except (*_TIME_ERRORS, tarfile.FilterError):
+            pass
+
+
+def extract_tar(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | None = None) -> None:
+    """Extract an untrusted tar stream under *target*, never resolving a path by name.
+
+    *target* is opened once, following a symlink there; every member below it is reached through directory
+    descriptors opened component by component ``O_DIRECTORY|O_NOFOLLOW``, so a symlink at any component (one this
+    stream wrote or one an earlier extraction left) refuses the member. Missing directories are created with the
+    default mode. A leading ``/`` is stripped from names, empty and ``.`` components are dropped, and a ``..``
+    component is refused, as are a NUL, more than 256 components, a path that with *target* and a separator
+    reaches ``PATH_MAX`` (4096 bytes), and a non-directory whose name ends in ``/`` or ``/.``. Members, in stream
+    order:
+
+    - A directory is created with the default mode (an existing one accepted); a ``.`` member names *target*
+      itself, every other type naming *target* is refused. Directory times are restored after the last member,
+      deepest first.
+    - A regular file is written through an ``O_NOFOLLOW`` open (a symlink at its name is refused; an existing
+      regular file is written in place) with tarfile's ``data`` filter mode (no high bits, no group or other
+      write, exec bits only when owner-executable, owner read and write) and its time. A sparse member is refused.
+    - A symlink keeps its link text, absolute or not (an empty one or one with a NUL is refused); an existing
+      non-directory entry at its name is removed first, never followed.
+    - A hard link must name a regular file this stream extracted under another name; it is copied (no hard link is
+      ever made), with its own member's mode and time; one naming itself, after that file, is a no-op. An absolute
+      link name is refused, and so is a copy that would take the bytes copied for hard links beyond 8 times the
+      regular-file bytes the stream carried so far plus 1 GiB.
+    - Devices, FIFOs and other types are refused; ownership is ignored.
+
+    Mode and time failures are not fatal. Nothing is fsynced. A refused member stops the extraction and leaves
+    what was extracted before it. A stream cut short, even exactly at a member boundary, is refused after its
+    last complete member; a damaged (non-zero, invalid) header after the members ends the stream as tarfile reads
+    it and is not detected.
+
+    Threat model: the stream is untrusted; *target* is this process's own directory (not always a fresh one: a
+    reused push token, a single-file pull's chosen directory), which only trusted local actors write. A concurrent
+    local writer that moves a directory of *target* during the extraction redirects every later member of that
+    directory through a cached descriptor; that is outside the threat model, as it is for tarfile's filters.
+
+    :param stream: The binary tar stream, read once.
+    :param target: The existing directory to extract into.
+    :param rename: ``(member, name)`` for a single file: the only member accepted, a regular file written as *name*.
+    :raises tarfile.FilterError: For a refused member; a subclass (``OutsideDestinationError``,
+        ``SpecialFileError``, ``AbsoluteLinkError``, ``LinkOutsideDestinationError``) where one applies.
+    :raises tarfile.TarError: If the stream is malformed or cut short.
+    :raises OSError: For an error of the filesystem itself (``ENOSPC``, ``EIO``, ``EACCES``, ...).
+    """
+
+    landing = _Landing(target)
+    try:
+        with tarfile.open(fileobj=stream, mode="r|") as archive:
+            for member in archive:
+                name = member.name
+                if rename is not None:
+                    # The landing directory holds the user's other files, so only one regular file may arrive there.
+                    if name != rename[0] or not member.isreg():
+                        raise tarfile.FilterError(f"unexpected member in a single-file pull: {name!r}")
+                    name = rename[1]
+                parts = _member_parts(member, name, landing.target)
+                if member.isdir():
+                    _extract_directory(landing, member, parts)
+                elif member.isreg():
+                    _extract_regular(landing, archive, member, parts)
+                elif member.issym():
+                    _extract_symlink(landing, member, parts)
+                elif member.islnk():
+                    _extract_hard_link(landing, member, parts)
+                else:
+                    raise tarfile.SpecialFileError(member)
+            # tarfile ends the iteration quietly when the stream stops at a member boundary (nothing of the next
+            # header read) or inside a header (part of it read): a whole block read where the next header starts
+            # tells a cut stream from one that reached its end. Not detected: tarfile also ends quietly on a damaged
+            # (non-zero, invalid) header after the first member, which reads a whole block too.
+            consumed = getattr(archive.fileobj, "pos", None)
+            if not isinstance(consumed, int) or consumed - archive.offset != tarfile.BLOCKSIZE:
+                raise tarfile.ReadError("the stream ended before its end-of-archive marker")
+        _restore_directory_times(landing)
+    finally:
+        landing.close()
 
 
 def publish_record(directory: Path, name: str, data: bytes, *, nonce: bytes, durable: bool) -> bool:

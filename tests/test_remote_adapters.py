@@ -341,7 +341,9 @@ def test_local_extraction_keeps_inner_hard_links_and_absolute_symlinks(tmp_path:
 
     adapter_runtime._extract(_hostile(members), tmp_path)
 
-    assert (tmp_path / "alias").stat().st_ino == (tmp_path / "data").stat().st_ino
+    # An inner hard link arrives as a copy: the workspace makes no hard links.
+    assert (tmp_path / "alias").read_bytes() == (tmp_path / "data").read_bytes() == b"payload\n"
+    assert (tmp_path / "alias").stat().st_ino != (tmp_path / "data").stat().st_ino
     assert os.readlink(tmp_path / "potential") == "/opt/pseudopotentials/Si"
 
 

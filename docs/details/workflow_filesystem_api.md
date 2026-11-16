@@ -437,12 +437,60 @@ the root are returned as opaque leaves.
 **`copy_tree(src, dst, limits=None)`** copies a tree to a fresh name, possibly
 on another filesystem: regular files and directories, special files refused;
 durable mode fsyncs every file, directory and `dst`'s parent. A trusted copy
-recreates symlinks as symlinks (the only symlinks the protocol creates). With
+recreates symlinks as symlinks (with `extract_tar`, the only places the protocol creates symlinks). With
 `limits` (an untrusted source) it refuses symlinks and hard-linked files and
 enforces the entry, depth and byte bounds of `walk_untrusted`, counting bytes
 as they are read, so a file the source keeps growing ends the copy. It is not
 atomic: callers copy to a private or partial name and move or deliver it
 afterwards.
+
+**`extract_tar(stream, target, rename=None)`** extracts an untrusted tar
+stream (a pull's local side, `job adopt --stdin-tar`, `workflow install
+--stdin-tar`) without resolving any path by name. `target` is opened once,
+following a symlink there; every member below it is reached through directory
+descriptors opened component by component `O_DIRECTORY|O_NOFOLLOW` (at most 64
+kept open), so a symlink at any component, whether this stream wrote it or an
+earlier delivery left it, refuses the member. Names lose a leading `/` and
+their empty and `.` components; refused are a `..` component, a NUL, more than
+256 components, a name that with `target` and a separator reaches `PATH_MAX`
+(4096 bytes), a non-directory whose name ends in `/` or `/.`, devices, FIFOs,
+sparse members and other types. Regular files are opened `O_NOFOLLOW` and get
+tarfile's `data` filter mode (no high bits, no group/other write, exec bits
+only when owner-executable, owner read/write) and their time; an existing
+regular file at the name is written in place, so a hard link a trusted actor
+planted there is written through. Symlinks keep their link text (an empty one
+or one with a NUL is refused), replacing a non-directory entry without
+following it. A hard link must name a regular file this stream already wrote
+and is copied, never linked (one naming itself after its file, as GNU tar sends
+a name given twice, is a no-op); the copies may not write more than 8 times
+the stream's own file bytes so far plus 1 GiB. Directories keep the default mode,
+whatever their member says, and get their times back after the last member.
+Mode and time failures (including NaN or out-of-range times) are not fatal;
+nothing is fsynced; a refusal raises a `tarfile.FilterError` subclass and
+leaves what was written before it. A stream cut short, even exactly at a
+member boundary, is refused (`tarfile.ReadError`) after its last complete
+member; a damaged (non-zero, invalid) header after the members is not
+detected: tarfile ends the stream there, as before. With
+`rename=(member, name)` only that one regular member is accepted, written as
+`name`. The stream is untrusted; the landing is written only by trusted local
+actors (a directory moved by one during the extraction redirects its later
+members through a cached descriptor). Recorded differences from tarfile's
+`data`/`tar` filters:
+
+- refused: `..` inside the tree; a symlink at a directory component, even one
+  pointing inside; an existing symlink at a regular file's name (tarfile writes
+  through it); a hard link to a symlink, a directory, or a file this stream did
+  not write; more than 256 components; a non-directory named like a directory
+  (`a/`, `a/.`); a sparse member (tarfile writes it sparse at whatever size its
+  map claims); a symlink member tarfile cannot create (over a directory, named
+  `target`, or with an empty link text), which tarfile silently skips; hard-link
+  copies beyond 8 times the stream's own file bytes plus 1 GiB; a stream cut at
+  a member boundary;
+- accepted: a re-delivered symlink over an outside-pointing symlink (the old
+  link is removed, not followed); a hard link over an existing name; a hard
+  link naming itself after its file; an unusable time;
+- hard links arrive as copies: the names no longer alias and each takes its own
+  space.
 
 **`rename_probe(a, b)`** checks the rename semantics above between two
 directories: a non-empty directory moves keeping its inode, and a rename onto a

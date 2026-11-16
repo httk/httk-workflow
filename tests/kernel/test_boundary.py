@@ -45,8 +45,9 @@ CONTESTED = frozenset({"move_once", "publish_dir", "publish_record"})
 LINKS = {"os": frozenset({"link", "symlink"})}
 #: The pathlib spellings of the same, on any object (ruff's banned-api cannot see instance methods).
 LINK_METHODS = frozenset({"hardlink_to", "symlink_to", "link_to"})
-#: The one exception: a trusted ``_fs.copy_tree`` recreates a symlink it copies as a symlink (an untrusted copy,
-#: one with limits, refuses symlinks).
+#: The two exceptions, both in ``_fs``: a trusted ``_fs.copy_tree`` recreates a symlink it copies as a symlink (an
+#: untrusted copy, one with limits, refuses symlinks), and ``_fs.extract_tar`` creates a symlink member of a tar
+#: stream with its link text kept, anchored and never followed.
 LINKS_ALLOWED = {"_fs.py": {"os.symlink"}}
 #: Temporary files and copies by name: each creates entries no ``_fs`` primitive vouches for.
 TEMPFILE = {

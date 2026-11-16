@@ -720,14 +720,15 @@ def _tar_push(
 def _extract(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | None = None) -> None:
     """Extract one tar stream under *target*, member by member.
 
-    tarfile's extraction filters are the trust boundary. Every member except a
-    symlink goes through the ``data`` filter, which refuses names and hard-link
-    targets outside *target* (``..``, through an already-extracted symlink) and
-    device nodes and FIFOs, clears setuid/setgid and group/other write bits, and
-    leaves directory modes at their defaults. Symlinks go through the ``tar``
-    filter, which still refuses a name outside *target* but keeps an absolute
-    link target, which job trees legitimately carry. A leading ``/`` is
-    stripped, so such a member lands inside *target*.
+    :func:`httk.workflow._fs.extract_tar` is the trust boundary: it reaches every
+    member through directory descriptors opened without following symlinks, so
+    no name, ``..`` component or symlink (one the stream wrote or one already in
+    *target*) leads outside *target*. Device nodes and FIFOs are refused, regular
+    files get tarfile's ``data`` filter modes (no setuid/setgid, no group/other
+    write) and directories their default modes. A symlink keeps its link text,
+    absolute or not, which job trees legitimately carry. A hard link must name a
+    regular file of the same stream and is copied. A leading ``/`` is stripped,
+    so such a member lands inside *target*.
 
     :param stream: The binary tar stream.
     :param target: The local directory to extract into.
@@ -735,19 +736,10 @@ def _extract(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | None 
     :raises tarfile.TarError: If the stream is malformed or a member is refused.
     """
 
-    def checked(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo:
-        if rename is not None:
-            # The landing directory holds the user's other files, so only one regular file may arrive there.
-            if member.name != rename[0] or not member.isreg():
-                raise tarfile.FilterError(f"unexpected member in a single-file pull: {member.name!r}")
-            member = member.replace(name=rename[1], deep=False)
-        # A hard link is checked by data_filter only: tar_filter would let one alias a file outside *target*.
-        return tarfile.tar_filter(member, path) if member.issym() else tarfile.data_filter(member, path)
+    # Imported here: _fs pulls in httk.core, which every other adapter operation does without.
+    from . import _fs
 
-    # ponytail: tarfile reads a stream cut exactly at a member boundary as a complete archive; only a
-    # remote tar that exits 0 after such a cut slips through, as every dropped connection fails ssh's status.
-    with tarfile.open(fileobj=stream, mode="r|") as archive:
-        archive.extractall(target, filter=checked)
+    _fs.extract_tar(stream, target, rename=rename)
 
 
 def _tar_pull(
