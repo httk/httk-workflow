@@ -1990,10 +1990,22 @@ def _receive_bundles(workspace: Workspace, token: str | None) -> tuple[Path, lis
     elif not _LANDING_TOKEN.fullmatch(token):
         raise ValueError(f"--token must be 16 to 64 lowercase letters and digits: {token!r}")
     landing = workspace.control / "transfers" / "incoming" / token
-    return landing, receive_tar(workspace, landing)
+    return landing, receive_tar(workspace, landing, barrier=True)
 
 
-def receive_tar(workspace: Workspace, landing: Path) -> list[str]:
+def _extract_landing(workspace: Workspace, landing: Path, *, durable: bool) -> tuple[list[os.DirEntry[str]], int]:
+    """Extract standard input into *landing*, checking that every top-level entry is a directory."""
+
+    count = _fs.extract_tar(sys.stdin.buffer, landing, workers=workspace.io_workers, durable=durable)
+    with os.scandir(landing) as found:
+        entries = sorted(found, key=lambda entry: entry.name)
+    for entry in entries:
+        if not entry.is_dir(follow_symlinks=False):
+            raise ValueError(f"not a directory: {entry.name!r}")
+    return entries, count
+
+
+def receive_tar(workspace: Workspace, landing: Path, *, barrier: bool = False) -> list[str]:
     """Extract the tar stream on standard input into *landing* (created when absent): its top-level directories.
 
     The anchored extraction of the adapter's pull (:func:`httk.workflow._fs.extract_tar`) is the trust boundary,
@@ -2003,20 +2015,24 @@ def receive_tar(workspace: Workspace, landing: Path) -> list[str]:
 
     :param workspace: The workspace *landing* belongs to (its ``tmp/`` takes the discarded landing).
     :param landing: The directory to extract into.
+    :param barrier: The landing is what gets published (the far side of a push): in a durable workspace it is
+        made durable before this returns, through a :class:`~httk.workflow._fs.Barrier` entered before the first
+        member is extracted (``io.sync`` read afresh); a failed commit refuses the stream like a refused member.
+        ``workflow install --stdin-tar`` leaves it off: its landing is copied into the store, not published.
     :return: The names of the top-level directories, sorted.
-    :raises ValueError: For a malformed stream or a refused member.
+    :raises ValueError: For a malformed stream, a refused member or a failed sync barrier.
     """
 
     import tarfile
 
-    landing.mkdir(parents=True, exist_ok=True)
+    _fs.make_dirs(landing, durable=workspace.durable)
     try:
-        _fs.extract_tar(sys.stdin.buffer, landing, workers=workspace.io_workers)
-        with os.scandir(landing) as found:
-            entries = sorted(found, key=lambda entry: entry.name)
-        for entry in entries:
-            if not entry.is_dir(follow_symlinks=False):
-                raise ValueError(f"not a directory: {entry.name!r}")
+        if barrier and workspace.durable:
+            with _fs.Barrier(landing, workspace.io_sync(), inline=True) as sync:
+                entries, count = _extract_landing(workspace, landing, durable=sync.fsync_inline)
+                sync.commit(count)
+        else:
+            entries, _count = _extract_landing(workspace, landing, durable=False)
     except (tarfile.TarError, EOFError, OSError, ValueError) as exc:
         _fs.discard(_fs.loc(landing), trash_dir=workspace.control / "tmp", durable=workspace.durable)
         raise ValueError(f"refused the stream, nothing of it was used: {exc}") from None

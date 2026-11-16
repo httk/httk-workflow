@@ -718,8 +718,10 @@ def test_a_batch_reports_each_hold_and_releases_the_delivered(
     }
     assert find(far, present["id"]).state == "failed"  # type: ignore[union-attr]
     assert outgoing(near) == [] and incoming(far) == []
-    # Progress goes to stderr, one line a phase.
-    progress = captured.err.splitlines()
+    # Progress goes to stderr, one line a phase; the far side's sync line is relayed, prefixed by its locator.
+    relayed = [line for line in captured.err.splitlines() if line.startswith(f"cluster:{far_name}: ")]
+    assert len(relayed) == 1 and relayed[0].endswith(")") and " landed file(s) " in relayed[0]
+    progress = [line for line in captured.err.splitlines() if line not in relayed]
     assert progress[:3] == [
         f"holding 3 job(s) on {near.root}",
         f"delivering 3 bundle(s) to cluster:{far_name}",

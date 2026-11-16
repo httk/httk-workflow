@@ -18,13 +18,16 @@ import errno
 import hashlib
 import logging
 import os
+import re
 import stat
+import sys
 import tarfile
 from collections import Counter, OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
-from functools import partial
+from functools import cache, partial
 from pathlib import Path, PurePosixPath
-from typing import IO, Literal, Protocol
+from typing import IO, Literal, Protocol, Self
 
 from httk.workflow._pool import Feed
 from httk.workflow.errors import FormatError, WorkflowError
@@ -32,6 +35,8 @@ from httk.workflow.errors import FormatError, WorkflowError
 __all__ = [
     "DEFAULT_LIMITS",
     "STAGING_MARK",
+    "SYNC_SETTINGS",
+    "Barrier",
     "CrossDevice",
     "Delivered",
     "DeliveryUncertain",
@@ -41,6 +46,8 @@ __all__ = [
     "Loc",
     "MoveFailed",
     "Moved",
+    "SyncFailed",
+    "SyncStrategy",
     "TooLarge",
     "UnsafePath",
     "UntrustedContentError",
@@ -55,6 +62,7 @@ __all__ = [
     "exists",
     "extract_tar",
     "fresh_token",
+    "fsync_landing",
     "loc",
     "lstat",
     "make_dirs",
@@ -70,6 +78,7 @@ __all__ = [
     "remove_empty_dir",
     "remove_file",
     "rename_probe",
+    "resolve_sync",
     "set_fault_injector",
     "walk_untrusted",
     "write_all",
@@ -1191,12 +1200,16 @@ class _Landing:
     symlink at any component makes the open fail; a path is never resolved by name.
 
     :param target: The directory extracted into; a symlink to a directory is followed.
+    :param durable: Fsync every regular file on its writing descriptor and, after the last member, every directory.
     """
 
-    def __init__(self, target: Path) -> None:
+    def __init__(self, target: Path, *, durable: bool = False) -> None:
         self.target = str(target)
+        self.durable = durable
         self.root = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         self._cache: OrderedDict[_Parts, int] = OrderedDict()
+        #: Every directory below the target this extraction opened or created (fsynced when durable).
+        self.resolved: set[_Parts] = set()
         #: The regular files this stream wrote, by normalized path: the only names a hard link may copy.
         self.written: set[_Parts] = set()
         #: The directory members, whose times are restored after the last member.
@@ -1268,6 +1281,7 @@ class _Landing:
                 raise _in_the_way(member, parent, name, self.path(parts), "which is not a directory") from exc
             raise
         self._cache[parts] = child
+        self.resolved.add(parts)
         while len(self._cache) > _EXTRACT_DIRECTORIES:
             os.close(self._cache.popitem(last=False)[1])
         return child
@@ -1372,6 +1386,8 @@ def _extract_regular(landing: _Landing, archive: tarfile.TarFile, member: tarfil
                 landing.received += len(chunk)
                 write_all(descriptor, chunk)
         _finish_member(descriptor, member)
+        if landing.durable:
+            os.fsync(descriptor)
     finally:
         os.close(descriptor)
     landing.written.add(parts)
@@ -1451,6 +1467,8 @@ def _extract_hard_link(landing: _Landing, member: tarfile.TarInfo, parts: _Parts
                     raise _amplified(member, budget)
                 write_all(descriptor, chunk)
             _finish_member(descriptor, member)
+            if landing.durable:
+                os.fsync(descriptor)
         finally:
             os.close(descriptor)
     finally:
@@ -1477,6 +1495,14 @@ def _restore_directory_times(landing: _Landing) -> None:
                 os.utime(landing.root, times)
         except (*_TIME_ERRORS, tarfile.FilterError):
             pass
+
+
+def _fsync_directories(landing: _Landing) -> None:
+    # A durable extraction, after every member and worker and the times: each directory the stream created or
+    # wrote into, deepest first, then the target. Unlike the times, a failure here is fatal.
+    for parts in sorted((landing.resolved | set(landing.directories)) - {()}, key=len, reverse=True):
+        os.fsync(landing.directory(tarfile.TarInfo("/".join(parts)), parts, create=False))
+    os.fsync(landing.root)
 
 
 def _extract_member(
@@ -1522,6 +1548,8 @@ def _write_member(landing: _Landing, task: _Write) -> None:
         try:
             write_all(descriptor, task.data)
             _finish_member(descriptor, task.member)
+            if landing.durable:
+                os.fsync(descriptor)
         finally:
             os.close(descriptor)
     finally:
@@ -1663,7 +1691,14 @@ class _Reader:
                         del self.below[key[:depth]]
 
 
-def extract_tar(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | None = None, workers: int = 1) -> None:
+def extract_tar(
+    stream: IO[bytes],
+    target: Path,
+    *,
+    rename: tuple[str, str] | None = None,
+    workers: int = 1,
+    durable: bool = False,
+) -> int:
     """Extract an untrusted tar stream under *target*, never resolving a path by name.
 
     *target* is opened once, following a symlink there; every member below it is reached through directory
@@ -1688,7 +1723,8 @@ def extract_tar(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | No
       regular-file bytes the stream carried so far plus 1 GiB.
     - Devices, FIFOs and other types are refused; ownership is ignored.
 
-    Mode and time failures are not fatal. Nothing is fsynced. A refused member stops the extraction and leaves
+    Mode and time failures are not fatal. Without *durable* nothing is fsynced (the caller's
+    :class:`Barrier` makes the landing durable). A refused member stops the extraction and leaves
     what was extracted before it (see *workers* for what more it may leave). A stream cut short, even exactly at a
     member boundary, is refused after its last complete member; a damaged (non-zero, invalid) header after the
     members ends the stream as tarfile reads it and is not detected.
@@ -1715,13 +1751,18 @@ def extract_tar(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | No
         writes. Under a custom ``SIGINT`` handler that returns, a refusal this thread meets may be raised before
         the members already handed out are written, so the refusal reported may be a later one than the
         sequential extraction reports.
+    :param durable: Fsync every regular file on the descriptor that wrote it, before closing it (in this thread or
+        the worker that wrote it), and after the last member and the directory times every directory the stream
+        created or wrote into, deepest first, then *target*: the strategy ``fsync`` of a :class:`Barrier`. A
+        failed fsync is an ``OSError`` like any other write error.
+    :return: How many regular files the stream wrote (hard-link copies included).
     :raises tarfile.FilterError: For a refused member; a subclass (``OutsideDestinationError``,
         ``SpecialFileError``, ``AbsoluteLinkError``, ``LinkOutsideDestinationError``) where one applies.
     :raises tarfile.TarError: If the stream is malformed or cut short.
     :raises OSError: For an error of the filesystem itself (``ENOSPC``, ``EIO``, ``EACCES``, ...).
     """
 
-    landing = _Landing(target)
+    landing = _Landing(target, durable=durable)
     try:
         with tarfile.open(fileobj=stream, mode="r|") as archive:
             if workers > 1 and rename is None:
@@ -1744,8 +1785,11 @@ def extract_tar(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | No
             if not isinstance(consumed, int) or consumed - archive.offset != tarfile.BLOCKSIZE:
                 raise tarfile.ReadError("the stream ended before its end-of-archive marker")
         _restore_directory_times(landing)
+        if durable:
+            _fsync_directories(landing)
     finally:
         landing.close()
+    return len(landing.written)
 
 
 def publish_record(directory: Path, name: str, data: bytes, *, nonce: bytes, durable: bool) -> bool:
@@ -1878,3 +1922,368 @@ def rename_probe(a: Path, b: Path) -> None:
     finally:
         for leftover in (first, second, target):
             _remove_tree(loc(leftover))
+
+
+# -- the sync barrier (plan WORKFLOW_SYNC_BARRIER §8) ----------------------------------------------------------------
+
+#: The values of the ``io.sync`` application setting; an absent setting is ``auto``.
+SYNC_SETTINGS = ("auto", "syncfs", "fsync")
+#: The filesystem types ``auto`` trusts ``syncfs`` on (Linux 5.8 or later): Lustre by the user's decision, the
+#: local journalling filesystems whose writeback errors reach the superblock, and tmpfs (no persistence either way).
+_SYNCFS_VETTED = frozenset({"lustre", "ext4", "xfs", "tmpfs"})
+#: The ``errno`` values of a ``syncfs`` that is not there or not allowed (seccomp): the strategy becomes ``fsync``.
+_SYNCFS_UNSUPPORTED = frozenset({errno.ENOSYS, errno.EPERM, errno.EINVAL})
+#: The oldest kernel whose ``syncfs`` reports a writeback error (recorded on the superblock since the open).
+_SYNCFS_KERNEL = (5, 8)
+_MOUNTINFO = Path("/proc/self/mountinfo")
+
+type SyncStrategy = Literal["syncfs", "fsync"]
+
+#: The deepest directory the late walk descends into, in path components below the landing (as extract_tar).
+_LANDING_DEPTH = 256
+#: Whether ``syncfs`` works, by ``st_dev``, as the first prime or probe on that filesystem found.
+_syncfs_works: dict[int, bool] = {}
+
+
+class SyncFailed(OSError):
+    """A barrier's commit failed: the landing is not known to be durable and must not be published.
+
+    A subclass of :class:`OSError`, so that every handler of filesystem errors treats it as one.
+    """
+
+
+@cache
+def _syncfs_function() -> Callable[[int], int] | None:
+    # The libc function with its argument types, or None when libc has no syncfs (resolved once).
+    try:
+        import ctypes
+
+        found = ctypes.CDLL(None, use_errno=True).syncfs
+    except (ImportError, OSError, AttributeError):
+        # No _ctypes in this Python, no libc to load, or a libc without syncfs.
+        return None
+    found.argtypes = (ctypes.c_int,)
+    found.restype = ctypes.c_int
+    return found
+
+
+def _syncfs(descriptor: int) -> None:
+    """Call ``syncfs`` on *descriptor*: write back and wait for every dirty page and inode of its filesystem.
+
+    The call releases the GIL. From Linux 5.8 it reports a writeback error recorded on the filesystem since
+    *descriptor* was opened.
+
+    :param descriptor: Any open descriptor on the filesystem.
+    :raises OSError: With the call's ``errno``; ``ENOSYS`` when libc has no ``syncfs``.
+    """
+
+    function = _syncfs_function()
+    if function is None:
+        raise OSError(errno.ENOSYS, "libc has no syncfs")
+    import ctypes
+
+    if function(descriptor) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def _uname() -> tuple[str, str]:
+    # The system name and kernel release (a seam for tests).
+    system = os.uname()
+    return system.sysname, system.release
+
+
+def _read_mountinfo() -> str | None:
+    # This process's mount table, or None when it cannot be read (a seam for tests).
+    try:
+        return _MOUNTINFO.read_text(encoding="utf-8", errors="surrogateescape")
+    except OSError:
+        return None
+
+
+def _kernel_version(release: str) -> tuple[int, int] | None:
+    # The leading major.minor of a release string ("5.14.0-362.el9.x86_64" -> (5, 14)); None when it has none.
+    found = re.match(r"(\d+)\.(\d+)(?!\d)", release)
+    return None if found is None else (int(found[1]), int(found[2]))
+
+
+def _unescape(field: str) -> str:
+    # mountinfo writes space, tab, newline and backslash in a mount point as a backslash and three octal digits.
+    return re.sub(r"\\([0-7]{3})", lambda escape: chr(int(escape[1], 8)), field)
+
+
+def _filesystem_type(path: Path, device: int) -> str | None:
+    """The type of the filesystem *path* (on *device*) is on, from ``/proc/self/mountinfo``; ``None`` if unknown.
+
+    The entry whose ``major:minor`` is *device*; when none is (a btrfs subvolume reports an anonymous device), the
+    entry with the longest mount point that is a path-component prefix of the resolved *path*. Read afresh each
+    time: an anonymous device number is reused after an unmount.
+    """
+
+    text = _read_mountinfo()
+    if text is None:
+        return None
+    wanted = f"{os.major(device)}:{os.minor(device)}"
+    resolved = PurePosixPath(os.path.realpath(path))
+    found: str | None = None
+    longest = -1
+    for line in text.splitlines():
+        fields = line.split(" ")
+        if len(fields) < 7 or "-" not in fields[6:]:
+            continue
+        separator = fields.index("-", 6)
+        if separator + 1 >= len(fields):
+            continue
+        kind = fields[separator + 1]
+        if fields[2] == wanted:
+            found = kind
+            break
+        mount_point = PurePosixPath(_unescape(fields[4]))
+        if resolved.is_relative_to(mount_point) and len(mount_point.parts) > longest:
+            found, longest = kind, len(mount_point.parts)
+    return found
+
+
+def resolve_sync(path: Path, setting: object) -> tuple[SyncStrategy, str]:
+    """Choose how a landing below *path* is made durable: ``syncfs`` of its filesystem, or ``fsync`` per file.
+
+    *setting* is the ``io.sync`` value: ``auto`` gives ``syncfs`` only on Linux 5.8 or later, with libc's
+    ``syncfs`` working on that filesystem (not refused by a prime or probe before) and a vetted filesystem type
+    (``lustre``, ``ext4``, ``xfs``, ``tmpfs``); ``syncfs`` forces it on any filesystem type, but still gives
+    ``fsync``, with one warning, below Linux 5.8, off Linux, or where ``syncfs`` does not work; ``fsync`` gives
+    ``fsync``; any other value gives ``fsync`` with one warning. The setting is the caller's fresh read; only the
+    filesystem type is read afresh from the mount table each time.
+
+    :param path: An existing directory on the filesystem written.
+    :param setting: The ``io.sync`` value.
+    :return: The strategy and a short reason for display, such as ``"syncfs (lustre, Linux 5.14)"`` or
+        ``"fsync (zfs is not vetted for auto)"``.
+    :raises OSError: When *path* cannot be examined.
+    """
+
+    if setting not in SYNC_SETTINGS:
+        _LOGGER.warning("io.sync is %r, not one of auto, syncfs or fsync: using fsync", setting)
+        return "fsync", f"fsync (io.sync {setting!r} is not auto, syncfs or fsync)"
+    if setting == "fsync":
+        return "fsync", "fsync (io.sync is fsync)"
+    forced = setting == "syncfs"
+    device = os.stat(path).st_dev
+
+    def fallback(why: str) -> tuple[SyncStrategy, str]:
+        if forced:
+            _LOGGER.warning("io.sync is syncfs, but %s: using fsync", why)
+        return "fsync", f"fsync ({why})"
+
+    system, release = _uname()
+    if system != "Linux":
+        return fallback(f"{system} is not Linux")
+    version = _kernel_version(release)
+    if version is None:
+        return fallback(f"the kernel release {release!r} is not recognized")
+    kernel = f"Linux {version[0]}.{version[1]}"
+    if version < _SYNCFS_KERNEL:
+        return fallback(f"{kernel} is older than 5.8")
+    if _syncfs_function() is None:
+        return fallback("libc has no syncfs")
+    if _syncfs_works.get(device) is False:
+        return fallback("syncfs is not supported on this filesystem here")
+    kind = _filesystem_type(path, device)
+    if forced:
+        return "syncfs", f"syncfs (forced, {kind or 'unknown filesystem'}, {kernel})"
+    if kind is None:
+        return "fsync", "fsync (the filesystem type is unknown)"
+    if kind not in _SYNCFS_VETTED:
+        return "fsync", f"fsync ({kind} is not vetted for auto)"
+    return "syncfs", f"syncfs ({kind}, {kernel})"
+
+
+def _prime(descriptor: int, device: int) -> bool:
+    # One syncfs on a fresh descriptor: whether syncfs works on the filesystem (recorded by st_dev). Any other
+    # error is logged and ignored: nothing of the landing is written yet, so it is not ours.
+    try:
+        _syncfs(descriptor)
+    except OSError as exc:
+        if exc.errno in _SYNCFS_UNSUPPORTED:
+            _syncfs_works[device] = False
+            return False
+        _LOGGER.warning("the sync barrier's first syncfs failed before anything was landed (ignored): %s", exc)
+    _syncfs_works[device] = True
+    return True
+
+
+def _probe_syncfs(path: Path) -> bool:
+    # Whether syncfs works on the filesystem of *path*, recorded for resolve_sync as a barrier's prime records it.
+
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        return _prime(descriptor, os.fstat(descriptor).st_dev)
+    finally:
+        os.close(descriptor)
+
+
+def fsync_landing(anchor: int, *, label: str = "") -> int:
+    """Fsync a landed tree after the fact: every regular file, then every directory bottom-up, then *anchor*.
+
+    Each directory is opened ``O_DIRECTORY|O_NOFOLLOW`` relative to its parent's descriptor and each file through
+    an anchored ``O_NOFOLLOW|O_NONBLOCK`` open; symlinks and special files are skipped, never followed. A later
+    opener than the writer misses a writeback error already reported to someone else or lost when the inode was
+    evicted (the accepted limit of the strategy ``fsync`` for a landing another process wrote).
+
+    :param anchor: The directory descriptor of the landing (left open).
+    :param label: The landing's path, for messages.
+    :return: How many regular files were fsynced.
+    :raises SyncFailed: When an entry cannot be listed, opened or fsynced, or a directory lies deeper than 256
+        levels (which bounds the descriptors the walk keeps open).
+    """
+
+    count = 0
+    try:
+        listing = sorted(os.listdir(anchor))
+    except OSError as exc:
+        raise SyncFailed(exc.errno, f"cannot sync {label} to disk: {exc.strerror}") from exc
+    # Each directory open below the anchor (the caller owns the anchor): its descriptor, path and names left.
+    pending: list[tuple[int, PurePosixPath, list[str]]] = [(anchor, PurePosixPath(), listing)]
+    try:
+        while pending:
+            directory, relative, names = pending[-1]
+            if not names:
+                pending.pop()
+                try:
+                    os.fsync(directory)
+                except OSError as exc:
+                    raise SyncFailed(exc.errno, f"cannot sync {label}/{relative} to disk: {exc.strerror}") from exc
+                finally:
+                    if directory != anchor:
+                        os.close(directory)
+                continue
+            name = names.pop()
+            path = relative / name
+            try:
+                mode = os.lstat(name, dir_fd=directory).st_mode
+                if stat.S_ISDIR(mode):
+                    if len(path.parts) > _LANDING_DEPTH:
+                        raise SyncFailed(
+                            errno.ELOOP, f"cannot sync {label}/{path} to disk: deeper than {_LANDING_DEPTH} levels"
+                        )
+                    child = os.open(name, _DIR_FLAGS, dir_fd=directory)
+                    try:
+                        listing = sorted(os.listdir(child))
+                    except BaseException:
+                        os.close(child)
+                        raise
+                    pending.append((child, path, listing))
+                elif stat.S_ISREG(mode):
+                    descriptor = os.open(name, _SOURCE_FLAGS, dir_fd=directory)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                    count += 1
+            except SyncFailed:
+                raise
+            except OSError as exc:
+                raise SyncFailed(exc.errno, f"cannot sync {label}/{path} to disk: {exc.strerror}") from exc
+    finally:
+        for directory, _relative, _names in pending:
+            if directory != anchor:
+                os.close(directory)
+    return count
+
+
+class Barrier:
+    """Make everything landed below *anchor* durable once, before any of it is published (plan §8.1).
+
+    Entered before the first byte is landed: the strategy is resolved (:func:`resolve_sync`) and *anchor* opened.
+    For ``syncfs`` a first ``syncfs`` on that fresh descriptor ("prime") flushes what was dirty already and
+    consumes an unseen writeback error of someone else; its error is logged and ignored, and a ``syncfs`` that is
+    not supported there makes the strategy ``fsync``. :meth:`commit` then calls ``syncfs`` on the same descriptor,
+    so any writeback error since the open, ours or not, fails it: an error is never attributed, the landing is
+    not published. Under ``fsync``, a caller whose writes fsync themselves (:attr:`fsync_inline`) passes
+    *inline*, and the commit has nothing left to do but say so; otherwise it fsyncs the landing after the fact
+    (:func:`fsync_landing`). Leaving without a commit syncs nothing. A running ``syncfs`` cannot be interrupted.
+
+    :param anchor: The landing directory, which the caller has created durably.
+    :param setting: The ``io.sync`` value, read fresh by the caller.
+    :param inline: The caller writes every file of the landing with fsync on its writing descriptor when
+        :attr:`fsync_inline` is true (an extraction or a copy), rather than another process writing it.
+    :param quiet: Print no progress line.
+    """
+
+    def __init__(self, anchor: Path, setting: object, *, inline: bool = False, quiet: bool = False) -> None:
+        self.anchor = anchor
+        self.setting = setting
+        self.inline = inline
+        self.quiet = quiet
+        self.strategy: SyncStrategy = "fsync"
+        self.reason = ""
+        self._descriptor: int | None = None
+
+    @property
+    def fsync_inline(self) -> bool:
+        """Whether the caller must fsync each file as it writes it (the strategy is ``fsync``)."""
+
+        return self.strategy == "fsync"
+
+    def __enter__(self) -> Self:
+        self.strategy, self.reason = resolve_sync(self.anchor, self.setting)
+        self._descriptor = os.open(self.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            if self.strategy == "syncfs" and not _prime(self._descriptor, os.fstat(self._descriptor).st_dev):
+                if self.setting == "syncfs":
+                    _LOGGER.warning("io.sync is syncfs, but syncfs is not supported here: using fsync")
+                self.strategy, self.reason = "fsync", "fsync (syncfs is not supported on this filesystem here)"
+        except BaseException:
+            self._close()
+            raise
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._close()
+
+    def _close(self) -> None:
+        if self._descriptor is not None:
+            descriptor, self._descriptor = self._descriptor, None
+            os.close(descriptor)
+
+    def _say(self, verb: str, count_hint: int | None, unit: str) -> None:
+        if self.quiet:
+            return
+        what = f"the landed {unit}s" if count_hint is None else f"{count_hint} landed {unit}(s)"
+        strategy, _, detail = self.reason.partition(" (")
+        print(f"{verb.format(what)} ({strategy}: {detail.removesuffix(')')})", file=sys.stderr, flush=True)
+
+    def commit(self, count_hint: int | None = None, *, unit: str = "file") -> None:
+        """Make the landing durable: ``syncfs`` on the anchor's descriptor, or the late walk of strategy ``fsync``.
+
+        Unless *quiet*, a progress line naming the strategy goes to standard error: ``syncing N landed file(s) to
+        disk (syncfs: lustre, Linux 5.14)`` before a ``syncfs`` or a walk, and ``made N landed file(s) durable
+        (fsync: ...)`` for an *inline* landing under ``fsync``, whose files were fsynced as they were written (so
+        nothing is left to do).
+
+        :param count_hint: How many were landed, for the progress line.
+        :param unit: What *count_hint* counts, for the progress line: ``file`` or ``bundle``.
+        :raises SyncFailed: When the ``syncfs`` or the walk fails; it is logged once as a warning naming the
+            strategy.
+        :raises ValueError: Outside the context.
+        """
+
+        if self._descriptor is None:
+            raise ValueError("a barrier commits only inside its context")
+        if self.strategy == "fsync" and self.inline:
+            self._say("made {} durable", count_hint, unit)
+            return
+        self._say("syncing {} to disk", count_hint, unit)
+        if self.strategy == "fsync":
+            try:
+                fsync_landing(self._descriptor, label=str(self.anchor))
+            except SyncFailed as exc:
+                _LOGGER.warning("the sync barrier (%s) of %s failed: %s", self.reason, self.anchor, exc)
+                raise
+            return
+        try:
+            _syncfs(self._descriptor)
+        except OSError as exc:
+            _LOGGER.warning("the sync barrier (%s) of %s failed: %s", self.reason, self.anchor, exc)
+            raise SyncFailed(
+                exc.errno, f"syncfs of {self.anchor} failed, so what landed there is not durable: {exc.strerror}"
+            ) from exc

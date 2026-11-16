@@ -38,6 +38,9 @@ WORKFLOWS_DIRECTORY = "workflows"
 IO_WORKERS = "io.workers"
 #: Its value when unset, or when the stored value is invalid.
 DEFAULT_IO_WORKERS = 8
+#: The application setting of how files landed by a transfer are made durable before they are published:
+#: ``auto`` (when unset), ``syncfs`` or ``fsync`` (plan WORKFLOW_SYNC_BARRIER §8.3).
+IO_SYNC = "io.sync"
 
 #: The largest accepted ``format.json``.
 _FORMAT_LIMIT = 1 << 20
@@ -93,6 +96,14 @@ def _validate_io_workers(value: object) -> int:
 
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 32:
         raise ValueError(f"application setting {IO_WORKERS} must be an integer from 1 to 32, not {value!r}")
+    return value
+
+
+def _validate_io_sync(value: object) -> object:
+    """Return a valid ``io.sync`` value: ``auto``, ``syncfs`` or ``fsync``."""
+
+    if not isinstance(value, str) or value not in _fs.SYNC_SETTINGS:
+        raise ValueError(f"application setting {IO_SYNC} must be auto, syncfs or fsync, not {value!r}")
     return value
 
 
@@ -471,6 +482,22 @@ class Workspace:
             _LOGGER.warning("using %s = %d: %s", IO_WORKERS, DEFAULT_IO_WORKERS, exc)
             return DEFAULT_IO_WORKERS
 
+    def io_sync(self) -> object:
+        """Return the ``io.sync`` setting as stored now (``auto`` when unset), re-reading ``format.json``.
+
+        Read afresh at every sync barrier, so that a change reaches a running daemon or manager without a restart.
+        The value is returned as stored: :func:`httk.workflow._fs.resolve_sync` takes an invalid one as ``fsync``
+        (with a warning), and so does this method when the settings cannot be read or are not valid.
+
+        :return: The stored value, or ``auto``; ``fsync`` when ``format.json`` or its settings cannot be read.
+        """
+
+        try:
+            return self.read_settings().get(IO_SYNC, "auto")
+        except (ValueError, WorkflowError) as exc:
+            _LOGGER.warning("using %s = fsync: %s", IO_SYNC, exc)
+            return "fsync"
+
     def refresh_format(self) -> dict[str, object]:
         """Re-read ``format.json`` and refresh the enabled :attr:`extensions` from it.
 
@@ -572,6 +599,8 @@ class Workspace:
                 _validate_setting_value(key, value)
                 if key == IO_WORKERS:
                     _validate_io_workers(value)
+                if key == IO_SYNC:
+                    _validate_io_sync(value)
                 self._check_setting_collision(key, settings)
                 settings[key] = value
             stored["settings"] = settings
@@ -595,6 +624,8 @@ class Workspace:
         merged = _validate_settings(seeds)
         if IO_WORKERS in merged:
             _validate_io_workers(merged[IO_WORKERS])
+        if IO_SYNC in merged:
+            _validate_io_sync(merged[IO_SYNC])
 
         def seed(stored: dict[str, Any]) -> dict[str, object]:
             current = _validate_settings(_section(stored, "settings"))

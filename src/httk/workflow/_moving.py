@@ -901,6 +901,21 @@ def _reject(workspace: _kernel.KernelWorkspace, bundle: Path, refused_to: Path, 
     return refused_to / unique / bundle.name
 
 
+#: A transfer's landing scratch, ``tmp/<owner-id>.landing.<token>/`` (see :meth:`~httk.workflow._kernel.Owner.scratch`).
+_LANDING_SCRATCH = re.compile(r"[0-9a-f]{32}\.landing\.[a-z2-7]{16}")
+
+
+def _landing_copy(workspace: _kernel.KernelWorkspace, source: Path) -> bool:
+    """Whether *source* is a bundle in a transfer's landing scratch of *workspace*: ``<landing>/outgoing/<id>``."""
+
+    landing = source.parent.parent
+    return (
+        source.parent.name == "outgoing"
+        and _LANDING_SCRATCH.fullmatch(landing.name) is not None
+        and landing.parent.resolve() == (workspace.control / "tmp").resolve()
+    )
+
+
 def _refuse(owner: Owner, scratch: Path, bundle: Path, record: _Record, reason: str) -> str:
     """Move a refused bundle away and discard the scratch, or keep it; return the complete message."""
 
@@ -920,6 +935,13 @@ def _refuse(owner: Owner, scratch: Path, bundle: Path, record: _Record, reason: 
         # A remote transfer's landing is a copy of a hold by construction: the hold stays, the copy goes.
         owner.discard_scratch(scratch)
         return f"bundle refused: {reason}; it was a copy of a held bundle and was discarded (the hold stays)"
+    elif record.source is not None and _landing_copy(owner.workspace, Path(record.source)):
+        # A local transfer's landing (a copied or pulled hold) is a copy too: the source hold is untouched.
+        owner.discard_scratch(scratch)
+        return (
+            f"bundle refused: {reason}; it was a landed copy of a held bundle and was discarded "
+            "(the source hold is untouched)"
+        )
     elif record.source is not None and not _fs.exists(_fs.loc(Path(record.source))):
         _fs.move_owned(_fs.loc(bundle), _fs.loc(Path(record.source)), durable=durable)
         owner.discard_scratch(scratch)

@@ -106,6 +106,44 @@ httk workspace settings set --key io.workers --value 16 default
 httk workspace settings set --key io.workers --value 4 cluster:default
 ```
 
+`io.sync` (`auto`, the default, `syncfs` or `fsync`) sets how jobs that a
+transfer lands in this workspace (the far side of a push, the local side of a
+pull, and holds copied from another filesystem or kept with `--keep`) are made
+durable before they are adopted, so that a crash of the node cannot leave a
+published job with missing or partial files. `syncfs` makes the whole landing
+durable with one call for its filesystem, on a descriptor opened (and synced
+once, which also flushes what was pending before) before the first file lands;
+it flushes other users' pending writes on that filesystem too, and Ctrl-C
+waits for it to finish. `fsync` synchronizes every file on its own, which
+costs one round trip a file on a shared filesystem. `auto` uses `syncfs` on
+Linux 5.8 or later for Lustre, ext4, XFS and tmpfs, and `fsync` elsewhere
+(older kernels report no write errors through `syncfs`); `syncfs` forces it on
+any filesystem type you vouch for, still falling back to `fsync` below Linux
+5.8 or where the call is not available. tmpfs is never persistent, whatever
+the setting. A value other than the three is refused when set, and one stored
+otherwise counts as `fsync`; the setting is read afresh at every landing, so a
+running daemon sees a change at once, and a `--no-durable` workspace
+synchronizes nothing.
+
+The command that runs `job transfer`, `job push` or `job pull` prints the
+strategy on standard error, unless `-q`: `syncing 120 landed file(s) to disk
+(syncfs: lustre, Linux 5.14)`, or `made 3 landed bundle(s) durable (fsync:
+zfs is not vetted for auto)` when every file was synchronized as it was
+written. For a push, that is the destination's line, relayed with its name in
+front. When the synchronization fails, nothing of that landing is adopted:
+
+- a push from a local workspace is refused and its jobs are taken back into
+  the source (`not_moved`); run the transfer again;
+- a pull, or a push from a remote workspace, fails and its jobs stay held at
+  the source; `job transfer --resume` delivers them again;
+- copies from another filesystem are made once more with every file
+  synchronized as it is written, and the chunk fails (jobs held at the source)
+  only if that fails too.
+
+```console
+httk workspace settings set --key io.sync --value fsync default
+```
+
 Engine tunables (the visibility deadline of a shared filesystem and the
 retention limits of `gc`) are *workspace policy*, kept apart from application
 settings and edited with `workspace policy show|set`; see

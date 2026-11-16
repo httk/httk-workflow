@@ -11,6 +11,7 @@ release the hold keeping the moved jobs in SRC as ``away`` copies, which a later
 import argparse
 import contextlib
 import json
+import os
 import re
 import shlex
 import sys
@@ -922,6 +923,71 @@ def _deliver_call(
     return int(result.get("returncode", 0) or 0), str(result.get("stdout", "")), str(result.get("stderr", ""))
 
 
+def _sync_barrier(
+    workspace: Workspace, anchor: Path, arguments: argparse.Namespace, *, inline: bool
+) -> contextlib.AbstractContextManager[_fs.Barrier | None]:
+    """The sync barrier of a landing in *workspace* (``io.sync`` read afresh); none in a non-durable workspace."""
+
+    if not workspace.durable:
+        return contextlib.nullcontext(None)
+    return _fs.Barrier(anchor, workspace.io_sync(), inline=inline, quiet=arguments.quiet)
+
+
+def _other_filesystem(holds: list[_moving.Hold], dst: Workspace) -> bool:
+    """Whether the holds (their ``transfers/outgoing/``) are on another filesystem than *dst*'s control directory.
+
+    Equal devices can still refuse a rename (bind mounts): adoption's own cross-filesystem copy remains for those.
+    """
+
+    outgoing = Path(holds[0].path).parent
+    return os.stat(outgoing).st_dev != os.stat(dst.control).st_dev
+
+
+def _land_copies(
+    workspace: Workspace,
+    owner: _kernel.Owner,
+    holds: list[_moving.Hold],
+    scratch: Path,
+    arguments: argparse.Namespace,
+) -> list[Path]:
+    """Copy every hold into the landing *scratch* of *workspace*, durably before any of it is adopted.
+
+    The copies run with *workspace*'s ``io.workers`` inside one sync barrier (inline fsync per file when it
+    resolves to ``fsync``). When the barrier's commit fails, the copies are discarded and made once more with an
+    fsync of every file (the holds are untouched); an error of that copy fails the chunk.
+
+    :param workspace: The destination workspace.
+    :param owner: The transfer's owner in *workspace*.
+    :param holds: The chunk's holds, in a local source workspace.
+    :param scratch: The owner's landing scratch.
+    :param arguments: The command's arguments (``--quiet``).
+    :return: The copies, in the order of *holds*.
+    """
+
+    outgoing = scratch / "outgoing"
+    targets = [outgoing / hold.transfer_id for hold in holds]
+
+    def copy_all(durable: bool) -> None:
+        _fs.make_dirs(outgoing, durable=durable)
+        run_batch(
+            owner,
+            lambda index: _fs.copy_tree(Path(holds[index].path), targets[index], durable=durable),
+            range(len(holds)),
+            workspace.io_workers,
+        )
+
+    try:
+        with _sync_barrier(workspace, scratch, arguments, inline=True) as barrier:
+            copy_all(barrier is not None and barrier.fsync_inline)
+            if barrier is not None:
+                barrier.commit(len(holds), unit="bundle")
+    except _fs.SyncFailed as exc:
+        _say(arguments, f"copying {len(holds)} bundle(s) again, with an fsync of every file: {exc}")
+        owner.discard_tree(outgoing)
+        copy_all(True)
+    return targets
+
+
 def _deliver(
     src: _End,
     dst: _End,
@@ -930,6 +996,11 @@ def _deliver(
     arguments: argparse.Namespace,
 ) -> dict[str, dict[str, Any]]:
     """Steps 2 and 3 for a chunk bound for a local *dst*: copy its held bundles there and adopt them.
+
+    Holds on the same filesystem move in (adoption takes them); with ``--keep``, or from another filesystem, they
+    are copied into a landing scratch first (see :func:`_land_copies`); a remote *src*'s are pulled into one. A
+    landing is made durable (a sync barrier entered before its first byte, committed before any adoption), and
+    a failed commit of a pull fails the chunk with the holds kept at the source.
 
     The result is each hold's adoption entry by transfer id (``status`` as ``job adopt --json`` gives it); an
     error raised fails the whole chunk.
@@ -946,19 +1017,22 @@ def _deliver(
         # Errors are kept, not raised, inside: an owner left by an error stays open for recovery.
         scratch = None
         try:
-            if src.workspace is not None and not arguments.keep:
-                # One filesystem: adoption moves each hold in, and a refusal moves it back. Across: it copies.
+            if src.workspace is not None and not arguments.keep and not _other_filesystem(holds, dst.workspace):
+                # One filesystem: adoption moves each hold in, and a refusal moves it back.
                 sources = [Path(hold.path) for hold in holds]
             elif src.workspace is not None:
-                # Keeping away copies releases the hold itself, so the adoption takes a copy of it.
+                # Keeping away copies releases the hold itself, and another filesystem cannot take it by a rename:
+                # the adoption takes a durable copy of it.
                 scratch = owner.scratch("landing")
-                sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
-                for hold, target in zip(holds, sources, strict=True):
-                    _fs.copy_tree(Path(hold.path), target, durable=dst.workspace.durable)
+                sources = _land_copies(dst.workspace, owner, holds, scratch, arguments)
             else:
                 scratch = owner.scratch("landing")
                 _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
-                _adapter(src, context, arguments, "pull", outgoing, str(scratch / "outgoing"), ids)
+                # Entered before the adapter writes anything; committed before anything is adopted.
+                with _sync_barrier(dst.workspace, scratch, arguments, inline=False) as barrier:
+                    _adapter(src, context, arguments, "pull", outgoing, str(scratch / "outgoing"), ids)
+                    if barrier is not None:
+                        barrier.commit()
                 sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
             _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
             workspace = dst.workspace
@@ -995,7 +1069,8 @@ def _deliver_remote(
     --stdin-tar`` there (a remote *src*'s bundles relayed through a local directory), asking about *built_for*.
 
     The result is the checked adoption document (see :func:`_adoption`). A :class:`RuntimeError` says that *dst*
-    gave no usable answer, so whether anything was adopted is unknown.
+    gave no usable answer, so whether anything was adopted is unknown. Once an adoption is read, the far side's
+    standard error lines (its sync line, its warnings) are printed here (:func:`_relay`).
     """
 
     ids = [hold.transfer_id for hold in holds]
@@ -1013,7 +1088,7 @@ def _deliver_remote(
             _say(arguments, f"delivering {len(ids)} bundle(s) to {dst.locator}")
             code, out, err = _deliver_call(dst, context, arguments, f"{relay}/outgoing", ids, argv)
     try:
-        return _adoption(out, ids)
+        document = _adoption(out, ids)
     except (ValueError, TypeError, WorkflowError):
         detail = err.strip() if code and err.strip() else f"{dst.locator} returned an unrecognised adoption report"
         if "unrecognized arguments" in err or "invalid choice" in err:
@@ -1023,6 +1098,27 @@ def _deliver_remote(
             f"deliver again with `httk job transfer --resume {src.locator} {dst.locator}` or, if they are there, "
             f"release with {_release_remedy(arguments, 'TRANSFER_ID', None, src, dst)}"
         ) from None
+    if "refused" not in document:
+        _relay(dst, arguments, err)
+    return document
+
+
+#: The far side's standard error lines of an adoption that a push relays: the sync barrier's progress line,
+#: ``warning:`` lines, and the barrier's own logged warnings, which the far side's httk renders as their bare
+#: message (so they are told apart by their fixed beginnings). Nothing else (ssh warnings, login banners, module
+#: system output, tracebacks, a bundle's own message and its continuation lines) is relayed.
+_RELAYED = ("syncing ", "made ", "warning:", "io.sync ", "the sync barrier")
+#: Relayed lines the client reports itself (its workflow shipping), left out.
+_REPORTED_HERE = ("warning: these workflows are not installed",)
+
+
+def _relay(dst: _End, arguments: argparse.Namespace, err: str) -> None:
+    """Print the far side's sync line and warnings of an adoption (:data:`_RELAYED`), each prefixed by *dst*,
+    unless ``--quiet``."""
+
+    for line in err.splitlines():
+        if line.startswith(_RELAYED) and not line.startswith(_REPORTED_HERE):
+            _say(arguments, f"{dst.locator}: {line}")
 
 
 def _release_remedy(

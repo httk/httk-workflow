@@ -444,7 +444,7 @@ as they are read, so a file the source keeps growing ends the copy. It is not
 atomic: callers copy to a private or partial name and move or deliver it
 afterwards.
 
-**`extract_tar(stream, target, rename=None, workers=1)`** extracts an untrusted tar
+**`extract_tar(stream, target, rename=None, workers=1, durable=False)`** extracts an untrusted tar
 stream (a pull's local side, `job adopt --stdin-tar`, `workflow install
 --stdin-tar`) without resolving any path by name. `target` is opened once,
 following a symlink there; every member below it is reached through directory
@@ -466,7 +466,13 @@ a name given twice, is a no-op); the copies may not write more than 8 times
 the stream's own file bytes so far plus 1 GiB. Directories keep the default mode,
 whatever their member says, and get their times back after the last member.
 Mode and time failures (including NaN or out-of-range times) are not fatal;
-nothing is fsynced; a refusal raises a `tarfile.FilterError` subclass and
+without `durable` nothing is fsynced (the caller's `Barrier` makes the landing
+durable); with it (a barrier's strategy `fsync`), each regular file is fsynced
+on the descriptor that wrote it before it is closed, in the reading thread or
+the worker that wrote it, and after the last member and the directory times
+every directory the stream created or wrote into, deepest first, then
+`target`, a failed fsync being an `OSError`; it returns how many regular files
+it wrote. A refusal raises a `tarfile.FilterError` subclass and
 leaves what was written before it. A stream cut short, even exactly at a
 member boundary, is refused (`tarfile.ReadError`) after its last complete
 member; a damaged (non-zero, invalid) header after the members is not
@@ -503,6 +509,69 @@ members through a cached descriptor). Recorded differences from tarfile's
   link naming itself after its file; an unusable time;
 - hard links arrive as copies: the names no longer alias and each takes its own
   space.
+
+**`Barrier(anchor, setting, inline=False, quiet=False)`** makes a landing
+durable once, before any of it is published: a job must not be renamed into
+`jobs/<state>/` before its files are on disk, and nothing is reported to
+another host before it is durable. It is used, in a durable workspace only, by
+the far side of a push (`job adopt --stdin-tar`, not `workflow install
+--stdin-tar`), the local side of a pull, and a local transfer whose holds are
+on another filesystem (by the `st_dev` of `transfers/outgoing/` and of the
+destination's control directory) or kept (`--keep`), which copies every hold
+into a landing scratch first. The caller creates `anchor` durably and enters
+the barrier before the first byte lands; the barrier resolves its strategy
+with `resolve_sync(anchor, setting)`, `setting` being the `io.sync`
+application setting read afresh: `auto` (when unset) gives `syncfs` only on
+Linux 5.8 or later (whose `syncfs` reports a writeback error recorded on the
+filesystem since the descriptor was opened), with libc's `syncfs` available
+and working there, on a vetted filesystem type (`lustre`, `ext4`, `xfs`,
+`tmpfs`, read afresh from `/proc/self/mountinfo` by the `st_dev` of `anchor`,
+else by the longest mount point that is a path-component prefix of it);
+`syncfs` forces it on any filesystem type but still gives `fsync`, with a
+warning, below 5.8, off Linux or where `syncfs` is not available; `fsync`, and
+any invalid value (with a warning), give `fsync`.
+
+For `syncfs` the barrier opens `anchor` and calls `syncfs` once on that fresh
+descriptor, the *prime*: it flushes what was dirty already and consumes an
+unseen writeback error of someone else, so its error is logged and ignored;
+`ENOSYS`, `EPERM` or `EINVAL` there make the strategy `fsync` for that
+filesystem for the rest of the process. `commit()` calls `syncfs` on the same
+descriptor, the *commit*: any error raises `SyncFailed` (an `OSError`) after
+one warning naming the strategy, and is never attributed to someone else.
+Under `fsync` an `inline` caller writes every file with fsync on its writing
+descriptor (`extract_tar(durable=True)`, `copy_tree` in durable mode) and the
+commit has nothing left to do; otherwise (a pull, which the adapter's process
+writes) the commit fsyncs every regular file and then every directory
+bottom-up through anchored no-follow opens, at most 256 levels deep; an entry
+it cannot list, open or fsync, or a deeper directory, fails the commit (a late
+opener can miss a writeback error already reported to someone else or lost
+with an evicted inode, an accepted limit of this case). Unless quiet, the
+commit prints `syncing N landed file(s) to disk (syncfs: lustre, Linux 5.14)`
+before a `syncfs` or a walk, or `made N landed bundle(s) durable (fsync: ...)`
+for an inline landing. Once it has read an adoption that was not refused, the
+client of a push prints, prefixed with the destination and unless `-q`, only
+these lines of the far side's standard error: this progress line, lines
+beginning `warning:` (except the uninstalled-workflows warning, which the
+client reports itself), and the barrier's own logged warnings (the far side
+prints a logged warning as its bare message, beginning `io.sync ` or `the
+sync barrier`); ssh warnings, login banners, module-system output,
+tracebacks and each bundle's own message are not relayed. A running `syncfs` cannot be interrupted: Ctrl-C waits for
+it.
+
+A failed commit publishes nothing of the landing: the far side of a push
+refuses the stream (landing discarded, the refusal document printed), and the
+client takes a local source's holds back (`not_moved`) or keeps a remote
+source's held; a pull's chunk fails with its holds kept at the source
+(`--resume` delivers it again); landing copies are discarded and made once
+more with an fsync of every file (their sources are untouched), the chunk
+failing with its holds kept if that fails, while any other copy error fails
+the chunk at once. `syncfs` also flushes other users' dirty data of that
+filesystem on this node, a writeback error of another process on it during
+the landing fails the transfer (resumable), and tmpfs is never persistent.
+Inline per-file fsync remains for the other copies: the isolating copy of an
+exchange bundle, an eject or `job adopt PATH` across filesystems, and the
+cross-filesystem copy inside `adopt` itself (kept for equal-`st_dev` bind
+mounts).
 
 **`rename_probe(a, b)`** checks the rename semantics above between two
 directories: a non-empty directory moves keeping its inode, and a rename onto a
