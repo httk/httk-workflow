@@ -509,6 +509,47 @@ def test_a_subtree_whose_parent_is_here_is_refused(tmp_path: Path) -> None:
     assert report.destination.is_dir()
 
 
+@pytest.mark.parametrize(
+    ("detached", "order"),
+    [(True, "parent-first"), (True, "child-first"), (False, "child-first"), (False, "parent-first")],
+)
+def test_a_detached_child_adopts_whatever_the_order(tmp_path: Path, detached: bool, order: str) -> None:
+    source, target = v3_workspace(tmp_path / "a"), v3_workspace(tmp_path / "b")
+    parent = job_mapping(WORKFLOW, {"start": "succeed"}, tag="p", placement="p")
+    child = job_mapping(WORKFLOW, {"start": "succeed"}, tag="c", placement="p/c")
+    child["parent"] = parent_link(parent, source.workspace_id)
+    place(source, child, "succeeded")
+    if detached:
+        with cli_owner(source) as owner:
+            owned = claim_root(source, owner, child["id"])
+            doc = owned.read_state()
+            assert doc is not None
+            owned.release(doc.updated(detached={"at": "now", "operator": "t"}), Release("succeeded", 500))
+    place(source, parent, "succeeded", children=(child,))
+    bundles = {}
+    for mapping in (child, parent):
+        with cli_owner(source) as owner:
+            owned = claim_root(source, owner, mapping["id"])
+            bundles[mapping["tag"]] = _moving.eject(
+                source, owner, owned, destination=tmp_path / "out", tree=False
+            ).destination
+    first, second = ("p", "c") if order == "parent-first" else ("c", "p")
+    with cli_owner(target) as owner:
+        assert _moving.adopt(target, owner, bundles[first], untrusted=False) is not None
+        if not detached and order == "parent-first":
+            # An attached child stays part of its parent's tree: refused as before.
+            match = r"the root's parent .* is in this workspace; adopt the parent's whole tree instead"
+            with pytest.raises(BundleError, match=match):
+                _moving.adopt(target, owner, bundles[second], untrusted=False)
+            assert find(target, child["id"]) is None and bundles[second].is_dir()
+            return
+        assert _moving.adopt(target, owner, bundles[second], untrusted=False) is not None
+    adopted = find(target, child["id"])
+    assert find(target, parent["id"]) is not None and adopted is not None
+    state, _damaged = read_state_unowned(adopted.path / "state.json")
+    assert state is not None and (state.detached is not None) == detached
+
+
 # -- untrusted adoption ---------------------------------------------------------------------------------------------
 
 

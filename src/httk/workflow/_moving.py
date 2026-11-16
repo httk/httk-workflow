@@ -1086,7 +1086,11 @@ def _presence(
         return f"{len(found)} of its {len(ids)} jobs are already in this workspace: {present}", {}
     if untrusted:
         return None, {}
-    parent = JobDefinition.from_path(manifest.member_dir(bundle, manifest.members[0]) / "job.json").parent
+    root_dir = manifest.member_dir(bundle, manifest.members[0])
+    parent = JobDefinition.from_path(root_dir / "job.json").parent
+    root_doc, _damaged = read_state_unowned(root_dir / "state.json")
+    if root_doc is not None and root_doc.detached is not None:
+        parent = None  # a detached root is independent of its parent here, as in tree_members
     if parent is not None:
         hint = PurePosixPath(str(parent.get("placement")))
         parent_id = str(parent.get("job_id"))

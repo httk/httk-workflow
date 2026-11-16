@@ -1280,6 +1280,36 @@ def test_state_without_tree_leaves_a_child_listed_before_its_parent(
     assert find(source, family["c1"]["id"]) is not None and find(target, family["c1"]["id"]) is None
 
 
+@pytest.mark.parametrize("parent_first", [True, False], ids=["parent-first", "child-first"])
+def test_state_moves_a_parent_and_its_detached_child_in_either_order(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, parent_first: bool
+) -> None:
+    from httk.workflow.models import make_job_key
+
+    source, source_name = registered(tmp_path, "a")
+    target, target_name = registered(tmp_path, "b")
+    family = _family(source, "camp/p", {"c1": ("succeeded", "camp/p/c1")})
+    context = CLIContext("httk", tmp_path)
+    assert command(["job", "detach", "--workspace", source_name, str(family["c1"]["id"])], context) == 0
+    parent_key = make_job_key(str(family["parent"]["id"]), "parent")
+    deliver = transfer_cli._deliver
+
+    def ordered(src: Any, dst: Any, holds: list[_moving.Hold], *rest: Any) -> dict[str, dict[str, Any]]:
+        # Holds are adopted in transfer id order (random); parent first used to refuse the detached child.
+        holds = sorted(holds, key=lambda hold: (parent_key in hold.members) != parent_first)
+        return deliver(src, dst, holds, *rest)
+
+    monkeypatch.setattr(transfer_cli, "_deliver", ordered)
+    capsys.readouterr()
+    assert run(tmp_path, "--json", "--state", "succeeded", source_name, target_name) == 0
+    document = outcomes(capsys)
+    assert document["errors"] == [] and [outcome["status"] for outcome in document["transfers"]] == ["adopted"] * 2
+    for mapping in family.values():
+        assert find(source, mapping["id"]) is None
+        assert job_ids_below(target.root).count(str(mapping["id"])) == 1
+    assert outgoing(source) == []
+
+
 def test_placement_is_validated_before_anything_runs(
     project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
