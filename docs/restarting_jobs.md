@@ -37,7 +37,8 @@ The job directory holds:
 ## What you may edit
 
 Everything in the job directory may be edited while the job is `failed` or
-`paused`, except `job.json`. It is digest-pinned at the first activation, and a
+`paused`, except `state.json`, the engine's own record (change it only through
+`job request` actions), and `job.json`. `job.json` is digest-pinned at the first activation, and a
 different digest fails the job with `protocol_error`. That includes the retry
 policy, the parameters and the placement. The exception is an unlocked job (see
 [Debug mode](#debug-mode-unlocked-jobs)), whose `job.json` may be edited.

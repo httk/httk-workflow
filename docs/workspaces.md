@@ -77,7 +77,7 @@ slurm.qos	"high"	unrecognized: httk-workflow reads no setting slurm.qos; pass it
 Setting an unrecognized key still stores it but prints a `warning:` line on
 standard error; setting an undeclared key prints a milder `notice:` line. On a terminal the markers are also colored; set `NO_COLOR` to
 turn that off. The namespaces `manager`, `slurm`, `confine`, `environment`,
-`seal`, `postprocess`, `children` and `httk_v1` belong to *httk-workflow*, so a
+`seal`, `postprocess`, `children`, `io` and `httk_v1` belong to *httk-workflow*, so a
 workflow reads its own keys outside them, and a code package uses its code's
 namespace, such as `vasp.`.
 
@@ -86,6 +86,25 @@ from the attempt's settings snapshot to place spawned children; see
 {doc}`campaigns`. Unlike other settings it is not overridden by job parameters
 or `HTTK_CHILDREN_PLACEMENT`: only the workspace setting, or a manager's pinned
 setting override, counts.
+
+`io.workers` (an integer from 1 to 32, default 8) sets how many jobs a batch
+command works on at once in this workspace: holding, adopting and releasing
+jobs in `job push`, `job pull`, `job transfer` and `job adopt`, writing the
+small files (up to 1 MiB) of a tar stream pushed into the workspace, and
+reading the rows and per-state counts of `job list`. Each job's own steps
+still run in order, and the output is the same as with one worker. The
+overlap helps most where file operations are slow round trips, as on shared
+HPC filesystems; how much depends on the filesystem. On a fast local disk it
+still helps the durable writes of transfers, while writing many small pushed
+files can be somewhat slower than with `1`. `1` restores strictly
+one-at-a-time processing. A value outside 1..32 is refused when set, and the
+`HTTK_IO_WORKERS` variable that attempts see does not affect commands. Each
+end of a transfer uses its own workspace's value:
+
+```console
+httk workspace settings set --key io.workers --value 16 default
+httk workspace settings set --key io.workers --value 4 cluster:default
+```
 
 Engine tunables (the visibility deadline of a shared filesystem and the
 retention limits of `gc`) are *workspace policy*, kept apart from application

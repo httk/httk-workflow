@@ -53,6 +53,13 @@ def _tag_of(ref: Any) -> str:
     return str(ref.job_key).partition("--")[0]
 
 
+@pytest.fixture(autouse=True)
+def _no_read_caches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests compare the reads of repeated listings: nothing may be served from the row or location cache."""
+
+    monkeypatch.setattr(_reading, "_remember", lambda *_args: None)
+
+
 @pytest.fixture
 def reads(monkeypatch: pytest.MonkeyPatch) -> Reads:
     record = Reads()
@@ -66,7 +73,7 @@ def reads(monkeypatch: pytest.MonkeyPatch) -> Reads:
                 raise RuntimeError(f"unexpected failure reading {ref.job_key}")
             if "badstate" in tag:
                 return None, f"{ref.job_key}: state.json is damaged"
-            return types.SimpleNamespace(phase={"kind": "idle"}, tag=tag), None
+            return types.SimpleNamespace(phase={"kind": "idle"}, tag=tag, unlocked=None), None
         finally:
             record.leave()
 
@@ -271,6 +278,7 @@ def test_the_read_ahead_never_takes_a_job_past_the_scan_limit(
                 priority=500,
                 token="x",
                 owner_id=None,
+                path=Path(f"/nowhere/{position}"),
             )
 
     monkeypatch.setattr(_reading, "_stream_after", endless)

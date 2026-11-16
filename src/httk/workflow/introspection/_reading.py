@@ -4,6 +4,8 @@ import glob
 import json
 import logging
 import os
+import stat
+import time
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -35,6 +37,22 @@ LOG_LIMIT = 16 << 20
 JSON_LIMIT = 1 << 20
 #: How many rows' documents a filtered page reads at once with more than one ``io.workers``.
 _READ_AHEAD = 64
+#: Each read cache below is cleared whole when it passes this many entries. Measured with ~160-character job
+#: paths: about 330 bytes per row and 320 per location (at most about 32 and 31 MiB); entries grow with the path
+#: length (~515 and 462 bytes at ~195 characters).
+_CACHE_LIMIT = 100_000
+#: How long a cached row is used, in seconds.
+_ROW_TTL = 60.0
+#: ``job list`` rows ``(stored at, phase kind, step)`` of unowned, locked jobs whose two documents were read
+#: intact, by job directory, for the life of the process. Display only. Only a job's owner writes inside it and
+#: every move out of ``owned/`` names the directory afresh, so no protocol actor changes these documents while the
+#: path exists (an unlocked job's ``job.json`` is edited in place, so it is never kept); rows expire after
+#: :data:`_ROW_TTL` so hand edits show within a minute.
+_ROWS: dict[str, tuple[float, object, str]] = {}
+#: Where each job was last seen, by ``(workspace root, job UUID)``: ``(path, state, owner id or placement)``,
+#: a hint checked with one ``lstat`` before use. Entries never expire: a stale one costs one ``lstat`` and the
+#: walk, and the dict is cleared whole at the limit.
+_LOCATIONS: dict[tuple[str, str], tuple[str, str, str]] = {}
 
 type _Documents = tuple[tuple[StateDoc | None, str | None], tuple[JobDefinition | None, str | None]]
 
@@ -77,6 +95,34 @@ class JobListPage:
         """
 
         return self.jobs[index]
+
+
+def _remember[K, V](cache: dict[K, V], key: K, value: V) -> None:
+    if len(cache) >= _CACHE_LIMIT:
+        cache.clear()
+    cache[key] = value
+
+
+def _location(ref: JobRef) -> tuple[str, str, str]:
+    detail = ref.owner_id if ref.state == OWNED else ref.placement
+    return str(ref.path), ref.state, str(detail)
+
+
+def _relocated(location: tuple[str, str, str]) -> JobRef:
+    path, state, detail = location
+    if state == OWNED:
+        return JobRef.from_path(Path(path), state=state, owner_id=detail)
+    return JobRef.from_path(Path(path), state=state, placement=PurePosixPath(detail))
+
+
+def _present(ref: JobRef) -> bool:
+    """Whether a remembered job directory is still there; ``False`` also when observing it fails."""
+
+    try:
+        status = _fs.lstat(_fs.loc(ref.path))
+    except OSError:
+        return False
+    return status is not None and stat.S_ISDIR(status.st_mode)
 
 
 def _check_states(states: Iterable[str] | None) -> tuple[str, ...]:
@@ -332,7 +378,7 @@ def _matches(ref: JobRef, selector: str) -> bool:
     return ref.job_id.startswith(selector) or ref.job_key.startswith(selector)
 
 
-def _resolve_id(workspace: Workspace, selector: str, refs: Iterable[JobRef]) -> JobRef:
+def _resolve_id(workspace: Workspace, selector: str, refs: Callable[[], Iterable[JobRef]]) -> JobRef:
     if not selector:
         raise ValueError("a job selector cannot be empty")
     try:
@@ -340,10 +386,16 @@ def _resolve_id(workspace: Workspace, selector: str, refs: Iterable[JobRef]) -> 
     except FormatError:
         job_id = None
     if job_id is not None:
-        ref = _kernel.locate(workspace, job_id, placement_hint=None, exhaustive=True)
+        key = (str(workspace.root), job_id)
+        ref = None if (location := _LOCATIONS.get(key)) is None else _relocated(location)
+        # Only this lstat guards a remembered location: a job moving between it and the caller's read is the
+        # window the walk has too.
+        if ref is None or not _present(ref):
+            ref = _kernel.locate(workspace, job_id, placement_hint=None, exhaustive=True)
         if ref is not None and selector in {ref.job_id, ref.job_key}:
+            _remember(_LOCATIONS, key, _location(ref))
             return ref
-    matches = {ref.job_id: ref for ref in refs if _matches(ref, selector)}
+    matches = {ref.job_id: ref for ref in refs() if _matches(ref, selector)}
     if not matches:
         raise ValueError(f"no job in {workspace.root} matches {selector!r}")
     if len(matches) > 1:
@@ -365,7 +417,7 @@ def resolve_job(workspace: Workspace, selector: str) -> JobRef:
     :raises ValueError: For an empty, unknown or ambiguous selector.
     """
 
-    return _resolve_id(workspace, selector, iter_jobs(workspace))
+    return _resolve_id(workspace, selector, lambda: iter_jobs(workspace))
 
 
 def selector_is_path(cwd: Path, selector: str) -> bool:
@@ -444,7 +496,7 @@ class JobSelectorResolver:
             return _unique(ref for path in paths for ref in self._resolve_path(path))
         if (self.cwd / selector).exists():
             return _unique(self._resolve_path(selector))
-        return [_resolve_id(self.workspace, selector, self._all())]
+        return [_resolve_id(self.workspace, selector, self._all)]
 
 
 def _unique(refs: Iterable[JobRef]) -> list[JobRef]:
@@ -522,13 +574,15 @@ def _read_row(ref: JobRef) -> _Documents | Exception:
 
 
 class _Ahead:
-    """A listed job, and its documents (or the error reading them) once read, possibly ahead of the loop."""
+    """A listed job, its cached row or its documents (or the error reading them) once read, possibly ahead."""
 
-    __slots__ = ("documents", "ref")
+    __slots__ = ("documents", "ref", "row")
 
     def __init__(self, ref: JobRef) -> None:
         self.ref = ref
         self.documents: _Documents | Exception | None = None
+        cached = None if ref.state == OWNED else _ROWS.get(str(ref.path))
+        self.row = None if cached is None or time.monotonic() - cached[0] > _ROW_TTL else (cached[1], cached[2])
 
 
 def _tag_matches(ref: JobRef, tag_contains: str | None) -> bool:
@@ -552,6 +606,8 @@ def list_jobs(
 
     With more than one ``io.workers`` the documents are read in chunks, up to that many jobs at once; the rows,
     the cursor and the warnings are those of the one-by-one reading (a *steps* filter may read up to 63 more jobs).
+    The row of an unowned, locked job read intact in this process within the last minute is not read again: no
+    protocol actor changes such a directory's documents while its name exists.
 
     :param workspace: The workspace.
     :param states: The states to list; every state when ``None``.
@@ -620,8 +676,9 @@ def list_jobs(
             for later in ahead
             if isinstance(later, _Ahead) and later.documents is None and _tag_matches(later.ref, tag_contains)
         )
-        chunk = [entry, *islice(unread, size - 1)]
-        while len(chunk) < size and (scan_limit is None or drawn < scan_limit):
+        # The next jobs that will need their rows; those with a cached row are not read.
+        window = [entry, *islice(unread, size - 1)]
+        while len(window) < size and (scan_limit is None or drawn < scan_limit):
             if ahead and isinstance(ahead[-1], Exception):
                 break  # the listing failed there: nothing follows
             try:
@@ -634,27 +691,33 @@ def list_jobs(
             drawn += 1
             ahead.append(later := _Ahead(ref))
             if _tag_matches(ref, tag_contains):
-                chunk.append(later)
+                window.append(later)
+        chunk = [later for later in window if later.row is None]
         for later, read in zip(
             chunk, _pool.run_ordered(_read_row, [later.ref for later in chunk], workers), strict=True
         ):
             later.documents = read
 
-    def matching(entry: _Ahead) -> tuple[StateDoc | None, str | None] | None:
-        """The job's state document and step when it passes the filters, else ``None``."""
+    def matching(entry: _Ahead) -> tuple[object, str | None] | None:
+        """The job's phase kind and step when it passes the filters, else ``None``."""
 
         ref = entry.ref
         if not _tag_matches(ref, tag_contains):
             return None
-        (doc, state_error), (job, job_error) = documents(entry)
-        if wanted_steps is None:
-            return doc, None if job is None or state_error is not None else current_step(job, doc)
-        if job is None or state_error is not None:
-            # Its step is unknown: a damaged state.json is not the initial step.
-            _LOGGER.warning("%s: %s; left out of the --step listing", ref.job_key, job_error or state_error)
-            return None
-        step = current_step(job, doc)
-        return (doc, step) if step in wanted_steps else None
+        row = entry.row
+        if row is None:
+            (doc, state_error), (job, job_error) = documents(entry)
+            phase = None if doc is None else doc.phase.get("kind")
+            if job is None or state_error is not None:
+                if wanted_steps is None:
+                    return phase, None
+                # Its step is unknown: a damaged state.json is not the initial step.
+                _LOGGER.warning("%s: %s; left out of the --step listing", ref.job_key, job_error or state_error)
+                return None
+            row = phase, current_step(job, doc)
+            if ref.state != OWNED and (doc is None or doc.unlocked is None):
+                _remember(_ROWS, str(ref.path), (time.monotonic(), *row))
+        return row if wanted_steps is None or row[1] in wanted_steps else None
 
     examined = 0
     last: JobRef | None = None
@@ -673,7 +736,7 @@ def list_jobs(
             continue
         examined += 1
         if (found := matching(entry)) is not None:
-            doc, step = found
+            phase, step = found
             placement = job_placement(ref)
             rows.append(
                 {
@@ -681,7 +744,7 @@ def list_jobs(
                     "job_id": ref.job_id,
                     "state": ref.state,
                     "step": step,
-                    "phase": None if doc is None else doc.phase.get("kind"),
+                    "phase": phase,
                     "placement": None if placement is None else placement_text(placement),
                     "priority": ref.priority,
                     "token": ref.token,
@@ -689,6 +752,7 @@ def list_jobs(
                 }
             )
             last = ref
+            _remember(_LOCATIONS, (str(workspace.root), ref.job_id), _location(ref))
         if scan_limit is not None and examined >= scan_limit:
             next_after = _ref_cursor(ref)
             break

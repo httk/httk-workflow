@@ -30,6 +30,7 @@ from httk.core.identity import ensure_identity_key, write_identity_config
 from httk.workflow.adapters import (
     add_remote,
 )
+from httk.workflow.introspection import _reading
 from httk.workflow.registry import (
     register_workspace,
 )
@@ -105,6 +106,14 @@ def _isolated_httk_config(tmp_path_factory: pytest.TempPathFactory, monkeypatch:
 
     monkeypatch.setenv("HTTK_CONFIG_HOME", str(tmp_path_factory.mktemp("httk-config")))
     monkeypatch.setenv("HTTK_DATA_HOME", str(tmp_path_factory.mktemp("httk-store")))
+
+
+@pytest.fixture(autouse=True)
+def _empty_read_caches() -> None:
+    """Start every test with the process-lifetime ``job list`` row and job location caches empty."""
+
+    _reading._ROWS.clear()
+    _reading._LOCATIONS.clear()
 
 
 @pytest.fixture(autouse=True)
