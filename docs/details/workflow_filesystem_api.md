@@ -444,6 +444,17 @@ as they are read, so a file the source keeps growing ends the copy. It is not
 atomic: callers copy to a private or partial name and move or deliver it
 afterwards.
 
+**`copy_file(src, dst, durable, metadata=False)`** copies one regular file's
+bytes as `shutil.copyfile` does (`src`, a file its caller trusts, is opened
+following symlinks; `dst` is created or truncated, never through a symlink,
+and `shutil.SameFileError` is raised, nothing truncated, when it is `src`
+itself), and with `metadata` keeps its permission bits, times and extended
+attributes as `shutil.copy2` does (so it serves as the `copy_function` of
+`shutil.copytree`). Durable mode
+fsyncs the copy on the descriptor that wrote it, not its directory (a sync
+barrier's walk or the caller does that): job creation's staged files and the
+store's package and artifact copies under a barrier of strategy `fsync`.
+
 **`extract_tar(stream, target, rename=None, workers=1, durable=False)`** extracts an untrusted tar
 stream (a pull's local side, `job adopt --stdin-tar`, `workflow install
 --stdin-tar`) without resolving any path by name. `target` is opened once,
@@ -510,7 +521,8 @@ members through a cached descriptor). Recorded differences from tarfile's
 - hard links arrive as copies: the names no longer alias and each takes its own
   space.
 
-**`Barrier(anchor, setting, inline=False, quiet=False)`** makes a landing
+**`Barrier(anchor, setting, inline=False, quiet=False, prime=True)`**, committed with
+`commit(count_hint=None, unit="file", tree=None)`, makes a landing
 durable once, before any of it is published: a job must not be renamed into
 `jobs/<state>/` before its files are on disk, and nothing is reported to
 another host before it is durable. It is used, in a durable workspace only, by
@@ -518,7 +530,69 @@ the far side of a push (`job adopt --stdin-tar`, not `workflow install
 --stdin-tar`), the local side of a pull, and a local transfer whose holds are
 on another filesystem (by the `st_dev` of `transfers/outgoing/` and of the
 destination's control directory) or kept (`--keep`), which copies every hold
-into a landing scratch first. The caller creates `anchor` durably and enters
+into a landing scratch first. Payload written outside the transfer paths is
+synced quietly before it is published:
+
+- job creation (`job new` and campaigns through `new_jobs`): one barrier for
+  the whole command, anchored on the control `tmp/` that holds every job's
+  `submit` scratch, entered (and primed) before the first job's `build/` is
+  created, and committed once per job, after its duplicate-tag check and
+  before its `build/` is renamed to `job/` (the scratch reconciler publishes a
+  `job/` after a crash, so only a durable payload is ever named so). Every
+  `syncfs` on the one descriptor reports a writeback error recorded since the
+  previous one, so each commit covers that job's writes: N jobs cost N + 1
+  `syncfs` calls. Under `fsync` the staged copies, prepared documents,
+  embedded workflow and `job.json` are fsynced on their writing descriptors,
+  each `httk.core.save` output is fsynced right after the save returns, and
+  each commit walks only that job's scratch (`commit(tree=...)`) for what
+  instantiate hooks wrote and for the directories. A failed commit does not
+  submit that job and stops the command as any failure does (the jobs before
+  it stay submitted; the message suggests `--duplicate-tag skip` to create
+  the rest); its scratch goes as for any failure before submission (files
+  moved in by `--input-move-from-job` are moved back, and a scratch holding
+  one that cannot go back is kept). `job submit` holds one barrier alike for
+  its copies (`copy_tree`, inline), committed per payload and stopping at a
+  failed commit with the payloads before it submitted, while `job submit
+  --move` syncs all its payloads together first, as `job adopt PATH` does
+  below (a `submit_payload` call on its own takes a barrier on its scratch, or
+  syncs its moved payload);
+- the workflow store (`workflow install`, its `--stdin-tar` and transfer copies
+  through `install_copy`, `workflow build`): a barrier anchored on the staged
+  `tree/` in the owner's `build` scratch around the package copy and
+  `install.json`, and for a build a second one, entered only after the build
+  command has run, anchored on `builds/` around the artifact copies and
+  `build.json`; both are committed before the rename into `workflows/` (and
+  before a replaced installation is moved aside), or a rebuild's into the
+  installation's `builds/`. Under `fsync` the copies and records are fsynced
+  as they are written and each commit walks its anchor (the build's own
+  working copy is outside both). A failed commit installs nothing; a store
+  copy so failed is reported `failed`, not `refused`;
+- `job adopt PATH` (and `job submit --move`) of operators' bundles (payloads)
+  on the workspace's filesystem: they were written before httk ran, so no
+  barrier could precede their first byte. Before anything is taken, one
+  barrier with `prime=False` anchored on the control directory makes the
+  whole batch durable (`sync_written`): one `syncfs` on a descriptor opened
+  now, or under `fsync` a walk of each bundle; where `syncfs` turns out not to
+  be supported at that commit, the bundles are walked instead. A bundle on
+  another filesystem is not synced here: the adoption copies it with inline
+  fsync. Best effort: a writeback error of their files is reported only while
+  nobody has seen it yet (one reported to someone else first, or lost with an
+  evicted inode, is not), and an unseen error of someone else on that
+  filesystem fails the batch too. An error cannot be attributed to one
+  bundle, so it fails every bundle of the batch (entries `failed`, nothing
+  taken), and since a reported error is seen and the failed pages may then
+  read back intact from memory while not on disk, a retry would not detect
+  the loss: the message says to re-create the bundles from their source
+  before trying again. When a walk cannot read an entry (its permissions or
+  type), no write error was reported: the message names the entry instead
+  (`SyncUnreadable`). A bundle path the sync cannot reach (`ENOTDIR`,
+  `EACCES`, ...) is skipped and reported by its own take; any other error of
+  the batch sync fails the batch. Transfers adopt only their own holds and
+  committed landings and say so (`adopt(..., synced=True)`); any other trusted
+  bundle that `adopt` is given, at a path or anchored below a directory
+  descriptor, is synced on its own first.
+
+The caller creates `anchor` durably and enters
 the barrier before the first byte lands; the barrier resolves its strategy
 with `resolve_sync(anchor, setting)`, `setting` being the `io.sync`
 application setting read afresh: `auto` (when unset) gives `syncfs` only on

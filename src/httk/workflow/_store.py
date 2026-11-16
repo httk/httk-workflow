@@ -16,7 +16,8 @@ Install, uninstall and build provide **no concurrency protection**, by
 decision: users do not change workflows that jobs are using, and two
 operators installing the same id concurrently is not handled. Every tree is
 assembled in an owner scratch and moved into place with
-:func:`httk.workflow._fs.move_owned`. A replaced installation is first moved
+:func:`httk.workflow._fs.move_owned`, in a durable workspace only once a sync
+barrier (``io.sync``) has made it durable. A replaced installation is first moved
 aside to ``<slug>--<h16>.old.<token>/``. A crash between the two renames
 leaves only that moved-aside tree, which lookups then use as the installation
 and ``httk workspace gc`` moves back into place; gc removes a moved-aside tree
@@ -39,13 +40,13 @@ import signal
 import stat
 import subprocess
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from httk.core.building import DEFAULT_TAG, BuildSpec, execute_build
+from httk.core.building import DEFAULT_TAG, BuildResult, BuildSpec, execute_build
 from httk.core.digests import sha256_file, tree_digest
 from httk.core.git_sources import parse_git_uri
 
@@ -575,6 +576,33 @@ def _scratch(owner: Owner) -> Iterator[Path]:
         reconcile_scratch(owner, path)
 
 
+def _sync_barrier(workspace: KernelWorkspace, tree: Path) -> AbstractContextManager[_fs.Barrier | None]:
+    """The sync barrier of a *tree* staged in a durable *workspace* (``io.sync`` read afresh); none in a non-durable one.
+
+    Entered before the first byte of *tree* is written and committed (:func:`_commit`) before *tree* is renamed into
+    ``workflows/``: one ``syncfs`` per published tree, or, under ``fsync``, the copies fsynced as they are written
+    and a walk of *tree* (its directories, and anything written without an inline fsync). No progress line.
+    """
+
+    if not workspace.durable:
+        return nullcontext(None)
+    from httk.workflow.workspace import Workspace
+
+    setting = workspace.io_sync() if isinstance(workspace, Workspace) else "auto"
+    return _fs.Barrier(tree, setting, quiet=True)
+
+
+def _commit(barrier: _fs.Barrier | None, what: str) -> None:
+    """Commit a store barrier: nothing of *what* is published when it fails."""
+
+    if barrier is None:
+        return
+    try:
+        barrier.commit()
+    except _fs.SyncFailed as exc:
+        raise _fs.SyncFailed(exc.errno, f"{what} was not published, nothing changed: {exc.strerror}") from exc
+
+
 def _not_source(spec: BuildSpec | None) -> Callable[[str], bool]:
     """The relative paths of a package that are not its sources: ``.git`` anywhere and the declared artifacts."""
 
@@ -596,8 +624,11 @@ def source_digest(package: Path, *, declared_by: Path | None = None) -> str:
     return tree_digest(package, exclude=_not_source(read_build_spec(declared_by or package)))
 
 
-def _copy_package(source: Path, destination: Path, spec: BuildSpec | None) -> None:
-    """Copy a package's sources, refusing symlinks and special files, skipping ``.git`` and build artifacts."""
+def _copy_package(source: Path, destination: Path, spec: BuildSpec | None, *, durable: bool = False) -> None:
+    """Copy a package's sources, refusing symlinks and special files, skipping ``.git`` and build artifacts.
+
+    With *durable*, every copied file is fsynced on its writing descriptor (not its directories).
+    """
 
     skipped_source = _not_source(spec)
 
@@ -612,24 +643,43 @@ def _copy_package(source: Path, destination: Path, spec: BuildSpec | None) -> No
                 raise ValueError(f"workflow package {source} contains a symlink or special file: {relative}")
         return skipped
 
-    shutil.copytree(source, destination, ignore=ignore)
+    def copy(src: str, dst: str) -> None:
+        _fs.copy_file(src, dst, durable=durable, metadata=True)
+
+    shutil.copytree(source, destination, ignore=ignore, copy_function=copy)
     _writable(destination)
 
 
 def _build_into(
-    package: Path, spec: BuildSpec, builds: Path, work: Path, stamp: Mapping[str, object], *, durable: bool
+    workspace: KernelWorkspace, package: Path, spec: BuildSpec, builds: Path, work: Path, stamp: Mapping[str, object]
 ) -> Path:
-    """Build a copy of *package* in *work* and register its artifacts as ``builds/<tag>/``."""
+    """Build a copy of *package* in *work* and register its artifacts as ``builds/<tag>/``, durable before return.
+
+    The build runs outside any sync barrier; one barrier on *builds* (created durably) covers the artifact copies
+    and ``build.json``, which under ``fsync`` are fsynced as they are written.
+    """
 
     source = work / "build-src"
     shutil.copytree(package, source)
     _writable(source)
     result = execute_build(source, spec, strip_env_prefixes=("HTTK_WORKFLOW_",), env=_LANGUAGES_DIR)
-    target = builds / result.tag
+    _fs.make_dirs(builds, durable=workspace.durable)
+    with _sync_barrier(workspace, builds) as barrier:
+        durable = barrier is not None and barrier.fsync_inline
+        target = _register_build(source, spec, result, builds / result.tag, stamp, durable=durable)
+        _commit(barrier, f"the build of workflow {stamp['id']}")
+    return target
+
+
+def _register_build(
+    source: Path, spec: BuildSpec, result: BuildResult, target: Path, stamp: Mapping[str, object], *, durable: bool
+) -> Path:
+    """Copy a build's artifacts to ``<target>/artifacts/`` and write its ``build.json`` (*durable*: fsynced)."""
+
     for relative in result.artifact_files:
         destination = target / "artifacts" / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source / relative, destination)
+        _fs.copy_file(source / relative, destination, durable=durable, metadata=True)
     document = {
         "format": _BUILD_FORMAT,
         "format_version": 1,
@@ -947,14 +997,17 @@ def _install(
         }
         assert provider.directory is not None  # _resolve refuses providers without a package directory
         tree = work / "tree"
-        tree.mkdir()
-        _copy_package(provider.directory, tree / "package", provider.build)
-        tree_sha256 = source_digest(tree / "package")
-        record = _record(workflow_id, name, origin, reference, tree_sha256, recorded, defaults, provider)
-        _fs.write_file(_fs.loc(tree / "install.json"), _encode(record), durable=workspace.durable)
+        _fs.make_dirs(tree, durable=workspace.durable)
+        with _sync_barrier(workspace, tree) as barrier:
+            durable = barrier is not None and barrier.fsync_inline
+            _copy_package(provider.directory, tree / "package", provider.build, durable=durable)
+            tree_sha256 = source_digest(tree / "package")
+            record = _record(workflow_id, name, origin, reference, tree_sha256, recorded, defaults, provider)
+            _fs.write_file(_fs.loc(tree / "install.json"), _encode(record), durable=durable)
+            _commit(barrier, f"the workflow {workflow_id}")
         if build and provider.build is not None:
             stamp = {"id": workflow_id, "tree_sha256": tree_sha256}
-            _build_into(tree / "package", provider.build, tree / "builds", work, stamp, durable=workspace.durable)
+            _build_into(workspace, tree / "package", provider.build, tree / "builds", work, stamp)
         target = _workflows(workspace) / _dirname(workflow_id, name)
         # A replaced installation is moved aside beside it, outside the scratch, so a crash between the two
         # renames leaves it as <target>.old.<token>: lookups use it while <target> is missing, gc restores it.
@@ -1070,23 +1123,26 @@ def install_copy(workspace: KernelWorkspace, owner: Owner, entry: Path, *, sourc
     with _scratch(owner) as work:
         tree = work / "tree"
         _fs.make_dirs(tree, durable=workspace.durable)
-        _copy_package(source, tree / "package", read_build_spec(source))
-        # Everything recorded is derived from the copy itself, never from the copied record or the source tree.
-        tree_sha256 = source_tree_digest(tree / "package")
-        if tree_sha256 != claimed:
-            raise ValueError(f"{entry}: tree digest mismatch: the package has {tree_sha256}, the record {claimed}")
-        provider = parse_workflow_manifest(tree / "package", _uri=workflow_id)
-        name = provider.name or provider.workflow_id
-        if (workflow_id.startswith("local:") and workflow_id != f"local:{name}") or (
-            workflow_id.startswith("adhoc:") and not workflow_id.startswith(f"adhoc:{name}@")
-        ):
-            raise ValueError(f"{entry}: the id {workflow_id} does not name the package's workflow {name!r}")
-        if set(calls) != set(provider.calls or {}):
-            raise ValueError(f"{entry}: the recorded calls {sorted(calls)} are not the manifest's")
-        if set(slots) != set(provider.slots or {}):
-            raise ValueError(f"{entry}: the recorded call slots {sorted(slots)} are not the manifest's")
-        record = _record(workflow_id, name, source_label, reference, tree_sha256, calls, slots, provider)
-        _fs.write_file(_fs.loc(tree / "install.json"), _encode(record), durable=workspace.durable)
+        with _sync_barrier(workspace, tree) as barrier:
+            durable = barrier is not None and barrier.fsync_inline
+            _copy_package(source, tree / "package", read_build_spec(source), durable=durable)
+            # Everything recorded is derived from the copy itself, never from the copied record or the source tree.
+            tree_sha256 = source_tree_digest(tree / "package")
+            if tree_sha256 != claimed:
+                raise ValueError(f"{entry}: tree digest mismatch: the package has {tree_sha256}, the record {claimed}")
+            provider = parse_workflow_manifest(tree / "package", _uri=workflow_id)
+            name = provider.name or provider.workflow_id
+            if (workflow_id.startswith("local:") and workflow_id != f"local:{name}") or (
+                workflow_id.startswith("adhoc:") and not workflow_id.startswith(f"adhoc:{name}@")
+            ):
+                raise ValueError(f"{entry}: the id {workflow_id} does not name the package's workflow {name!r}")
+            if set(calls) != set(provider.calls or {}):
+                raise ValueError(f"{entry}: the recorded calls {sorted(calls)} are not the manifest's")
+            if set(slots) != set(provider.slots or {}):
+                raise ValueError(f"{entry}: the recorded call slots {sorted(slots)} are not the manifest's")
+            record = _record(workflow_id, name, source_label, reference, tree_sha256, calls, slots, provider)
+            _fs.write_file(_fs.loc(tree / "install.json"), _encode(record), durable=durable)
+            _commit(barrier, f"the copy of workflow {workflow_id}")
         target = _workflows(workspace) / _dirname(workflow_id, name)
         try:
             # Rename as CAS, without install's move-aside: an occupied target is another actor's installation.
@@ -1148,7 +1204,7 @@ def build(workspace: KernelWorkspace, owner: Owner, id_or_name: str) -> Path:
         raise ValueError(f"workflow {found.id} declares no [workflow.build]")
     with _scratch(owner) as work:
         stamp = {"id": found.id, "tree_sha256": found.record.get("tree_sha256")}
-        built = _build_into(found.package, spec, work / "builds", work, stamp, durable=workspace.durable)
+        built = _build_into(workspace, found.package, spec, work / "builds", work, stamp)
         target = found.directory / "builds" / built.name
         if _fs.exists(_fs.loc(target)):
             _fs.move_owned(_fs.loc(target), _fs.loc(work / "old"), durable=workspace.durable)

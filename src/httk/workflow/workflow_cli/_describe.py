@@ -744,6 +744,9 @@ def _install_copies(arguments: argparse.Namespace, context: Any) -> int:
                         workspace, owner, Path(directory).absolute(), source_label=label
                     )
                     row.update(id=installed.id, status=status, build=installed.record.get("build") is True)
+                except _fs.SyncFailed as exc:
+                    # Not a verdict on the copy: it could not be made durable, so nothing was installed.
+                    row.update(id=None, status="failed", reason=str(exc))
                 except _ERRORS as exc:
                     row.update(id=None, status="refused", reason=str(exc))
                 rows.append(row)
@@ -772,7 +775,7 @@ def _install_copies(arguments: argparse.Namespace, context: Any) -> int:
                     _consume(workspace, directory)
                 except _ERRORS as exc:
                     print(f"{directory}: the pushed copy was not discarded: {exc}", file=sys.stderr)
-    failed = any(row["status"] == "refused" or row.get("build_status") == "failed" for row in rows)
+    failed = any(row["status"] in ("refused", "failed") or row.get("build_status") == "failed" for row in rows)
     return 1 if failed or any(entry["status"] == "failed" for entry in built) else 0
 
 

@@ -916,6 +916,41 @@ def _landing_copy(workspace: _kernel.KernelWorkspace, source: Path) -> bool:
     )
 
 
+def sync_operator_bundles(workspace: "Workspace", bundles: Sequence[Path | _fs.Loc], *, what: str = "bundle") -> None:
+    """Make operators' bundles (or payloads) on *workspace*'s filesystem durable before any of them is taken.
+
+    They were written before httk ran (unpacked by scp or tar, say): one no-prime ``syncfs`` on the control
+    directory for all of them, or under ``fsync`` a walk of each (:func:`httk.workflow._fs.sync_written`); a bundle
+    on another filesystem is left to the adoption's copy, which fsyncs it. Nothing in a non-durable workspace.
+
+    :param workspace: The workspace taking them.
+    :param bundles: Their paths, or anchored locations.
+    :param what: What they are, for the message.
+    :raises httk.workflow._fs.SyncUnreadable: When a walk cannot read an entry, naming it; nothing was taken.
+    :raises httk.workflow._fs.SyncFailed: When the sync fails, with a message saying that none may be intact on
+        disk and must be re-created from its source; nothing was taken.
+    """
+
+    if not workspace.durable:
+        return
+    try:
+        _fs.sync_written(workspace.control, bundles, workspace.io_sync())
+    except _fs.SyncUnreadable as exc:
+        # Nothing reported a write error: the entry is to be made readable, the files are as they were.
+        raise _fs.SyncUnreadable(exc.errno, f"not taken: {exc.strerror}") from exc
+    except _fs.SyncFailed as exc:
+        raise _fs.SyncFailed(exc.errno, sync_failure(what, exc)) from exc
+
+
+def sync_failure(what: str, exc: OSError) -> str:
+    """The message of a failed sync of trees written before httk ran: none was taken, and none may be intact."""
+
+    return (
+        f"not taken: syncing the {what} to disk failed ({exc.strerror}), so its files may not be intact on disk; "
+        f"re-create the {what} from its source before trying again (a retry would not detect the loss)"
+    )
+
+
 def _refuse(owner: Owner, scratch: Path, bundle: Path, record: _Record, reason: str) -> str:
     """Move a refused bundle away and discard the scratch, or keep it; return the complete message."""
 
@@ -1337,6 +1372,7 @@ def adopt(
     untrusted: bool,
     refused_to: Path | None = None,
     absent: frozenset[str] | None = None,
+    synced: bool = False,
 ) -> AdoptReport | None:
     """Take a bundle into the workspace: validate, rekey when untrusted, deduplicate and publish bottom-up.
 
@@ -1357,12 +1393,20 @@ def adopt(
     :param refused_to: Where refused bundles go.
     :param absent: For a trusted bundle of a batch: :func:`settle_absent` of the batch, taken before any of it
         was adopted, so that this adoption does not wait out the visibility deadline again.
+    :param synced: The caller made the bundle durable already: a transfer's own hold or committed landing, or an
+        operator's bundle the caller synced with its batch (:func:`sync_operator_bundles`). Otherwise a trusted
+        bundle at a path, in a durable workspace, is an operator's, written before httk ran, and is synced on its
+        own before the take.
     :return: The report; ``None`` when another actor took *source* first.
     :raises httk.workflow._bundles.BundleError: When the bundle is refused; the message says where it went.
+    :raises httk.workflow._fs.SyncFailed: When the bundle could not be synced; nothing was taken.
     """
 
     durable = workspace.durable
     src = source if isinstance(source, _fs.Loc) else _fs.loc(Path(source))
+    if not (synced or untrusted):
+        # Trusted, at a path or below a descriptor: an operator's bundle, written before httk ran.
+        sync_operator_bundles(workspace, [src])
     name = src.name()
     if name in RESERVED_NAMES or _RECORD_TEMPORARY.fullmatch(name):
         raise BundleError(f"a bundle may not be named {name!r}")

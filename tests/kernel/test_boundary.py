@@ -177,8 +177,7 @@ SHUTIL_COPY_CALLERS = frozenset(
         "compat/cwl/cwl_runner.py",
         "compat/v1/v1_runner.py",
         "compat/v1/templates.py",
-        # Preparing a payload in a private scratch before it is submitted through the kernel.
-        "scaffold.py",
+        # Language realizations preparing a payload in a private scratch before it is submitted through the kernel.
         "compat/cwl/__init__.py",
         "compat/jobflow/__init__.py",
         # Store installations, built in the owner's build scratch and installed by rename.
@@ -215,7 +214,6 @@ WRITE_ALLOWED = frozenset(
         "_store.py:_adhoc_package",
         "_store.py:_document_package",
         # Preparing a payload in a private directory before it is submitted through the kernel.
-        "scaffold.py:_build_payload",
         "compat/cwl/__init__.py:_prepare.instantiate",
         "workflow_cli/_job.py:_workflow_target",
         # Runner side: the outputs document in the runner's own work directory.
@@ -249,9 +247,8 @@ MKDIR_ALLOWED = frozenset(
         "_data.py:Transaction.put",
         # Store installations, built in the owner's private build scratch.
         "_store.py:_adhoc_package",
-        "_store.py:_build_into",
+        "_store.py:_register_build",
         "_store.py:_document_package",
-        "_store.py:_install",
     }
 )
 

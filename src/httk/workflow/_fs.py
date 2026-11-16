@@ -19,11 +19,12 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import stat
 import sys
 import tarfile
 from collections import Counter, OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import cache, partial
 from pathlib import Path, PurePosixPath
@@ -48,12 +49,14 @@ __all__ = [
     "Moved",
     "SyncFailed",
     "SyncStrategy",
+    "SyncUnreadable",
     "TooLarge",
     "UnsafePath",
     "UntrustedContentError",
     "WalkLimits",
     "anchored",
     "carries",
+    "copy_file",
     "copy_tree",
     "create_exclusive",
     "deliver",
@@ -80,6 +83,7 @@ __all__ = [
     "rename_probe",
     "resolve_sync",
     "set_fault_injector",
+    "sync_written",
     "walk_untrusted",
     "write_all",
     "write_file",
@@ -1134,6 +1138,76 @@ def copy_tree(src: Path | Loc, dst: Path, *, durable: bool, limits: WalkLimits |
         _fsync_parent(loc(dst))
 
 
+#: What :func:`shutil.copy2` ignores when extended attributes cannot be listed, read or (with ``EPERM``) set.
+_XATTR_IGNORED = frozenset({errno.ENOTSUP, errno.ENODATA, errno.EINVAL})
+
+
+def _copy_xattrs(source: int, target: int) -> None:
+    # As shutil.copy2: every extended attribute the source has and the target's filesystem takes (none off Linux).
+    if not hasattr(os, "listxattr"):
+        return
+    try:
+        names = os.listxattr(source)
+    except OSError as exc:
+        if exc.errno not in _XATTR_IGNORED:
+            raise
+        return
+    for name in names:
+        try:
+            os.setxattr(target, name, os.getxattr(source, name))
+        except OSError as exc:
+            if exc.errno not in _XATTR_IGNORED | {errno.EPERM}:
+                raise
+
+
+def copy_file(
+    src: str | os.PathLike[str], dst: str | os.PathLike[str], *, durable: bool, metadata: bool = False
+) -> None:
+    """Copy one regular file's bytes to *dst*, as :func:`shutil.copyfile` does, fsyncing it on its writing descriptor.
+
+    *src* is a file its caller trusts, opened following symlinks as :func:`shutil.copyfile` does; *dst* is created,
+    or truncated when it exists (never when it is *src* itself), never through a symlink. Its directory is not
+    fsynced: a sync barrier's walk, or the caller, does that.
+
+    :param src: The file to copy.
+    :param dst: The copy.
+    :param durable: Fsync the copy before closing it.
+    :param metadata: Also keep the permission bits, times and extended attributes, as :func:`shutil.copy2` does (and
+        so usable as the ``copy_function`` of :func:`shutil.copytree`).
+    :raises UnsafePath: When *src* is not a regular file.
+    :raises shutil.SameFileError: When *dst* is *src*; neither is changed.
+    :raises shutil.SpecialFileError: When *dst* exists and is not a regular file (a device, say); it is not
+        written.
+    :raises OSError: When *src* cannot be read or *dst* written (``ELOOP`` for a symlink at *dst*).
+    """
+
+    source = os.open(src, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(source)
+        if not stat.S_ISREG(opened.st_mode):
+            raise UnsafePath(f"{os.fspath(src)} is not a regular file", "not_regular")
+        # Truncated only once it is known to be a regular file other than the source; never blocking on a FIFO.
+        target = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o666)
+        try:
+            written = os.fstat(target)
+            if not stat.S_ISREG(written.st_mode):
+                raise shutil.SpecialFileError(f"{os.fspath(dst)!r} is not a regular file")
+            if (written.st_dev, written.st_ino) == (opened.st_dev, opened.st_ino):
+                raise shutil.SameFileError(f"{os.fspath(src)!r} and {os.fspath(dst)!r} are the same file")
+            os.ftruncate(target, 0)
+            while chunk := os.read(source, 1 << 20):
+                write_all(target, chunk)
+            if metadata:
+                _copy_xattrs(source, target)
+                _finish_copy(target, opened, durable=durable)
+            elif durable:
+                os.fsync(target)
+        finally:
+            os.close(target)
+    finally:
+        os.close(source)
+
+
 #: Directory descriptors one :func:`extract_tar` keeps open below its target, least recently used closed first.
 _EXTRACT_DIRECTORIES = 64
 #: Linux's ``PATH_MAX``, which counts the separator after *target* and the terminating NUL: *target*, ``/`` and
@@ -1952,6 +2026,13 @@ class SyncFailed(OSError):
     """
 
 
+class SyncUnreadable(SyncFailed):
+    """A walk of strategy ``fsync`` could not list or open an entry (its permissions, its type, its depth).
+
+    No writeback error was reported: the entry, which the message names, was never synced.
+    """
+
+
 @cache
 def _syncfs_function() -> Callable[[int], int] | None:
     # The libc function with its argument types, or None when libc has no syncfs (resolved once).
@@ -2132,15 +2213,19 @@ def fsync_landing(anchor: int, *, label: str = "") -> int:
     :param anchor: The directory descriptor of the landing (left open).
     :param label: The landing's path, for messages.
     :return: How many regular files were fsynced.
-    :raises SyncFailed: When an entry cannot be listed, opened or fsynced, or a directory lies deeper than 256
-        levels (which bounds the descriptors the walk keeps open).
+    :raises SyncUnreadable: When an entry cannot be listed or opened, or a directory lies deeper than 256 levels
+        (which bounds the descriptors the walk keeps open).
+    :raises SyncFailed: When an fsync reports an error.
     """
+
+    def unreadable(error: int | None, where: str, why: str | None) -> SyncUnreadable:
+        return SyncUnreadable(error, f"cannot read {where} to sync it to disk: {why}")
 
     count = 0
     try:
         listing = sorted(os.listdir(anchor))
     except OSError as exc:
-        raise SyncFailed(exc.errno, f"cannot sync {label} to disk: {exc.strerror}") from exc
+        raise unreadable(exc.errno, label, exc.strerror) from exc
     # Each directory open below the anchor (the caller owns the anchor): its descriptor, path and names left.
     pending: list[tuple[int, PurePosixPath, list[str]]] = [(anchor, PurePosixPath(), listing)]
     try:
@@ -2162,9 +2247,7 @@ def fsync_landing(anchor: int, *, label: str = "") -> int:
                 mode = os.lstat(name, dir_fd=directory).st_mode
                 if stat.S_ISDIR(mode):
                     if len(path.parts) > _LANDING_DEPTH:
-                        raise SyncFailed(
-                            errno.ELOOP, f"cannot sync {label}/{path} to disk: deeper than {_LANDING_DEPTH} levels"
-                        )
+                        raise unreadable(errno.ELOOP, f"{label}/{path}", f"deeper than {_LANDING_DEPTH} levels")
                     child = os.open(name, _DIR_FLAGS, dir_fd=directory)
                     try:
                         listing = sorted(os.listdir(child))
@@ -2172,17 +2255,21 @@ def fsync_landing(anchor: int, *, label: str = "") -> int:
                         os.close(child)
                         raise
                     pending.append((child, path, listing))
-                elif stat.S_ISREG(mode):
-                    descriptor = os.open(name, _SOURCE_FLAGS, dir_fd=directory)
-                    try:
-                        os.fsync(descriptor)
-                    finally:
-                        os.close(descriptor)
-                    count += 1
+                    continue
+                descriptor = os.open(name, _SOURCE_FLAGS, dir_fd=directory) if stat.S_ISREG(mode) else None
             except SyncFailed:
                 raise
             except OSError as exc:
+                raise unreadable(exc.errno, f"{label}/{path}", exc.strerror) from exc
+            if descriptor is None:
+                continue  # symlinks and special files: nothing of theirs to sync
+            try:
+                os.fsync(descriptor)
+            except OSError as exc:
                 raise SyncFailed(exc.errno, f"cannot sync {label}/{path} to disk: {exc.strerror}") from exc
+            finally:
+                os.close(descriptor)
+            count += 1
     finally:
         for directory, _relative, _names in pending:
             if directory != anchor:
@@ -2202,18 +2289,28 @@ class Barrier:
     *inline*, and the commit has nothing left to do but say so; otherwise it fsyncs the landing after the fact
     (:func:`fsync_landing`). Leaving without a commit syncs nothing. A running ``syncfs`` cannot be interrupted.
 
+    Trees written before the barrier could be entered (operators' bundles unpacked by scp or tar) take *prime*
+    false (:func:`sync_written`): no prime consumes a writeback error of their files, so the commit's ``syncfs``
+    reports one that nobody has seen yet (best effort: one already reported to someone else, or lost with an
+    evicted inode, is not), and also any unseen one of someone else on that filesystem; where ``syncfs`` turns
+    out not to be supported, the commit walks its *tree* instead.
+
     :param anchor: The landing directory, which the caller has created durably.
     :param setting: The ``io.sync`` value, read fresh by the caller.
     :param inline: The caller writes every file of the landing with fsync on its writing descriptor when
         :attr:`fsync_inline` is true (an extraction or a copy), rather than another process writing it.
     :param quiet: Print no progress line.
+    :param prime: Prime the barrier at entry; false only for a tree written before it was entered.
     """
 
-    def __init__(self, anchor: Path, setting: object, *, inline: bool = False, quiet: bool = False) -> None:
+    def __init__(
+        self, anchor: Path, setting: object, *, inline: bool = False, quiet: bool = False, prime: bool = True
+    ) -> None:
         self.anchor = anchor
         self.setting = setting
         self.inline = inline
         self.quiet = quiet
+        self.prime = prime
         self.strategy: SyncStrategy = "fsync"
         self.reason = ""
         self._descriptor: int | None = None
@@ -2228,7 +2325,11 @@ class Barrier:
         self.strategy, self.reason = resolve_sync(self.anchor, self.setting)
         self._descriptor = os.open(self.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
-            if self.strategy == "syncfs" and not _prime(self._descriptor, os.fstat(self._descriptor).st_dev):
+            if (
+                self.strategy == "syncfs"
+                and self.prime
+                and not _prime(self._descriptor, os.fstat(self._descriptor).st_dev)
+            ):
                 if self.setting == "syncfs":
                     _LOGGER.warning("io.sync is syncfs, but syncfs is not supported here: using fsync")
                 self.strategy, self.reason = "fsync", "fsync (syncfs is not supported on this filesystem here)"
@@ -2252,8 +2353,13 @@ class Barrier:
         strategy, _, detail = self.reason.partition(" (")
         print(f"{verb.format(what)} ({strategy}: {detail.removesuffix(')')})", file=sys.stderr, flush=True)
 
-    def commit(self, count_hint: int | None = None, *, unit: str = "file") -> None:
+    def commit(self, count_hint: int | None = None, *, unit: str = "file", tree: "Path | Loc | None" = None) -> None:
         """Make the landing durable: ``syncfs`` on the anchor's descriptor, or the late walk of strategy ``fsync``.
+
+        A barrier may commit several times, one landing below *anchor* after another, each before its own
+        publication: every ``syncfs`` on the one descriptor reports a writeback error recorded since the previous
+        one (or since the prime), so each commit covers what was written since the last, and a failed one fails
+        only what it was to publish. Under ``fsync`` the walk covers *tree*, that landing alone.
 
         Unless *quiet*, a progress line naming the strategy goes to standard error: ``syncing N landed file(s) to
         disk (syncfs: lustre, Linux 5.14)`` before a ``syncfs`` or a walk, and ``made N landed file(s) durable
@@ -2262,8 +2368,10 @@ class Barrier:
 
         :param count_hint: How many were landed, for the progress line.
         :param unit: What *count_hint* counts, for the progress line: ``file`` or ``bundle``.
-        :raises SyncFailed: When the ``syncfs`` or the walk fails; it is logged once as a warning naming the
-            strategy.
+        :param tree: The directory (or anchored location of one) below *anchor*, or *anchor* itself (the default),
+            that the walk of strategy ``fsync`` covers.
+        :raises SyncFailed: When the ``syncfs`` or the walk fails (:class:`SyncUnreadable` when the walk cannot
+            read an entry); it is logged once as a warning naming the strategy.
         :raises ValueError: Outside the context.
         """
 
@@ -2274,16 +2382,87 @@ class Barrier:
             return
         self._say("syncing {} to disk", count_hint, unit)
         if self.strategy == "fsync":
-            try:
-                fsync_landing(self._descriptor, label=str(self.anchor))
-            except SyncFailed as exc:
-                _LOGGER.warning("the sync barrier (%s) of %s failed: %s", self.reason, self.anchor, exc)
-                raise
+            self._walk(tree)
             return
         try:
             _syncfs(self._descriptor)
         except OSError as exc:
+            if not self.prime and exc.errno in _SYNCFS_UNSUPPORTED:
+                # No prime probed it: syncfs does not work here, so the tree is walked instead.
+                _syncfs_works[os.fstat(self._descriptor).st_dev] = False
+                self.strategy, self.reason = "fsync", "fsync (syncfs is not supported on this filesystem here)"
+                self._walk(tree)
+                return
             _LOGGER.warning("the sync barrier (%s) of %s failed: %s", self.reason, self.anchor, exc)
             raise SyncFailed(
                 exc.errno, f"syncfs of {self.anchor} failed, so what landed there is not durable: {exc.strerror}"
             ) from exc
+
+    def _walk(self, tree: "Path | Loc | None") -> None:
+        # The late walk of strategy fsync over *tree* (the anchor by default), logged once when it fails.
+        assert self._descriptor is not None
+        label = str(self.anchor if tree is None else tree.path if isinstance(tree, Loc) else tree)
+        try:
+            if tree is None:
+                fsync_landing(self._descriptor, label=label)
+                return
+            try:
+                if isinstance(tree, Loc):
+                    descriptor = os.open(str(tree.path), _DIR_FLAGS, dir_fd=tree.at)
+                else:
+                    descriptor = os.open(tree, _DIR_FLAGS)
+            except OSError as exc:
+                raise SyncUnreadable(exc.errno, f"cannot read {label} to sync it to disk: {exc.strerror}") from exc
+            try:
+                fsync_landing(descriptor, label=label)
+            finally:
+                os.close(descriptor)
+        except SyncFailed as exc:
+            _LOGGER.warning("the sync barrier (%s) of %s failed: %s", self.reason, label, exc)
+            raise
+
+
+def sync_written(anchor: Path, trees: Sequence[Path | Loc], setting: object) -> list[Path | Loc]:
+    """Make trees that were written before httk ran (operators' bundles or payloads) durable, together.
+
+    Only the trees that are directories on the filesystem of *anchor* are synced (another filesystem's are copied
+    by their caller, which fsyncs the copy): one ``syncfs`` on a descriptor opened on *anchor* now, with no prime,
+    for all of them, or under ``fsync`` a walk of each. No barrier could precede their first byte, so this is best
+    effort: a writeback error is reported only while nobody has seen it yet, and an unseen one of someone else on
+    that filesystem fails the call too. An error cannot be attributed to one tree; once reported, it is seen, so
+    the failed pages may read back intact from memory while not on disk: every tree must then be re-created from
+    its source, never merely synced again.
+
+    :param anchor: An existing directory on the filesystem written (the workspace's control directory).
+    :param trees: The trees: absolute paths, or anchored locations (a trusted name below a directory descriptor).
+    :param setting: The ``io.sync`` value, read fresh by the caller.
+    :return: The trees synced (those on *anchor*'s filesystem).
+    :raises SyncFailed: When the ``syncfs`` or a walk fails (:class:`SyncUnreadable` when a walk cannot read an
+        entry).
+    :raises OSError: When *anchor* cannot be opened.
+    """
+
+    device = os.stat(anchor).st_dev
+    synced: list[Path | Loc] = []
+    for tree in trees:
+        try:
+            status = lstat(tree) if isinstance(tree, Loc) else os.lstat(tree)
+        except OSError:
+            continue  # gone or unreachable (ENOTDIR, EACCES, ELOOP, ...): its caller's take reports it
+        if status is None:
+            continue
+        if stat.S_ISDIR(status.st_mode) and status.st_dev == device:
+            synced.append(tree)
+    if not synced:
+        return synced
+    with Barrier(anchor, setting, quiet=True, prime=False) as barrier:
+        pending = synced
+        if barrier.strategy == "syncfs":
+            # One syncfs for every tree; where it turns out not to be supported, the first tree is walked instead.
+            barrier.commit(tree=synced[0])
+            if barrier.strategy == "syncfs":
+                return synced
+            pending = synced[1:]
+        for tree in pending:
+            barrier.commit(tree=tree)
+    return synced

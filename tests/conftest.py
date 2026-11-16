@@ -118,7 +118,7 @@ def _empty_read_caches() -> None:
 
 @pytest.fixture(autouse=True)
 def _isolated_workflow_logging() -> Iterator[None]:
-    """Restore the ``httk.workflow`` logger after every test.
+    """Restore the ``httk.workflow`` logger, and the ``httk`` logger's level, after every test.
 
     CLI entry points deliberately set ``propagate = False`` and install handlers
     on ``httk.workflow`` for their own process; inside one pytest worker that
@@ -129,10 +129,14 @@ def _isolated_workflow_logging() -> Iterator[None]:
     propagate = logger.propagate
     handlers = list(logger.handlers)
     level = logger.level
+    # Serving a store (httk-serve) lowers the "httk" logger's level, admitting INFO records into later tests.
+    package = logging.getLogger("httk")
+    package_level = package.level
     yield
     logger.propagate = propagate
     logger.handlers[:] = handlers
     logger.setLevel(level)
+    package.setLevel(package_level)
 
 
 def register_ws(

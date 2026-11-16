@@ -279,6 +279,7 @@ def prepare_job_payload(
     with open(root / "job.json", "xb") as stream:
         stream.write(data)
         if durable:
+            stream.flush()  # the buffered bytes reach the descriptor before it is fsynced
             os.fsync(stream.fileno())
     return JobDefinition.from_bytes(data)
 

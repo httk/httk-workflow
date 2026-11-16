@@ -868,7 +868,8 @@ def _adopt_local(workspace: Workspace, owner: _kernel.Owner, source: Path, absen
     """Adopt one bundle of a batch (*absent* settled for it) into a local *workspace*: a ``job adopt --json`` entry."""
 
     try:
-        report = _moving.adopt(workspace, owner, source, untrusted=False, absent=absent)
+        # A hold moved in, or a committed landing: durable already.
+        report = _moving.adopt(workspace, owner, source, untrusted=False, absent=absent, synced=True)
     except BundleError as exc:
         return {"status": "refused", "message": str(exc)}
     except _ERRORS as exc:
@@ -1152,7 +1153,7 @@ def _take_back(src: _End, holds: list[_moving.Hold], reason: str) -> dict[str, d
         def take(source: Path) -> dict[str, Any]:
             failure: str | None
             try:
-                report = _moving.adopt(workspace, owner, source, untrusted=False, absent=settled.absent)
+                report = _moving.adopt(workspace, owner, source, untrusted=False, absent=settled.absent, synced=True)
             except _ERRORS as exc:
                 report, failure = None, str(exc)
             else:
@@ -1225,6 +1226,8 @@ def _install_shipped(
                     status, installed = _store.install_copy(dst.workspace, owner, base / directory, source_label=label)
                     build = installed.record.get("build") is True
                     rows[directory] = {"id": installed.id, "status": status, "build": build}
+                except _fs.SyncFailed as exc:
+                    rows[directory] = {"status": "failed", "reason": str(exc)}
                 except _ERRORS as exc:
                     rows[directory] = {"status": "refused", "reason": str(exc)}
         except _ERRORS as exc:

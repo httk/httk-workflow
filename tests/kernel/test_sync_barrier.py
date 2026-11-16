@@ -458,7 +458,8 @@ def test_a_walk_whose_first_listing_fails_fails_the_commit_with_one_labelled_war
     ):
         monkeypatch.setattr(os, "listdir", listing)
         barrier.commit()
-    assert raised.value.errno == errno.EIO and f"cannot sync {tmp_path} to disk" in str(raised.value)
+    assert isinstance(raised.value, _fs.SyncUnreadable)
+    assert raised.value.errno == errno.EIO and f"cannot read {tmp_path} to sync it to disk" in str(raised.value)
     assert [record.getMessage() for record in caplog.records] == [
         f"the sync barrier (fsync (io.sync is fsync)) of {tmp_path} failed: {raised.value}"
     ]
@@ -495,7 +496,9 @@ def test_an_entry_the_walk_cannot_open_fails_the_commit(tmp_path: Path, monkeypa
         with _fs.Barrier(tmp_path, "fsync", quiet=True) as barrier, pytest.raises(_fs.SyncFailed) as raised:
             barrier.commit()
         assert raised.value.errno == errno.EACCES
-        assert f"cannot sync {tmp_path}/a/file to disk" in str(raised.value)
+        # Not a write error: the entry is named as unreadable (SyncUnreadable).
+        assert isinstance(raised.value, _fs.SyncUnreadable)
+        assert f"cannot read {tmp_path}/a/file to sync it to disk" in str(raised.value)
         assert len(os.listdir("/proc/self/fd")) == before
     finally:
         (tmp_path / "a" / "file").chmod(0o600)

@@ -47,12 +47,12 @@ import math
 import os
 import re
 import shlex
-import shutil
 import stat
 import subprocess
 import sys
 import uuid
 from collections.abc import Callable, Generator, Iterable, Mapping
+from contextlib import AbstractContextManager, ExitStack, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType, ModuleType
@@ -1727,6 +1727,9 @@ def new_jobs(
     tags = None if duplicate_tag == "allow" else _TagIndex(workspace)
     owner = _kernel.register_owner(workspace, kind="cli", label="job new", allocation=None, advertised={})
     snapshot: Path | None = None
+    # The command's one sync barrier, entered before the first job's first byte (see _sync_barrier).
+    synced = ExitStack()
+    barrier: _fs.Barrier | None = None
     try:
         if embed_workflow:
             if install:
@@ -1739,11 +1742,13 @@ def new_jobs(
         prepared = _prepare(installed, step=step)
         bindings = _bind_slots(workspace, installed, calls, call_parameters, owner=owner, install=install)
         for item in items:
+            if barrier is None and workspace.durable:
+                barrier = synced.enter_context(_command_barrier(workspace))
             scratch = owner.scratch(_SUBMIT)
             staging = scratch / "build"
-            staging.mkdir()
             moves: list[_InputMove] = []
             try:
+                staging.mkdir()
                 job = _build_payload(
                     workspace,
                     prepared,
@@ -1760,9 +1765,19 @@ def new_jobs(
                     move_inputs=item.get("move_inputs"),
                     moves=moves,
                     calls=bindings,
+                    durable=barrier is not None and barrier.fsync_inline,
                 )
                 if tags is not None and job.tag and (existing := tags.existing(job.placement, job.tag)):
                     raise DuplicateTagError(job.tag, job.placement, existing)
+                # Committed before build/ is renamed to job/: a scratch holding job/ is published by its
+                # reconciler, so only a durable payload is ever named so. Under fsync it walks this job's scratch.
+                _commit_staged(
+                    barrier,
+                    f"the job {job.job_key}",
+                    tree=scratch,
+                    hint="; the jobs before it were submitted: create the rest with --duplicate-tag skip "
+                    "(duplicate_tag='skip'), which skips those",
+                )
                 ref = _submit_staged(workspace, owner, scratch, staging)
             except DuplicateTagError as exc:
                 if _undo_moves(workspace, moves):
@@ -1798,6 +1813,7 @@ def new_jobs(
                 warnings=prepared.warnings,
             )
     finally:
+        synced.close()
         if snapshot is not None:
             from .packages import _evict_modules
 
@@ -1813,6 +1829,8 @@ def submit_payload(
     *,
     move: bool,
     changes: Mapping[str, object] | None = None,
+    barrier: _fs.Barrier | None = None,
+    synced: bool = False,
 ) -> _kernel.JobRef:
     """Submit a prepared payload directory (a ``job.json`` version 3 and its files) into ``jobs/ready/``.
 
@@ -1822,15 +1840,24 @@ def submit_payload(
     before the submission: a moved payload, the operator's only copy, is never
     discarded. A refused submission moves it back.
 
+    In a durable workspace the payload is durable before it is named ``job/``: a copy under a sync barrier
+    committed for it (*barrier*, a command's, or one of its own on its scratch), a moved payload, which was
+    written before httk ran, synced in place first (unless *synced*), with one no-prime ``syncfs``
+    (or a per-file walk under ``io.sync`` ``fsync``).
+
     :param workspace: The workspace.
     :param owner: The registered owner whose scratch stages the payload.
     :param source: The payload directory.
     :param move: Move *source* instead of copying it.
     :param changes: ``job.json`` members to replace in the copy; only without *move*.
+    :param barrier: A command's entered sync barrier (``inline``, anchored on the control ``tmp/``) to commit this
+        copy with, instead of one of its own.
+    :param synced: A moved payload was synced by the caller already, with its batch.
     :return: The published reference.
     :raises httk.workflow.errors.FormatError: If ``job.json`` is missing or invalid.
     :raises httk.workflow._fs.UnsafePath: If the placement below ``jobs/ready/`` is a symlink or not a directory,
         or a copied payload holds a special file.
+    :raises httk.workflow._fs.SyncFailed: If the payload could not be made durable; nothing was submitted.
     :raises ValueError: If the payload carries ``state.json`` or ``logs``, or *changes* come with *move*.
     """
 
@@ -1845,12 +1872,67 @@ def submit_payload(
     _kernel.check_placement(workspace, "ready", job.placement)
     scratch = owner.scratch(_SUBMIT)
     if move:
-        return _submit_staged(workspace, owner, scratch, source.resolve())
+        moved = source.resolve()
+        if not synced:
+            from . import _moving
+
+            _moving.sync_operator_bundles(workspace, [moved], what="payload")
+        return _submit_staged(workspace, owner, scratch, moved)
     copied = scratch / "copy"
-    _fs.copy_tree(source, copied, durable=workspace.durable)
-    if changes:
-        _fs.write_file(_fs.loc(copied / "job.json"), job.encode(), durable=workspace.durable)
+    own = _sync_barrier(workspace, scratch, inline=True) if barrier is None else nullcontext(barrier)
+    with own as entered:
+        durable = entered is not None and entered.fsync_inline
+        _fs.copy_tree(source, copied, durable=durable)
+        if changes:
+            _fs.write_file(_fs.loc(copied / "job.json"), job.encode(), durable=durable)
+        _commit_staged(entered, f"the payload {source}", tree=scratch)
     return _submit_staged(workspace, owner, scratch, copied)
+
+
+def _sync_barrier(
+    workspace: Workspace, anchor: Path, *, inline: bool = False
+) -> AbstractContextManager[_fs.Barrier | None]:
+    """The sync barrier of payloads staged below *anchor* in a durable *workspace*; none in a non-durable one.
+
+    ``io.sync`` is read afresh, and no progress line is printed. :func:`new_jobs` and ``job submit`` hold one for
+    the whole command, anchored on the control ``tmp/`` that holds every submit scratch, entered before the first
+    byte is staged and committed once per payload (:func:`_commit_staged`) before it is renamed to ``job/``; a
+    :func:`submit_payload` copy without one takes its own on its scratch. Under ``fsync`` the copies are fsynced
+    as they are written and, unless *inline* (every file is httk's own fsynced copy), each commit walks that
+    payload's scratch for what hooks wrote and for the directories.
+    """
+
+    if not workspace.durable:
+        return nullcontext(None)
+    return _fs.Barrier(anchor, workspace.io_sync(), inline=inline, quiet=True)
+
+
+def _command_barrier(workspace: Workspace, *, inline: bool = False) -> AbstractContextManager[_fs.Barrier | None]:
+    """The one sync barrier of a command staging several payloads, anchored on the control ``tmp/``.
+
+    :param workspace: The workspace (none in a non-durable one).
+    :param inline: Every payload is a copy fsynced as it is written under ``fsync`` (``job submit``).
+    :return: The barrier's context.
+    """
+
+    tmp = workspace.control / "tmp"
+    if workspace.durable:
+        _fs.make_dirs(tmp, durable=True)
+    return _sync_barrier(workspace, tmp, inline=inline)
+
+
+def _commit_staged(barrier: _fs.Barrier | None, what: str, *, tree: Path | None = None, hint: str = "") -> None:
+    """Commit a staging barrier (under ``fsync``, walking *tree*, by default its anchor): when it fails, *what* is
+    not submitted and nothing is published; *hint* ends the message."""
+
+    if barrier is None:
+        return
+    try:
+        barrier.commit(tree=tree)
+    except _fs.SyncFailed as exc:
+        raise _fs.SyncFailed(
+            exc.errno, f"{what} was not submitted, nothing was published: {exc.strerror}{hint}"
+        ) from exc
 
 
 def _submit_staged(workspace: Workspace, owner: _kernel.Owner, scratch: Path, payload: Path) -> _kernel.JobRef:
@@ -2808,6 +2890,7 @@ def _build_payload(
     moves: list[_InputMove] | None = None,
     calls: Mapping[str, Mapping[str, object]] | None = None,
     persist_outputs: Mapping[str, str] | None = None,
+    durable: bool = False,
 ) -> JobDefinition:
     """Stage one job payload into *destination* and write its ``job.json``.
 
@@ -2820,6 +2903,9 @@ def _build_payload(
     roll them back when the job is not submitted. *calls* is the job's call slot bindings
     (:func:`_bind_slots`); without them, a workflow's slots are bound to their installed defaults.
     *persist_outputs* is the ``persist_outputs`` member of a job called through a call slot.
+    With *durable* (:func:`new_jobs` under a sync barrier of strategy ``fsync``), every file this copies or
+    writes itself is fsynced on its writing descriptor; the barrier's walk covers the rest (hook outputs,
+    serialized inputs, directories).
     """
 
     workflow = prepared.workflow
@@ -2849,21 +2935,19 @@ def _build_payload(
             raise ValueError(
                 f"workflow input {input_name!r} has no destination to move a file to; inputs with one: {names}"
             )
-    _stage_files(destination, user_files)
+    _stage_files(destination, user_files, durable=durable)
     for member, text in prepared.documents.items():
         document_path = destination.joinpath(*payload_relative(member).parts)
         document_path.parent.mkdir(parents=True, exist_ok=True)
-        if isinstance(text, bytes):
-            document_path.write_bytes(text)
-        else:
-            document_path.write_text(text, encoding="utf-8")
-    _stage_files(destination, prepared.files)
+        _write_document(document_path, text if isinstance(text, bytes) else text.encode("utf-8"), durable=durable)
+    _stage_files(destination, prepared.files, durable=durable)
     supplied_inputs = dict(inputs or {})
     _stage_inputs(
         destination,
         workflow,
         supplied_inputs,
         instantiate=prepared.instantiate is not None or prepared.instantiate_exec is not None,
+        durable=durable,
     )
     # The job id is chosen now, so a release record can name the receiving job before its file moves.
     job_id = str(uuid.uuid4()) if move_inputs else None
@@ -2952,7 +3036,7 @@ def _build_payload(
                     f"workflow input {input_name!r} is required and was not supplied; declared inputs: {declared_names}"
                 )
     if prepared.instantiate_exec is not None:
-        hook_inputs = _serialize_executable_inputs(destination, workflow, supplied_inputs)
+        hook_inputs = _serialize_executable_inputs(destination, workflow, supplied_inputs, durable=durable)
         hook_parameters, hook_tag = _run_executable_instantiate(
             prepared.instantiate_exec,
             destination,
@@ -2991,7 +3075,7 @@ def _build_payload(
     installed = prepared.installed
     frozen_embedded = None
     if installed.embedded:
-        _place_embedded(installed, destination)
+        _place_embedded(installed, destination, durable=durable)
         frozen_embedded = {key: value for key, value in installed.record.items() if key != "build"}
     spec = JobSpec(
         name=name or f"{installed.name}: {tag or 'job'}",
@@ -3033,7 +3117,7 @@ def _build_payload(
     if maxtime_cap is not None:
         resources, step_resources = cap_maxtime(spec.resources, spec.step_resources, maxtime_cap)
         spec = replace(spec, resources=resources, step_resources=step_resources)
-    definition = prepare_job_payload(destination, spec)
+    definition = prepare_job_payload(destination, spec, durable=durable)
     for move in moves or ():
         if move.release is not None and move.release.to_job_key != definition.job_key:
             # A hook retagged the job after its files moved: the record is replaced, naming the final key.
@@ -3055,13 +3139,16 @@ def _build_payload(
     return definition
 
 
-def _place_embedded(snapshot: Installed, payload: Path) -> None:
-    """Copy an embedded workflow's snapshot into a staged payload's ``workflow/``, verified against its digest."""
+def _place_embedded(snapshot: Installed, payload: Path, *, durable: bool = False) -> None:
+    """Copy an embedded workflow's snapshot into a staged payload's ``workflow/``, verified against its digest.
+
+    With *durable*, the copy is fsynced as it is written.
+    """
 
     tree = payload / JOB_WORKFLOW_DIRECTORY
     if os.path.lexists(tree):
         raise ValueError(f"an instantiate hook created {JOB_WORKFLOW_DIRECTORY}/, reserved for the embedded workflow")
-    _fs.copy_tree(snapshot.package, tree, durable=False, limits=_fs.DEFAULT_LIMITS)
+    _fs.copy_tree(snapshot.package, tree, durable=durable, limits=_fs.DEFAULT_LIMITS)
     if embedded_digest(tree) != snapshot.record["tree_sha256"]:
         raise ValueError(f"the embedded workflow {snapshot.id} changed since it was snapshotted for the job")
 
@@ -3085,9 +3172,9 @@ def _check_parameter_types(values: Mapping[str, object], declared: Mapping[str, 
 
 
 def _serialize_executable_inputs(
-    payload: Path, workflow: ResolvedWorkflow, inputs: Mapping[str, object]
+    payload: Path, workflow: ResolvedWorkflow, inputs: Mapping[str, object], *, durable: bool = False
 ) -> dict[str, dict[str, object]]:
-    """Copy or serialize executable-hook inputs into descriptor files."""
+    """Copy or serialize executable-hook inputs into descriptor files (*durable*: copies fsynced as written)."""
 
     descriptors: dict[str, dict[str, object]] = {}
     for name, value in inputs.items():
@@ -3104,7 +3191,7 @@ def _serialize_executable_inputs(
             if destination.exists():
                 raise ValueError(f"generated member {relative.as_posix()!r} collides with an existing payload member")
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, destination)
+            _fs.copy_file(source, destination, durable=durable)
             descriptors[name] = {"kind": "file", "path": relative.as_posix()}
             continue
         message = _missing_file_input_message(name, value)
@@ -3113,7 +3200,7 @@ def _serialize_executable_inputs(
         if _is_json_native(value):
             descriptors[name] = {"kind": "value", "value": value}
         else:
-            descriptors[name] = _save_executable_input(payload, name, value)
+            descriptors[name] = _save_executable_input(payload, name, value, durable=durable)
     return descriptors
 
 
@@ -3193,8 +3280,8 @@ def _is_json_native(value: object, active: set[int] | None = None) -> bool:
         active.remove(identity)
 
 
-def _save_executable_input(payload: Path, name: str, value: object) -> dict[str, object]:
-    """Save one live executable-hook input using a registered extension."""
+def _save_executable_input(payload: Path, name: str, value: object, *, durable: bool = False) -> dict[str, object]:
+    """Save one live executable-hook input using a registered extension (*durable*: fsynced once it is saved)."""
 
     import httk.core
     from httk.core.register import known_writers
@@ -3214,6 +3301,8 @@ def _save_executable_input(payload: Path, name: str, value: object) -> dict[str,
             last_error = exc
             _fs.remove_file(_fs.loc(destination.absolute()), durable=False)
             continue
+        if durable:
+            _fsync_saved(destination)
         # ponytail: core has no object-to-writer query; sorted-first-success is
         # deterministic until core exposes explicit writer selection.
         return {"kind": "file", "path": relative.as_posix()}
@@ -3300,8 +3389,8 @@ def _run_executable_instantiate(
         raise ValueError(f"executable instantiate hook {member!r} returned invalid JSON: {exc}{detail}") from exc
 
 
-def _stage_files(payload: Path, files: Mapping[str, str | os.PathLike[str]]) -> None:
-    """Copy every named file into the payload it belongs to."""
+def _stage_files(payload: Path, files: Mapping[str, str | os.PathLike[str]], *, durable: bool = False) -> None:
+    """Copy every named file into the payload it belongs to (*durable*: each fsynced on its writing descriptor)."""
 
     for name, source in files.items():
         path = Path(source).expanduser()
@@ -3311,7 +3400,7 @@ def _stage_files(payload: Path, files: Mapping[str, str | os.PathLike[str]]) -> 
             raise ValueError(f"the file staged as {name!r} does not exist: {path}")
         destination = payload.joinpath(*payload_relative(name).parts)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(path, destination)
+        _fs.copy_file(path, destination, durable=durable)
 
 
 def _staged_entries(
@@ -3342,8 +3431,9 @@ def _stage_inputs(
     inputs: Mapping[str, object],
     *,
     instantiate: bool = False,
+    durable: bool = False,
 ) -> None:
-    """Realize declared inputs into the payload declared by the workflow."""
+    """Realize declared inputs into the payload declared by the workflow (*durable*: copies fsynced as written)."""
 
     declared = workflow.inputs
     for name, value in inputs.items():
@@ -3366,7 +3456,7 @@ def _stage_inputs(
             continue
         destination = payload_relative(destination_name)
         if isinstance(value, (str, os.PathLike)):
-            _stage_files(payload, {destination.as_posix(): value})
+            _stage_files(payload, {destination.as_posix(): value}, durable=durable)
             continue
         import httk.core
 
@@ -3378,6 +3468,28 @@ def _stage_inputs(
         path = payload.joinpath(*destination.parts)
         path.parent.mkdir(parents=True, exist_ok=True)
         httk.core.save(value, path)
+        if durable:
+            _fsync_saved(path)
+
+
+def _write_document(path: Path, data: bytes, *, durable: bool) -> None:
+    """Write a prepared document into a payload being staged, fsynced on its writing descriptor when *durable*."""
+
+    with open(path, "wb") as stream:
+        stream.write(data)
+        if durable:
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def _fsync_saved(path: Path) -> None:
+    """Fsync a file :func:`httk.core.save` just wrote in this process (its writer's descriptor is not ours)."""
+
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def payload_relative(name: str) -> PurePosixPath:

@@ -9,6 +9,7 @@ import argparse
 import errno
 import io
 import json
+import logging
 import os
 import shutil
 import stat
@@ -419,8 +420,8 @@ def test_an_fsync_pull_whose_landing_cannot_be_opened_fails_the_chunk(
     monkeypatch.setattr(transfer_cli, "_adapter", unreadable)
     assert transfer(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
     (outcome,) = statuses(capsys)
-    assert outcome["status"] == "failed" and "cannot sync" in outcome["message"]
-    assert "input.txt to disk" in outcome["message"]
+    assert outcome["status"] == "failed" and "cannot read" in outcome["message"]
+    assert "input.txt to sync it to disk" in outcome["message"]
     assert find(near, plan[0][0]["id"]) is None and outgoing(far) == [outcome["transfer_id"]]
 
 
@@ -669,7 +670,10 @@ def test_an_invalid_stored_io_sync_resolves_to_fsync(
         _fs.Barrier(workspace.control / "tmp", workspace.io_sync(), quiet=True) as barrier,
     ):
         assert barrier.reason == "fsync (io.sync 'always' is not auto, syncfs or fsync)"
-    assert len(caplog.records) == 1
+    # Only _fs's records: an earlier test in the worker may have lowered the "httk" logger's level, admitting the
+    # INFO record of registered()'s policy update.
+    records = [record.getMessage() for record in caplog.records if record.name == "httk.workflow._fs"]
+    assert records == ["io.sync is 'always', not one of auto, syncfs or fsync: using fsync"]
 
 
 def test_unreadable_settings_resolve_to_fsync(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -677,7 +681,8 @@ def test_unreadable_settings_resolve_to_fsync(tmp_path: Path, caplog: pytest.Log
     (workspace.control / "format.json").write_text("{", encoding="utf-8")
     with caplog.at_level("WARNING", logger="httk.workflow.workspace"):
         assert workspace.io_sync() == "fsync"
-    assert [record.getMessage().startswith("using io.sync = fsync") for record in caplog.records] == [True]
+    warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert [message.startswith("using io.sync = fsync") for message in warnings] == [True]
 
 
 def test_an_invalid_stored_settings_value_makes_io_sync_fsync_until_fixed(

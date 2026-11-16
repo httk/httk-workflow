@@ -94,6 +94,7 @@ from ..scaffold import (
     DEFAULT_PLACEMENT,
     ScaffoldedJob,
     WorkflowProvider,
+    _command_barrier,
     _sanitize_tag,
     new_job,
     new_jobs,
@@ -525,10 +526,41 @@ def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int
     workspace = _modifiable(arguments, context, action="submit into it")
     submitted: list[str] = []
     failed = False
-    with _kernel.register_owner(workspace, kind="cli", label="job submit", allocation=None, advertised={}) as owner:
-        for source in arguments.sources:
+    with (
+        _kernel.register_owner(workspace, kind="cli", label="job submit", allocation=None, advertised={}) as owner,
+        ExitStack() as stack,
+    ):
+        unsynced: str | None = None
+        barrier: _fs.Barrier | None = None
+        if arguments.move:
+            # Payloads written before httk ran: one sync for all of them before any is moved; its error cannot be
+            # told apart between them, so it fails every one.
             try:
-                ref = submit_payload(workspace, owner, Path(source).expanduser(), move=arguments.move)
+                paths = [Path(source).expanduser().resolve() for source in arguments.sources]
+                _moving.sync_operator_bundles(workspace, paths, what="payload")
+            except _fs.SyncFailed as exc:
+                unsynced = exc.strerror
+            except _ERRORS as exc:
+                unsynced = f"not submitted: the payloads could not be synced to disk: {exc}"
+        else:
+            # One barrier for the command, committed for each copy before it is named job/ (N copies, N + 1 syncfs).
+            barrier = stack.enter_context(_command_barrier(workspace, inline=True))
+        for index, source in enumerate(arguments.sources):
+            if unsynced is not None:
+                failed = True
+                print(f"{source}: {unsynced}", file=sys.stderr)
+                continue
+            try:
+                ref = submit_payload(
+                    workspace, owner, Path(source).expanduser(), move=arguments.move, barrier=barrier, synced=True
+                )
+            except _fs.SyncFailed as exc:
+                # As job new: a failed commit stops the command; the payloads before it stay submitted.
+                failed = True
+                print(f"{source}: {exc}", file=sys.stderr)
+                if rest := len(arguments.sources) - index - 1:
+                    print(f"stopped: the {rest} payload(s) after {source} were not submitted", file=sys.stderr)
+                break
             except _ERRORS as exc:
                 failed = True
                 print(f"{source}: {exc}", file=sys.stderr)
@@ -1938,9 +1970,12 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
         print(json.dumps({"bundles": [], "workspace_id": workspace_id, "refused": str(exc)}, indent=2))
         return 2
     entries: list[dict[str, object]] = []
+    unsynced: str | None = None
 
     def adopt(index: int) -> tuple[dict[str, object], list[tuple[bool, str]]]:
         source, bundle = sources[index], bundles[index]
+        if unsynced is not None:
+            return {"bundle": bundle, "status": "failed", "message": unsynced}, [(True, f"{bundle}: {unsynced}")]
         foreign = _foreign_bundle(workspace, source) if arguments.stdin_tar else None
         if foreign is None:
             return _adopt_one(workspace, owner, source, bundle, arguments, settled.absent)
@@ -1954,6 +1989,16 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
         entries.append(entry)
 
     with stack:
+        if not arguments.stdin_tar:
+            # Operators' bundles, written before httk ran: one sync for the batch before anything is taken. Its
+            # error cannot be told apart between them, so it fails every bundle of the batch (a bundle it cannot
+            # reach is skipped: its own take reports it).
+            try:
+                _moving.sync_operator_bundles(workspace, sources)
+            except _fs.SyncFailed as exc:
+                unsynced = exc.strerror
+            except _ERRORS as exc:
+                unsynced = f"not taken: the bundles could not be synced to disk: {exc}"
         # Outside the try above: an unexpected error after bundles were adopted prints no "refused" document.
         serial = {index for index, source in enumerate(sources) if source in settled.serial}
         run_batch(owner, adopt, range(len(sources)), workspace.io_workers, serial=serial, emit=show)
@@ -2079,7 +2124,8 @@ def _adopt_one(
     (``True`` for standard error), which the caller prints."""
 
     try:
-        report = _moving.adopt(workspace, owner, source, untrusted=False, absent=absent)
+        # Synced already: a committed --stdin-tar landing, or the batch's operator bundles (handle_job_adopt).
+        report = _moving.adopt(workspace, owner, source, untrusted=False, absent=absent, synced=True)
     except _ERRORS as exc:
         status = "refused" if isinstance(exc, BundleError) else "failed"
         return {"bundle": bundle, "status": status, "message": str(exc)}, [(True, f"{bundle}: {exc}")]

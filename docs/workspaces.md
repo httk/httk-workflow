@@ -123,7 +123,15 @@ any filesystem type you vouch for, still falling back to `fsync` below Linux
 the setting. A value other than the three is refused when set, and one stored
 otherwise counts as `fsync`; the setting is read afresh at every landing, so a
 running daemon sees a change at once, and a `--no-durable` workspace
-synchronizes nothing.
+synchronizes nothing. Job creation (`job new`, campaigns, `job submit`),
+workflow installation and builds, and `job adopt PATH` of a bundle on the
+workspace's filesystem are made durable the same way, quietly, before the job
+or package is published (creating N jobs costs N + 1 `syncfs` calls). Bundles
+and `job submit --move` payloads that were written before httk ran are synced
+together as they are, so a write error there is reported only if nobody has
+seen it yet; when one is reported, nothing is taken, and the files may not be
+intact on disk: re-create them from their source before trying again, since a
+retry would not notice the loss.
 
 The command that runs `job transfer`, `job push` or `job pull` prints the
 strategy on standard error, unless `-q`: `syncing 120 landed file(s) to disk
