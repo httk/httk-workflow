@@ -1780,6 +1780,7 @@ def extract_tar(
     workers: int = 1,
     durable: bool = False,
     top_level: set[str] | None = None,
+    read_done: Callable[[], object] | None = None,
 ) -> int:
     """Extract an untrusted tar stream under *target*, never resolving a path by name.
 
@@ -1840,6 +1841,10 @@ def extract_tar(
     :param top_level: A set that a successful extraction adds the first component of every member name to (after
         the normalization above; a member naming *target* itself adds none): what this stream put in *target*,
         as opposed to what was there before.
+    :param read_done: Called once this thread stops reading the stream: its members exhausted, or a refusal, an
+        error or a stop ending the reading. What follows reads nothing more of the stream: the pooled writes still
+        running are waited for, then, after a success, the directory times are restored and, with *durable*, the
+        directories fsynced.
     :return: How many regular files the stream wrote (hard-link copies included).
     :raises tarfile.FilterError: For a refused member; a subclass (``OutsideDestinationError``,
         ``SpecialFileError``, ``AbsoluteLinkError``, ``LinkOutsideDestinationError``) where one applies.
@@ -1857,11 +1862,24 @@ def extract_tar(
                     max_tasks=_POOLED_TASKS * workers,
                     max_weight=_POOLED_BYTES,
                 )
+                reader = _Reader(landing, archive, feed)
+
+                def read() -> bool:
+                    try:
+                        return reader.read()
+                    finally:
+                        if read_done is not None:
+                            read_done()
+
                 # Returns, or raises, only once no write runs any more (directory times are restored after it).
-                feed.run(_Reader(landing, archive, feed).read, workers)
+                feed.run(read, workers)
             else:
-                for member in archive:
-                    _extract_member(landing, archive, member, rename)
+                try:
+                    for member in archive:
+                        _extract_member(landing, archive, member, rename)
+                finally:
+                    if read_done is not None:
+                        read_done()
             # tarfile ends the iteration quietly when the stream stops at a member boundary (nothing of the next
             # header read) or inside a header (part of it read): a whole block read where the next header starts
             # tells a cut stream from one that reached its end. Not detected: tarfile also ends quietly on a damaged

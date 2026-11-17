@@ -227,10 +227,10 @@ destination and only then releases the hold, so an interrupted transfer is
 finished by running it again or with `httk job transfer --resume`;
 `httk transfer status` lists what a workspace holds. All jobs of one transfer
 travel together, so the cost is the same whether it moves one job or a thousand:
-a push to a remote workspace is one ssh connection and one remote `httk` start
-(the bundles stream straight into the adoption there), plus one of each when the
-destination lacks a workflow the jobs need or its build, and one more of each
-only when a failed synchronization there is retried (see {doc}`../workspaces`); a pull from a remote
+a push to a remote workspace is one ssh connection and one remote `httk` start,
+a transfer session (below) that also ships and builds the workflows the
+destination lacks and retries a failed synchronization there (see
+{doc}`../workspaces`); a pull from a remote
 workspace is three connections and two `httk` starts (hold, copy, release); a
 remote-to-remote transfer four connections and three starts. On a site where
 every Python start is slow, that is what a transfer costs. It reports each step
@@ -242,15 +242,44 @@ steps and their recovery are in the `job transfer` section of {doc}`workflow_cli
 A transfer session is one connection and one far-side `httk` start, the hidden
 `httk workflow transfer-session`, started through the adapter `session`
 operation (as the monitor's session is), that carries typed requests and their
-data in binary frames. Transfers do not open one yet; they will in a later
-release, and this section describes the session they will use.
+data in binary frames. A push from a local workspace to a remote one opens one
+at its first delivery and closes it at the end of the command; pulls and
+remote-to-remote transfers do not use one yet.
+
+Over the session a push first asks the destination which of the workflows its
+jobs need it lacks or has unbuilt, installs and builds those (once a command; a
+failure is reported and the jobs wait, the push goes on), and only then travels
+in segments, so that each segment can start as soon as it is adopted. A segment
+closes at 256 bundles, 16 GiB of file data or 16,384 archive members, whichever
+comes first (a hold larger than that is a segment of its own; a hold is never
+split). Each segment is its own request, with its own archive, landing,
+synchronization, adoption and answer, and its adopted holds are released at
+once, so a failure late in a large push costs only the segments it reached. A
+push therefore costs one connection and one remote start in every case. A
+failed synchronization of a segment's landing is retried once, as for any push,
+and after that every later segment of the session is synchronized file by file
+at once. When the far side refuses one bundle's member, only that bundle is
+refused (taken back when this run held it) and the rest of its segment is
+delivered once more without it; when it refuses a whole segment (an unknown or
+sealed workspace, a full quota, or, conservatively, a member it cannot attribute
+to a bundle), nothing more is sent and the jobs this run held are taken back.
+Before the first segment, a session that fails while the workflows are installed
+has adopted nothing: the holds stay for `httk job transfer --resume`. An answer that cannot be read, a far side that dies, or a
+segment answered by another workspace than the first stops the push there: that
+segment's holds and every later one's stay held, and running the transfer again
+(or `httk job transfer --resume`) finishes it, reporting what had arrived as
+already adopted.
 
 Opening a session checks the far side before anything is changed: its hello
 must name the expected format version and every request the caller needs, and
 a round trip of all 256 byte values must come back intact. When any of that
-fails (an older far-side `httk` without the command, a `mount-daemon` remote,
-an executor that mangles binary data), the caller falls back to the adapter
-operations, at the cost of one extra connection and start. A refused or broken
+fails (an older far-side `httk` without the command, an executor that mangles
+binary data), the push says so and falls back to one adapter `deliver` per
+delivery as before sessions, at the cost of one extra connection and start per
+command (the refused session; this is not remembered between commands). A
+`mount-daemon` remote, which has no session, and a remote with
+`transfer_session=off` take that path at once, without a word or a start. Any other failure to open the session fails the deliveries, and the
+jobs stay held for `--resume`. A refused or broken
 ssh connection (ssh's own exit status 255) is never a fallback. Set
 `transfer_session=off` on a remote to skip the session and its check (the
 default is `auto`):
@@ -265,7 +294,13 @@ outcome. The adapter timeout (`--adapter-timeout`, else the remote's
 `timeout_seconds`) bounds each wait, not a whole request: a request fails when
 the far side sends nothing and takes no data for that long, or when neither its
 reported progress nor any data moves for that long outside a filesystem
-synchronization or a build. The far side reports progress every 10 seconds, so
+synchronization (a landing's first `syncfs`, the end of its extraction with the
+fsyncs of its directories, its commit), the wait of the destination's
+visibility deadline before adopting, or a build. A landing's synchronization
+covers the whole end of its extraction, however it ends (the writes still
+running, the directory times and fsyncs, or the discard of a refused landing):
+a far side hung there, still reporting its progress, is caught only once it
+stops answering altogether (the idle bound), an accepted limitation. The far side reports progress every 10 seconds, so
 the bound is at least 30 seconds whatever is configured. Time in which this side
 offers nothing (a slow reader of a download, a slow source of an upload) is not
 held against the far side. This side holds at most 64 MiB of what the far side

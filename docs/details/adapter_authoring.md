@@ -422,19 +422,24 @@ does not install software or validate compute-node confinement.
 ## The optional `session` operation
 
 A caller that polls, such as `workflow monitor`, would otherwise pay one login
-and one remote `httk` start per read. `session` instead starts one long-lived
-far-side process and talks to it over the adapter's own pipes, as rsync does.
-It is optional: an adapter that does not implement it refuses it (or fails),
-and the caller then falls back to one `invoke` per command. The caller also
-falls back when the far side cannot serve a session, for example because its
-`httk` predates the session command. The maintained `local`, `ssh` and `mount`
-kinds implement it; `mount-daemon` refuses it.
+and one remote `httk` start per read, and a push one per delivery. `session`
+instead starts one long-lived far-side process and talks to it over the
+adapter's own pipes, as rsync does. The monitor starts `httk workflow session`
+(text lines); a push from a local workspace starts `httk workflow
+transfer-session` (binary frames, see *The transfer session* in
+{doc}`/details/remotes`). It is optional: an adapter that does not implement it
+refuses it (or fails), and the caller then falls back to one `invoke` (the
+monitor) or one `deliver` (a push) per command. The caller also falls back when
+the far side cannot serve a session, for example because its `httk` predates
+the session command. The maintained `local`, `ssh` and `mount` kinds implement
+it; `mount-daemon` refuses it. The remote setting `transfer_session=off`
+(default `auto`) makes a push skip the transfer session without starting it.
 
 Beyond the standard request envelope, `session` accepts exactly:
 
 | Member | Type | Meaning |
 | --- | --- | --- |
-| `argv` | array of nonempty strings, required | the command to run, `["httk", "workflow", "session"]` |
+| `argv` | array of nonempty strings, required | the command to run, `["httk", "workflow", "session"]` or `["httk", "workflow", "transfer-session"]` |
 
 There is no `cwd`: each request inside the session carries its own.
 
@@ -449,9 +454,12 @@ literal `httk`, the remote's `httk_command` applies, and so does `cli_prelude`,
 exactly as for `invoke`.
 
 The caller tolerates lines a login banner or a printing `cli_prelude` puts
-ahead of the far side's output. The wire format is that of the hidden
-`httk workflow session` command: one hello line, then one JSON response line
-per JSON request line, until the caller closes stdin.
+ahead of the far side's output. The wire format is that of the command run:
+for `httk workflow session` one hello line, then one JSON response line per
+JSON request line, until the caller closes stdin; for `httk workflow
+transfer-session` one hello line, then binary frames in both directions, so the
+channel must carry every byte value unchanged (a pty does not, and the caller
+then falls back).
 
 ## Settings and credentials
 
@@ -460,7 +468,7 @@ key:
 
 - Keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS`
   (`check_connectivity`, `host`, `httk_command`, `interactive_auth`,
-  `legacy_settings`, `port`,
+  `legacy_settings`, `port`, `transfer_session`,
   `username`, the mount settings, `exchange` and the three `daemon_*` identity settings documented in
   {doc}`/details/remotes`, `vasp_command` and `vasp_pseudo_library`) are written
   into the flat `settings` object of the shareable, signable `remote.json`.

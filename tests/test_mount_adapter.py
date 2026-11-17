@@ -24,6 +24,7 @@ from httk.workflow import Workspace, _kernel
 from httk.workflow.adapters import add_remote, run_adapter
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import command
+from test_job_transfer import recorded_requests
 
 # A stand-in executor: it appends the single command line it is handed to a log
 # (so quoting and prelude are inspectable), then runs it through a shell, so the
@@ -491,7 +492,10 @@ def test_check_reports_a_missing_remote_httk_with_the_remedy(tmp_path: Path, mou
 # 8. end to end ---------------------------------------------------------------
 
 
-def test_a_job_reaches_a_mount_workspace_and_runs_there(tmp_path: Path, mount: Mount) -> None:
+def test_a_job_reaches_a_mount_workspace_and_runs_there(
+    tmp_path: Path, mount: Mount, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
     source_root = tmp_path / "project"
     initialize_project(source_root, name="mount-end-to-end")
     home = v3.workspace(source_root / "workspace")
@@ -504,15 +508,18 @@ def test_a_job_reaches_a_mount_workspace_and_runs_there(tmp_path: Path, mount: M
     register_ws(context, home.root, "home")
     register_ws(context, destination.root, "station", remote="cluster")
 
+    requests = recorded_requests(monkeypatch)
     assert command(["job", "transfer", "--job", job_id, "home", "cluster:station"], context) == 0
 
     assert _kernel.locate(home, job_id, placement_hint=None, exhaustive=True) is None
     assert v3.find(destination, job_id).state == "ready"
     v3.run(destination)
     assert v3.find(destination, job_id).state == "succeeded"
-    # The push is one executor call, no probe: the bundle bytes stream on its stdin into the remote adoption.
-    (adoption,) = mount.commands()
-    assert adoption.startswith("httk job adopt --json --stdin-tar ") and "--workspace station" in adoption
+    # The push is one executor call, no probe: a transfer session, whose request streams the bundle into the
+    # remote adoption.
+    (session,) = mount.commands()
+    assert session.startswith("httk workflow transfer-session")
+    assert [header["workspace"] for op, header in requests if op == "adopt"] == ["station"]
 
 
 # 9. refusal still holds with three kinds -------------------------------------

@@ -1078,8 +1078,9 @@ _FRAME_OVERHEAD = 64
 #: How many bytes of far-side events a transfer session queues before its reader thread stops reading: 64 MiB, the
 #: largest JSON frame, with its overhead, so that every event fits an empty queue.
 _TRANSFER_QUEUE_BYTES = JSON_LIMIT + _FRAME_OVERHEAD
-#: The phases in which a far side's progress may stand still (a running ``syncfs``, a build).
-_UNCOUNTED_PHASES = frozenset({"sync", "build"})
+#: The phases in which a far side's progress may stand still: a running ``syncfs`` or fsync, the wait of the
+#: visibility deadline before a landing's absent jobs are settled, a build.
+_UNCOUNTED_PHASES = frozenset({"sync", "settle", "build"})
 #: What :meth:`TransferSession.open` sends through ``echo``: every byte value, so a text-mangling channel shows.
 _ECHO_PAYLOAD = bytes(range(256)) * 4
 #: The most seconds the opening echo, which reports no progress, may take.
@@ -1283,7 +1284,7 @@ class _Watch:
 
     Idle: no inbound frame and no accepted upload bytes for the bound. Stall: neither the far side's progress
     (``phase``, ``count``) nor any data (accepted upload bytes, arriving download bytes) moved for the bound, outside
-    the ``sync`` and ``build`` phases; an empty ``D`` frame shows the far side alive but moves nothing. A queued frame
+    the ``sync``, ``settle`` and ``build`` phases; an empty ``D`` frame shows the far side alive but moves nothing. A queued frame
     that arrived after its deadline fails the request all the same.
 
     The bounds measure the far side's liveness only, so time in which this side offered it nothing is never charged
@@ -1427,7 +1428,7 @@ class TransferSession:
     :param needs: The ops the caller will request; a far side lacking one is unsupported.
     :param timeout: The bound in seconds, or the bundle's ``timeout_seconds`` when omitted: on the far side's hello,
         and, per request, on the far side being idle (no frame, no upload bytes taken) or stalled (no progress, no data
-        moving outside the ``sync`` and ``build`` phases). A request's bound is at least three progress intervals
+        moving outside the ``sync``, ``settle`` and ``build`` phases). A request's bound is at least three progress intervals
         (30 seconds), since the far side reports progress only every 10 seconds.
     """
 
@@ -1456,6 +1457,12 @@ class TransferSession:
         self._reason = ""
         #: The ops the far side's hello listed, once open.
         self.ops: frozenset[str] = frozenset()
+
+    @property
+    def is_open(self) -> bool:
+        """Return whether the session is open (opened, and neither failed nor closed since)."""
+
+        return self._state == "open"
 
     def __enter__(self) -> Self:
         """Return this session; :meth:`open` it before the first request."""

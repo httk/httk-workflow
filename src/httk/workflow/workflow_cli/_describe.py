@@ -15,13 +15,14 @@ import os
 import re
 import sys
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import IO, Any, cast
 
 from httk.core.git_sources import GitUri, parse_git_uri
 
-from .. import _fs, _kernel, _store
+from .. import _fs, _kernel, _landing, _store
 from .._durations import TIME_RESOURCES, format_duration
 from .._manager_scheduling import bound_workflows, effective_workflow
 from ..adapters import probe_remote_workspace, resolve_remote, run_adapter
@@ -691,21 +692,9 @@ _PUSH_TOKEN = re.compile(r"[0-9a-f]{32}")
 def _install_copies(arguments: argparse.Namespace, context: Any) -> int:
     """Install copied store entries (``--from-store DIR...``) under their recorded ids, printing one JSON document.
 
-    Each DIR yields a row ``{"directory", "id", "status"}``, in argument order, with status ``installed``,
-    ``present`` (that id with the same tree), ``mismatch`` (that id with another tree, left as it is) or
-    ``refused`` (with ``reason``, and ``id`` null); all but a refused row tell whether the installation has a
-    ``[workflow.build]`` (``build``). The DIRs are left in place unless ``--consume`` discards the pushed copy
-    holding them, ``tmp/push.<hex>/``, whatever the outcome once the workspace is known (a failure to discard
-    it goes to stderr only).
-
-    In the same process, ``--build`` builds each row ``installed`` here with a ``[workflow.build]``, adding
-    ``build_status`` to every row (``built``, ``failed`` with ``build_reason``, or null when not built), and
-    ``--also-build ID`` builds installations already here, reported as ``built``: ``[{"id", "status",
-    "reason"?}]``. A failed build leaves the installation in place.
-
-    With ``--stdin-tar`` the entries arrive as one tar stream instead, extracted into ``tmp/push.<token>/`` (which
-    ``workspace gc`` sweeps) and always discarded afterwards. With neither, only the ``--also-build`` ids are
-    built: ``{"workflows": [], "built": [...]}``.
+    See :func:`install_copies` for the document. The DIRs are left in place unless ``--consume`` discards the pushed
+    copy holding them, ``tmp/push.<hex>/``, whatever the outcome once the workspace is known (a failure to discard
+    it goes to stderr only). With ``--stdin-tar`` the entries arrive as one tar stream on standard input instead.
     """
 
     mode = "--stdin-tar" if arguments.stdin_tar else "--from-store"
@@ -723,20 +712,100 @@ def _install_copies(arguments: argparse.Namespace, context: Any) -> int:
     workspace = Workspace(
         _local_root(arguments, context, action="install workflows into it"), durable=_durable(arguments)
     )
-    label = arguments.source_label or "a copied store entry"
-    rows: list[dict[str, object]] = []
-    built: list[dict[str, object]] = []
-    landing = workspace.control / "tmp" / f"push.{arguments.token or uuid.uuid4().hex}"
     entries: list[str] = list(arguments.from_store or ())
     try:
-        require_cli_modifiable(workspace)
-        if arguments.stdin_tar:
-            from ._job import receive_tar
+        _document, returncode = install_copies(
+            workspace,
+            directories=entries,
+            stream=sys.stdin.buffer if arguments.stdin_tar else None,
+            token=arguments.token,
+            source_label=arguments.source_label,
+            build=arguments.build,
+            also_build=arguments.also_build,
+            # Before a stream's landing is discarded, as the document reports what is installed already.
+            report=lambda document: print(json.dumps(document, indent=2, sort_keys=True)),
+        )
+    finally:
+        if arguments.consume and not arguments.stdin_tar:
+            for directory in {Path(directory).parent: directory for directory in entries}.values():
+                try:
+                    _consume(workspace, directory)
+                except _ERRORS as exc:
+                    print(f"{directory}: the pushed copy was not discarded: {exc}", file=sys.stderr)
+    return returncode
 
-            entries = [str(landing / name) for name in receive_tar(workspace, landing)]
+
+def install_copies(
+    workspace: Workspace,
+    *,
+    directories: Sequence[str] = (),
+    stream: IO[bytes] | None = None,
+    token: str | None = None,
+    source_label: str | None = None,
+    build: bool = False,
+    also_build: Sequence[str] = (),
+    finish: Callable[[], object] | None = None,
+    progress: _landing.Progress | None = None,
+    report: Callable[[dict[str, object]], object] | None = None,
+) -> tuple[dict[str, object], int]:
+    """Install copied store entries under their recorded ids, and build: ``workflow install --json --from-store`` or
+    ``--stdin-tar``, which the transfer session's ``install`` op shares.
+
+    Each entry yields a row ``{"directory", "id", "status"}``, in order, with status ``installed``, ``present``
+    (that id with the same tree), ``mismatch`` (that id with another tree, left as it is), ``refused`` (with
+    ``reason``, and ``id`` null) or ``failed`` (it could not be made durable); all but a refused or failed row tell
+    whether the installation has a ``[workflow.build]`` (``build``). With *build*, each row ``installed`` here with a
+    ``[workflow.build]`` is built, adding ``build_status`` to every row (``built``, ``failed`` with
+    ``build_reason``, or null when not built); *also_build* ids, installations already here, are built and reported
+    as ``built``: ``[{"id", "status", "reason"?}]``. A failed build leaves the installation in place. A build's own
+    output goes to standard error.
+
+    With *stream* the entries arrive as one tar stream, extracted into ``tmp/push.<token>/`` (which ``workspace gc``
+    sweeps) and always discarded afterwards. With neither entries nor a stream, only the *also_build* ids are built:
+    ``{"workflows": [], "built": [...]}``.
+
+    Nothing is installed when this raises before its first install (*progress* is told ``install`` once the
+    command's owner is registered); an error after that leaves the owner for recovery.
+
+    :param workspace: The workspace to install into.
+    :param directories: The entries' directories (``--from-store``).
+    :param stream: The binary tar stream of the entries (``--stdin-tar``) instead.
+    :param token: The stream's landing name (32 lowercase hexadecimal digits), or ``None`` for a fresh one.
+    :param source_label: How the installations record their source.
+    :param build: Build what this installed (``--build``).
+    :param also_build: Installed ids to build (``--also-build``).
+    :param finish: See :func:`httk.workflow._landing.receive_tar`.
+    :param progress: Told the phases of :func:`httk.workflow._landing.receive_tar`, then ``install`` with the entries
+        done, then ``build`` before the builds.
+    :param report: Given the document before a stream's landing is discarded.
+    :return: The document ``{"workflows": rows}`` (with ``"built"`` when *also_build* is given) and the exit status:
+        1 when an entry or a build failed, else 0.
+    """
+
+    from ._job import _warn_leftovers
+
+    label = source_label or "a copied store entry"
+    rows: list[dict[str, object]] = []
+    built: list[dict[str, object]] = []
+    landing = workspace.control / "tmp" / f"push.{token or uuid.uuid4().hex}"
+    entries = list(directories)
+    try:
+        require_cli_modifiable(workspace)
+        if stream is not None:
+            received = _landing.receive_tar(
+                workspace,
+                landing,
+                stream,
+                finish=finish,
+                progress=progress,
+                on_leftovers=partial(_warn_leftovers, landing),
+            )
+            entries = [str(landing / name) for name in received]
         with _kernel.register_owner(
             workspace, kind="cli", label="workflow install", allocation=None, advertised={}
         ) as owner:
+            if progress is not None:
+                progress("install", 0)
             for directory in entries:
                 row: dict[str, object] = {"directory": directory}
                 try:
@@ -750,7 +819,11 @@ def _install_copies(arguments: argparse.Namespace, context: Any) -> int:
                 except _ERRORS as exc:
                     row.update(id=None, status="refused", reason=str(exc))
                 rows.append(row)
-            for row in rows if arguments.build else ():
+                if progress is not None:
+                    progress("install", len(rows))
+            if progress is not None:
+                progress("build", None)
+            for row in rows if build else ():
                 reason = None
                 attempted = row["status"] == "installed" and row["build"] is True
                 if attempted:
@@ -758,25 +831,20 @@ def _install_copies(arguments: argparse.Namespace, context: Any) -> int:
                 row["build_status"] = ("failed" if reason else "built") if attempted else None
                 if reason is not None:
                     row["build_reason"] = reason
-            for workflow_id in arguments.also_build:
+            for workflow_id in also_build:
                 reason = _build_reason(workspace, owner, workflow_id)
                 outcome: dict[str, object] = {"id": workflow_id, "status": "failed" if reason else "built"}
                 built.append(outcome if reason is None else {**outcome, "reason": reason})
         document: dict[str, object] = {"workflows": rows}
-        if arguments.also_build:
+        if also_build:
             document["built"] = built
-        print(json.dumps(document, indent=2, sort_keys=True))
+        if report is not None:
+            report(document)
     finally:
-        if arguments.stdin_tar:
+        if stream is not None:
             _fs.discard(_fs.loc(landing), trash_dir=workspace.control / "tmp", durable=workspace.durable)
-        elif arguments.consume:
-            for directory in {Path(directory).parent: directory for directory in entries}.values():
-                try:
-                    _consume(workspace, directory)
-                except _ERRORS as exc:
-                    print(f"{directory}: the pushed copy was not discarded: {exc}", file=sys.stderr)
     failed = any(row["status"] in ("refused", "failed") or row.get("build_status") == "failed" for row in rows)
-    return 1 if failed or any(entry["status"] == "failed" for entry in built) else 0
+    return document, 1 if failed or any(entry["status"] == "failed" for entry in built) else 0
 
 
 def _build_reason(workspace: Workspace, owner: _kernel.Owner, workflow_id: str) -> str | None:

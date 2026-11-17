@@ -27,6 +27,7 @@ from httk.workflow.adapters import RemoteTarget, add_remote, probe_remote_worksp
 from httk.workflow.launchers import add_launcher
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _manager, command
+from test_job_transfer import recorded_requests
 
 _FAKE_PYTHON = '''#!{python}
 """Stand-in for python3 that records ``-m pip`` instead of running it."""
@@ -957,7 +958,10 @@ def test_an_unrecognized_adapter_kind_still_refuses(tmp_path: Path, remote: Remo
         run_adapter(bundle, "status", {"remote_settings": {}, "argv": ["true"]})
 
 
-def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote: Remote) -> None:
+def test_a_job_reaches_a_remote_workspace_and_runs_there(
+    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
     source_root = tmp_path / "project"
     initialize_project(source_root, name="end-to-end")
     home = v3.workspace(source_root / "workspace")
@@ -970,16 +974,19 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     register_ws(context, home.root, "home")
     register_ws(context, destination.root, "station", remote="cluster")
 
+    requests = recorded_requests(monkeypatch)
     assert command(["job", "transfer", "--job", job_id, "home", "cluster:station"], context) == 0
 
     assert _kernel.locate(home, job_id, placement_hint=None, exhaustive=True) is None
     assert v3.find(destination, job_id).state == "ready"
     v3.run(destination)
     assert v3.find(destination, job_id).state == "succeeded"
-    # The push crossed the stand-in transport as one connection: the bundle streamed to the adoption, no probe.
+    # The push crossed the stand-in transport as one connection, a transfer session: the bundle streamed to the
+    # adoption, no probe.
     commands = remote.commands()
-    (adoption,) = commands
-    assert adoption.startswith("httk job adopt --json --stdin-tar ") and "--workspace station" in adoption
+    (session,) = commands
+    assert session.startswith("httk workflow transfer-session")
+    assert [header["workspace"] for op, header in requests if op == "adopt"] == ["station"]
 
 
 def test_probe_remote_workspace_refuses_an_older_remote_with_the_upgrade(tmp_path: Path) -> None:

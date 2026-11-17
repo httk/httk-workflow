@@ -25,7 +25,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote
-from httk.workflow import Workspace, _fs, _moving, _store
+from httk.workflow import Workspace, _fs, _landing, _moving, _store
 from httk.workflow import scaffold as scaffold_module
 from httk.workflow._setting_catalog import classify_setting
 from httk.workflow._state import read_state_unowned
@@ -33,7 +33,6 @@ from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
-from httk.workflow.workflow_cli._job import receive_tar
 from test_deliver import hold_jobs, outgoing_dir, stream
 from test_job_creation import install, raw_package, ready
 from test_job_transfer import adapter_calls, jobs, outgoing, registered, selected, starts
@@ -55,6 +54,12 @@ from v3_helpers import cli_owner
 _FS_LOGGER = "httk.workflow._fs"
 
 
+def receive_tar(workspace: Workspace, landing: Path, **options: Any) -> list[str]:
+    """The far side's receiver reading standard input, as ``job adopt --stdin-tar`` hands it its stream."""
+
+    return _landing.receive_tar(workspace, landing, sys.stdin.buffer, **options)
+
+
 @pytest.fixture(autouse=True)
 def _fresh_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_fs, "_syncfs_works", {})
@@ -66,8 +71,9 @@ def project(tmp_path: Path) -> Path:
 
     root = tmp_path / "project"
     initialize_project(root, name="sync-errors")
-    fake_remote(root, template="local", name="cluster")
-    fake_remote(root, template="local", name="other")
+    # The adapter path, which Far scripts (a session's retry: test_session_push).
+    fake_remote(root, template="local", name="cluster", transfer_session="off")
+    fake_remote(root, template="local", name="other", transfer_session="off")
     return root
 
 
@@ -806,7 +812,7 @@ def test_local_to_remote_over_ssh_costs_one_more_call_only_for_a_retry(
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="ssh-retry")
-    fake_remote(project)
+    fake_remote(project, transfer_session="off")  # the adapter path's count (a session's: test_session_push)
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(remote.root, "far")
     far.configure_settings({"io.sync": "syncfs"})

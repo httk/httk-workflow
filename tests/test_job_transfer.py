@@ -21,6 +21,7 @@ from httk.core.cli import CLIContext
 from conftest import Remote, fake_remote
 from httk.workflow import Workspace, _kernel, _moving, hygiene
 from httk.workflow._state import Release, read_state_unowned
+from httk.workflow.adapters import resolve_remote
 from httk.workflow.projects import initialize_project
 from httk.workflow.registry import create_workspace
 from httk.workflow.workflow_cli import _transfer as transfer_cli
@@ -52,6 +53,32 @@ def registered(root: Path, label: str) -> tuple[Workspace, str]:
 
 def run(cwd: Path, *argv: str) -> int:
     return command(["job", "transfer", "--no-durable", *argv], CLIContext("httk", cwd))
+
+
+def recorded_requests(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
+    """Record the op and header of every transfer-session request this process makes, in order."""
+
+    from httk.workflow.adapters import TransferSession
+
+    seen: list[tuple[str, dict[str, Any]]] = []
+    real = TransferSession.request
+
+    def request(session: TransferSession, op: str, header: Any = None, **options: Any) -> dict[str, Any]:
+        seen.append((op, dict(header or {})))
+        return real(session, op, header, **options)
+
+    monkeypatch.setattr(TransferSession, "request", request)
+    return seen
+
+
+def adapter_path(project: Path, name: str = "cluster") -> None:
+    """Make the remote *name* of *project* skip the transfer session, so a push takes the adapter path that a test
+    scripts or counts (``transfer_session=off``)."""
+
+    bundle = resolve_remote(name, project=project).bundle
+    metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
+    metadata["settings"]["transfer_session"] = "off"
+    (bundle / "remote.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
 
 
 def outcomes(capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
@@ -501,7 +528,8 @@ def test_remote_status_and_refusal_keep_the_remote_hold(
     assert outgoing(near) == []
 
 
-def test_a_job_crosses_the_ssh_adapter(tmp_path: Path, remote: Remote, capsys) -> None:
+def test_a_job_crosses_the_ssh_adapter(tmp_path: Path, remote: Remote, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
+    requests = recorded_requests(monkeypatch)
     project = tmp_path / "project"
     initialize_project(project, name="ssh-transfer")
     fake_remote(project)
@@ -517,9 +545,10 @@ def test_a_job_crosses_the_ssh_adapter(tmp_path: Path, remote: Remote, capsys) -
     assert_in(near, plan)
     commands = remote.commands()
     assert any("job transfer --hold --json" in item for item in commands)
-    # The adoption reads the bundles from its stdin and names the workspace as the far side registered it.
-    (adoption,) = [item for item in commands if "job adopt" in item]
-    assert adoption.startswith("httk job adopt --json --stdin-tar --token ") and f"--workspace {far_name}" in adoption
+    # The push is one transfer session: its adopt request names the workspace as the far side registered it.
+    (session,) = [item for item in commands if "transfer-session" in item]
+    assert session.startswith("httk workflow transfer-session") and not [item for item in commands if "adopt" in item]
+    assert [header["workspace"] for op, header in requests if op == "adopt"] == [far_name]
 
 
 def test_a_banner_on_the_remote_stdout_is_reported_and_resumed(
@@ -624,7 +653,7 @@ def test_local_to_remote_over_ssh_makes_one_call_whatever_the_number_of_jobs(
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="ssh-batch")
-    fake_remote(project)
+    fake_remote(project, transfer_session="off")  # the adapter path's pinned count (a session's: test_session_push)
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(remote.root, "far")
     calls = adapter_calls(monkeypatch)
@@ -733,6 +762,7 @@ def test_a_failed_batch_adoption_keeps_every_hold_and_resume_delivers(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, far, far_name = _remote_pair(tmp_path)
+    adapter_path(project)  # the adapter path, which this test scripts
     plan = jobs(near, 3)
 
     def older(*_arguments: Any) -> tuple[int, str, str]:  # a remote whose job adopt reads no stream
@@ -892,8 +922,8 @@ def test_long_id_lists_are_split_into_calls_that_fit_the_budget(
     plan = jobs(near, 5)
     assert run(project, "--json", *selected(plan), near_name, f"cluster:{far_name}") == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 5
-    # One delivery: the bundles travel in the stream, not on the command line.
-    assert calls == ["deliver job adopt"]
+    # One transfer session, no adapter call: the bundles travel in the stream, not on the command line.
+    assert calls == []
     assert_in(far, plan)
     assert outgoing(near) == [] and incoming(far) == []
     calls.clear()
@@ -908,6 +938,7 @@ def test_a_batch_is_one_delivery_whatever_the_budget_and_its_failure_keeps_every
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, far, far_name = _remote_pair(tmp_path)
+    adapter_path(project)  # the adapter path, which this test scripts
     # The bundles travel in the stream, not on the command line: a tiny budget still makes one delivery.
     monkeypatch.setattr(transfer_cli, "_ARGUMENT_BUDGET", 70)
     real = transfer_cli._deliver_call
@@ -938,6 +969,7 @@ def test_an_older_destination_s_flat_adoption_report_is_explained(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, _far, far_name = _remote_pair(tmp_path)
+    adapter_path(project)  # the adapter path, which this test scripts
 
     def older(*_arguments: Any) -> tuple[int, str, str]:  # the single-document --json of an older job adopt
         return 0, json.dumps({"already_adopted": False, "published": [], "missing_workflows": []}), ""
@@ -1125,6 +1157,7 @@ def test_remote_state_goes_in_the_last_hold_call_only_and_step_in_every_one(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, far, far_name = _remote_pair(tmp_path)
+    adapter_path(project)  # the adapter path, which this test scripts
     monkeypatch.setattr(transfer_cli, "_ARGUMENT_BUDGET", 100)  # two `--job UUID` a call: chunks of 2 and 1
     real = transfer_cli._remote
     holds: list[list[str]] = []
@@ -1706,7 +1739,7 @@ def test_an_unreadable_adoption_answer_keeps_the_holds_and_a_resume_delivers(
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="ssh-adopt-banner")
-    fake_remote(project)
+    fake_remote(project, transfer_session="off")  # the banner greets a job adopt connection
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(remote.root, "far")
     plan = jobs(near, 2)

@@ -28,8 +28,7 @@ from typing import IO, Any, cast
 
 import pytest
 
-from httk.workflow import Workspace, _fs, _pool, adapter_runtime
-from httk.workflow.workflow_cli._job import receive_tar
+from httk.workflow import Workspace, _fs, _landing, _pool, adapter_runtime
 
 MTIME = 1_000_000_000
 
@@ -37,6 +36,12 @@ type Member = tuple[tarfile.TarInfo, bytes]
 type Builder = Callable[[Path], Sequence[Member]]
 type Setup = Callable[[Path, Path], None]
 type Extract = Callable[[IO[bytes], Path], None]
+
+
+def receive_tar(workspace: Workspace, landing: Path, **options: Any) -> list[str]:
+    """The far side's receiver reading standard input, as ``job adopt --stdin-tar`` hands it its stream."""
+
+    return _landing.receive_tar(workspace, landing, sys.stdin.buffer, **options)
 
 
 def old_extract(stream: IO[bytes], target: Path, *, rename: tuple[str, str] | None = None) -> None:

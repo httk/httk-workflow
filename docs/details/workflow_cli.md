@@ -692,7 +692,9 @@ workspace's id, and, for each hidden `--built-for ID`, a `workflows` entry
 `{"id", "status", "tree_sha256"}` with status `present`, `unbuilt` or `missing`.
 A stream refused before any adoption (exit `2`) prints instead the document
 `{"bundles": [], "workspace_id": ..., "refused": REASON}` (`workspace_id` is
-`null` when the workspace could not be opened); when the refusal is the landing's
+`null` when the workspace could not be opened); when the extraction refused a
+member, `"bundle"` names the top-level bundle directory it belongs to; when the
+refusal is the landing's
 failed `syncfs` under `io.sync_errors` `fail` (a write error on that filesystem,
 possibly another user's; see {doc}`../workspaces`), and only then, it also
 carries `"sync_failed": true`, which makes a push deliver once more. Exit `0`
@@ -764,7 +766,8 @@ its terminal or paused descendants too) in SRC's own
 `.httk-workspace/transfers/outgoing/<transfer id>/`, recording DST, after which
 the jobs are in neither workspace's state trees. It **copies** the held bundle
 to DST (on one filesystem adoption simply moves it in; a local DST receives it
-with the adapter's `pull`; a remote DST receives it with the adapter's
+with the adapter's `pull`; a remote DST receives it from a local SRC over one
+transfer session, segment by segment (below), and otherwise with the adapter's
 `deliver`, streamed into `job adopt --stdin-tar` there), **adopts** it there
 into the states and priorities it left, and only then **releases** the hold.
 A remote end is never probed first: its commands name the workspace by the
@@ -776,13 +779,19 @@ closure of its calls, as SRC resolves them) that DST lacks and SRC has are
 installed in DST under the same ids, and a shipped workflow with
 `[workflow.build]` is built there, as is a needed one DST already had without a
 build for its platform. For a local DST this happens before the first adoption
-of a batch, from DST's store; the builds follow the release. A remote DST
-reports what it has with the adoption itself (`job adopt --built-for ID`, each
-`present`, `unbuilt` or `missing`), and only when something is missing or
-unbuilt one more remote start follows: one `deliver` of the store entries
-(`install.json` and `package/`) to the internal `workflow install --stdin-tar
---build [--also-build ID …]`, or, with nothing to install, one
-`workflow install --also-build ID …`. Adopting before installing is safe: a
+of a batch, from DST's store; the builds follow the release. Over a push's
+transfer session the same holds for a remote DST: before the first segment, one
+request asks DST which of the workflows it has (`present`, `unbuilt` or
+`missing`), and one more installs the missing ones and builds the unbuilt ones,
+so every segment can start as soon as it is adopted, even while later segments
+are still on their way; a failed installation or build is reported and the push
+goes on (those jobs wait). Without a session a remote DST
+reports what it has with the adoption itself (`job adopt --built-for ID`), and
+when something is missing or unbuilt it is installed and built once, after the
+last adoption, in one more remote start: one `deliver`
+of the store entries (`install.json` and `package/`) to the internal
+`workflow install --stdin-tar --build [--also-build ID …]`, or, with nothing to
+install, one `workflow install --also-build ID …`. Adopting before installing is safe: a
 manager skips, and does not fail, a ready job whose workflow is not installed
 yet. An installation DST already has is never replaced,
 even with another tree. `--no-workflows` skips all of this. With
@@ -804,20 +813,63 @@ starts does not grow with the number of jobs: one hold call on a remote SRC
 one `deliver` to a remote DST (which lands the bundles in
 `.httk-workspace/transfers/incoming/<batch token>/` and adopts them in the same
 start), and one release call on a remote SRC. Local to remote takes one ssh
-connection and one remote `httk` start; remote to local three connections
+connection and one remote `httk` start, whatever it ships, builds or retries:
+the push runs over one transfer session (see *The transfer session* in
+{doc}`remotes`); remote to local three connections
 (hold, pull, release) and two starts; remote to remote four connections and
-three starts. Shipping missing or unbuilt workflows to a remote DST adds one
-connection and one start. A push from a local SRC that both re-drives holds
-an earlier run left bound for DST and holds new jobs delivers the two sets
-separately (the earlier holds first), which adds one connection and one start,
-only then. A delivery retried after DST's failed `syncfs` adds one connection
-and one start (the bundles are delivered again; a remote SRC's are not fetched
-again); the retry is per delivery, so with both sets it can add up to two. A
+three starts. Without a session (a DST whose `httk` predates it, which costs
+one more connection and start for the refused session, or the remote setting
+`transfer_session=off`), a push costs what it did before sessions: one `deliver`
+of the whole batch, plus one connection and one start for shipping missing or
+unbuilt workflows, for the second delivery when a push from a local SRC both
+re-drives holds an earlier run left bound for DST and holds new jobs (the two
+sets travel separately, the earlier holds first), and for each delivery retried
+after DST's failed `syncfs`. Remote to remote ships and retries the same way
+(its holds travel as one delivery: a remote SRC's holds are never taken back,
+so they are not separated), and a remote SRC's bundles are not fetched again
+for a retry. A
 pull chunk fetched again after a failed `syncfs` of its landing adds one
 `pull`; nothing is added when no retry happens.
-A delivery is one call for the whole batch (its bundles travel in the stream);
-only a hold, pull or release whose id list exceeds 64 KiB of command text (some
+Only a hold, pull or release whose id list exceeds 64 KiB of command text (some
 1500 jobs) is split, into as many such calls as it needs.
+
+Over a transfer session a push is delivered in segments, each closed at 256
+bundles, 16 GiB of file data or 16,384 archive members (a larger hold is a
+segment of its own; a hold is never split), and the earlier holds and the new
+ones never share a segment. Each segment is one request with its own archive,
+landing (`transfers/incoming/<token>/`), synchronization and adoption document,
+and the holds it adopted are released right after it. A push over a session is
+therefore not all-or-nothing: the segments adopted before a failure stay
+adopted and released, and after an unknown outcome only the failed segment and
+those after it stay held for `--resume`. The rules below apply to each segment as to a delivery, and two
+kinds of failure differ:
+
+- A **refusal** (a `refused` document: definitively nothing of that segment was
+  adopted) takes the segment's holds that this run made back into SRC
+  (`not_moved`) and keeps the earlier runs' held (`failed`, with the remedies
+  below). A refusal of one bundle's member names that bundle: only that bundle
+  is refused so, and the rest of its segment is delivered once more without it
+  (a second refusal of the rest is final). A refusal of a whole segment that
+  names no bundle (an unknown or sealed workspace, a full quota, an unwritable
+  landing) would meet every later segment too: nothing more is sent, and the
+  segments not yet sent are settled by the same refusal, so this run's holds
+  among them are taken back and earlier runs' stay held. A member refusal the
+  far side cannot attribute to a bundle counts as such a refusal
+  (conservatively). A refusal the far side marks as caused by an incomplete
+  stream (this side aborted its upload, say because a hold changed while it was
+  read) stops nothing.
+- An **unknown outcome** (an unreadable answer, a far side that dies or fails,
+  a segment answered by another workspace id than the first) stops the
+  session: that segment's holds are `failed` with an unknown outcome, and every
+  segment not yet sent stays held, `failed` with the `--resume` remedy. This
+  includes this run's own new holds when the unknown outcome is the earlier
+  holds' segment, since those are delivered first: they are never taken back
+  on an unknown outcome.
+
+After a retried `syncfs` failure every later segment of the session is
+synchronized file by file at once. When the session fails while the workflows
+are installed, before the first segment, nothing has been adopted and every
+hold stays held.
 
 A bundle DST refuses (for example because some of its jobs are already there,
 or because its `bundle.json` records another destination workspace id) stays

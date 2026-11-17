@@ -17,7 +17,16 @@ from httk.workflow.gc import collect_garbage
 from httk.workflow.packages import parse_workflow_manifest
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _transfer as transfer_cli
-from test_job_transfer import adapter_calls, outcomes, outgoing, project, registered, run, starts  # noqa: F401
+from test_job_transfer import (  # noqa: F401 (project: fixture)
+    adapter_calls,
+    adapter_path,
+    outcomes,
+    outgoing,
+    project,
+    registered,
+    run,
+    starts,
+)
 from test_moving import client_bundle, find, io_workers, place, single  # noqa: F401 (io_workers: fixture)
 from v3_helpers import cli_owner, job_mapping
 
@@ -224,7 +233,8 @@ def test_local_to_remote_and_pull_back_ship_through_the_adapter(
     (outcome,) = outcomes(capsys)["transfers"]
     assert shipped(outcome) == {GIT_ID: "installed", "local:caller": "installed"}, outcome["workflows"]
     # The adoption reports the workflows missing; one more start installs and builds them.
-    assert calls == ["deliver job adopt", "deliver workflow install"]
+    # One transfer session carries the adoption and the installation: no adapter call.
+    assert calls == []
     assert {found.id for found in _store.list_installed(far)} == {GIT_ID, "local:caller"}
     assert _store.closure(far, "local:caller", check_builds=True).ok and landings(far) == []
     # Pulled back into a third workspace: copied into a landing scratch there, which goes.
@@ -256,7 +266,7 @@ def test_ssh_ships_store_entries_in_one_push_and_one_install(
 ) -> None:
     project_root = tmp_path / "project"
     initialize_project(project_root, name="ssh-workflows")
-    fake_remote(project_root)
+    fake_remote(project_root, transfer_session="off")  # the adapter path's count (a session's: test_session_push)
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(remote.root, "far")
     calls = adapter_calls(monkeypatch)
@@ -311,6 +321,7 @@ def test_an_older_destination_s_install_refusal_is_reported_and_gc_sweeps_landin
 ) -> None:
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(tmp_path, "far")
+    adapter_path(project)  # the adapter path, which this test scripts
     real = transfer_cli._deliver_call
 
     def older(end: Any, context: Any, arguments: Any, source: str, files: list[str], argv: list[str]) -> Any:
@@ -433,7 +444,7 @@ def test_an_unbuilt_installation_is_built_by_a_later_transfer(
     (outcome,) = outcomes(capsys)["transfers"]
     assert shipped(outcome) == {GIT_ID: "present", "local:caller": "present"}
     # Nothing to install, one unbuilt: one more start, which only builds.
-    assert calls == ["deliver job adopt", "workflow install"]
+    assert calls == []  # the build is a request on the push's transfer session
     assert _store.closure(far, "local:caller", check_builds=True).ok
 
 

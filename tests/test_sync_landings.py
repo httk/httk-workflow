@@ -27,14 +27,19 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import fake_remote
-from httk.workflow import Workspace, _fs, _kernel, _moving
+from httk.workflow import Workspace, _fs, _kernel, _landing, _moving
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
-from httk.workflow.workflow_cli._job import receive_tar
 from test_deliver import hold_jobs, outgoing_dir, stream
 from test_job_transfer import jobs, outgoing, registered, selected
 from test_moving import assert_in, find, io_workers, place, tree  # noqa: F401 (io_workers: fixture)
+
+
+def receive_tar(workspace: Workspace, landing: Path, **options: Any) -> list[str]:
+    """The far side's receiver reading standard input, as ``job adopt --stdin-tar`` hands it its stream."""
+
+    return _landing.receive_tar(workspace, landing, sys.stdin.buffer, **options)
 
 
 @pytest.fixture
@@ -43,7 +48,8 @@ def project(tmp_path: Path) -> Path:
 
     root = tmp_path / "project"
     initialize_project(root, name="sync")
-    fake_remote(root, template="local", name="cluster")
+    # The adapter path, whose far side in_process_far_side runs in this process to observe its barrier.
+    fake_remote(root, template="local", name="cluster", transfer_session="off")
     return root
 
 

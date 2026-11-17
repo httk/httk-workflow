@@ -19,12 +19,15 @@ half-open TCP connection) leaves it waiting for input until the transport notice
 
 import argparse
 import contextlib
+import io
 import json
+import logging
 import os
 import sys
 import threading
 import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from pathlib import Path
 from typing import IO, Any, Self
 
 from httk.core.cli import CLIContext
@@ -33,7 +36,7 @@ from .. import _frames
 from .._frames import PROGRESS, REQUEST, RESPONSE, FrameReader, FrameWriter, StreamReader, StreamWriter
 from ..adapters import TRANSFER_SESSION_FORMAT, TRANSFER_SESSION_FORMAT_VERSION
 from ..errors import StreamAborted, TransferProtocolError
-from ._common import _leaf
+from ._common import _ERRORS, _leaf, _local_root, _modifiable
 
 __all__ = [
     "OPS",
@@ -110,7 +113,7 @@ class Request:
 
         :param phase: The phase name (``extract``, ``settle``, ``sync``, ``adopt``, ...).
         :param count: How far the phase got; a client fails the request when neither it nor the data moves for its
-            bound, outside the ``sync`` and ``build`` phases.
+            bound, outside the ``sync``, ``settle`` and ``build`` phases.
         """
 
         with self._lock:
@@ -183,8 +186,195 @@ def _bye(request: Request) -> Mapping[str, Any]:
     return {}
 
 
+@contextlib.contextmanager
+def _captured() -> Iterator[io.StringIO]:
+    """Capture what a request writes to standard error, for its response: what a command line would show.
+
+    Standard error is redirected (process-wide, so the pooled threads of the request's work write there too), which
+    also takes the records Python's last-resort handler renders when no handler is configured; and every console
+    handler of the ``httk`` loggers (a plain stream handler on this process's standard error) writes to the capture
+    for the request's time. Nothing else of the logging setup changes: each handler keeps its filters, formatting
+    and level, and other consumers (files, an active :func:`httk.core.report.collect_reports`) still receive the
+    records. So each record reaches the capture at most once, and this process's own standard error not at all.
+    """
+
+    capture = io.StringIO()
+    consoles = {id(sys.stderr), id(sys.__stderr__)}
+    loggers = [logging.getLogger("httk")]
+    loggers += [
+        logger
+        for name, logger in logging.Logger.manager.loggerDict.items()
+        if name.startswith("httk.") and isinstance(logger, logging.Logger)
+    ]
+    redirected = [
+        handler
+        for logger in loggers
+        for handler in logger.handlers
+        if type(handler) is logging.StreamHandler and id(handler.stream) in consoles
+    ]
+    saved = [handler.setStream(capture) for handler in redirected]
+    try:
+        with contextlib.redirect_stderr(capture):
+            yield capture
+    finally:
+        for handler, stream in zip(redirected, saved, strict=True):
+            handler.setStream(stream)
+
+
+def _text(header: Mapping[str, Any], key: str, *, required: bool = False) -> str | None:
+    value = header.get(key)
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value:
+        raise Refused(f"{header.get('op')} needs {key} as a nonempty string")
+    return value
+
+
+def _texts(header: Mapping[str, Any], key: str) -> list[str]:
+    value = header.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise Refused(f"{header.get('op')} needs {key} as a list of nonempty strings")
+    return value
+
+
+def _flag(header: Mapping[str, Any], key: str) -> bool:
+    value = header.get(key, False)
+    if not isinstance(value, bool):
+        raise Refused(f"{header.get('op')} needs {key} as a boolean")
+    return value
+
+
+def _workspace_arguments(name: str) -> argparse.Namespace:
+    """The arguments a command line naming *name* with ``--workspace`` resolves its workspace from."""
+
+    return argparse.Namespace(workspace=name, by_path=False, no_durable=False)
+
+
+def _adopt(request: Request) -> Mapping[str, Any]:
+    """Adopt the bundles the upload carries: ``job adopt --json --stdin-tar --token T [--sync fsync] --workspace WS
+    [--built-for ID ...]`` (:func:`~httk.workflow.workflow_cli._job.adopt_stream`).
+
+    Header: ``workspace`` (a registered name, resolved as the command line resolves it), ``token``, ``sync``
+    (``"fsync"`` or absent) and ``built_for`` (workflow ids). The response carries that command's JSON
+    ``document``, its ``returncode`` and its captured ``stderr``; it is ``ok`` exactly when the document is no
+    ``refused`` one (a refusal is answered ``ok: false`` with those members, and ``error`` its reason). An error
+    after the first adoption began is fatal.
+    """
+
+    header = request.header
+    workspace = _text(header, "workspace", required=True)
+    assert workspace is not None
+    token = _text(header, "token")
+    sync = header.get("sync")
+    if sync not in (None, "fsync"):
+        raise Refused(f"adopt takes sync fsync or none, not {sync!r}")
+    built_for = _texts(header, "built_for")
+    upload = request.upload
+    if upload is None:
+        raise Refused("adopt needs an upload")
+    from ._job import adopt_stream
+
+    context = CLIContext("httk", Path.cwd())
+    with _captured() as stderr:
+        document, returncode = adopt_stream(
+            lambda: _modifiable(_workspace_arguments(workspace), context, action="adopt jobs into it"),
+            upload,
+            token=token,
+            force_fsync=sync == "fsync",
+            built_for=built_for,
+            finish=upload.finish,
+            progress=request.progress,
+        )
+    members = {"document": document, "returncode": returncode, "stderr": stderr.getvalue()}
+    if "refused" in document:
+        raise Refused(str(document["refused"]), **members)
+    return members
+
+
+def _install(request: Request) -> Mapping[str, Any]:
+    """Install the store entries the upload carries and build: ``workflow install --json [--stdin-tar
+    --source-label L --build] [--also-build ID ...] --workspace WS``
+    (:func:`~httk.workflow.workflow_cli._describe.install_copies`).
+
+    Header: ``workspace``, ``source_label``, ``build`` and ``also_build`` (installed ids to build); the upload, when
+    there is one, is the tar of the entries (``<directory>/install.json`` and ``<directory>/package/``). The response
+    carries the command's JSON ``document``, its ``returncode`` and its captured ``stderr``; a build's own output
+    goes to this process's standard error, not the response. An error before the first install refuses the request
+    (``ok: false``, its ``stderr`` kept); one after it is fatal.
+    """
+
+    header = request.header
+    workspace_name = _text(header, "workspace", required=True)
+    assert workspace_name is not None
+    source_label = _text(header, "source_label")
+    build = _flag(header, "build")
+    also_build = _texts(header, "also_build")
+    upload = request.upload
+    if upload is None and not also_build:
+        raise Refused("install needs an upload or also_build ids")
+    from ..workspace import Workspace
+    from ._describe import install_copies
+
+    context = CLIContext("httk", Path.cwd())
+    begun = False
+
+    def progress(phase: str, count: int | None) -> None:
+        nonlocal begun
+        begun = begun or phase in {"install", "build"}  # told once the command's owner is registered
+        request.progress(phase, count)
+
+    with _captured() as stderr:
+        try:
+            root = _local_root(_workspace_arguments(workspace_name), context, action="install workflows into it")
+            document, returncode = install_copies(
+                Workspace(root),
+                stream=upload,
+                source_label=source_label,
+                build=build,
+                also_build=also_build,
+                finish=None if upload is None else upload.finish,
+                progress=progress,
+            )
+        except _ERRORS as exc:
+            if begun:
+                raise  # an install may have begun, and the owner is left for recovery: fail-stop
+            error = str(exc)
+        else:
+            return {"document": document, "returncode": returncode, "stderr": stderr.getvalue()}
+    raise Refused(error, stderr=stderr.getvalue())
+
+
+def _workflows(request: Request) -> Mapping[str, Any]:
+    """Report the workflows *ids* as ``job adopt --built-for`` reports them: ``present``, ``unbuilt`` or
+    ``missing``, each with its ``tree_sha256`` (read only).
+
+    Header: ``workspace`` and ``ids``. The response carries ``workflows``, the rows in the order of *ids*; an
+    unknown workspace refuses the request.
+    """
+
+    header = request.header
+    workspace_name = _text(header, "workspace", required=True)
+    assert workspace_name is not None
+    ids = _texts(header, "ids")
+    if request.upload is not None:
+        raise Refused("workflows takes no upload")
+    from ..workspace import Workspace
+    from ._job import _built_for
+
+    context = CLIContext("httk", Path.cwd())
+    with _captured() as stderr:
+        try:
+            root = _local_root(_workspace_arguments(workspace_name), context, action="report its workflows")
+            rows = _built_for(Workspace(root), ids)
+        except _ERRORS as exc:  # read only: nothing changed
+            error = str(exc)
+        else:
+            return {"workflows": rows, "stderr": stderr.getvalue()}
+    raise Refused(error, stderr=stderr.getvalue())
+
+
 #: The ops of format version 1 this far side serves, by name.
-OPS: dict[str, Op] = {"echo": _echo, "bye": _bye}
+OPS: dict[str, Op] = {"echo": _echo, "bye": _bye, "adopt": _adopt, "install": _install, "workflows": _workflows}
 
 
 class _Ticker:

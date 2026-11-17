@@ -33,7 +33,8 @@ def ssh_pair(tmp_path: Path, remote: Remote) -> tuple[Path, Workspace, str, Work
 
     project = tmp_path / "project"
     initialize_project(project, name="ssh-takeback")
-    fake_remote(project)
+    # The adapter path these tests count and script (a session's take-back: test_session_push).
+    fake_remote(project, transfer_session="off")
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(remote.root, "far")
     return project, near, near_name, far, far_name
@@ -199,7 +200,7 @@ def project(tmp_path: Path) -> Path:
 
     root = tmp_path / "project"
     initialize_project(root, name="takeback-scripted")
-    fake_remote(root, template="local", name="cluster")
+    fake_remote(root, template="local", name="cluster", transfer_session="off")  # Far scripts the adapter path
     return root
 
 

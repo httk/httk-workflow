@@ -6,7 +6,6 @@ import math
 import os
 import re
 import shlex
-import stat
 import sys
 import tempfile
 import time
@@ -15,7 +14,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import IO, Any
 
 from httk.core.cli import CLIContext
 from httk.core.identity import (
@@ -27,11 +26,13 @@ from httk.core.identity import (
     sign_document,
 )
 
-from .. import _fs, _kernel, _moving, _pool, _requests, _store, scaffold
+from .. import _fs, _kernel, _landing, _moving, _pool, _requests, _store, scaffold
 from .._bundles import BundleError, read_manifest
 from .._children import newest_labeled
 from .._job import JobDefinition
 from .._kernel import JobRef
+from .._landing import CommitFailed as _CommitFailed
+from .._landing import StreamRefused
 from .._logging import LOG_LEVELS, configure_logging
 from .._manager_scheduling import current_step
 from .._state import TERMINAL_STATES, read_state_unowned
@@ -1947,31 +1948,133 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
     A refused bundle does not stop the ones after it. Afterwards, a bundle's parent directory that is a direct
     child of this workspace's ``transfers/incoming/`` (a transfer's per-batch landing) is removed when empty.
     With ``--stdin-tar`` the bundles arrive as one tar stream, extracted whole into such a landing before any is
-    adopted; a bundle there bound for another workspace is refused and discarded.
+    adopted (:func:`adopt_stream`); a bundle there bound for another workspace is refused and discarded.
     """
 
-    workspace: Workspace | None = None
-    landing: Path | None = None
-    parents: set[Path] = set()
-    stack = ExitStack()
-    try:
+    def resolve() -> Workspace:
         if arguments.stdin_tar == bool(arguments.bundles):
             raise ValueError("give BUNDLE paths, or --stdin-tar to read the bundles from standard input, not both")
         if arguments.token is not None and not arguments.stdin_tar:
             raise ValueError("--token names the landing of --stdin-tar")
         if arguments.sync is not None and not arguments.stdin_tar:
             raise ValueError("--sync applies to the landing of --stdin-tar")
-        workspace = _modifiable(arguments, context, action="adopt jobs into it")
-        if arguments.stdin_tar:
-            landing, bundles = _receive_bundles(workspace, arguments.token, force_fsync=arguments.sync == "fsync")
-            sources = [landing / name for name in bundles]
-            parents.add(landing.resolve())  # removed when empty, even after an empty stream
-        else:
-            sources = [context.cwd / Path(bundle).expanduser() for bundle in arguments.bundles]
-            bundles = arguments.bundles
+        return _modifiable(arguments, context, action="adopt jobs into it")
+
+    if arguments.stdin_tar:
+        # With --json, a refused invocation is the refusal document too.
+        document, returncode = adopt_stream(
+            resolve,
+            sys.stdin.buffer,
+            token=arguments.token,
+            force_fsync=arguments.sync == "fsync",
+            built_for=arguments.built_for,
+            move=arguments.move,
+            json_output=arguments.json,
+        )
+        if arguments.json:
+            print(json.dumps(document, indent=2))
+        return returncode
+    workspace = resolve()
+    sources = [context.cwd / Path(bundle).expanduser() for bundle in arguments.bundles]
+    stack = ExitStack()
+    try:
         owner = stack.enter_context(
             _kernel.register_owner(workspace, kind="cli", label="job adopt", allocation=None, advertised={})
         )
+        # One wait of the visibility deadline for every bundle's absent jobs, not one a bundle.
+        settled = _moving.settle_absent(workspace, sources)
+    except _ERRORS:
+        stack.close()
+        raise
+    unsynced: str | None = None
+    with stack:
+        # Operators' bundles, written before httk ran: one sync for the batch before anything is taken. Its error
+        # cannot be told apart between them, so it fails every bundle of the batch (a bundle it cannot reach is
+        # skipped: its own take reports it).
+        try:
+            _moving.sync_operator_bundles(workspace, sources)
+        except _fs.SyncFailed as exc:
+            unsynced = exc.strerror
+        except _ERRORS as exc:
+            unsynced = f"not taken: the bundles could not be synced to disk: {exc}"
+        # Outside the try above: an unexpected error after bundles were adopted prints no "refused" document.
+        entries = _adopt_sources(
+            workspace,
+            owner,
+            sources,
+            arguments.bundles,
+            settled,
+            delivered=False,
+            move=arguments.move,
+            json_output=arguments.json,
+            unsynced=unsynced,
+        )
+    _prune_landings(workspace, {source.parent.resolve() for source in sources})
+    if arguments.json:
+        report: dict[str, object] = {"bundles": entries, "workspace_id": workspace.workspace_id}
+        if arguments.built_for:
+            report["workflows"] = _built_for(workspace, arguments.built_for)
+        print(json.dumps(report, indent=2))
+    return _adoption_status(entries)
+
+
+def adopt_stream(
+    resolve: Callable[[], Workspace],
+    stream: IO[bytes],
+    *,
+    token: str | None = None,
+    force_fsync: bool = False,
+    built_for: Sequence[str] = (),
+    finish: Callable[[], object] | None = None,
+    progress: _landing.Progress | None = None,
+    move: bool = False,
+    json_output: bool = True,
+) -> tuple[dict[str, object], int]:
+    """Receive a tar stream of bundles into one landing and adopt every bundle it carried: ``job adopt --json
+    --stdin-tar``, which the transfer session's ``adopt`` op shares.
+
+    The stream is extracted whole (:func:`httk.workflow._landing.receive_tar`, made durable before anything is
+    adopted) into ``transfers/incoming/<token>/``; a bundle there bound for another workspace is refused and
+    discarded. Until the first adoption begins, any failure (the workspace, the stream, the sync commit) refuses
+    the whole stream: its landing is discarded and the result is the ``refused`` document, ``{"bundles": [],
+    "workspace_id", "refused"}``, with ``"bundle"`` naming the bundle whose member the extraction refused,
+    ``"stream_aborted": true`` when the stream itself was incomplete (aborted by its sender, or cut) and
+    ``"sync_failed": true`` when the sync barrier's commit failed. After that, an error escapes (so the far side
+    fails rather than claims a refusal). Standard error gets the human lines (``warning:`` lines, a refusal's
+    ``job adopt:`` line); with *json_output* off, a refusal raises instead and each adopted job's line goes to
+    standard output.
+
+    :param resolve: Returns the adopting workspace (checked to be modifiable); its error refuses the stream.
+    :param stream: The binary tar stream.
+    :param token: The landing's name (16 to 64 lowercase letters and digits), or ``None`` for a fresh one.
+    :param force_fsync: ``--sync fsync``: fsync every landed file as it is written, in a landing that must be fresh.
+    :param built_for: Workflow ids to report as ``workflow list --built-for`` sees them (``workflows``, with
+        *json_output* only).
+    :param finish: Called once the stream is extracted, before its commit; its error refuses the stream (see
+        :func:`~httk.workflow._landing.receive_tar`).
+    :param progress: Told each phase and count: those of :func:`~httk.workflow._landing.receive_tar`, ``settle``,
+        then ``adopt`` with the bundles adopted.
+    :param move: ``--move``: discard a bundle that adoption copied once it is adopted.
+    :param json_output: Return the documents (``--json``); without it a refusal raises.
+    :return: The ``job adopt --json`` document and the exit status: 0 when every bundle was adopted (or already
+        was), 1 when one was not, 2 for a refused stream.
+    :raises ValueError: Without *json_output*, for a refused stream.
+    """
+
+    workspace: Workspace | None = None
+    landing: Path | None = None
+    stack = ExitStack()
+    try:
+        workspace = resolve()
+        landing, bundles = _receive_bundles(
+            workspace, token, stream, force_fsync=force_fsync, finish=finish, progress=progress
+        )
+        sources = [landing / name for name in bundles]
+        owner = stack.enter_context(
+            _kernel.register_owner(workspace, kind="cli", label="job adopt", allocation=None, advertised={})
+        )
+        if progress is not None:
+            progress("settle", None)
         # One wait of the visibility deadline for every bundle's absent jobs, not one a bundle.
         settled = _moving.settle_absent(workspace, sources)
     except _ERRORS as exc:
@@ -1980,28 +2083,89 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
         if workspace is not None and landing is not None:
             _fs.discard(_fs.loc(landing), trash_dir=workspace.control / "tmp", durable=workspace.durable)
         sync_failed = isinstance(exc, _CommitFailed)
-        if not (arguments.stdin_tar and arguments.json):
+        if not json_output:
             if sync_failed:
                 raise ValueError(f"{exc} {_COMMIT_FAILED_HINT}") from None
             raise
         print(f"job adopt: {exc}", file=sys.stderr)
         workspace_id = None if workspace is None else workspace.workspace_id
         refusal: dict[str, object] = {"bundles": [], "workspace_id": workspace_id, "refused": str(exc)}
+        if isinstance(exc, StreamRefused) and exc.bundle is not None:
+            refusal["bundle"] = exc.bundle
+        if isinstance(exc, StreamRefused) and exc.stream_aborted:
+            # The sender's own stream was incomplete (it aborted it, or the input ended): no verdict on the bundles.
+            refusal["stream_aborted"] = True
         if sync_failed:
             # Only for the commit's writeback error: the sender delivers once more with --sync fsync.
             refusal["sync_failed"] = True
-        print(json.dumps(refusal, indent=2))
-        return 2
+        return refusal, 2
+    with stack:
+        # Outside the try above: an unexpected error after bundles were adopted gives no "refused" document.
+        entries = _adopt_sources(
+            workspace,
+            owner,
+            sources,
+            bundles,
+            settled,
+            delivered=True,
+            move=move,
+            json_output=json_output,
+            progress=progress,
+        )
+    _prune_landings(workspace, {landing.resolve(), *(source.parent.resolve() for source in sources)})
+    document: dict[str, object] = {"bundles": entries, "workspace_id": workspace.workspace_id}
+    if built_for and json_output:
+        document["workflows"] = _built_for(workspace, built_for)
+    return document, _adoption_status(entries)
+
+
+def _adoption_status(entries: Sequence[Mapping[str, object]]) -> int:
+    """The exit status of ``job adopt``: 0 when every bundle was adopted (or already was), else 1."""
+
+    return 0 if all(entry["status"] in ("adopted", "already_adopted") for entry in entries) else 1
+
+
+def _adopt_sources(
+    workspace: Workspace,
+    owner: _kernel.Owner,
+    sources: Sequence[Path],
+    bundles: Sequence[str],
+    settled: _moving.Settled,
+    *,
+    delivered: bool,
+    move: bool = False,
+    json_output: bool,
+    unsynced: str | None = None,
+    progress: _landing.Progress | None = None,
+) -> list[dict[str, object]]:
+    """Adopt each source in turn (up to ``io.workers`` at once, related ones in order), printing each one's human
+    lines; return the ``job adopt --json`` entries in order.
+
+    :param workspace: The adopting workspace.
+    :param owner: The command's owner there.
+    :param sources: The bundle directories.
+    :param bundles: Their names as the entries report them.
+    :param settled: The batch's settled absences.
+    :param delivered: The sources are a delivered stream's: one bound for another workspace is refused and
+        discarded.
+    :param move: ``--move``: discard a copied source once adopted.
+    :param json_output: ``--json``: no human lines on standard output.
+    :param unsynced: Why the batch could not be synced: every bundle then fails with it.
+    :param progress: Told ``("adopt", n)`` with the number of bundles done so far.
+    :return: The entries.
+    """
+
     entries: list[dict[str, object]] = []
-    unsynced: str | None = None
+    if progress is not None:
+        progress("adopt", 0)
 
     def adopt(index: int) -> tuple[dict[str, object], list[tuple[bool, str]]]:
         source, bundle = sources[index], bundles[index]
         if unsynced is not None:
             return {"bundle": bundle, "status": "failed", "message": unsynced}, [(True, f"{bundle}: {unsynced}")]
-        foreign = _foreign_bundle(workspace, source) if arguments.stdin_tar else None
+        foreign = _foreign_bundle(workspace, source) if delivered else None
         if foreign is None:
-            return _adopt_one(workspace, owner, source, bundle, arguments, settled.absent)
+            return _adopt_one(workspace, owner, source, bundle, settled.absent, move=move, json_output=json_output)
         _fs.discard(_fs.loc(source), trash_dir=workspace.control / "tmp", durable=workspace.durable)
         return {"bundle": bundle, "status": "refused", "message": foreign}, [(True, f"{bundle}: {foreign}")]
 
@@ -2010,47 +2174,49 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
         for to_stderr, line in lines:
             print(line, file=sys.stderr if to_stderr else sys.stdout)
         entries.append(entry)
+        if progress is not None:
+            progress("adopt", len(entries))
 
-    with stack:
-        if not arguments.stdin_tar:
-            # Operators' bundles, written before httk ran: one sync for the batch before anything is taken. Its
-            # error cannot be told apart between them, so it fails every bundle of the batch (a bundle it cannot
-            # reach is skipped: its own take reports it).
-            try:
-                _moving.sync_operator_bundles(workspace, sources)
-            except _fs.SyncFailed as exc:
-                unsynced = exc.strerror
-            except _ERRORS as exc:
-                unsynced = f"not taken: the bundles could not be synced to disk: {exc}"
-        # Outside the try above: an unexpected error after bundles were adopted prints no "refused" document.
-        serial = {index for index, source in enumerate(sources) if source in settled.serial}
-        run_batch(owner, adopt, range(len(sources)), workspace.io_workers, serial=serial, emit=show)
+    serial = {index for index, source in enumerate(sources) if source in settled.serial}
+    run_batch(owner, adopt, range(len(sources)), workspace.io_workers, serial=serial, emit=show)
+    return entries
+
+
+def _prune_landings(workspace: Workspace, parents: set[Path]) -> None:
+    """Remove each of *parents* that is a direct child of ``transfers/incoming/`` (a landing) and now empty."""
+
     incoming = (workspace.control / "transfers" / "incoming").resolve()
-    for parent in parents | {source.parent.resolve() for source in sources}:
+    for parent in parents:
         if parent.parent == incoming:
             try:
                 _fs.remove_empty_dir(_fs.loc(parent))  # kept while a bundle stayed in it
             except OSError:
                 pass
-    if arguments.json:
-        document: dict[str, object] = {"bundles": entries, "workspace_id": workspace.workspace_id}
-        if arguments.built_for:
-            document["workflows"] = _built_for(workspace, arguments.built_for)
-        print(json.dumps(document, indent=2))
-    return 0 if all(entry["status"] in ("adopted", "already_adopted") for entry in entries) else 1
 
 
 #: A ``job adopt --token``: the landing's directory name below ``transfers/incoming/``.
 _LANDING_TOKEN = re.compile(r"[0-9a-z]{16,64}")
 
 
-def _receive_bundles(workspace: Workspace, token: str | None, *, force_fsync: bool = False) -> tuple[Path, list[str]]:
-    """Extract the tar stream on standard input into ``transfers/incoming/<token>/`` (a fresh token by default).
+def _receive_bundles(
+    workspace: Workspace,
+    token: str | None,
+    stream: IO[bytes],
+    *,
+    force_fsync: bool = False,
+    finish: Callable[[], object] | None = None,
+    progress: _landing.Progress | None = None,
+) -> tuple[Path, list[str]]:
+    """Extract the tar *stream* into ``transfers/incoming/<token>/`` (a fresh token by default).
 
     :param workspace: The adopting workspace.
     :param token: The landing's name, so that a retried delivery lands in the same place, or ``None``.
+    :param stream: The binary tar stream.
     :param force_fsync: ``--sync fsync``: fsync every landed file as it is written, whatever ``io.sync`` says.
-    :return: The landing, and the names of the bundles in it, sorted.
+    :param finish: See :func:`~httk.workflow._landing.receive_tar`.
+    :param progress: See :func:`~httk.workflow._landing.receive_tar`.
+    :return: The landing, and the names of the bundles the stream carried, sorted (a reused landing's other entries
+        are named in one ``warning:`` line on standard error, before anything is committed).
     :raises ValueError: For a malformed token or stream, or a refused member (:class:`_CommitFailed` when the
         sync barrier's commit failed).
     """
@@ -2060,39 +2226,28 @@ def _receive_bundles(workspace: Workspace, token: str | None, *, force_fsync: bo
     elif not _LANDING_TOKEN.fullmatch(token):
         raise ValueError(f"--token must be 16 to 64 lowercase letters and digits: {token!r}")
     landing = workspace.control / "transfers" / "incoming" / token
-    return landing, receive_tar(workspace, landing, barrier=True, force_fsync=force_fsync)
+    bundles = _landing.receive_tar(
+        workspace,
+        landing,
+        stream,
+        barrier=True,
+        force_fsync=force_fsync,
+        finish=finish,
+        progress=progress,
+        on_leftovers=partial(_warn_leftovers, landing),
+    )
+    return landing, bundles
 
 
-def _extract_landing(workspace: Workspace, landing: Path, *, durable: bool) -> tuple[list[str], int]:
-    """Extract standard input into *landing*: the top-level names the stream carried, sorted, each checked to be a
-    directory, and how many regular files it wrote.
+def _warn_leftovers(landing: Path, leftovers: Sequence[str]) -> None:
+    """Print one ``warning:`` line about a reused landing's entries that the stream did not carry, if any."""
 
-    Anything else in *landing* (a reused token's leftovers of an earlier, interrupted delivery) is left untouched
-    and not returned, with one ``warning:`` line on standard error.
-    """
-
-    names: set[str] = set()
-    count = _fs.extract_tar(sys.stdin.buffer, landing, workers=workspace.io_workers, durable=durable, top_level=names)
-    for name in names:
-        found = _fs.lstat(_fs.loc(landing / name))
-        if found is None or not stat.S_ISDIR(found.st_mode):
-            raise ValueError(f"not a directory: {name!r}")
-    with os.scandir(landing) as listing:
-        others = sorted(entry.name for entry in listing if entry.name not in names)
-    if others:
+    if leftovers:
         print(
-            f"warning: left {len(others)} entr(ies) in {landing} that this stream did not carry untouched (not "
-            f"adopted): {', '.join(others[:5])}{', ...' if len(others) > 5 else ''}",
+            f"warning: left {len(leftovers)} entr(ies) in {landing} that this stream did not carry untouched (not "
+            f"adopted): {', '.join(leftovers[:5])}{', ...' if len(leftovers) > 5 else ''}",
             file=sys.stderr,
         )
-    return sorted(names), count
-
-
-class _CommitFailed(ValueError):
-    """A stream refused because its sync barrier's ``syncfs`` commit failed under ``io.sync_errors`` ``fail``: a
-    writeback error on the landing's filesystem, possibly another user's, so a delivery with ``--sync fsync``
-    (whose fsyncs no foreign error can fail) may succeed. The ``job adopt --json`` refusal document says so with
-    ``"sync_failed": true``."""
 
 
 #: What ``job adopt`` without ``--json`` adds to the message of a stream refused by a failed commit.
@@ -2100,79 +2255,6 @@ _COMMIT_FAILED_HINT = (
     "(a writeback error on this filesystem, possibly another process's: deliver the stream again, or see the "
     "io.sync and io.sync_errors settings)"
 )
-
-
-def receive_tar(workspace: Workspace, landing: Path, *, barrier: bool = False, force_fsync: bool = False) -> list[str]:
-    """Extract the tar stream on standard input into *landing* (created when absent): its top-level directories.
-
-    The anchored extraction of the adapter's pull (:func:`httk.workflow._fs.extract_tar`) is the trust boundary,
-    writing small files with up to the workspace's ``io.workers`` threads; every top-level entry of the stream must
-    be a directory. A stream that fails either is refused whole and *landing* discarded (only after every write of
-    the extraction finished), so nothing of it is used. Only the top-level names this stream carried are returned:
-    a reused landing's other entries (leftovers of an earlier, interrupted delivery) are left in place, never
-    adopted, with a ``warning:`` line.
-
-    :param workspace: The workspace *landing* belongs to (its ``tmp/`` takes the discarded landing).
-    :param landing: The directory to extract into.
-    :param barrier: The landing is what gets published (the far side of a push): in a durable workspace it is
-        made durable before this returns, through a :class:`~httk.workflow._fs.Barrier` entered before the first
-        member is extracted (``io.sync`` and ``io.sync_errors`` read afresh); a failed commit refuses the stream
-        like a refused member. ``workflow install --stdin-tar`` leaves it off: its landing is copied into the store,
-        not published.
-    :param force_fsync: Use the strategy ``fsync`` whatever ``io.sync`` says, with *barrier*: every landed file is
-        fsynced on its writing descriptor as it is extracted (``job adopt --sync fsync``, a push's one retry after a
-        failed commit); nothing more in a non-durable workspace. In any workspace, durable or not, *landing* must
-        not exist yet: its parents are created, then *landing* itself exclusively, and an existing one (or one
-        created concurrently) refuses the stream before anything is extracted or discarded.
-    :return: The names of the top-level directories the stream carried, sorted.
-    :raises ValueError: For a malformed stream, a refused member or a failed sync barrier (:class:`_CommitFailed`
-        when the barrier's ``syncfs`` commit failed under ``io.sync_errors`` ``fail``), or, with *force_fsync*,
-        when *landing* exists already (nothing is changed then).
-    """
-
-    import tarfile
-
-    if force_fsync:
-        _fs.make_dirs(landing.parent, durable=workspace.durable)
-        try:
-            os.mkdir(landing)
-        except FileExistsError:
-            raise ValueError(
-                f"--sync fsync needs a fresh landing, and {landing.name} exists already; nothing was used"
-            ) from None
-        if workspace.durable:
-            parent = os.open(landing.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-            try:
-                os.fsync(parent)  # the landing's own entry, as make_dirs makes it durable
-            finally:
-                os.close(parent)
-    else:
-        _fs.make_dirs(landing, durable=workspace.durable)
-    try:
-        if barrier and workspace.durable:
-            # --sync fsync only strengthens: inline fsync on the writing descriptors, which no foreign error fails.
-            policy: tuple[object, _fs.SyncErrors] = ("fsync", "fail") if force_fsync else workspace.io_sync_policy()
-            with _fs.Barrier(landing, policy[0], errors=policy[1], inline=True) as sync:
-                if force_fsync:
-                    sync.reason = "fsync (--sync fsync)"
-                entries, count = _extract_landing(workspace, landing, durable=sync.fsync_inline)
-                try:
-                    # Inline, so no walk: only a syncfs commit can fail here, and under ignore only for an
-                    # unsupported syncfs, which a retry would not help.
-                    sync.commit(count)
-                except _fs.SyncFailed as exc:
-                    if sync.errors != "fail":
-                        raise
-                    raise _CommitFailed(str(exc)) from exc
-        else:
-            entries, _count = _extract_landing(workspace, landing, durable=False)
-    except (tarfile.TarError, EOFError, OSError, ValueError) as exc:
-        _fs.discard(_fs.loc(landing), trash_dir=workspace.control / "tmp", durable=workspace.durable)
-        message = f"refused the stream, nothing of it was used: {exc}"
-        if isinstance(exc, _CommitFailed):
-            raise _CommitFailed(message) from None
-        raise ValueError(message) from None
-    return entries
 
 
 def _foreign_bundle(workspace: Workspace, bundle: Path) -> str | None:
@@ -2208,11 +2290,13 @@ def _adopt_one(
     owner: _kernel.Owner,
     source: Path,
     bundle: str,
-    arguments: argparse.Namespace,
     absent: frozenset[str],
+    *,
+    move: bool,
+    json_output: bool,
 ) -> tuple[dict[str, object], list[tuple[bool, str]]]:
     """Adopt one bundle of ``job adopt`` (*absent* settled for the batch): its entry, and its human output lines
-    (``True`` for standard error), which the caller prints."""
+    (``True`` for standard error), which the caller prints; *move* and *json_output* are ``--move`` and ``--json``."""
 
     try:
         # Synced already: a committed --stdin-tar landing, or the batch's operator bundles (handle_job_adopt).
@@ -2223,15 +2307,15 @@ def _adopt_one(
     if report is None:
         message = "another actor took the bundle first"
         return {"bundle": bundle, "status": "taken", "message": message}, [(True, f"{bundle}: {message}")]
-    if arguments.move and report.copied:
+    if move and report.copied:
         _fs.discard(_fs.loc(source), trash_dir=source.parent, durable=workspace.durable)
     lines: list[tuple[bool, str]] = []
     if report.missing_workflows:
         missing = ", ".join(report.missing_workflows)
         lines.append((True, f"warning: these workflows are not installed, so their jobs wait: {missing}"))
-    if report.already_adopted and not arguments.json:
+    if report.already_adopted and not json_output:
         lines.append((False, f"{bundle}: already adopted"))
-    elif not arguments.json:
+    elif not json_output:
         lines += [(False, f"{ref.job_key}\t{ref.state}\t{ref.path}") for ref in report.published]
     status = "already_adopted" if report.already_adopted else "adopted"
     return {"bundle": bundle, "status": status, **adopt_document(report)}, lines
