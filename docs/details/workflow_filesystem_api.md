@@ -536,26 +536,69 @@ synced quietly before it is published:
 - job creation (`job new` and campaigns through `new_jobs`): one barrier for
   the whole command, anchored on the control `tmp/` that holds every job's
   `submit` scratch, entered (and primed) before the first job's `build/` is
-  created, and committed once per job, after its duplicate-tag check and
-  before its `build/` is renamed to `job/` (the scratch reconciler publishes a
-  `job/` after a crash, so only a durable payload is ever named so). Every
+  created, and committed once per batch. `new_jobs(..., batch=1)`, the
+  library default, publishes each job before it asks for the next item (a
+  batch of one, N + 1 `syncfs`), so a loop feeding on its own results works;
+  `job new` and `campaign_submit_many`, whose inputs are materialized, pass
+  `_BATCH_JOBS` (256). Each job is staged in its own `submit` scratch (built,
+  hooks run, duplicate tag checked) into the open batch, which closes between
+  items, before the next one is asked for, at the batch size or once
+  `_BATCH_SECONDS` (10) have passed since its first staged job (cooperative: a
+  blocking input or a slow hook delays it), and at the end of the input. A job
+  that moves inputs (`--input-move-from-job`) has a batch of its own: the open
+  batch is published before it is staged, and it is published right after, so
+  no other job is published while a file is out of its origin, and at most one
+  job holding moved files and their origin descriptors is staged and not
+  published. The batch is committed once, then each job's `build/` is renamed
+  to `job/` and submitted and the job is yielded, in order (the scratch
+  reconciler publishes a `job/` after a crash, so only a durable payload is
+  ever named so; a committed `build/` is discarded like any other). Every
   `syncfs` on the one descriptor reports a writeback error recorded since the
-  previous one, so each commit covers that job's writes: N jobs cost N + 1
-  `syncfs` calls. Under `fsync` the staged copies, prepared documents,
-  embedded workflow and `job.json` are fsynced on their writing descriptors,
-  each `httk.core.save` output is fsynced right after the save returns, and
-  each commit walks only that job's scratch (`commit(tree=...)`) for what
-  instantiate hooks wrote and for the directories. A failed commit does not
-  submit that job and stops the command as any failure does (the jobs before
-  it stay submitted; the message suggests `--duplicate-tag skip` to create
-  the rest); its scratch goes as for any failure before submission (files
-  moved in by `--input-move-from-job` are moved back, and a scratch holding
-  one that cannot go back is kept). `job submit` holds one barrier alike for
-  its copies (`copy_tree`, inline), committed per payload and stopping at a
-  failed commit with the payloads before it submitted, while `job submit
-  --move` syncs all its payloads together first, as `job adopt PATH` does
-  below (a `submit_payload` call on its own takes a barrier on its scratch, or
-  syncs its moved payload);
+  previous one, so each commit covers its batch's writes. Under `fsync` the
+  staged copies, prepared documents, embedded workflow and `job.json` are
+  fsynced on their writing descriptors, each `httk.core.save` output is
+  fsynced right after the save returns, and the commit walks each job's
+  scratch of the batch (`commit(tree=...)`) for what instantiate hooks wrote
+  and for the directories. Exactly the yielded jobs are submitted, and a job
+  already named `job/` when a failure struck (its rename, a parent fsync or
+  `_kernel.submit` failed after it): that one is committed, counts as
+  submitted (the owner's close or recovery publishes it), and keeps its moved
+  inputs. Closing the generator, `KeyboardInterrupt`, `SystemExit` or any
+  failure discards the other jobs staged and not published (files moved in
+  are moved back; a scratch holding one that cannot go back is kept with its
+  markers); the job being staged and every staged job are owned by that
+  cleanup at every point. A duplicate tag within the batch is found by a
+  reservation of the staged jobs' `(placement, tag)` beside the tag index:
+  `refuse` publishes the jobs staged before it and raises `DuplicateTagError`
+  naming the published one, `skip` drops the later job. An ordinary error
+  while staging a job or reading the input (a `None` item is one) publishes
+  the jobs staged before it, then is raised; when that commit fails,
+  `SyncFailed` is raised, chained to the error. A failed commit submits none
+  of its batch and stops the command; the message says how many jobs before
+  it were submitted and suggests `--duplicate-tag skip` to create the rest,
+  and, for a `syncfs` (whose error may be anyone's), `io.sync fsync` or
+  `io.sync_errors ignore` on a node where other users' writeback errors are
+  frequent; a failed walk of strategy `fsync` names its job instead. A failed
+  submission of one job of a committed batch discards the jobs after it, and
+  its error carries notes with the submitted count (and the staging error
+  that closed the batch early, if one did), which the CLI prints. A
+  non-durable workspace has no barrier, and each job is submitted as soon as
+  it is staged. `job submit` holds one barrier alike for its copies
+  (`copy_tree`, inline), staged into batches the same way (256 copies or 10
+  seconds) and committed once per batch, reporting in argument order: a
+  source that cannot be checked or copied is reported and skipped, a failed
+  submission of one copy is reported and the rest continue (one already named
+  `job/` is noted as submitted all the same), and a failed commit stops the
+  command with the batches before it submitted, while `job submit --move`
+  syncs all its payloads together first, as `job adopt PATH` does below (a
+  `submit_payload` call on its own takes a barrier on its scratch, or syncs
+  its moved payload). A marker of a moved input records absolute paths; the
+  reconciler finds the file by its place below the scratch-named component of
+  the recorded target, rejoined below the scratch the marker is in now (a
+  recoverer renames a dead owner's scratch first), so it works under another
+  mount point, a bind or a moved workspace. Fail safe: when the target cannot be placed so (or the
+  marker is unreadable or not absolute) and the source is not a regular file
+  at its recorded home, the scratch is kept for the operator;
 - the workflow store (`workflow install`, its `--stdin-tar` and transfer copies
   through `install_copy`, `workflow build`): a barrier anchored on the staged
   `tree/` in the owner's `build` scratch around the package copy and

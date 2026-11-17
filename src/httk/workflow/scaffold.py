@@ -37,6 +37,7 @@ materializes a list of them.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import difflib
 import hashlib
@@ -50,8 +51,9 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 import uuid
-from collections.abc import Callable, Generator, Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -142,6 +144,25 @@ STRUCTURE_PATTERNS = ("POSCAR*", "*.vasp")
 _DESCRIBE_VARIABLE = "HTTK_WORKFLOW_DESCRIBE"
 #: The scratch purpose of a payload on its way to ``jobs/ready/``; its reconciler publishes a staged ``job/``.
 _SUBMIT = "submit"
+#: The batch size of ``job new``, campaigns (``new_jobs(..., batch=...)``) and ``job submit`` copies: a batch,
+#: committed with one sync of the command's barrier before any of it is published, closes once it holds this many
+#: staged jobs, ...
+_BATCH_JOBS = 256
+#: ... once this many seconds have passed since its first job was staged (checked between items), at the end of
+#: the input, and around a job that moves inputs out of other jobs.
+_BATCH_SECONDS = 10.0
+#: The clock of :data:`_BATCH_SECONDS`.
+_clock = time.monotonic
+#: How a failed sync commit at job creation or ``job submit`` ends its message.
+_SYNC_REMEDY = (
+    "on a node where writeback errors of other users are frequent, set io.sync fsync (every file is synced on its "
+    "own, so only this command's own errors count) or io.sync_errors ignore (writes that returned are trusted)"
+)
+#: How a failed sync commit at job creation tells to create the jobs that were not submitted.
+_RERUN_SKIP = (
+    "create the rest with --duplicate-tag skip (duplicate_tag='skip'), which skips those by their tags "
+    "(a tagless job is created again)"
+)
 _DESCRIBE_TIMEOUT = 120.0
 _INSTANTIATE_TIMEOUT = 3600.0
 _TAG_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789._-"
@@ -1664,6 +1685,7 @@ def new_jobs(
     call_parameters: Mapping[str, Mapping[str, object]] | None = None,
     embed_workflow: bool = False,
     duplicate_tag: Literal["refuse", "skip", "allow"] = "refuse",
+    batch: int = 1,
 ) -> Generator[ScaffoldedJob, None, None]:
     """Scaffold and submit one job per member of *items*, lazily.
 
@@ -1679,6 +1701,23 @@ def new_jobs(
     turned into jobs without either side of the loop ever being materialized.
     Nothing happens until the first job is requested, and the CLI owner the jobs
     are built by is closed when the iterator is exhausted or closed.
+
+    In a durable workspace each job is made durable with one sync of the command's
+    barrier before it is published (the first job costs one more). With *batch*
+    above 1, up to that many jobs are staged and made durable with one sync, then
+    submitted and yielded in order, so results arrive per batch: the next item is
+    asked for while the batch is still open, and an input that blocks (or waits on
+    the jobs it produced) delays the batch's publication. Use it for materialized
+    inputs. A batch also closes once 10 seconds
+    have passed since its first job was staged (checked between items, so a
+    blocking input or a slow hook delays it), at the end of *items*, and around a
+    job that moves inputs (``move_inputs``), which has a batch of its own.
+    Exactly the yielded jobs are submitted, and a job whose payload was named
+    ``job/`` before a failure: closing the iterator, an interrupt, or a failure
+    discards the other jobs staged and not yet yielded (moving their moved inputs
+    back). An error while staging a job submits the jobs staged before it, then
+    is raised. In a non-durable workspace each job is submitted as soon as it is
+    staged.
 
     :param workspace: Provide the workspace receiving the jobs.
     :param workflow: Select the installed workflow, or a runner file to install.
@@ -1705,12 +1744,17 @@ def new_jobs(
         The package is resolved and snapshotted once; every job gets its own copy.
     :param duplicate_tag: What to do with a job whose tag is taken in its placement; see :func:`new_job`. The jobs
         this call submits count too, and each placement is listed once per call.
+    :param batch: Stage up to this many jobs before syncing and publishing them together (see above); 1, the
+        default, publishes each job before the next item is asked for.
     :return: An iterator yielding each submitted job description.
     :yield: Each submitted job description.
     :raises httk.workflow.errors.DuplicateTagError: At the first job whose tag is taken, with *duplicate_tag*
         ``"refuse"``; the jobs before it stay submitted.
+    :raises httk.workflow._fs.SyncFailed: If a batch could not be made durable: none of its jobs was submitted,
+        those of the batches before it were, and the message says how many (chained to the error that closed the
+        batch early, if any).
     :raises ValueError: If the workflow is not installed (and *install* is false), or workflow,
-        inputs, placement, job settings, call slot bindings or *duplicate_tag* are invalid.
+        inputs, placement, job settings, call slot bindings, *duplicate_tag* or *batch* are invalid.
 
     .. code-block:: python
 
@@ -1724,12 +1768,18 @@ def new_jobs(
 
     if duplicate_tag not in ("refuse", "skip", "allow"):
         raise ValueError(f"duplicate_tag must be 'refuse', 'skip' or 'allow': {duplicate_tag!r}")
+    if isinstance(batch, bool) or not isinstance(batch, int) or batch < 1:
+        raise ValueError(f"batch must be a positive number of jobs: {batch!r}")
     tags = None if duplicate_tag == "allow" else _TagIndex(workspace)
     owner = _kernel.register_owner(workspace, kind="cli", label="job new", allocation=None, advertised={})
     snapshot: Path | None = None
     # The command's one sync barrier, entered before the first job's first byte (see _sync_barrier).
     synced = ExitStack()
     barrier: _fs.Barrier | None = None
+    # The staged jobs of the open batch, in input order, and the moves of the job being staged: both are the
+    # cleanup's below until they are published (a job is pending from the moment it is appended).
+    pending: list[_Staged] = []
+    current: list[_InputMove] = []
     try:
         if embed_workflow:
             if install:
@@ -1741,84 +1791,192 @@ def new_jobs(
             installed = _installed(workspace, workflow, owner=owner, install=install, step=step, language=format)
         prepared = _prepare(installed, step=step)
         bindings = _bind_slots(workspace, installed, calls, call_parameters, owner=owner, install=install)
-        for item in items:
-            if barrier is None and workspace.durable:
-                barrier = synced.enter_context(_command_barrier(workspace))
+        # The (placement, final tag) of each job of the open batch: the tag index sees a job once it is published.
+        reserved: dict[tuple[PurePosixPath, str], _Staged] = {}
+        submitted = 0
+        started = 0.0
+
+        def stage(item: JobItem, moves: list[_InputMove]) -> _Staged:
+            # One job built in its own submit scratch's build/, which is named job/ only once committed.
             scratch = owner.scratch(_SUBMIT)
             staging = scratch / "build"
-            moves: list[_InputMove] = []
-            try:
-                staging.mkdir()
-                job = _build_payload(
-                    workspace,
-                    prepared,
-                    staging,
-                    inputs={**(inputs or {}), **item.get("inputs", {})},
-                    files={**(files or {}), **item.get("files", {})},
-                    parameters={**(parameters or {}), **item.get("parameters", {})},
-                    environment={**(environment or {}), **item.get("environment", {})},
-                    tag=item.get("tag", tag),
-                    placement=item.get("placement", placement),
-                    priority=item.get("priority", priority),
-                    name=item.get("name", name),
-                    provenance=item.get("provenance", provenance),
-                    move_inputs=item.get("move_inputs"),
-                    moves=moves,
-                    calls=bindings,
-                    durable=barrier is not None and barrier.fsync_inline,
-                )
-                if tags is not None and job.tag and (existing := tags.existing(job.placement, job.tag)):
-                    raise DuplicateTagError(job.tag, job.placement, existing)
-                # Committed before build/ is renamed to job/: a scratch holding job/ is published by its
-                # reconciler, so only a durable payload is ever named so. Under fsync it walks this job's scratch.
-                _commit_staged(
-                    barrier,
-                    f"the job {job.job_key}",
-                    tree=scratch,
-                    hint="; the jobs before it were submitted: create the rest with --duplicate-tag skip "
-                    "(duplicate_tag='skip'), which skips those",
-                )
-                ref = _submit_staged(workspace, owner, scratch, staging)
-            except DuplicateTagError as exc:
-                if _undo_moves(workspace, moves):
-                    _drop_markers(workspace, moves)
-                if duplicate_tag == "refuse":
-                    raise
-                _LOGGER.warning("skipped tag %s: already %s (%s)", exc.tag, exc.existing.job_key, exc.existing.state)
-                _kernel.reconcile_scratch(owner, scratch)  # as Owner.close would, but now
-                continue
-            except BaseException:
-                # A file that cannot go back keeps the markers, so closing the owner keeps the scratch holding it.
-                if _undo_moves(workspace, moves):
-                    _drop_markers(workspace, moves)
-                raise
-            finally:
-                for move in moves:
-                    os.close(move.directory)
-            if tags is not None and job.tag is not None:
-                tags.add(ref, job.tag)
-            if moves:
-                _drop_markers(workspace, moves)
-                _fs.remove_empty_dir(_fs.loc(scratch))
-            yield ScaffoldedJob(
-                job_id=job.id,
-                job_key=job.job_key,
-                tag=job.tag,
-                placement=job.placement,
-                payload=ref.path,
-                ref=ref,
-                workflow=job.workflow_id,
-                workflow_name=job.workflow_name,
-                initial_step=job.initial_step,
-                warnings=prepared.warnings,
+            staging.mkdir()
+            job = _build_payload(
+                workspace,
+                prepared,
+                staging,
+                inputs={**(inputs or {}), **item.get("inputs", {})},
+                files={**(files or {}), **item.get("files", {})},
+                parameters={**(parameters or {}), **item.get("parameters", {})},
+                environment={**(environment or {}), **item.get("environment", {})},
+                tag=item.get("tag", tag),
+                placement=item.get("placement", placement),
+                priority=item.get("priority", priority),
+                name=item.get("name", name),
+                provenance=item.get("provenance", provenance),
+                move_inputs=item.get("move_inputs"),
+                moves=moves,
+                calls=bindings,
+                durable=barrier is not None and barrier.fsync_inline,
             )
+            return _Staged(job, scratch, moves)
+
+        def publish(cause: Exception | None = None) -> Generator[ScaffoldedJob, None, None]:
+            # Close the batch: one commit, then each job renamed to job/ and submitted in order, and yielded. A
+            # failed commit (chained to *cause*, the staging error that closed the batch) or publication leaves the
+            # jobs not published in the batch, for the handler below to discard.
+            nonlocal submitted
+            if not pending:
+                return
+            _commit_batch(
+                barrier,
+                [staged.scratch for staged in pending],
+                [staged.job.job_key for staged in pending],
+                noun="job",
+                submitted=submitted,
+                rerun=_RERUN_SKIP,
+                cause=cause,
+            )
+            reserved.clear()
+            while pending:
+                staged = pending[0]
+                try:
+                    ref = _submit_staged(workspace, owner, staged.scratch, staged.scratch / "build")
+                except BaseException as exc:
+                    # Once its build/ was named job/ the job is committed and counts as submitted: the owner's close
+                    # (or recovery) publishes what is still job/, and its moved inputs stay moved.
+                    # OwnerLost: a recoverer took this owner's scratch, and the job with it; not this command's.
+                    lost = isinstance(exc, _kernel.OwnerLost)
+                    named = _settle(workspace, staged) and not lost
+                    pending.pop(0)
+                    if isinstance(exc, Exception):
+                        if lost:
+                            state = "was left to the recovery that took over this command's owner"
+                        elif named:
+                            state = "was submitted too, though not reported (now, or by the owner's close or recovery)"
+                        else:
+                            state = "was not submitted"
+                        exc.add_note(
+                            f"{submitted} job(s) of this command were reported as submitted; {staged.job.job_key} "
+                            f"{state}, and the {len(pending)} job(s) staged after it were not submitted"
+                        )
+                        if cause is not None:
+                            exc.add_note(f"the batch was published early because a later job failed: {cause}")
+                    raise
+                moved = list(staged.moves)
+                _release(staged.moves)
+                pending.pop(0)
+                staged.ref = ref
+                job = staged.job
+                if tags is not None and job.tag is not None:
+                    tags.add(ref, job.tag)
+                if moved:
+                    _drop_markers(workspace, moved)
+                    _fs.remove_empty_dir(_fs.loc(staged.scratch))
+                submitted += 1
+                yield ScaffoldedJob(
+                    job_id=job.id,
+                    job_key=job.job_key,
+                    tag=job.tag,
+                    placement=job.placement,
+                    payload=ref.path,
+                    ref=ref,
+                    workflow=job.workflow_id,
+                    workflow_name=job.workflow_name,
+                    initial_step=job.initial_step,
+                    warnings=prepared.warnings,
+                )
+
+        iterator = iter(items)
+        while True:
+            # The open batch closes between items, before the next one is asked for (the time cap is cooperative).
+            # Without a barrier (a non-durable workspace) nothing is synced, so every job is published at once.
+            if pending and (barrier is None or len(pending) >= batch or _clock() - started >= _BATCH_SECONDS):
+                yield from publish()
+            current = []
+            failure: Exception | None = None
+            try:
+                item = next(iterator)
+            except StopIteration:
+                break
+            except Exception as exc:
+                # An input error: the jobs staged before it are committed and published, then it is raised.
+                yield from publish(exc)
+                raise
+            # A job that moves inputs gets a batch of its own, so that no other job of a batch is published while
+            # a file is out of its origin, and it is the only staged job holding moved files and their descriptors.
+            if isinstance(item, Mapping) and item.get("move_inputs"):
+                yield from publish()
+            staged: _Staged | None = None
+            existing: _kernel.JobRef | None = None
+            try:
+                if barrier is None and workspace.durable:
+                    barrier = synced.enter_context(_command_barrier(workspace))
+                staged = stage(item, current)
+                job = staged.job
+                if tags is not None and job.tag:
+                    existing = tags.existing(job.placement, job.tag)
+            except Exception as exc:
+                failure = exc
+            if failure is not None:
+                # The jobs staged before this one are committed and published (so the jobs before a failure stay
+                # submitted), then the failure is raised; a failed commit raises SyncFailed chained to it.
+                _abandon(workspace, current)
+                yield from publish(failure)
+                raise failure
+            assert staged is not None
+            job = staged.job
+            if existing is not None and job.tag:
+                _abandon(workspace, current)
+                if duplicate_tag == "refuse":
+                    failure = DuplicateTagError(job.tag, job.placement, existing)
+                    yield from publish(failure)
+                    raise failure
+                _LOGGER.warning("skipped tag %s: already %s (%s)", job.tag, existing.job_key, existing.state)
+                _kernel.reconcile_scratch(owner, staged.scratch)  # as Owner.close would, but now
+                continue
+            key = (job.placement, job.tag) if tags is not None and job.tag else None
+            if key is not None and (earlier := reserved.get(key)) is not None:
+                # The tag is taken by a job of this batch, which the tag index does not see before it is published.
+                _abandon(workspace, current)
+                if duplicate_tag == "skip":
+                    _LOGGER.warning("skipped tag %s: already %s (being submitted)", key[1], earlier.job.job_key)
+                    _kernel.reconcile_scratch(owner, staged.scratch)
+                    continue
+                try:
+                    yield from publish()
+                except _fs.SyncFailed as exc:
+                    exc.add_note(
+                        f"the job after them was refused: its tag {key[1]!r} is taken by {earlier.job.job_key}"
+                    )
+                    raise
+                assert earlier.ref is not None
+                raise DuplicateTagError(key[1], key[0], earlier.ref)
+            if not pending:
+                started = _clock()
+            pending.append(staged)
+            current = []  # its moves are the batch's now
+            if key is not None:
+                reserved[key] = staged
+            if staged.moves:
+                yield from publish()
+        yield from publish()
+    except BaseException:
+        # Closed, interrupted or failed: no job staged and not yet named job/ is submitted, and its moved inputs
+        # go back; one named job/ is published by the owner's close and keeps them.
+        for staged in pending:
+            _settle(workspace, staged)
+        pending.clear()
+        _abandon(workspace, current)
+        raise
     finally:
         synced.close()
         if snapshot is not None:
             from .packages import _evict_modules
 
             _evict_modules(snapshot)  # the instantiate hook modules of the snapshot discarded below
-        # Discards the scratch of a job whose building failed (never named job/), then the owner record.
+        # Publishes a job named job/ whose submission failed, then discards the scratch of each job never named so
+        # (keeping one holding a moved file that cannot go back), then the owner record.
         owner.close()
 
 
@@ -1829,7 +1987,6 @@ def submit_payload(
     *,
     move: bool,
     changes: Mapping[str, object] | None = None,
-    barrier: _fs.Barrier | None = None,
     synced: bool = False,
 ) -> _kernel.JobRef:
     """Submit a prepared payload directory (a ``job.json`` version 3 and its files) into ``jobs/ready/``.
@@ -1840,18 +1997,16 @@ def submit_payload(
     before the submission: a moved payload, the operator's only copy, is never
     discarded. A refused submission moves it back.
 
-    In a durable workspace the payload is durable before it is named ``job/``: a copy under a sync barrier
-    committed for it (*barrier*, a command's, or one of its own on its scratch), a moved payload, which was
-    written before httk ran, synced in place first (unless *synced*), with one no-prime ``syncfs``
-    (or a per-file walk under ``io.sync`` ``fsync``).
+    In a durable workspace the payload is durable before it is named ``job/``: a copy under a sync barrier of its
+    own on its scratch, committed for it, a moved payload, which was written before httk ran, synced in place first
+    (unless *synced*), with one no-prime ``syncfs`` (or a per-file walk under ``io.sync`` ``fsync``). ``job submit``
+    stages its copies in batches instead, under one barrier for the command.
 
     :param workspace: The workspace.
     :param owner: The registered owner whose scratch stages the payload.
     :param source: The payload directory.
     :param move: Move *source* instead of copying it.
     :param changes: ``job.json`` members to replace in the copy; only without *move*.
-    :param barrier: A command's entered sync barrier (``inline``, anchored on the control ``tmp/``) to commit this
-        copy with, instead of one of its own.
     :param synced: A moved payload was synced by the caller already, with its batch.
     :return: The published reference.
     :raises httk.workflow.errors.FormatError: If ``job.json`` is missing or invalid.
@@ -1863,13 +2018,7 @@ def submit_payload(
 
     if move and changes:
         raise ValueError("a moved payload cannot be changed; copy it instead")
-    job = JobDefinition.from_path(source / "job.json")
-    if changes:
-        job = JobDefinition.from_mapping({**job.as_mapping(), **changes})
-    for trusted in ("state.json", LOGS_DIRECTORY):
-        if os.path.lexists(source / trusted):
-            raise ValueError(f"a prepared payload may not carry {trusted}; only a job's owner writes it")
-    _kernel.check_placement(workspace, "ready", job.placement)
+    job = _checked_payload(workspace, source, changes)
     scratch = owner.scratch(_SUBMIT)
     if move:
         moved = source.resolve()
@@ -1878,15 +2027,242 @@ def submit_payload(
 
             _moving.sync_operator_bundles(workspace, [moved], what="payload")
         return _submit_staged(workspace, owner, scratch, moved)
-    copied = scratch / "copy"
-    own = _sync_barrier(workspace, scratch, inline=True) if barrier is None else nullcontext(barrier)
-    with own as entered:
-        durable = entered is not None and entered.fsync_inline
-        _fs.copy_tree(source, copied, durable=durable)
-        if changes:
-            _fs.write_file(_fs.loc(copied / "job.json"), job.encode(), durable=durable)
-        _commit_staged(entered, f"the payload {source}", tree=scratch)
+    with _sync_barrier(workspace, scratch, inline=True) as barrier:
+        durable = barrier is not None and barrier.fsync_inline
+        copied = _copy_payload(source, scratch, job if changes else None, durable=durable)
+        _commit_staged(barrier, f"the payload {source}", tree=scratch)
     return _submit_staged(workspace, owner, scratch, copied)
+
+
+def _checked_payload(workspace: Workspace, source: Path, changes: Mapping[str, object] | None) -> JobDefinition:
+    """The ``job.json`` of the prepared payload *source* with *changes*, checked as :func:`submit_payload` says."""
+
+    job = JobDefinition.from_path(source / "job.json")
+    if changes:
+        job = JobDefinition.from_mapping({**job.as_mapping(), **changes})
+    for trusted in ("state.json", LOGS_DIRECTORY):
+        if os.path.lexists(source / trusted):
+            raise ValueError(f"a prepared payload may not carry {trusted}; only a job's owner writes it")
+    _kernel.check_placement(workspace, "ready", job.placement)
+    return job
+
+
+def _copy_payload(source: Path, scratch: Path, changed: JobDefinition | None, *, durable: bool) -> Path:
+    """Copy *source* to ``scratch/copy`` (fsyncing as it writes when *durable*), with the *changed* ``job.json``."""
+
+    copied = scratch / "copy"
+    _fs.copy_tree(source, copied, durable=durable)
+    if changed is not None:
+        _fs.write_file(_fs.loc(copied / "job.json"), changed.encode(), durable=durable)
+    return copied
+
+
+def _submit_copies(
+    workspace: Workspace,
+    owner: _kernel.Owner,
+    sources: Sequence[str],
+    barrier: _fs.Barrier | None,
+    *,
+    errors: tuple[type[Exception], ...],
+) -> Generator[tuple[str, _kernel.JobRef | None, Exception | None], None, None]:
+    """Submit copies of the prepared payloads *sources* (``job submit`` without ``--move``) in batches.
+
+    Each payload is checked and copied into its own submit scratch (the staging half of :func:`submit_payload`)
+    under the command's *barrier*; a batch closes between payloads at :data:`_BATCH_JOBS` copies or
+    :data:`_BATCH_SECONDS` after its first payload, and at the end of *sources*: it is committed once, and then each
+    of its copies is named ``job/`` and submitted. Without a barrier (a non-durable workspace) each copy is
+    submitted at once.
+
+    :param workspace: The workspace.
+    :param owner: The command's registered owner.
+    :param sources: The payload directories, as given.
+    :param barrier: The command's entered barrier (``inline``, anchored on the control ``tmp/``), or ``None``.
+    :param errors: The ordinary errors that skip one payload: it is reported and the next one is staged.
+    :yield: Each source with its published reference (or ``None``) and the error it met (or ``None``), in the order
+        of *sources*, each batch once it is committed. A copy whose submission failed after it was named ``job/``
+        has both when it is found in ``jobs/ready/``, and a note on the error saying it was submitted all the same.
+    :raises httk.workflow._fs.SyncFailed: A batch's commit failed: none of that batch was submitted (its sources
+        that failed before are yielded first), nothing after it was staged, and the batches before it stay
+        submitted; the message says how many.
+    """
+
+    durable = barrier is not None and barrier.fsync_inline
+    # The open batch in the order of *sources*: each a staged copy (its scratch, copy and job.json) or the error
+    # that skipped it.
+    entries: list[tuple[str, tuple[Path, Path, JobDefinition] | Exception]] = []
+    submitted = 0
+    started = 0.0
+
+    def publish(rest: int) -> Generator[tuple[str, _kernel.JobRef | None, Exception | None], None, None]:
+        nonlocal submitted
+        staged = [(source, entry) for source, entry in entries if not isinstance(entry, Exception)]
+        failed: _fs.SyncFailed | None = None
+        if staged:
+            stopped = f"; stopped: the {rest} payload(s) after {entries[-1][0]} were not submitted" if rest else ""
+            try:
+                _commit_batch(
+                    barrier,
+                    [scratch for _, (scratch, _, _) in staged],
+                    [source for source, _ in staged],
+                    noun="payload",
+                    submitted=submitted,
+                    rerun="submit only the payloads not reported as submitted",
+                    stopped=stopped,
+                )
+            except _fs.SyncFailed as exc:
+                failed = exc
+        published, entries[:] = list(entries), []
+        for source, entry in published:
+            if isinstance(entry, Exception):
+                yield source, None, entry
+                continue
+            if failed is not None:
+                continue
+            scratch, copied, job = entry
+            try:
+                ref = _submit_staged(workspace, owner, scratch, copied)
+            except errors as exc:
+                found = None
+                if _fs.exists(_fs.loc(scratch)) and not _fs.exists(_fs.loc(copied)):
+                    # Named job/ (committed) before the failure: in jobs/ready/ already, or published by the owner's
+                    # close.
+                    with contextlib.suppress(WorkflowError, OSError):  # best effort: never mask the publication error
+                        found = _kernel.locate(workspace, job.id, placement_hint=job.placement, include_owned=False)
+                    where = found.path if found is not None else "by the owner's close or recovery"
+                    exc.add_note(f"{source} was submitted all the same ({where})")
+                    submitted += found is not None
+                yield source, found, exc
+                continue
+            submitted += 1
+            yield source, ref, None
+        if failed is not None:
+            raise failed
+
+    for index, source in enumerate(sources):
+        count = sum(not isinstance(entry, Exception) for _, entry in entries)
+        if entries and (barrier is None or count >= _BATCH_JOBS or _clock() - started >= _BATCH_SECONDS):
+            yield from publish(len(sources) - index)
+        if not entries:
+            started = _clock()
+        try:
+            path = Path(source).expanduser()
+            job = _checked_payload(workspace, path, None)
+            scratch = owner.scratch(_SUBMIT)
+            entries.append((source, (scratch, _copy_payload(path, scratch, None, durable=durable), job)))
+        except errors as exc:
+            entries.append((source, exc))
+    yield from publish(0)
+
+
+@dataclass(eq=False)
+class _Staged:
+    """One job of an open :func:`new_jobs` batch, built in its submit scratch's ``build/`` and not yet published.
+
+    :param job: Its definition.
+    :param scratch: Its submit scratch.
+    :param moves: The inputs it moved out of other jobs, whose descriptors stay open until it is published or its
+        moves are undone (emptied then).
+    :param ref: The published reference, once it is.
+    """
+
+    job: JobDefinition
+    scratch: Path
+    moves: list[_InputMove]
+    ref: _kernel.JobRef | None = None
+
+
+def _release(moves: list[_InputMove]) -> None:
+    """Close the origin descriptors of *moves*, emptying it (so a second release or undo does nothing)."""
+
+    while moves:
+        os.close(moves.pop().directory)
+
+
+def _abandon(workspace: Workspace, moves: list[_InputMove]) -> None:
+    """Move the inputs a job that is not submitted moved out of other jobs back, and release *moves*.
+
+    A file that cannot go back keeps the markers, so the owner's close keeps the scratch holding it. A second call
+    does nothing.
+    """
+
+    if not moves:
+        return
+    try:
+        if _undo_moves(workspace, moves):
+            _drop_markers(workspace, moves)
+    finally:
+        _release(moves)
+
+
+def _settle(workspace: Workspace, staged: _Staged) -> bool:
+    """Settle a staged job that will not be yielded, and report whether it counts as submitted.
+
+    Its ``build/`` gone from its scratch means it was named ``job/``, which is committed: the owner's close (or
+    recovery) publishes it if ``_kernel.submit`` did not, so its moved inputs stay moved and only their descriptors
+    are released. Otherwise it is not submitted, and its moved inputs go back.
+    """
+
+    if _fs.exists(_fs.loc(staged.scratch / "build")):
+        _abandon(workspace, staged.moves)
+        return False
+    _release(staged.moves)
+    return True
+
+
+def _commit_batch(
+    barrier: _fs.Barrier | None,
+    trees: Sequence[Path],
+    names: Sequence[str],
+    *,
+    noun: str,
+    submitted: int,
+    rerun: str,
+    cause: BaseException | None = None,
+    stopped: str = "",
+) -> None:
+    """Commit a command's barrier once for a batch staged in *trees* (under ``fsync``, a walk of each one).
+
+    :param barrier: The command's barrier, or ``None`` (nothing to do).
+    :param trees: The submit scratches of the batch, in order.
+    :param names: What the batch's members are called in a message, in order.
+    :param noun: What a member is (``job``, ``payload``).
+    :param submitted: How many the command submitted before this batch.
+    :param rerun: How to create the members not submitted, when some were.
+    :param cause: The error the batch was closed for, which a failure is chained to.
+    :param stopped: What ends a failure's message.
+    :raises httk.workflow._fs.SyncFailed: When the commit fails: none of the batch is submitted.
+    """
+
+    if barrier is None:
+        return
+    # One syncfs covers the batch; the walks of strategy fsync are each member's own (nothing for inline copies).
+    walked: list[tuple[Path | None, str]] = (
+        list(zip(trees, names, strict=True)) if barrier.fsync_inline else [(None, "")]
+    )
+    syncing = ""
+    try:
+        for tree, syncing in walked:
+            barrier.commit(tree=tree)
+    except _fs.SyncFailed as exc:
+        if len(names) == 1:
+            what, them = f"the {noun} {names[0]} was", "it"
+        else:
+            what, them = f"the {len(names)} {noun}s of this batch ({names[0]} to {names[-1]}) were", "them"
+        before = (
+            f"the {submitted} {noun}(s) before {them} were submitted: {rerun}"
+            if submitted
+            else f"no {noun} before {them} was submitted"
+        )
+        # A syncfs error may be anyone's on the filesystem; a walk's error is the named member's own.
+        where = f" (syncing the {noun} {syncing})" if syncing and len(names) > 1 else ""
+        remedy = f"; {_SYNC_REMEDY}" if barrier.strategy == "syncfs" else ""
+        failed = _fs.SyncFailed(
+            exc.errno,
+            f"{what} not submitted, nothing was published: {exc.strerror}{where}; {before}{remedy}{stopped}",
+        )
+        if cause is not None:
+            failed.add_note(f"the batch was closed early by: {type(cause).__name__}: {cause}")
+        raise failed from (exc if cause is None else cause)
 
 
 def _sync_barrier(
@@ -1896,10 +2272,10 @@ def _sync_barrier(
 
     ``io.sync`` and ``io.sync_errors`` are read afresh, and no progress line is printed. :func:`new_jobs` and
     ``job submit`` hold one for the whole command, anchored on the control ``tmp/`` that holds every submit scratch,
-    entered before the first byte is staged and committed once per payload (:func:`_commit_staged`) before it is
-    renamed to ``job/``; a :func:`submit_payload` copy without one takes its own on its scratch. Under ``fsync`` the
-    copies are fsynced as they are written and, unless *inline* (every file is httk's own fsynced copy), each commit
-    walks that payload's scratch for what hooks wrote and for the directories.
+    entered before the first byte is staged and committed once per batch of payloads (:func:`_commit_batch`) before
+    any of them is renamed to ``job/``; a :func:`submit_payload` copy takes its own on its scratch. Under ``fsync``
+    the copies are fsynced as they are written and, unless *inline* (every file is httk's own fsynced copy), each
+    commit walks the batch's scratches, one by one, for what hooks wrote and for the directories.
     """
 
     if not workspace.durable:
@@ -1922,9 +2298,9 @@ def _command_barrier(workspace: Workspace, *, inline: bool = False) -> AbstractC
     return _sync_barrier(workspace, tmp, inline=inline)
 
 
-def _commit_staged(barrier: _fs.Barrier | None, what: str, *, tree: Path | None = None, hint: str = "") -> None:
+def _commit_staged(barrier: _fs.Barrier | None, what: str, *, tree: Path | None = None) -> None:
     """Commit a staging barrier (under ``fsync``, walking *tree*, by default its anchor): when it fails, *what* is
-    not submitted and nothing is published; *hint* ends the message."""
+    not submitted and nothing is published."""
 
     if barrier is None:
         return
@@ -1932,7 +2308,9 @@ def _commit_staged(barrier: _fs.Barrier | None, what: str, *, tree: Path | None 
         barrier.commit(tree=tree)
     except _fs.SyncFailed as exc:
         raise _fs.SyncFailed(
-            exc.errno, f"{what} was not submitted, nothing was published: {exc.strerror}{hint}"
+            exc.errno,
+            f"{what} was not submitted, nothing was published: {exc.strerror}"
+            + (f"; {_SYNC_REMEDY}" if barrier.strategy == "syncfs" else ""),
         ) from exc
 
 
@@ -1988,17 +2366,39 @@ def _finish_submit(owner: _kernel.Owner, scratch: Path) -> bool:
 
 
 def _moved(owner: _kernel.Owner, marker: Path) -> bool:
-    """Report whether a marker's move may have happened; one whose file is still home and never landed is dropped."""
+    """Report whether a marker's move may have happened; one whose file is still home and never landed is dropped.
+
+    The marker records absolute paths, and the scratch may have been renamed since (a recoverer takes a dead
+    owner's scratch under its own name first) or the workspace reached under another path (another mount point,
+    a bind, a moved workspace): the target is found by its place below the scratch-named component of the
+    recorded path, rejoined below the scratch the marker is in now. Whenever that is not certain and the source is
+    not a regular file at its recorded home (it may have landed and been renamed in the build), the scratch is kept
+    for the operator.
+    """
 
     try:
         document = json.loads(_fs.read_bounded(_fs.loc(marker), 1 << 16) or b"{}")
         source, target = Path(document["from"]), Path(document["to"])
+        if not (source.is_absolute() and target.is_absolute()):
+            raise ValueError("not absolute")
     except (WorkflowError, OSError, ValueError, KeyError, TypeError):
         return True  # unreadable: keep the scratch for the operator
-    if _is_regular(_fs.loc(source)) and _fs.lstat(_fs.loc(target)) is None:
-        _fs.remove_file(_fs.loc(marker), durable=owner.workspace.durable)
-        return False
-    return _fs.lstat(_fs.loc(target)) is not None
+    # <old root>/<control>/tmp/<scratch>/build/...: the scratch is a component named like one, after tmp/ and before
+    # build/; every such component is tried (an outer path may look like one too).
+    parts = target.parts
+    scratches = [
+        index
+        for index in range(1, len(parts) - 1)
+        if _kernel._SCRATCH.fullmatch(parts[index]) and parts[index + 1] == "build" and parts[index - 1] == "tmp"
+    ]
+    if any(_fs.lstat(_fs.loc(marker.parent.joinpath(*parts[index + 1 :]))) is not None for index in scratches):
+        return True
+    home = _is_regular(_fs.loc(source))
+    if home and scratches:
+        _fs.remove_file(_fs.loc(marker), durable=owner.workspace.durable)  # home and never landed: no move
+    # Not home and not where it landed: the build may still hold it under another name (a hook renamed it), so the
+    # scratch is kept for the operator.
+    return not home
 
 
 _kernel.register_reconciler(_SUBMIT, _finish_submit)
@@ -2742,8 +3142,10 @@ def _move_input(
             if not _is_regular(_fs.loc(moved_to)):
                 raise ValueError(_MOVE_REFUSAL.format(path=source))
         except BaseException as exc:
-            # A source that vanished under us is not back: its marker (and so the scratch) is kept for the operator.
-            if _undo_moves(workspace, [move], moved=_is_regular(_fs.loc(moved_to))):
+            # A file that never landed in the build is not this scratch's to keep (one that vanished under us is
+            # logged by the undo); a landed file that cannot go back keeps its marker, and so the scratch.
+            landed = _is_regular(_fs.loc(moved_to))
+            if _undo_moves(workspace, [move], moved=landed) or not landed:
                 _drop_markers(workspace, [move])
             if isinstance(exc, _fs.CrossDevice):
                 raise ValueError(f"{source} is on another filesystem; a cross-filesystem move is refused") from exc

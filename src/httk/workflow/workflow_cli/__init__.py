@@ -358,6 +358,8 @@ def dispatch(
         return handler(arguments, context)
     except _ERRORS as exc:
         print(f"{prog}: {exc}", file=sys.stderr)
+        for note in getattr(exc, "__notes__", ()):
+            print(f"{prog}: {note}", file=sys.stderr)
         return 2
 
 

@@ -459,7 +459,8 @@ def test_a_failed_commit_stops_the_campaign_at_that_job(tmp_path: Path, monkeypa
     first = next(jobs)
     with pytest.raises(_fs.SyncFailed, match="the job j1--.* was not submitted, nothing was published: .*") as raised:
         next(jobs)
-    assert "the jobs before it were submitted: create the rest with --duplicate-tag skip" in str(raised.value)
+    assert "the 1 job(s) before it were submitted: create the rest with --duplicate-tag skip" in str(raised.value)
+    assert "io.sync fsync" in str(raised.value) and "io.sync_errors ignore" in str(raised.value)
     assert first.tag == "j0" and [ref.path for ref in ready(ws)] == [first.payload]
     assert len(events.renames(job_rename)) == 1 and events.kinds().count("syncfs") == 3
     assert events.kinds().count("hook") == 2  # the third job was never staged
@@ -591,7 +592,9 @@ def test_job_submit_stops_at_a_failed_commit_keeping_those_before(
 ) -> None:
     ws = durable_workspace(tmp_path / "ws", "syncfs")
     payloads = prepared_payloads(ws, tmp_path, 3)
-    # The prime, then one commit per payload: the commit of payload *failing* reports an error.
+    # Batches of one payload (plan 7.3 batches them; this keeps the per-payload scenario): the prime, then one
+    # commit per payload: the commit of payload *failing* reports an error.
+    monkeypatch.setattr(scaffold_module, "_BATCH_JOBS", 1)
     events = Events(monkeypatch, syncfs_failures=[None] * (failing + 1) + [errno.EIO])
     assert submit(tmp_path, ws, *map(str, payloads)) == 1
     err = capsys.readouterr().err
@@ -602,20 +605,22 @@ def test_job_submit_stops_at_a_failed_commit_keeping_those_before(
     assert_nothing_left(ws)
 
 
-def test_job_submit_copies_under_one_barrier_with_a_commit_each(
+def test_job_submit_copies_under_one_barrier_with_a_commit_per_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ws = durable_workspace(tmp_path / "ws", "syncfs")
     payloads = prepared_payloads(ws, tmp_path, 2)
+    monkeypatch.setattr(scaffold_module, "_clock", lambda: 0.0)  # no time cap: one batch however slow the copies
     events = Events(monkeypatch)
     assert submit(tmp_path, ws, *map(str, payloads)) == 0
     ((barrier,),) = [events.barriers]
     assert barrier.anchor == ws.control / "tmp" and barrier.prime and barrier.inline
-    prime, *commits = events.indices("syncfs")
+    # One batch, one commit (plan 7.3; this pinned one commit per payload before batching).
+    prime, commit = events.indices("syncfs")
     renamed = events.renames(job_rename)
     copies = events.indices("copy-tree")
-    assert len(commits) == 2 and set(events.details("syncfs")) == {events.details("enter")[0]}
-    assert prime < copies[0] < commits[0] < renamed[0] < copies[1] < commits[1] < renamed[1]
+    assert set(events.details("syncfs")) == {events.details("enter")[0]}
+    assert prime < copies[0] < copies[1] < commit < renamed[0] < renamed[1]
     assert all(payload.is_dir() for payload in payloads) and len(ready(ws)) == 2
 
 

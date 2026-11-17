@@ -195,7 +195,7 @@ def test_a_cli_batch_counts_skips_and_reports_a_refusal(tmp_path: Path, capsys: 
     assert captured.out == "" and "submitted 0 jobs (2 skipped)" in captured.err
     assert command(argv, context) == 2
     err = capsys.readouterr().err
-    assert "submitted 0 of 2 jobs before failing" in err and "pass --duplicate-tag allow" in err
+    assert "submitted and reported 0 of 2 jobs before failing" in err and "pass --duplicate-tag allow" in err
 
 
 def test_fsck_reports_a_tag_shared_in_one_placement(ws: Workspace) -> None:

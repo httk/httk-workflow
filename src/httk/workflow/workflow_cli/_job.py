@@ -27,7 +27,7 @@ from httk.core.identity import (
     sign_document,
 )
 
-from .. import _fs, _kernel, _moving, _pool, _requests, _store
+from .. import _fs, _kernel, _moving, _pool, _requests, _store, scaffold
 from .._bundles import BundleError, read_manifest
 from .._children import newest_labeled
 from .._job import JobDefinition
@@ -97,6 +97,7 @@ from ..scaffold import (
     WorkflowProvider,
     _command_barrier,
     _sanitize_tag,
+    _submit_copies,
     new_job,
     new_jobs,
     payload_relative,
@@ -473,7 +474,8 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
                         item["tag"] = _sanitize_tag(f"{arguments.tag}-{derived}")
                     else:
                         item["tag"] = arguments.tag or derived or command_tag
-                results = new_jobs(workspace, target, items, **shared)
+                # Materialized items: synced and published in batches.
+                results = new_jobs(workspace, target, items, batch=scaffold._BATCH_JOBS, **shared)
             else:
                 tag = arguments.tag or command_tag or input_tag
                 job = new_job(workspace, target, tag=tag, move_inputs=move_inputs, **shared)
@@ -511,7 +513,8 @@ def _report_jobs(
                 print(f"{job.job_key}\t{job.payload}")
     except _ERRORS:
         if batch is not None:
-            print(f"submitted {submitted} of {batch} jobs before failing", file=sys.stderr)
+            # The error's notes name a job submitted after these but not reported (named job/ before it failed).
+            print(f"submitted and reported {submitted} of {batch} jobs before failing", file=sys.stderr)
         raise
     if arguments.json:
         print(json.dumps([job.as_mapping() for job in collected], indent=2))
@@ -527,15 +530,28 @@ def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int
     workspace = _modifiable(arguments, context, action="submit into it")
     submitted: list[str] = []
     failed = False
+
+    def report(source: str, ref: JobRef | None, error: Exception | None) -> None:
+        # A copy can have both: submitted all the same after an error once it was named job/.
+        nonlocal failed
+        if error is not None:
+            failed = True
+            print(f"{source}: {error}", file=sys.stderr)
+            for note in getattr(error, "__notes__", ()):
+                print(f"{source}: {note}", file=sys.stderr)
+        if ref is not None:
+            submitted.append(str(ref.path))
+            if not arguments.json and error is None:
+                print(f"{source}: {ref.path}")
+
     with (
         _kernel.register_owner(workspace, kind="cli", label="job submit", allocation=None, advertised={}) as owner,
         ExitStack() as stack,
     ):
-        unsynced: str | None = None
-        barrier: _fs.Barrier | None = None
         if arguments.move:
             # Payloads written before httk ran: one sync for all of them before any is moved; its error cannot be
             # told apart between them, so it fails every one.
+            unsynced: str | None = None
             try:
                 paths = [Path(source).expanduser().resolve() for source in arguments.sources]
                 _moving.sync_operator_bundles(workspace, paths, what="payload")
@@ -543,32 +559,29 @@ def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int
                 unsynced = exc.strerror
             except _ERRORS as exc:
                 unsynced = f"not submitted: the payloads could not be synced to disk: {exc}"
+            for source in arguments.sources:
+                if unsynced is not None:
+                    failed = True
+                    print(f"{source}: {unsynced}", file=sys.stderr)
+                    continue
+                try:
+                    ref = submit_payload(workspace, owner, Path(source).expanduser(), move=True, synced=True)
+                except _ERRORS as exc:
+                    report(source, None, exc)
+                    continue
+                report(source, ref, None)
         else:
-            # One barrier for the command, committed for each copy before it is named job/ (N copies, N + 1 syncfs).
+            # One barrier for the command, committed once per batch of copies before any of them is named job/.
             barrier = stack.enter_context(_command_barrier(workspace, inline=True))
-        for index, source in enumerate(arguments.sources):
-            if unsynced is not None:
-                failed = True
-                print(f"{source}: {unsynced}", file=sys.stderr)
-                continue
             try:
-                ref = submit_payload(
-                    workspace, owner, Path(source).expanduser(), move=arguments.move, barrier=barrier, synced=True
-                )
+                for source, copied, error in _submit_copies(
+                    workspace, owner, arguments.sources, barrier, errors=_ERRORS
+                ):
+                    report(source, copied, error)
             except _fs.SyncFailed as exc:
-                # As job new: a failed commit stops the command; the payloads before it stay submitted.
+                # As job new: a failed commit stops the command; the batches before it stay submitted.
                 failed = True
-                print(f"{source}: {exc}", file=sys.stderr)
-                if rest := len(arguments.sources) - index - 1:
-                    print(f"stopped: the {rest} payload(s) after {source} were not submitted", file=sys.stderr)
-                break
-            except _ERRORS as exc:
-                failed = True
-                print(f"{source}: {exc}", file=sys.stderr)
-                continue
-            submitted.append(str(ref.path))
-            if not arguments.json:
-                print(f"{source}: {ref.path}")
+                print(exc, file=sys.stderr)
     if arguments.json:
         print(json.dumps(submitted, indent=2))
     return 1 if failed else 0

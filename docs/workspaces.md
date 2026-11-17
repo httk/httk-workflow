@@ -127,9 +127,17 @@ running daemon sees a change at once, and a `--no-durable` workspace
 synchronizes nothing. Job creation (`job new`, campaigns, `job submit`),
 workflow installation and builds, and `job adopt PATH` of a bundle on the
 workspace's filesystem are made durable the same way, quietly, before the job
-or package is published (creating N jobs costs N + 1 `syncfs` calls). Bundles
-and `job submit --move` payloads that were written before httk ran are synced
-together as they are, so a write error there is reported only if nobody has
+or package is published. `job new`, campaigns and `job submit` create jobs in
+batches, each costing one `syncfs` before its jobs are submitted and reported:
+a batch closes at 256 jobs, once 10 seconds have passed since its first job
+(checked between jobs, so a slow instantiate hook delays it), and at the end of
+the input, and a job that moves inputs (`--input-move-from-job`) has a batch of
+its own. Creating N jobs thus costs one `syncfs` per batch plus one (600 jobs
+cost 4 when each batch fills within 10 seconds). The library's `new_jobs`
+publishes each job before it asks for the next item (N + 1 `syncfs`) unless
+it is given `batch=`. Bundles and `job submit --move` payloads that were
+written before httk ran are synced together as they are, so a write error
+there is reported only if nobody has
 seen it yet; when one is reported, nothing is taken, and the files may not be
 intact on disk: re-create them from their source before trying again, since a
 retry would not notice the loss.
@@ -164,10 +172,15 @@ a push from a local workspace takes its jobs back into the source
 (`not_moved`; run the transfer again), and a pull, or a push from a remote
 workspace, keeps the jobs held at the source for `job transfer --resume`. Job
 creation (`job new`, campaigns), `job submit` of copies and workflow
-installation have no retry either: the command fails, and running it again is
-safe. `job adopt PATH` and `job submit --move` take files written before httk
-ran, so after a failed synchronization re-create them from their source first,
-as described above, rather than merely running the command again. Copies from
+installation have no retry either: the command fails, and for job creation
+and `job submit` none of that batch is submitted (the batches before it are,
+and the message says how many). Running it again is safe: for `job new` and
+campaigns with `--duplicate-tag skip`, so that the jobs already submitted are
+not created twice (a tagless job is); for `job submit`, which has no such
+check, give it only the payloads it did not report as submitted. `job adopt
+PATH` and `job submit --move` take files written before httk ran, so after a
+failed synchronization re-create them from their source first, as described
+above, rather than merely running the command again. Copies from
 another filesystem whose `syncfs` failed are made once more with every file
 synchronized as it is written, and the chunk fails (jobs held at the source)
 only if that fails too. The retried delivery or fetch runs under the same

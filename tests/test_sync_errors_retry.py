@@ -1258,10 +1258,12 @@ def test_job_submit_copies_and_moves_under_ignore_publish_after_a_sync_error(
     ws = durable_workspace(tmp_path / "ws", "syncfs")
     ws.configure_settings({"io.sync_errors": "ignore"})
     first, second, third = prepared_payloads(ws, tmp_path, 3)
-    # Copies: the prime, then one commit per payload; the first commit reports an error, trusted after a re-sync.
-    calls = Syncfs(monkeypatch, [None, errno.EIO, None, None])
+    # Copies: the prime, then one commit for the batch (plan 7.3; this was one commit per payload before batching),
+    # which reports an error, trusted after a re-sync.
+    monkeypatch.setattr(scaffold_module, "_clock", lambda: 0.0)  # no time cap: one batch however slow the copies
+    calls = Syncfs(monkeypatch, [None, errno.EIO, None])
     assert submit(tmp_path, ws, str(first), str(second)) == 0
-    assert len(ready(ws)) == 2 and len(calls.descriptors) == 4
+    assert len(ready(ws)) == 2 and len(calls.descriptors) == 3
     # --move: one no-prime syncfs for the batch, trusted after a re-sync.
     calls = Syncfs(monkeypatch, [errno.EIO, None])
     assert submit(tmp_path, ws, "--move", str(third)) == 0

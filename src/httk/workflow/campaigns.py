@@ -36,6 +36,7 @@ from pathlib import Path
 
 from httk.core.cli import CLIContext
 
+from . import scaffold as _scaffold
 from .collecting import DEFAULT_COLLECT_STATES, JobRecord, job_records
 from .errors import FormatError, SealedError
 from .models import validate_capacity
@@ -274,7 +275,9 @@ def campaign_submit_many(
     r"""Submit a batch of root jobs into the partition *key* is assigned.
 
     The batch shares one partition; use one call per key to spread a campaign
-    across partitions, or ``round-robin`` assignment with distinct indices.
+    across partitions, or ``round-robin`` assignment with distinct indices. Its
+    jobs are made durable and published in batches of up to 256 (see
+    :func:`~httk.workflow.scaffold.new_jobs`), unless *shared* gives ``batch``.
 
     :param workflow: Identify the workflow to submit.
     :param items: Supply the job items to submit.
@@ -288,7 +291,7 @@ def campaign_submit_many(
 
     partition = assign_partition(key, index=index, project=project)
     workspace = _local_partition_workspace(partition, project)
-    return list(new_jobs(workspace, workflow, items, **shared))  # type: ignore[arg-type]
+    return list(new_jobs(workspace, workflow, items, **{"batch": _scaffold._BATCH_JOBS, **shared}))  # type: ignore[arg-type]
 
 
 def _selected(config: CampaignConfig, partitions: Sequence[str] | None) -> tuple[str, ...]:

@@ -419,9 +419,12 @@ of the job's run, labelled by its payload-relative path (see
 [Collecting results](collecting.md#staged-inputs-record-the-exact-file)).
 
 After a batch, one final stderr line reports `submitted N jobs`. If a batch
-fails partway, it instead reports `submitted N of M jobs before failing` and
-exits `2`. In a batch, `--tag` becomes a *prefix* combined with each item's
-derived tag (`run7-si2o`); for a single job, `--tag` is the whole tag.
+fails partway, it instead reports `submitted and reported N of M jobs before
+failing` and exits `2`; the error's notes, printed after it, name a job that
+was submitted too without being reported (one named complete before a
+failure, which the command's close publishes). In a batch, `--tag` becomes a
+*prefix* combined with each item's derived tag (`run7-si2o`); for a single
+job, `--tag` is the whole tag.
 
 ### Command templates
 
