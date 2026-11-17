@@ -158,9 +158,10 @@ everyone on it:
   another user's error cannot fail); this costs one more connection and one
   more remote `httk` start, only when it happens, and a push from a remote
   workspace delivers its local copies again rather than fetching them anew. If
-  that delivery is refused too, a push from a local workspace takes its jobs
-  back into the source (`not_moved`; run the transfer again), and from a
-  remote workspace its jobs stay held there (`job transfer --resume`);
+  that delivery is refused too, a push from a local workspace takes the jobs
+  it held itself back into the source (`not_moved`; run the transfer again),
+  and from a remote workspace its jobs stay held there (`job transfer
+  --resume`);
 - a pull is fetched once more into a fresh landing under a fresh
   synchronization (one more fetch, only when it happens); if that fails too,
   the chunk fails and its jobs stay held at the source, and `job transfer
@@ -168,9 +169,11 @@ everyone on it:
 
 A failure is not retried otherwise. A destination (or, for a pull, this
 workspace) on `io.sync fsync`, whose per-file errors are exact, fails at once:
-a push from a local workspace takes its jobs back into the source
-(`not_moved`; run the transfer again), and a pull, or a push from a remote
-workspace, keeps the jobs held at the source for `job transfer --resume`. Job
+a push from a local workspace takes the jobs it held itself back into the
+source (`not_moved`; run the transfer again), and a pull, or a push from a
+remote workspace, keeps the jobs held at the source for `job transfer
+--resume`. A hold an earlier run left is never taken back, since an earlier
+delivery may have adopted it (see {doc}`details/workflow_cli`). Job
 creation (`job new`, campaigns), `job submit` of copies and workflow
 installation have no retry either: the command fails, and for job creation
 and `job submit` none of that batch is submitted (the batches before it are,

@@ -719,15 +719,21 @@ primed commit, which still fails, is not retried; job creation, `job submit`,
   `extract_tar(top_level=)`), never what a reused landing held before (an
   interrupted earlier delivery's leftovers stay in place, with a `warning:`
   line). The second answer is
-  the one answer the transfer processes (take-back of a local source's holds
-  after a refusal, release, workflow shipping and the destination's
-  `workspace_id`); it is never retried. A second answer reporting another
+  the one answer the transfer processes (take-back of the holds a local
+  source made in this run after a refusal, release, workflow shipping and the
+  destination's `workspace_id`); it is never retried. A second answer reporting another
   `workspace_id` than the first one reported keeps the holds for `--resume`:
   as an unreadable answer when it is a refusal, and, when it is an adoption,
   with a message saying that the jobs were adopted by that workspace, not the
   expected one. The retry runs under the same `--adapter-timeout` as the first
   delivery. The retry costs one more connection and one more remote
-  `httk` start, only when it happens;
+  `httk` start, only when it happens. A push from a local source delivers the
+  holds an earlier run left and the holds of this run in separate deliveries
+  (the earlier first; only this run's holds are ever taken back), and each
+  delivery retries on its own. Each answer naming a `workspace_id` is also
+  checked against the one the batch's earlier delivery reported (the retry's
+  against it when the first attempt named none): a mismatch keeps the holds
+  for `--resume` in the same way;
 - a pull (`_deliver` from a remote source) whose `syncfs` commit failed under
   `fail` discards the landing and pulls the chunk once more into a fresh
   landing scratch under a fresh, primed barrier (one more adapter `pull`); a

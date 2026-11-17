@@ -1090,6 +1090,8 @@ def _deliver_remote(
     arguments: argparse.Namespace,
     token: str,
     built_for: list[str],
+    *,
+    expected: str | None = None,
 ) -> dict[str, Any]:
     """Steps 2 and 3 for a chunk bound for a remote *dst*: one ``deliver`` of its held bundles to ``job adopt
     --stdin-tar`` there (a remote *src*'s bundles relayed through a local directory), asking about *built_for*.
@@ -1102,21 +1104,23 @@ def _deliver_remote(
     for another user's writeback error) is delivered once more, the same bundles from the same local directory
     (a remote *src*'s relay is not pulled again), to a fresh token with ``--sync fsync``, whose inline fsyncs no
     foreign error can fail; the answer to that delivery is the result, never retried itself. When it reports
-    another ``workspace_id`` than the first, the result is unknown (:class:`RuntimeError`).
+    another ``workspace_id`` than the first, or an answer reports another than *expected* (the one an earlier
+    delivery of the same batch reported), the result is unknown (:class:`RuntimeError`).
     """
 
     ids = [hold.transfer_id for hold in holds]
     outgoing = str(PurePosixPath(holds[0].path).parent)
     if src.workspace is not None:
         _say(arguments, f"delivering {len(ids)} bundle(s) to {dst.locator}")
-        return _deliver_adoption(src, dst, context, arguments, outgoing, ids, token, built_for)
+        return _deliver_adoption(src, dst, context, arguments, outgoing, ids, token, built_for, expected)
     with tempfile.TemporaryDirectory(prefix="httk-transfer-") as relay:
         _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
         for chunk in _chunks(ids):  # a pull names its files on the far side's command line
             _adapter(src, context, arguments, "pull", outgoing, f"{relay}/outgoing", chunk)
         _say(arguments, f"delivering {len(ids)} bundle(s) to {dst.locator}")
         # Inside the relay's lifetime: a retry delivers the same copies again.
-        return _deliver_adoption(src, dst, context, arguments, f"{relay}/outgoing", ids, token, built_for)
+        source = f"{relay}/outgoing"
+        return _deliver_adoption(src, dst, context, arguments, source, ids, token, built_for, expected)
 
 
 def _deliver_adoption(
@@ -1128,10 +1132,11 @@ def _deliver_adoption(
     ids: list[str],
     token: str,
     built_for: list[str],
+    expected: str | None,
 ) -> dict[str, Any]:
     """Deliver the bundles *ids* in the local directory *source* to ``job adopt --stdin-tar`` on *dst*, once more
     with ``--sync fsync`` after a ``sync_failed`` refusal: the checked adoption document (see
-    :func:`_deliver_remote`)."""
+    :func:`_deliver_remote`), whose ``workspace_id`` is *expected* unless either is unknown."""
 
     def deliver(landing: str, *strengthen: str) -> tuple[dict[str, Any], str]:
         argv = [*REMOTE_JOB_ADOPT_COMMAND, "--json", "--stdin-tar", "--token", landing, *strengthen]
@@ -1149,15 +1154,11 @@ def _deliver_adoption(
                 detail += f" ({dst.locator} may run an older httk-workflow; upgrade it)"
             raise _unknown_adoption(detail, src, dst, arguments) from None
 
-    document, err = deliver(token)
-    if "refused" in document and document.get("sync_failed") is True:
-        _say(
-            arguments,
-            f"{dst.locator} could not make the delivery durable ({document['refused']}); delivering {len(ids)} "
-            "bundle(s) again, with an fsync of every file",
-        )
-        first = document.get("workspace_id")
-        document, err = deliver(_fs.fresh_token(), "--sync", "fsync")
+    # The answers compared: this one, and the one that answered first.
+    retried = ("the second delivery", "the first delivery")
+    batch = ("this delivery", "the batch's earlier delivery")
+
+    def same_workspace(document: dict[str, Any], first: str | None, pair: tuple[str, str]) -> None:
         second = document.get("workspace_id")
         if first is not None and second is not None and second != first:
             if "refused" not in document:
@@ -1165,12 +1166,28 @@ def _deliver_adoption(
                 # released, and no away copy can name the right destination.
                 raise RuntimeError(
                     f"{dst.locator} adopted the jobs into workspace {second}, not the expected workspace {first} "
-                    f"that answered the first delivery; the holds are kept on {src.locator}: check with `httk job "
+                    f"that answered {pair[1]}; the holds are kept on {src.locator}: check with `httk job "
                     f"show` on {dst.locator}, then `httk job transfer --resume {src.locator} {dst.locator}` reports "
                     "them already adopted there and releases the holds"
                 )
-            detail = f"{dst.locator} answered the second delivery as workspace {second}, the first as {first}"
+            detail = f"{dst.locator} answered {pair[0]} as workspace {second}, {pair[1]} as {first}"
             raise _unknown_adoption(detail, src, dst, arguments)
+
+    document, err = deliver(token)
+    same_workspace(document, expected, batch)
+    if "refused" in document and document.get("sync_failed") is True:
+        _say(
+            arguments,
+            f"{dst.locator} could not make the delivery durable ({document['refused']}); delivering {len(ids)} "
+            "bundle(s) again, with an fsync of every file",
+        )
+        answered = document.get("workspace_id")
+        document, err = deliver(_fs.fresh_token(), "--sync", "fsync")
+        if answered is None:
+            # The first attempt named no workspace: the retry is held to the batch's earlier delivery.
+            same_workspace(document, expected, ("the second delivery", batch[1]))
+        else:
+            same_workspace(document, answered, retried)
     if "refused" not in document:
         _relay(dst, arguments, err)
     return document
@@ -1221,8 +1238,9 @@ def _release_remedy(
 
 
 def _take_back(src: _End, holds: list[_moving.Hold], reason: str) -> dict[str, dict[str, Any]]:
-    """Adopt the holds of a local *src* back into it after *dst* refused them before adopting any: the outcome
-    members by transfer id (``not_moved``, or ``failed`` when one cannot be taken back and stays held)."""
+    """Adopt the holds of a local *src* back into it after *dst* refused them before adopting any (only holds this
+    run created, never one an earlier delivery may have adopted): the outcome members by transfer id
+    (``not_moved``, or ``failed`` when one cannot be taken back and stays held)."""
 
     workspace = src.workspace
     assert workspace is not None
@@ -1548,13 +1566,32 @@ def _release(
 
 
 def _drive(
-    src: _End, dst: _End, holds: list[_moving.Hold], context: CLIContext, arguments: argparse.Namespace
+    src: _End,
+    dst: _End,
+    holds: list[_moving.Hold],
+    context: CLIContext,
+    arguments: argparse.Namespace,
+    *,
+    fresh: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Copy, adopt and release a batch of holds bound for *dst*: one outcome per hold, in order.
 
-    A hold that was not adopted stays held on *src*, except when a remote *dst* refused a chunk before adopting
-    any of it: a local *src* then takes those holds back (``not_moved``). The workflows the holds need are shipped
-    to a local *dst* before the adoption, and to a remote one after it, from what its adoption reported.
+    A hold that was not adopted stays held on *src*, except when a remote *dst* refused a delivery before adopting
+    any of it: a local *src* then takes back the holds of that delivery that this run created (*fresh*, their
+    transfer ids), reported ``not_moved``. A hold that existed before the run may have been adopted by an earlier
+    delivery whose answer was lost, so it is never taken back: it stays held, reported ``failed``. From a local
+    *src*, the holds that predate the run and this run's are therefore delivered to a remote *dst* separately
+    (those first, each delivery with its own token), one delivery when either set is empty. The workflows the
+    holds need are shipped to a local *dst* before the adoption, and to a remote one once after the deliveries,
+    from what their adoptions reported.
+
+    :param src: The end holding the jobs.
+    :param dst: The destination every hold of the batch records.
+    :param holds: The batch.
+    :param context: The CLI invocation.
+    :param arguments: The command's arguments.
+    :param fresh: The transfer ids of the holds this run created in a local *src*.
+    :return: One outcome per hold, in the order of *holds*.
     """
 
     outcomes: dict[str, dict[str, Any]] = {
@@ -1580,6 +1617,8 @@ def _drive(
             file=sys.stderr,
         )
     shipping: dict[str, dict[str, Any]] = {}
+    # The holds whose workflows are shipped: a local DST's all, a remote DST's those of an adopting delivery.
+    shipped_for = ready
     if workflows and dst.workspace is not None:
         # Once a batch, before the first adoption: a job adopted after its workflow can start at once.
         shipping = _ship_workflows(src, dst, ready, context, arguments)
@@ -1594,27 +1633,61 @@ def _drive(
             except _ERRORS as exc:
                 entries.update({transfer_id: {"status": "failed", "message": str(exc)} for transfer_id in chunk})
     elif ready:
-        # One delivery for the whole batch: the bundles travel in the stream, not on the command line.
-        built_for = sorted({entry[0] for hold in ready for entry in hold.workflows or ()}) if workflows else []
-        try:
-            document = _deliver_remote(src, dst, ready, context, arguments, _fs.fresh_token(), built_for)
-        except _ERRORS as exc:
-            entries.update({transfer_id: {"status": "failed", "message": str(exc)} for transfer_id in by_id})
-        else:
+        # One delivery for the batch (the bundles travel in the stream, not on the command line); from a local SRC
+        # one for the holds that predate this run, then one for this run's, so that a refusal can take these back.
+        deliveries = [ready]
+        if src.workspace is not None:
+            deliveries = [
+                [hold for hold in ready if hold.transfer_id not in fresh],
+                [hold for hold in ready if hold.transfer_id in fresh],
+            ]
+        answered: str | None = None
+        reports: list[object] = []
+        shipped_for = []
+        for delivery in (delivery for delivery in deliveries if delivery):
+            ids = [hold.transfer_id for hold in delivery]
+            built_for = sorted({entry[0] for hold in delivery for entry in hold.workflows or ()}) if workflows else []
+            try:
+                document = _deliver_remote(
+                    src, dst, delivery, context, arguments, _fs.fresh_token(), built_for, expected=answered
+                )
+            except _ERRORS as exc:
+                entries.update({transfer_id: {"status": "failed", "message": str(exc)} for transfer_id in ids})
+                continue
+            answered = answered or document.get("workspace_id")
             if "refused" in document:
-                # Definitively nothing of the batch was adopted.
+                # Definitively nothing of this delivery was adopted.
                 reason = f"{dst.locator}: {document['refused']}"
-                if src.workspace is not None:
-                    for transfer_id, update in _take_back(src, ready, reason).items():
-                        outcomes[transfer_id].update(update)
-                else:
+                if src.workspace is None:
                     message = f"refused before anything was adopted: {reason}; it stays held on {src.locator}"
                     message += f" (`httk job transfer --resume {src.locator} {dst.locator}` delivers it again)"
-                    outcomes.update({key: {**outcomes[key], "status": "failed", "message": message} for key in by_id})
+                    outcomes.update({key: {**outcomes[key], "status": "failed", "message": message} for key in ids})
+                    continue
+                if back := [hold for hold in delivery if hold.transfer_id in fresh]:
+                    for transfer_id, update in _take_back(src, back, reason).items():
+                        outcomes[transfer_id].update(update)
+                for hold in delivery:
+                    if hold.transfer_id not in fresh:
+                        # An earlier run's delivery of this hold may have been adopted, its answer lost.
+                        remedy = _release_remedy(
+                            arguments, hold.transfer_id, destination_id or document.get("workspace_id"), src, dst
+                        )
+                        message = (
+                            f"refused before anything was adopted: {reason}; it stays held on {src.locator}, because "
+                            f"an earlier delivery may already have adopted it: check with `httk job show` on "
+                            f"{dst.locator}, then deliver again with `httk job transfer --resume {src.locator} "
+                            f"{dst.locator}` or, if the jobs are there, release with {remedy}, or, if they are not "
+                            f"there, take it back with `httk job adopt --workspace {src.locator} {hold.path}`"
+                        )
+                        outcomes[hold.transfer_id].update(status="failed", message=message)
             else:
                 entries.update(document["entries"])
                 destination_id = destination_id or document["workspace_id"]
-                report = document.get("workflows")
+                reports.append(document.get("workflows"))
+                shipped_for += delivery
+        if any(isinstance(rows, list) for rows in reports):
+            # Each delivery asked about its own holds' workflows: together, about the batch's.
+            report = [row for rows in reports if isinstance(rows, list) for row in rows]
     delivered = []
     for transfer_id, entry in entries.items():
         outcome, status = outcomes[transfer_id], entry["status"]
@@ -1632,7 +1705,8 @@ def _drive(
             outcome.update(status="failed", message=f"{entry.get('message')}; it stays held on {src.locator}")
     if workflows and dst.workspace is None and delivered:
         # After the adoption, from its report: a manager skips a ready job whose workflow is not installed yet.
-        shipping = _ship_workflows(src, dst, ready, context, arguments, _reported_workflows(report))
+        # Only for the holds of a delivery that answered with an adoption (its report covers no other).
+        shipping = _ship_workflows(src, dst, shipped_for, context, arguments, _reported_workflows(report))
     unreleased: list[tuple[str, str]] = []
     released: set[str] = set()
     for chunk in _chunks(delivered, flag="--release"):
@@ -1655,7 +1729,7 @@ def _drive(
         )
     if dst.workspace is not None:
         _build_shipped(dst, shipping, arguments)
-    for hold in ready:
+    for hold in shipped_for:
         if shipping and hold.workflows is not None:
             outcomes[hold.transfer_id]["workflows"] = [
                 {"id": workflow_id, **shipping[workflow_id]} for workflow_id, _, _ in hold.workflows
@@ -1849,6 +1923,8 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
         ends[dst.locator] = dst
     errors: list[str] = []
     known: list[_moving.Hold] | None = None
+    # The holds this run creates: only these may be taken back after a refusal (an earlier one may be adopted).
+    fresh: frozenset[str] = frozenset()
     if selected:
         assert dst is not None
         if dst.workspace is not None:
@@ -1859,6 +1935,7 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
         at = f" at step {' or '.join(arguments.step)}" if arguments.step else ""
         _say(arguments, f"holding {', '.join(what or ['every job'])}{at} on {src.locator}")
         held, before = _hold_jobs(src, dst, context, arguments, errors)
+        fresh = frozenset(hold.transfer_id for hold in held)
         if before is not None:
             # A remote SRC listed the other holds bound for DST with the hold: no transfer status call.
             known = sorted({hold.transfer_id: hold for hold in [*before, *held]}.values(), key=lambda h: h.transfer_id)
@@ -1883,7 +1960,7 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
         batches.setdefault(locator, []).append(hold)
     outcomes = []
     for locator, holds in batches.items():
-        outcomes.extend(_drive(src, ends[locator], holds, context, arguments))
+        outcomes.extend(_drive(src, ends[locator], holds, context, arguments, fresh=fresh))
     if arguments.state or arguments.step:
         under = f" under {arguments.placement}" if arguments.placement is not None else ""
         which = f"{' or '.join(arguments.state)} " if arguments.state else ""

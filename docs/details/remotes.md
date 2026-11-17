@@ -290,8 +290,9 @@ Three settings describe it:
   remote adoption, so the executor must pass stdin through (no `docker exec`
   without `-i`, no wrapper that redirects `</dev/null`). An executor that drops
   stdin makes the adoption read an empty stream, which it refuses: nothing
-  arrives, and the transfer reports each hold `not_moved` (a local SRC takes the
-  jobs back) or, from a remote SRC, `failed` with the holds kept.
+  arrives, and the transfer reports each hold `not_moved` (a local SRC takes back
+  the jobs this run held) or, from a remote SRC, `failed` with the holds kept;
+  a hold left by an earlier run is never taken back (`failed`, held).
 
 ```console
 $ httk remote add --template mount sigma

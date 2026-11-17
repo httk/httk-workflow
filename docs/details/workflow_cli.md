@@ -807,10 +807,14 @@ start), and one release call on a remote SRC. Local to remote takes one ssh
 connection and one remote `httk` start; remote to local three connections
 (hold, pull, release) and two starts; remote to remote four connections and
 three starts. Shipping missing or unbuilt workflows to a remote DST adds one
-connection and one start. A push retried after DST's failed `syncfs` adds one
-connection and one start (the bundles are delivered again; a remote SRC's are
-not fetched again), and a pull chunk fetched again after a failed `syncfs` of
-its landing adds one `pull`; nothing is added when no retry happens.
+connection and one start. A push from a local SRC that both re-drives holds
+an earlier run left bound for DST and holds new jobs delivers the two sets
+separately (the earlier holds first), which adds one connection and one start,
+only then. A delivery retried after DST's failed `syncfs` adds one connection
+and one start (the bundles are delivered again; a remote SRC's are not fetched
+again); the retry is per delivery, so with both sets it can add up to two. A
+pull chunk fetched again after a failed `syncfs` of its landing adds one
+`pull`; nothing is added when no retry happens.
 A delivery is one call for the whole batch (its bundles travel in the stream);
 only a hold, pull or release whose id list exceeds 64 KiB of command text (some
 1500 jobs) is split, into as many such calls as it needs.
@@ -820,12 +824,25 @@ or because its `bundle.json` records another destination workspace id) stays
 held on SRC and is reported; one whose jobs are all at DST already is "already
 adopted", and its hold is released. When a remote DST refuses a delivery before
 adopting anything (the workspace name is unknown there, the stream was
-refused), a local SRC takes those holds back at once and reports them
-`not_moved` with DST's reason; a remote SRC keeps them held (`failed`). A
-refusal marked `sync_failed` is first delivered once more, to a fresh landing
-with every file synchronized as it is written there; only that second answer
-counts (a refusal then takes the holds back as above; one from another
-workspace id than the first answer is treated as unreadable). An
+refused), a local SRC takes back at once the holds of that delivery that this
+run made, and reports them `not_moved` with DST's reason; a remote SRC keeps
+them held (`failed`). A hold that existed before the run (left by an earlier
+run, re-driven now) is never taken back, since an earlier delivery of it may
+have been adopted with its answer lost: it stays held and is reported
+`failed` with the refusal. Check with `httk job show` on DST: deliver it again
+with `--resume`, or, if the jobs are there, release it (`job transfer
+--release T`), or, if they are not, take it back with
+`httk job adopt --workspace SRC SRC/.httk-workspace/transfers/outgoing/<transfer id>`
+(the message names both). This is why the earlier holds and the run's new ones
+travel in separate deliveries. The rule cannot cover two transfers of one SRC
+to one DST running at once: the run that created a hold may still take it back
+after the other run delivered it, leaving the jobs in both workspaces, so do
+not run them concurrently. A refusal marked `sync_failed` is first delivered once more,
+to a fresh landing with every file synchronized as it is written there; only
+that second answer counts (a refusal then takes the holds back as above; one
+from another workspace id than the first answer is treated as unreadable, as
+is a delivery answered by another workspace id than the batch's earlier
+delivery). An
 answer that cannot be read (a banner on the connection, a crash, a timeout)
 marks every hold of that call `failed` and leaves it held: whether the jobs
 arrived is unknown, and `--resume` delivers again (they then report "already
