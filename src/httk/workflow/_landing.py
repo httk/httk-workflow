@@ -1,8 +1,9 @@
 """The receiving side of a pushed tar stream: one landing, extracted, validated and made durable before any use.
 
-The far side of a push (``job adopt --stdin-tar``, the transfer session's ``adopt`` op) and ``workflow install
---stdin-tar`` (and its ``install`` op) read a tar stream into a landing directory with :func:`receive_tar`. The
-stream is any binary file: standard input for the command line, a transfer session's upload for an op. This module
+The far side of a push (``job adopt --stdin-tar``, the transfer session's ``adopt`` op), ``workflow install
+--stdin-tar`` (and its ``install`` op) and the near side of a pull over a transfer session read a tar stream into a
+landing directory with :func:`receive_tar`. The stream is any binary file: standard input for the command line, a
+transfer session's upload for an op, its download for a pull. This module
 imports nothing of the command line.
 """
 
@@ -165,6 +166,7 @@ def receive_tar(
     finish: Callable[[], object] | None = None,
     progress: Progress | None = None,
     on_leftovers: Callable[[list[str]], object] | None = None,
+    quiet: bool = False,
 ) -> list[str]:
     """Extract the tar *stream* into *landing* (created when absent): the top-level directories it carried, sorted.
 
@@ -197,6 +199,7 @@ def receive_tar(
         read, then ``sync`` again once the reading ends, however it ends (the writes still running, the directory
         times and fsyncs, the terminal and the commit, or a refused stream's discard).
     :param on_leftovers: Told a reused landing's other entries, when there are any.
+    :param quiet: Print no progress line of the sync barrier (``job transfer -q`` receiving a pull).
     :return: The names of the top-level directories the stream carried, sorted.
     :raises StreamRefused: For a malformed, aborted or cut stream, a refused member (naming its bundle) or a failed
         sync barrier (:class:`CommitFailed` when the barrier's ``syncfs`` commit failed under ``io.sync_errors``
@@ -227,7 +230,7 @@ def receive_tar(
         if barrier and workspace.durable:
             # --sync fsync only strengthens: inline fsync on the writing descriptors, which no foreign error fails.
             policy: tuple[object, _fs.SyncErrors] = ("fsync", "fail") if force_fsync else workspace.io_sync_policy()
-            with _fs.Barrier(landing, policy[0], errors=policy[1], inline=True) as sync:
+            with _fs.Barrier(landing, policy[0], errors=policy[1], inline=True, quiet=quiet) as sync:
                 if force_fsync:
                     sync.reason = "fsync (--sync fsync)"
                 names, count = extract(durable=sync.fsync_inline)

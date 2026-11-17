@@ -23,6 +23,7 @@ from test_job_transfer import (  # noqa: F401 (project: fixture)
     outcomes,
     outgoing,
     project,
+    recorded_requests,
     registered,
     run,
     starts,
@@ -239,10 +240,14 @@ def test_local_to_remote_and_pull_back_ship_through_the_adapter(
     assert _store.closure(far, "local:caller", check_builds=True).ok and landings(far) == []
     # Pulled back into a third workspace: copied into a landing scratch there, which goes.
     calls.clear()
+    requests = recorded_requests(monkeypatch)
     assert run(project, "--json", "--job", job_id, f"cluster:{far_name}", home_name) == 0
     (outcome,) = outcomes(capsys)["transfers"]
     assert shipped(outcome) == {GIT_ID: "installed", "local:caller": "installed"}
-    assert calls == ["job transfer", "pull", "pull", "job transfer"]
+    # One transfer session to SRC carries the hold, the store entries (before the adoption), the bundles and the
+    # release: no adapter call.
+    assert calls == [] and [op for op, _ in requests] == ["hold", "send", "send", "release"]
+    assert [header["kind"] for op, header in requests if op == "send"] == ["store", "holds"]
     assert not list((home.control / "tmp").iterdir())
     assert _store.lookup(home, GIT_ID).record["source"] == f"transfer from cluster:{far_name}"  # type: ignore[union-attr]
     # Remote to remote is relayed through this client.

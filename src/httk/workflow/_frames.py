@@ -47,6 +47,7 @@ __all__ = [
     "encode_frame",
     "encode_header",
     "encode_json",
+    "json_payload",
 ]
 
 #: A request: ``{"op", ...}``, with ``"upload": true`` when stream data follows.
@@ -128,6 +129,17 @@ def encode_frame(kind: str, request_id: int, payload: Buffer) -> bytes:
     return encode_header(kind, request_id, len(view)) + view
 
 
+def json_payload(document: Mapping[str, Any]) -> bytes:
+    """Return the payload a JSON frame carries for *document*: compact JSON in UTF-8 (non-ASCII escaped), exactly
+    as :func:`encode_json` and :meth:`FrameWriter.send_json` encode it, so its length can be checked first.
+
+    :param document: The JSON object.
+    :return: The payload bytes.
+    """
+
+    return json.dumps(document, separators=(",", ":")).encode("utf-8")
+
+
 def encode_json(kind: str, request_id: int, document: Mapping[str, Any]) -> bytes:
     """Return one whole JSON frame.
 
@@ -140,7 +152,7 @@ def encode_json(kind: str, request_id: int, document: Mapping[str, Any]) -> byte
 
     if kind == DATA:
         raise TransferProtocolError("a D frame carries raw bytes, not JSON")
-    return encode_frame(kind, request_id, json.dumps(document, separators=(",", ":")).encode("utf-8"))
+    return encode_frame(kind, request_id, json_payload(document))
 
 
 class FrameReader:
@@ -260,7 +272,7 @@ class FrameWriter:
 
         if kind == DATA:
             raise TransferProtocolError("a D frame carries raw bytes, not JSON")
-        self.send(kind, request_id, json.dumps(document, separators=(",", ":")).encode("utf-8"))
+        self.send(kind, request_id, json_payload(document))
 
 
 class StreamWriter:

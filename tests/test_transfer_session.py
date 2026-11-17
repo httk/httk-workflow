@@ -950,7 +950,7 @@ class _Peer:
 
 def test_serve_says_hello_and_ends_cleanly_between_requests() -> None:
     peer = _Peer(dict(OPS))
-    ops = ["adopt", "bye", "echo", "install", "workflows"]
+    ops = ["adopt", "bye", "echo", "hold", "holds", "install", "release", "send", "workflows"]
     assert peer.hello == {"format": TRANSFER_SESSION_FORMAT, "format_version": 1, "ops": ops}
     peer.writer.send_json(REQUEST, 1, {"op": "nope"})
     assert peer.answer() == {"ok": False, "error": "unknown op 'nope'"}

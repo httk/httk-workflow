@@ -766,9 +766,10 @@ its terminal or paused descendants too) in SRC's own
 `.httk-workspace/transfers/outgoing/<transfer id>/`, recording DST, after which
 the jobs are in neither workspace's state trees. It **copies** the held bundle
 to DST (on one filesystem adoption simply moves it in; a local DST receives it
-with the adapter's `pull`; a remote DST receives it from a local SRC over one
-transfer session, segment by segment (below), and otherwise with the adapter's
-`deliver`, streamed into `job adopt --stdin-tar` there), **adopts** it there
+from a remote SRC over one transfer session, segment by segment (below), and
+otherwise with the adapter's `pull`; a remote DST receives it from a local SRC
+over one transfer session, segment by segment (below), and otherwise with the
+adapter's `deliver`, streamed into `job adopt --stdin-tar` there), **adopts** it there
 into the states and priorities it left, and only then **releases** the hold.
 A remote end is never probed first: its commands name the workspace by the
 plain name it has on the far side. On a remote SRC,
@@ -779,7 +780,9 @@ closure of its calls, as SRC resolves them) that DST lacks and SRC has are
 installed in DST under the same ids, and a shipped workflow with
 `[workflow.build]` is built there, as is a needed one DST already had without a
 build for its platform. For a local DST this happens before the first adoption
-of a batch, from DST's store; the builds follow the release. Over a push's
+of a batch, from SRC's store (a remote SRC's entries fetched with one request on
+the pull's transfer session, or with the adapter's `pull`); the builds follow
+the release. Over a push's
 transfer session the same holds for a remote DST: before the first segment, one
 request asks DST which of the workflows it has (`present`, `unbuilt` or
 `missing`), and one more installs the missing ones and builds the unbuilt ones,
@@ -815,11 +818,12 @@ one `deliver` to a remote DST (which lands the bundles in
 start), and one release call on a remote SRC. Local to remote takes one ssh
 connection and one remote `httk` start, whatever it ships, builds or retries:
 the push runs over one transfer session (see *The transfer session* in
-{doc}`remotes`); remote to local three connections
-(hold, pull, release) and two starts; remote to remote four connections and
-three starts. Without a session (a DST whose `httk` predates it, which costs
-one more connection and start for the refused session, or the remote setting
-`transfer_session=off`), a push costs what it did before sessions: one `deliver`
+{doc}`remotes`); remote to local one connection and one start too, whatever it
+ships or retries, over one transfer session to SRC; remote to remote four
+connections and three starts. Without a session (a far side whose `httk`
+predates it, which costs one more connection and start for the refused session,
+or the remote setting `transfer_session=off`), a pull costs three connections
+(hold, pull, release) and two starts, and a push what it did before sessions: one `deliver`
 of the whole batch, plus one connection and one start for shipping missing or
 unbuilt workflows, for the second delivery when a push from a local SRC both
 re-drives holds an earlier run left bound for DST and holds new jobs (the two
@@ -827,7 +831,7 @@ sets travel separately, the earlier holds first), and for each delivery retried
 after DST's failed `syncfs`. Remote to remote ships and retries the same way
 (its holds travel as one delivery: a remote SRC's holds are never taken back,
 so they are not separated), and a remote SRC's bundles are not fetched again
-for a retry. A
+for a retry. Without a session, a
 pull chunk fetched again after a failed `syncfs` of its landing adds one
 `pull`; nothing is added when no retry happens.
 Only a hold, pull or release whose id list exceeds 64 KiB of command text (some
@@ -870,6 +874,73 @@ After a retried `syncfs` failure every later segment of the session is
 synchronized file by file at once. When the session fails while the workflows
 are installed, before the first segment, nothing has been adopted and every
 hold stays held.
+
+A pull from a remote SRC into a local DST over a transfer session holds the
+selection with one request (whose answer lists the holds an earlier run left
+bound for DST, which this run drives too; `--resume` lists SRC's holds with one
+request instead), fetches the store entries DST lacks with one more, installs
+them, and then fetches the holds in segments of 256 bundles, in the order of
+their transfer ids. SRC closes each fetch once the bundles it sent hold 16 GiB
+of file data or 16,384 archive members (directories and hard links included; a
+hold is never split), so a segment may take several fetches, each of what is
+left of it. Each fetch is one archive into its own landing scratch in DST: the
+stream's end is checked before the landing is synchronized, the landing
+synchronized (`io.sync`, read for each landing) before anything of it is
+adopted, and the holds it adopted, or found adopted already, are released on SRC
+right after it, over the same session (with `--keep` recording DST's workspace
+id in the away copies). While SRC sends a hold, each file is checked against its
+own open descriptor: a file replaced, shrunk or grown since it was listed aborts
+the fetch, which never ends as complete. A file changed in place without changing
+its size is not detected (an accepted limitation: nothing writes a held bundle,
+and the adapter's tar copy has the same property). Per segment:
+
+- a failed `syncfs` commit of a landing under `io.sync_errors` `fail` discards
+  it and fetches it once more into a fresh landing with every file
+  synchronized as it is written, as every later fetch of the session then is,
+  for every destination of the command (this replaces the fresh `syncfs`
+  barrier of a pull without a session); a second failure (an fsync error of the
+  re-fetch) stops the pull as a refusal naming no hold does (below);
+- a hold SRC cannot send (it changed or vanished while it was read, which
+  aborts the fetch, or it is gone from SRC: another actor released or took it,
+  which the outcome says, naming where to check) or whose member DST refuses
+  fails alone, and the rest of its segment is fetched once more without it.
+  After a second such refusal in the segment the rest of it is not fetched:
+  each of those holds is reported "not fetched: another hold of its segment was
+  refused twice", stays held on SRC, and `--resume` retries it (a hold that
+  keeps failing so holds back the rest of its segment until then);
+- a refusal that names no hold, by SRC or by DST (a full disk or quota, a
+  landing scratch that cannot be made or used, a failed synchronization under
+  `io.sync_errors` `ignore`, an fsync error after the re-fetch), a failed
+  session, or an answer naming other holds than arrived stops the pull, as a
+  whole-segment refusal stops a push: nothing of that fetch was adopted, its
+  landing is discarded, and its holds and every later segment's stay held on
+  SRC (`failed`, with the `--resume` remedy). A bundle whose refusal in DST
+  cannot be attributed to it (one holding a name DST's filesystem cannot hold,
+  say) stops the pull at its segment on every `--resume`: take that hold back
+  on SRC by hand (`httk job adopt --workspace SRC
+  SRC/.httk-workspace/transfers/outgoing/<transfer id>`, on SRC's machine),
+  then `--resume` moves the rest;
+- a release that fails leaves the jobs in DST and their holds on SRC: the
+  outcome says "the jobs are in DST, but the hold was not released" and names
+  `--resume` or the hand release; a session failing in it stops the pull too.
+
+One answer carries at most 64 MiB, so until holds are paged a hold request
+whose selected jobs and SRC's existing holds together exceed 50,000, or a
+listing of more holds than one answer carries, is refused by SRC before
+anything changes, and the whole command then takes the adapter operations (one
+more login, said in one line). A hold answer that still does not fit after the
+holds were made (long paths, or trees with very many members) fails the session
+with the holds kept on SRC, an accepted limitation until holds are paged: a
+rerun of the pull does not recover (it fails again), so only `--resume`
+recovers, listing the holds or, when that listing is refused as too large,
+falling back to the adapter operations. Also accepted: on a filesystem whose `fstat` of an
+open file reports another device or inode than `lstat` of its path, SRC refuses
+every fetch as changed; set `transfer_session=off` on that remote.
+
+A remote SRC that serves no session (an older `httk`, `transfer_session=off`, a
+`mount-daemon` remote) is pulled with the adapter's hold, `pull` and release
+calls as before, the holds of a batch in one pull per 64 KiB of ids, and a
+failed `syncfs` commit of its landing pulled once more under a fresh barrier.
 
 A bundle DST refuses (for example because some of its jobs are already there,
 or because its `bundle.json` records another destination workspace id) stays

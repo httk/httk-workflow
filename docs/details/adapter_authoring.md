@@ -425,15 +425,16 @@ A caller that polls, such as `workflow monitor`, would otherwise pay one login
 and one remote `httk` start per read, and a push one per delivery. `session`
 instead starts one long-lived far-side process and talks to it over the
 adapter's own pipes, as rsync does. The monitor starts `httk workflow session`
-(text lines); a push from a local workspace starts `httk workflow
-transfer-session` (binary frames, see *The transfer session* in
-{doc}`/details/remotes`). It is optional: an adapter that does not implement it
-refuses it (or fails), and the caller then falls back to one `invoke` (the
-monitor) or one `deliver` (a push) per command. The caller also falls back when
-the far side cannot serve a session, for example because its `httk` predates
-the session command. The maintained `local`, `ssh` and `mount` kinds implement
-it; `mount-daemon` refuses it. The remote setting `transfer_session=off`
-(default `auto`) makes a push skip the transfer session without starting it.
+(text lines); a push from a local workspace, and a pull from a remote one
+into a local one, start `httk workflow transfer-session` (binary frames, see
+*The transfer session* in {doc}`/details/remotes`). It is optional: an adapter
+that does not implement it refuses it (or fails), and the caller then falls
+back to one `invoke` (the monitor), one `deliver` (a push) or its `invoke` and
+`pull` calls (a pull) per command. The caller also falls back when the far side
+cannot serve a session, for example because its `httk` predates the session
+command. The maintained `local`, `ssh` and `mount` kinds implement it;
+`mount-daemon` refuses it. The remote setting `transfer_session=off` (default
+`auto`) makes a push or a pull skip the transfer session without starting it.
 
 Beyond the standard request envelope, `session` accepts exactly:
 

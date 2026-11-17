@@ -63,7 +63,7 @@ import os
 import re
 import stat
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -1565,12 +1565,13 @@ def _needed_workflows(
     return tuple(entry if entry[2] is not None else (entry[0], None, None) for _, entry in sorted(needed.items()))
 
 
-def held(workspace: "Workspace", *, workflows: bool = False) -> list[Hold]:
+def held(workspace: "Workspace", *, workflows: bool = False, on_read: Callable[[], object] | None = None) -> list[Hold]:
     """List the held bundles.
 
     :param workspace: The workspace.
     :param workflows: Also report the workflows each hold's members need (:attr:`Hold.workflows`), read from
         their ``job.json`` and ``state.json`` and resolved in this workspace's store.
+    :param on_read: Called after each hold is read (a long listing's progress).
     :return: The holds, by transfer id.
     """
 
@@ -1581,6 +1582,8 @@ def held(workspace: "Workspace", *, workflows: bool = False) -> list[Hold]:
             bundle = outgoing / name
             needed = _needed_workflows(workspace, bundle, read[1]) if workflows else None
             holds.append(Hold.from_manifest(bundle, read[1], needed))
+        if on_read is not None:
+            on_read()
     return holds
 
 

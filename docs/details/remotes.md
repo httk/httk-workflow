@@ -230,9 +230,10 @@ travel together, so the cost is the same whether it moves one job or a thousand:
 a push to a remote workspace is one ssh connection and one remote `httk` start,
 a transfer session (below) that also ships and builds the workflows the
 destination lacks and retries a failed synchronization there (see
-{doc}`../workspaces`); a pull from a remote
-workspace is three connections and two `httk` starts (hold, copy, release); a
-remote-to-remote transfer four connections and three starts. On a site where
+{doc}`../workspaces`); a pull from a remote workspace is one connection and one
+`httk` start too, a transfer session that holds, copies the workflows and the
+jobs, and releases (three connections and two starts without one: hold, copy,
+release); a remote-to-remote transfer four connections and three starts. On a site where
 every Python start is slow, that is what a transfer costs. It reports each step
 on stderr (`-q` silences that). The
 steps and their recovery are in the `job transfer` section of {doc}`workflow_cli`.
@@ -243,8 +244,10 @@ A transfer session is one connection and one far-side `httk` start, the hidden
 `httk workflow transfer-session`, started through the adapter `session`
 operation (as the monitor's session is), that carries typed requests and their
 data in binary frames. A push from a local workspace to a remote one opens one
-at its first delivery and closes it at the end of the command; pulls and
-remote-to-remote transfers do not use one yet.
+at its first delivery, a pull from a remote workspace to a local one at its
+first request to the source (the hold, or the listing of the holds for
+`--resume`); either closes it at the end of the command. Remote-to-remote
+transfers do not use one yet.
 
 Over the session a push first asks the destination which of the workflows its
 jobs need it lacks or has unbuilt, installs and builds those (once a command; a
@@ -270,16 +273,39 @@ segment's holds and every later one's stay held, and running the transfer again
 (or `httk job transfer --resume`) finishes it, reporting what had arrived as
 already adopted.
 
+Over the session a pull holds the selected jobs with one request (its answer
+also lists the holds an earlier run left bound for this destination, which go
+along), fetches the store entries of the workflows the jobs need that this
+workspace lacks with one more and installs them here, all before the first
+adoption, and then fetches the holds in segments of 256 bundles. The source
+closes each fetch once 16 GiB of file data or 16,384 archive members went (a
+hold is never split), so a segment may take several fetches, each of what is
+left of it.
+Each fetch lands in its own scratch directory here, is checked and synchronized
+before anything of it is adopted, and the holds it adopted are released on the
+source at once. A failed synchronization of a landing is fetched once more,
+with every file synchronized as it is written, as every later fetch of the
+session then is. A hold the source cannot send (another actor released it, or
+a file of it was replaced or changed size while it was read) fails alone and the
+rest of its segment is fetched once more without it. A source that dies or
+answers something else, or a refusal naming no hold (a full quota here, say),
+stops the pull: nothing of that fetch was adopted, and its holds and every
+later one stay held there for `httk job transfer --resume`, which lists them
+over a new session. A failed release leaves the jobs here with their holds on
+the source, reported with the remedy.
+
 Opening a session checks the far side before anything is changed: its hello
 must name the expected format version and every request the caller needs, and
 a round trip of all 256 byte values must come back intact. When any of that
 fails (an older far-side `httk` without the command, an executor that mangles
 binary data), the push says so and falls back to one adapter `deliver` per
-delivery as before sessions, at the cost of one extra connection and start per
-command (the refused session; this is not remembered between commands). A
-`mount-daemon` remote, which has no session, and a remote with
-`transfer_session=off` take that path at once, without a word or a start. Any other failure to open the session fails the deliveries, and the
-jobs stay held for `--resume`. A refused or broken
+delivery as before sessions (a pull to its adapter hold, copy and release
+calls), at the cost of one extra connection and start per command (the refused
+session; this is not remembered between commands). A `mount-daemon` remote,
+which has no session, and a remote with `transfer_session=off` take that path
+at once, without a word or a start. Any other failure to open the session fails
+the deliveries, and the jobs stay held for `--resume` (a pull holds nothing). A
+refused or broken
 ssh connection (ssh's own exit status 255) is never a fallback. Set
 `transfer_session=off` on a remote to skip the session and its check (the
 default is `auto`):

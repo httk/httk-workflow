@@ -734,12 +734,21 @@ primed commit, which still fails, is not retried; job creation, `job submit`,
   checked against the one the batch's earlier delivery reported (the retry's
   against it when the first attempt named none): a mismatch keeps the holds
   for `--resume` in the same way;
-- a pull (`_deliver` from a remote source) whose `syncfs` commit failed under
-  `fail` discards the landing and pulls the chunk once more into a fresh
-  landing scratch under a fresh, primed barrier (one more adapter `pull`); a
-  clean commit of that one proves it durable, and a second failure fails the
-  chunk with its holds kept at the source (`--resume` delivers it again). A
-  failed walk of strategy `fsync` is exact and not pulled again. A remote-to-remote relay's pull leg has no barrier
+- a pull over a transfer session (`_pull_over_session`) whose landing's
+  `syncfs` commit failed under `fail` (`_landing.CommitFailed`) discards the
+  landing and fetches that segment's request once more into a fresh landing
+  with `receive_tar(force_fsync=True)`, inline fsync on the writing
+  descriptors, which no foreign error can fail; every later request of the
+  session then goes so too, and a second failure (an inline fsync error, a
+  `StreamRefused` naming no bundle) stops the pull with that segment's holds and
+  every later one's kept at the source (`--resume` delivers them again).
+  This supersedes, for a pull with a session, the fresh primed barrier below;
+- a pull without a session (`_deliver` from a remote source) whose `syncfs`
+  commit failed under `fail` discards the landing and pulls the chunk once more
+  into a fresh landing scratch under a fresh, primed barrier (one more adapter
+  `pull`); a clean commit of that one proves it durable, and a second failure
+  fails the chunk with its holds kept at the source (`--resume` delivers it
+  again). A failed walk of strategy `fsync` is exact and not pulled again. A remote-to-remote relay's pull leg has no barrier
   (a temporary copy); its delivery follows the push rule;
 - landing copies are discarded and made once more with an fsync of every file
   (their sources are untouched), the chunk failing with its holds kept if that

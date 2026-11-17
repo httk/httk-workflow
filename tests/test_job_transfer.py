@@ -544,11 +544,11 @@ def test_a_job_crosses_the_ssh_adapter(tmp_path: Path, remote: Remote, capsys, m
     assert outcomes(capsys)["transfers"][0]["status"] == "adopted"
     assert_in(near, plan)
     commands = remote.commands()
-    assert any("job transfer --hold --json" in item for item in commands)
-    # The push is one transfer session: its adopt request names the workspace as the far side registered it.
-    (session,) = [item for item in commands if "transfer-session" in item]
-    assert session.startswith("httk workflow transfer-session") and not [item for item in commands if "adopt" in item]
+    # The push and the pull are one transfer session each: their requests name the workspace as the far side
+    # registered it, and no other remote command runs.
+    assert len(commands) == 2 and all(item.startswith("httk workflow transfer-session") for item in commands)
     assert [header["workspace"] for op, header in requests if op == "adopt"] == [far_name]
+    assert {header["workspace"] for op, header in requests if op in ("hold", "send", "release")} == {far_name}
 
 
 def test_a_banner_on_the_remote_stdout_is_reported_and_resumed(
@@ -556,7 +556,8 @@ def test_a_banner_on_the_remote_stdout_is_reported_and_resumed(
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="ssh-banner")
-    fake_remote(project)
+    # A banner on the adapter path's hold call (a session skips it as preamble).
+    fake_remote(project, transfer_session="off")
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(remote.root, "far")
     mapping, state, priority = single(far)
@@ -684,7 +685,7 @@ def test_remote_to_local_over_ssh_makes_three_calls_whatever_the_number_of_jobs(
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="ssh-batch-back")
-    fake_remote(project)
+    fake_remote(project, transfer_session="off")  # the adapter path's pinned count (a session's: test_session_pull)
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(remote.root, "far")
     calls = adapter_calls(monkeypatch)
@@ -893,6 +894,7 @@ def test_releases_a_remote_source_does_not_confirm_are_reported(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, far, far_name = _remote_pair(tmp_path)
+    adapter_path(project)  # the adapter path, which this test scripts (a pull's session: test_session_pull)
     plan = jobs(near, 3)
     real = transfer_cli._remote
 
@@ -927,6 +929,7 @@ def test_long_id_lists_are_split_into_calls_that_fit_the_budget(
     assert_in(far, plan)
     assert outgoing(near) == [] and incoming(far) == []
     calls.clear()
+    adapter_path(project)  # the pull back on the adapter path, whose id lists this test splits (a session: none)
     assert run(project, "--json", *selected(plan), f"cluster:{far_name}", near_name) == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 5
     assert calls == [*["job transfer"] * 3, "pull", "pull", *["job transfer"] * 3]
@@ -1139,7 +1142,7 @@ def test_a_remote_state_selection_is_one_hold_call(
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="ssh-kind")
-    fake_remote(project)
+    fake_remote(project, transfer_session="off")  # the adapter path's pinned calls (a session's: test_session_pull)
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(remote.root, "far")
     plan, failed = jobs(far, 3), single(far, "failed")
@@ -1183,6 +1186,7 @@ def test_a_remote_step_selection_carries_its_placement(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, far, far_name = _remote_pair(tmp_path)
+    adapter_path(project)  # the adapter path, which this test scripts (a pull's session: test_session_pull)
     real = transfer_cli._remote
     holds: list[list[str]] = []
 
@@ -1231,6 +1235,7 @@ def test_a_hold_call_that_times_out_is_reported_and_its_holds_driven(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, far, far_name = _remote_pair(tmp_path)
+    adapter_path(project)  # the adapter path, which this test scripts (a pull's session: test_session_pull)
     plan = jobs(near, 2)
     real = transfer_cli._remote
 
@@ -1255,6 +1260,7 @@ def test_an_older_source_s_refusal_of_the_hold_is_explained(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, _far, far_name = _remote_pair(tmp_path)
+    adapter_path(project)  # the adapter path, which this test scripts (a pull's session: test_session_pull)
     real = transfer_cli._remote
 
     def older(end: Any, context: Any, arguments: Any, argv: list[str], cwd: str | None = None) -> tuple[int, str, str]:
@@ -1497,6 +1503,7 @@ def test_a_remote_push_holds_the_ready_trees(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, far, far_name = _remote_pair(tmp_path)
+    adapter_path(project)  # the adapter path, which this test scripts (a pull's session: test_session_pull)
     real = transfer_cli._remote
     holds: list[list[str]] = []
 
@@ -1635,6 +1642,7 @@ def test_a_remote_source_keeps_its_copies_through_the_release_leg(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name, far, far_name = _remote_pair(tmp_path)
+    adapter_path(project)  # the adapter path, which this test scripts (a pull's session: test_session_pull)
     ready, failed = single(near, "ready", 12), single(near, "failed", 13)
     assert everyday("push", project, "--json", "-q", f"cluster:{near_name}", far_name) == 0
     assert [outcome["kept"] for outcome in outcomes(capsys)["transfers"]] == [True]
