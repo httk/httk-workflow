@@ -237,6 +237,46 @@ every Python start is slow, that is what a transfer costs. It reports each step
 on stderr (`-q` silences that). The
 steps and their recovery are in the `job transfer` section of {doc}`workflow_cli`.
 
+### The transfer session
+
+A transfer session is one connection and one far-side `httk` start, the hidden
+`httk workflow transfer-session`, started through the adapter `session`
+operation (as the monitor's session is), that carries typed requests and their
+data in binary frames. Transfers do not open one yet; they will in a later
+release, and this section describes the session they will use.
+
+Opening a session checks the far side before anything is changed: its hello
+must name the expected format version and every request the caller needs, and
+a round trip of all 256 byte values must come back intact. When any of that
+fails (an older far-side `httk` without the command, a `mount-daemon` remote,
+an executor that mangles binary data), the caller falls back to the adapter
+operations, at the cost of one extra connection and start. A refused or broken
+ssh connection (ssh's own exit status 255) is never a fallback. Set
+`transfer_session=off` on a remote to skip the session and its check (the
+default is `auto`):
+
+```console
+$ httk remote configure --set transfer_session=off kappa
+```
+
+Once open, a session is never reopened: a request that fails (the far side
+ends, breaks the protocol, or fails the request fatally) has an unknown
+outcome. The adapter timeout (`--adapter-timeout`, else the remote's
+`timeout_seconds`) bounds each wait, not a whole request: a request fails when
+the far side sends nothing and takes no data for that long, or when neither its
+reported progress nor any data moves for that long outside a filesystem
+synchronization or a build. The far side reports progress every 10 seconds, so
+the bound is at least 30 seconds whatever is configured. Time in which this side
+offers nothing (a slow reader of a download, a slow source of an upload) is not
+held against the far side. This side holds at most 64 MiB of what the far side
+sent before it stops reading, and no single response document may be larger.
+
+A failed or closed session kills the far side together with everything it
+started. A session opened from a terminal, so that ssh can prompt, is the
+exception: only the adapter process itself is killed, so a process it started
+that keeps its pipes open can delay the end of the session by a few seconds and
+outlive it.
+
 ### Local names and second trees
 
 Names listed in `machine_names` address this machine. `login:runs` is a local

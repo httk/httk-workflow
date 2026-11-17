@@ -271,6 +271,7 @@ _GROUPS = (
     (("campaign",), "._campaign", "build_campaign_parser", False, True),
     (("monitor",), "._monitor", "build_monitor_parser", False, False),
     (("session",), "._session", "build_session_parser", False, False),
+    (("transfer-session",), "._transfer_session", "build_transfer_session_parser", False, False),
 )
 
 

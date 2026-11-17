@@ -19,7 +19,9 @@ __all__ = [
     "RunnerResolutionError",
     "SealError",
     "SealedError",
+    "StreamAborted",
     "TransactionError",
+    "TransferProtocolError",
     "TransitionLostError",
     "UnsupportedExtensionError",
     "WorkflowError",
@@ -76,6 +78,14 @@ class TransitionLostError(WorkflowError):
 
 class UnsupportedExtensionError(WorkflowError):
     """A workspace requires an extension this implementation does not support."""
+
+
+class TransferProtocolError(WorkflowError):
+    """A transfer-session frame broke the protocol; the session is unusable afterwards."""
+
+
+class StreamAborted(WorkflowError):
+    """A transfer-session stream ended without a successful terminal: its sender aborted it, or the input ended."""
 
 
 class TransactionError(WorkflowError):

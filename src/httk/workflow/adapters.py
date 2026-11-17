@@ -2,11 +2,13 @@
 
 import contextlib
 import importlib.resources
+import io
 import json
 import logging
 import os
 import queue
 import re
+import selectors
 import shlex
 import shutil
 import signal
@@ -17,15 +19,30 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Buffer, Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, Self
+from typing import IO, Any, BinaryIO, Self
 
+from . import _frames
+from ._frames import (
+    DATA,
+    DATA_LIMIT,
+    END,
+    JSON_LIMIT,
+    PROGRESS,
+    REQUEST,
+    RESPONSE,
+    Frame,
+    FrameReader,
+    StreamReader,
+    encode_header,
+    encode_json,
+)
 from ._util import write_json_atomic
 from .adapter_runtime import _PRELUDE_RENAMED
 from .configuration import remotes_home
-from .errors import ResolutionMiss
+from .errors import ResolutionMiss, StreamAborted, TransferProtocolError
 from .models import CORE_PROFILE
 from .projects import PROJECT_DIRECTORY, discover_project
 
@@ -51,6 +68,7 @@ __all__ = [
     "REMOTE_MANAGER_COMMAND",
     "REMOTE_SESSION_COMMAND",
     "REMOTE_STATUS_COMMAND",
+    "REMOTE_TRANSFER_SESSION_COMMAND",
     "REMOTE_TRANSFER_STATUS_COMMAND",
     "REMOTE_WORKSPACE_CONFIGURE_COMMAND",
     "REMOTE_WORKSPACE_DELETE_COMMAND",
@@ -67,9 +85,14 @@ __all__ = [
     "SEED_SETTING_MAP",
     "SESSION_FORMAT",
     "SESSION_FORMAT_VERSION",
+    "TRANSFER_SESSION_FORMAT",
+    "TRANSFER_SESSION_FORMAT_VERSION",
     "AdapterSession",
     "RemoteTarget",
+    "RequestAborted",
+    "SessionFailed",
     "SessionUnsupported",
+    "TransferSession",
     "add_remote",
     "import_v1_remote",
     "list_remotes",
@@ -139,6 +162,7 @@ PERSISTABLE_REMOTE_SETTINGS = frozenset(
         "mount_root",
         "port",
         "remote_root",
+        "transfer_session",
         "username",
         "vasp_command",
         "vasp_pseudo_library",
@@ -191,6 +215,11 @@ REMOTE_SESSION_COMMAND = ("httk", "workflow", "session")
 SESSION_FORMAT = "httk-workflow-session"
 #: The ``format_version`` the session's hello line names.
 SESSION_FORMAT_VERSION = 1
+REMOTE_TRANSFER_SESSION_COMMAND = ("httk", "workflow", "transfer-session")
+#: The ``format`` the transfer session's hello line names.
+TRANSFER_SESSION_FORMAT = "httk-workflow-transfer-session"
+#: The ``format_version`` the transfer session's hello line names.
+TRANSFER_SESSION_FORMAT_VERSION = 1
 
 
 def probe_remote_workspace(
@@ -1014,3 +1043,914 @@ class AdapterSession:
         if self._error_reader is not None:
             self._error_reader.join(timeout=1.0)
         return "".join(self._errors).strip()
+
+
+class SessionFailed(RuntimeError):
+    """A transfer-session request failed with an unknown outcome; the session is closed and never reopened.
+
+    :param message: What failed.
+    :param response: The far side's ``fatal`` response document, when one arrived.
+    """
+
+    def __init__(self, message: str, *, response: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.response = None if response is None else dict(response)
+
+
+class RequestAborted(RuntimeError):
+    """A transfer-session request whose stream was aborted; the far side answered, and the session stays usable.
+
+    Raised once the response arrived, from (``__cause__``) what aborted the stream: the upload source or the download
+    consumer raising, or :class:`~httk.workflow.errors.StreamAborted` for a download that ended without a successful
+    terminal. The far side saw an upload abort as such, never as a complete upload.
+
+    :param message: What was aborted.
+    :param response: The far side's response document.
+    """
+
+    def __init__(self, message: str, *, response: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.response = dict(response)
+
+
+#: What every queued event counts for beyond its payload, so that empty frames are bounded too.
+_FRAME_OVERHEAD = 64
+#: How many bytes of far-side events a transfer session queues before its reader thread stops reading: 64 MiB, the
+#: largest JSON frame, with its overhead, so that every event fits an empty queue.
+_TRANSFER_QUEUE_BYTES = JSON_LIMIT + _FRAME_OVERHEAD
+#: The phases in which a far side's progress may stand still (a running ``syncfs``, a build).
+_UNCOUNTED_PHASES = frozenset({"sync", "build"})
+#: What :meth:`TransferSession.open` sends through ``echo``: every byte value, so a text-mangling channel shows.
+_ECHO_PAYLOAD = bytes(range(256)) * 4
+#: The most seconds the opening echo, which reports no progress, may take.
+_ECHO_BOUND = 30.0
+#: The most seconds the ``bye`` of :meth:`TransferSession.close` may take, progress or not.
+_BYE_BOUND = 5.0
+#: How long a far side whose output ended may take to exit on its own before its failure is classified.
+_EXIT_GRACE = 5.0
+#: The longest preamble line read at once; a longer one is read in pieces, none of them a hello.
+_PREAMBLE_LINE_BYTES = 1 << 16
+
+
+@dataclass(frozen=True)
+class _Event:
+    """One thing the reader thread saw on a transfer session's stdout.
+
+    :param tag: ``hello``, ``foreign`` (another format's hello), ``refused`` (an adapter refusal), ``nohello``,
+        ``frame``, ``error`` (a protocol error), ``cut`` (the output ended inside a frame) or ``eof``.
+    :param value: The document, frame or error.
+    :param released: When the reader was last released from a full queue before it read this event.
+    :param arrival: When it was complete.
+    """
+
+    tag: str
+    value: Any
+    released: float
+    arrival: float
+
+
+class _ByteQueue:
+    """A FIFO of reader events bounded by the frame bytes it holds: :meth:`put` blocks while it is full.
+
+    Each event counts its payload plus :data:`_FRAME_OVERHEAD`; the bound is hard. While :meth:`put` is blocked,
+    this side holds the far side back, which :meth:`held_back` reports to the bounds at once.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._items: deque[tuple[_Event, int]] = deque()
+        self._bytes = 0
+        self._closed = False
+        self._condition = threading.Condition()
+        #: The most bytes the queue ever held.
+        self.high_water = 0
+        #: When a blocked :meth:`put` last got room: until then this side, not the far side, held the reader back.
+        self.released = 0.0
+        self._blocked_since: float | None = None
+
+    def put(self, event: _Event, size: int) -> bool:
+        """Append *event*, waiting for room.
+
+        :param event: The event.
+        :param size: What it counts for: its payload plus :data:`_FRAME_OVERHEAD`.
+        :return: False once the queue was closed (the event is dropped), else true.
+        :raises ValueError: If the event alone exceeds the bound.
+        """
+
+        with self._condition:
+            if size > self._limit:
+                raise ValueError(f"an event of {size} bytes exceeds the queue bound of {self._limit}")
+            while not self._closed and self._bytes + size > self._limit:
+                if self._blocked_since is None:
+                    self._blocked_since = time.monotonic()
+                self._condition.wait()
+            if self._blocked_since is not None:
+                self._blocked_since = None
+                self.released = time.monotonic()
+            if self._closed:
+                return False
+            self._items.append((event, size))
+            self._bytes += size
+            self.high_water = max(self.high_water, self._bytes)
+            self._condition.notify_all()
+            return True
+
+    def get(self, timeout: float) -> _Event:
+        """Remove and return the oldest event, waiting for one.
+
+        :param timeout: The most seconds to wait.
+        :return: The event.
+        :raises queue.Empty: If no event arrives in time.
+        """
+
+        with self._condition:
+            if not self._condition.wait_for(lambda: bool(self._items), max(0.0, timeout)):
+                raise queue.Empty
+            return self._pop()
+
+    def held_back(self) -> float:
+        """Return when this side last stopped holding the reader back: now, while a :meth:`put` is blocked.
+
+        Read under the queue's lock, so a consumer that just made room never judges the far side before the blocked
+        reader got to run.
+        """
+
+        with self._condition:
+            return time.monotonic() if self._blocked_since is not None else self.released
+
+    def take(self) -> _Event | None:
+        """Remove and return the oldest event, or ``None`` when there is none."""
+
+        with self._condition:
+            return self._pop() if self._items else None
+
+    def _pop(self) -> _Event:
+        event, size = self._items.popleft()
+        self._bytes -= size
+        self._condition.notify_all()
+        return event
+
+    def close(self) -> None:
+        """Drop every event and release a blocked :meth:`put` for good."""
+
+        with self._condition:
+            self._closed = True
+            self._items.clear()
+            self._bytes = 0
+            self._condition.notify_all()
+
+
+def _read_transfer_session(stream: IO[bytes], events: _ByteQueue) -> None:
+    """Turn a transfer session's stdout into events: its hello (or why there is none), its frames, then ``eof``.
+
+    Up to :data:`_SESSION_PREAMBLE_LINES` lines ahead of the hello (a login banner, a printing ``cli_prelude``)
+    are skipped. The stream is closed at the end.
+    """
+
+    def emit(tag: str, value: object, size: int = 0) -> bool:
+        return events.put(_Event(tag, value, events.released, time.monotonic()), size + _FRAME_OVERHEAD)
+
+    frames: FrameReader | None = None
+    try:
+        with stream:
+            for _ in range(_SESSION_PREAMBLE_LINES):
+                line = stream.readline(_PREAMBLE_LINE_BYTES)
+                if not line:
+                    return
+                try:
+                    document = json.loads(line.decode("utf-8"))
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(document, dict):
+                    continue
+                kind = document.get("format")
+                if kind == RESULT_FORMAT and document.get("ok") is False:
+                    emit("refused", document)
+                    return
+                if kind == TRANSFER_SESSION_FORMAT:
+                    emit("hello", document)
+                    break
+                if isinstance(kind, str) and "format_version" in document:
+                    emit("foreign", document)
+                    return
+            else:
+                emit("nohello", None)
+                return
+            frames = FrameReader(stream)
+            while (frame := frames.read_frame()) is not None:
+                if not emit("frame", frame, frame.size):
+                    return
+    except TransferProtocolError as exc:
+        emit("cut" if frames is not None and frames.ended else "error", exc)
+    except (OSError, ValueError) as exc:
+        emit("error", exc)
+    finally:
+        emit("eof", None)
+
+
+def _exit_status(process: "subprocess.Popen[bytes]", wait: float) -> int | None:
+    """Return *process*'s exit status once it exited, waiting up to *wait* seconds, without reaping it.
+
+    An unreaped process keeps its pid, and so its process group id, from being reused before the group is killed.
+
+    :param process: The far-side process.
+    :param wait: The most seconds to wait.
+    :return: The exit status (negative for a signal), or ``None`` while it runs.
+    """
+
+    waitid = getattr(os, "waitid", None)
+    deadline = time.monotonic() + wait
+    while True:
+        if process.returncode is not None:
+            return process.returncode
+        if waitid is None:
+            if process.poll() is not None:
+                return process.returncode
+        else:
+            try:
+                info = waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except ChildProcessError:
+                return process.poll()
+            if info is not None:
+                return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.02)
+
+
+class _Watch:
+    """The bounds of one request, judged by when frames arrived rather than when they were consumed.
+
+    Idle: no inbound frame and no accepted upload bytes for the bound. Stall: neither the far side's progress
+    (``phase``, ``count``) nor any data (accepted upload bytes, arriving download bytes) moved for the bound, outside
+    the ``sync`` and ``build`` phases; an empty ``D`` frame shows the far side alive but moves nothing. A queued frame
+    that arrived after its deadline fails the request all the same.
+
+    The bounds measure the far side's liveness only, so time in which this side offered it nothing is never charged
+    to it: the reader blocked on a full queue (this side's back-pressure), and an upload source preparing its next
+    write. Each upload write, and the terminal, re-arm both clocks first (:meth:`rearm`); a write after a source pause
+    longer than the bound therefore revives a request whose far side sent nothing meanwhile, by design. An optional
+    overall deadline bounds the request regardless of progress.
+
+    :param bound: The bound in seconds.
+    :param deadline: The overall deadline (``time.monotonic()``), if any.
+    """
+
+    def __init__(self, bound: float, deadline: float | None = None) -> None:
+        now = time.monotonic()
+        self.bound = bound
+        self._deadline = deadline
+        self._activity = now
+        self._moved = now
+        self._progress: tuple[str, int | None] | None = None
+
+    def _due(self, released: float) -> tuple[float, str]:
+        """Return the deadline and what expires then; *released* is when this side last stopped holding back the
+        reader, before which the far side could not send."""
+
+        due = max(self._activity, released) + self.bound
+        reason = f"the far side sent nothing and took no data for {self.bound:g} seconds"
+        if self._progress is not None and self._progress[0] not in _UNCOUNTED_PHASES:
+            stalled = max(self._moved, released) + self.bound
+            if stalled < due:
+                phase, count = self._progress
+                due = stalled
+                reason = (
+                    f"the far side's {phase} progress stood at {count} and no data moved for {self.bound:g} seconds"
+                )
+        if self._deadline is not None and self._deadline < due:
+            due, reason = self._deadline, "the far side did not answer in time"
+        return due, reason
+
+    def remaining(self, released: float) -> tuple[float, str]:
+        """Return the seconds left and what expires then, given when the reader was last released from a full queue."""
+
+        due, reason = self._due(released)
+        return due - time.monotonic(), reason
+
+    def late(self, event: _Event) -> str | None:
+        """Return what expired before *event* arrived, or ``None`` when it was in time."""
+
+        due, reason = self._due(event.released)
+        return reason if event.arrival > due else None
+
+    def saw(self, frame: Frame, at: float) -> None:
+        """Note a frame that arrived.
+
+        :param frame: The frame.
+        :param at: When it arrived.
+        :raises TransferProtocolError: If it is a malformed progress frame.
+        """
+
+        self._activity = max(self._activity, at)
+        if frame.kind == DATA and frame.data:
+            self._moved = max(self._moved, at)
+        elif frame.kind == PROGRESS:
+            assert frame.document is not None
+            phase, count = frame.document.get("phase"), frame.document.get("count")
+            if not isinstance(phase, str) or (
+                count is not None and (isinstance(count, bool) or not isinstance(count, int))
+            ):
+                raise TransferProtocolError(f"malformed progress frame {frame.document!r}")
+            if (phase, count) != self._progress:
+                self._progress, self._moved = (phase, count), max(self._moved, at)
+
+    def sent(self) -> None:
+        """Note upload bytes the far side accepted just now."""
+
+        self._activity = self._moved = time.monotonic()
+
+    def rearm(self) -> None:
+        """Restart both clocks: this side offers the far side data now, after a pause that was its own."""
+
+        self._activity = self._moved = time.monotonic()
+
+
+class _UploadStream(io.RawIOBase, BinaryIO):
+    """The writable upload of one transfer-session request: each write goes out at once as whole ``D`` frames.
+
+    Writes run in the calling thread; while one blocks, the far side's progress is serviced and the bounds apply.
+    The terminal is the session's to send, not this stream's.
+    """
+
+    def __init__(self, session: "TransferSession", request_id: int, watch: _Watch) -> None:
+        super().__init__()
+        self._session = session
+        self._id = request_id
+        self._watch = watch
+
+    def writable(self) -> bool:
+        """Return true: the stream is writable."""
+
+        return True
+
+    def write(self, data: Buffer, /) -> int:
+        """Send *data* as ``D`` frames of up to 1 MiB, sliced from it without copying.
+
+        :param data: The bytes.
+        :return: How many bytes were sent (all of them).
+        :raises ValueError: If the request is over.
+        """
+
+        if self.closed:
+            raise ValueError("write to a finished upload")
+        self._watch.rearm()  # the source's pause before this write was this side's, not the far side's
+        view = memoryview(data).cast("B")
+        for offset in range(0, len(view), DATA_LIMIT):
+            piece = view[offset : offset + DATA_LIMIT]
+            self._session._write(encode_header(DATA, self._id, len(piece)), self._id, self._watch)
+            self._session._write(piece, self._id, self._watch)
+        return len(view)
+
+
+class TransferSession:
+    """A far-side ``httk workflow transfer-session`` reached through the adapter ``session`` operation.
+
+    One connection and one far-side ``httk`` start carry every request of a transfer, each a :meth:`request` in binary
+    frames (the grammar is in ``httk.workflow._frames``). Whether the session can be used is decided by :meth:`open`
+    alone, before anything is changed: :class:`SessionUnsupported` means "use the adapter operations instead". After
+    that, any failure (a bound expiring, the far side ending, a protocol error, a fatal op) is :class:`SessionFailed`,
+    an unknown outcome of the request in flight: the session is closed and every later request raises; it never
+    reconnects. Use it as a context manager, or call :meth:`close`.
+
+    The far side's frames are read by a thread into a queue of 64 MiB (each frame counted with 64 bytes of overhead;
+    a JSON frame is at most 64 MiB, so every frame fits). The reader stops reading while the queue is full, so a slow
+    download consumer holds back the far side instead of growing this process. Upload and download run in the
+    calling thread.
+
+    A failed or closed non-interactive session kills the far side's whole process group. An interactive one (started
+    with the terminal, so ssh can prompt) shares this process's group, so only the adapter process itself is killed:
+    an accepted limitation, under which a descendant that keeps the pipes open can delay the end of :meth:`close` (by
+    the reader threads' joins, 2 seconds each) and survive it.
+
+    :param bundle: The adapter bundle path.
+    :param needs: The ops the caller will request; a far side lacking one is unsupported.
+    :param timeout: The bound in seconds, or the bundle's ``timeout_seconds`` when omitted: on the far side's hello,
+        and, per request, on the far side being idle (no frame, no upload bytes taken) or stalled (no progress, no data
+        moving outside the ``sync`` and ``build`` phases). A request's bound is at least three progress intervals
+        (30 seconds), since the far side reports progress only every 10 seconds.
+    """
+
+    def __init__(
+        self, bundle: str | os.PathLike[str], *, needs: Collection[str] = (), timeout: float | None = None
+    ) -> None:
+        self._root = Path(bundle).expanduser().resolve()
+        self._needs = frozenset(needs) | {"echo", "bye"}
+        self._timeout = timeout
+        self._limit = 60.0
+        self._lock = threading.Lock()
+        self._owner: int | None = None
+        self._process: subprocess.Popen[bytes] | None = None
+        self._group = False
+        self._ssh = False
+        self._selector: selectors.BaseSelector | None = None
+        self._events = _ByteQueue(_TRANSFER_QUEUE_BYTES)
+        self._reader: threading.Thread | None = None
+        self._errors: deque[str] = deque(maxlen=_SESSION_STDERR_TAIL)
+        self._error_reader: threading.Thread | None = None
+        self._next_id = 0
+        self._status: int | None = None
+        self._closing = False
+        # new -> open -> closed, or -> unsupported (at open), or -> failed (at open or a request)
+        self._state = "new"
+        self._reason = ""
+        #: The ops the far side's hello listed, once open.
+        self.ops: frozenset[str] = frozenset()
+
+    def __enter__(self) -> Self:
+        """Return this session; :meth:`open` it before the first request."""
+
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        """Close the session."""
+
+        self.close()
+
+    @contextlib.contextmanager
+    def _held(self) -> Iterator[None]:
+        """Hold the session for one call; a call nested in a request's own callback raises at once."""
+
+        if self._owner == threading.get_ident():
+            raise RuntimeError("a transfer session request is already in flight in this thread")
+        with self._lock:
+            self._owner = threading.get_ident()
+            try:
+                yield
+            finally:
+                self._owner = None
+
+    def _bound(self) -> float:
+        return max(self._limit, 3 * _frames.TICK)
+
+    def open(self, *, interactive: bool = False) -> None:
+        """Start the far side and check it: its hello, the ops this caller needs, and a binary ``echo``.
+
+        :param interactive: Whether the adapter keeps this process's controlling terminal (and so lets ssh
+            prompt); False starts it in a new session without one.
+        :raises SessionUnsupported: If the remote setting ``transfer_session`` is ``off`` (nothing is started),
+            the adapter refuses the operation, no hello arrives (the far side ends first, or prints another format's
+            hello), the version differs, a needed op is missing, or the echo does not come back intact; the caller
+            falls back to the adapter operations. Raised again by a later call, without starting anything.
+        :raises SessionFailed: If the session was opened, failed or closed before.
+        :raises TimeoutError: If no hello arrives within the bound.
+        :raises RuntimeError: If ssh itself fails (status 255, an ``ssh`` remote only), such as a refused login, at
+            any stage; or if :meth:`close` ended the opening.
+        :raises ValueError: If the ``transfer_session`` setting is neither ``auto`` nor ``off``.
+        """
+
+        with self._held():
+            if self._state == "unsupported":
+                raise SessionUnsupported(self._reason)
+            if self._state != "new":
+                raise SessionFailed(f"the transfer session was {self._state} already: {self._reason}")
+            metadata = validate_adapter_bundle(self._root)
+            mode = remote_settings(self._root).get("transfer_session", "auto")
+            if mode not in {"auto", "off"}:
+                raise ValueError(f"remote setting transfer_session must be auto or off: {mode!r}")
+            if mode == "off":
+                self._state, self._reason = "unsupported", "the remote setting transfer_session is off"
+                raise SessionUnsupported(self._reason)
+            self._limit = float(metadata.get("timeout_seconds", 60.0) if self._timeout is None else self._timeout)
+            self._ssh = metadata.get("kind") == "ssh"
+            request_path = _request_file(self._root, "session", {"argv": list(REMOTE_TRANSFER_SESSION_COMMAND)})
+            try:
+                self._start(request_path, interactive)
+                self._hello()
+                self._echo()
+                self._state = "open"
+            except SessionUnsupported as exc:
+                self._discard()
+                self._state, self._reason = "unsupported", str(exc)
+                raise
+            except BaseException as exc:
+                self._discard()
+                if self._state != "closed":
+                    self._state, self._reason = "failed", str(exc)
+                raise
+            finally:
+                request_path.unlink(missing_ok=True)
+
+    def _start(self, request_path: Path, interactive: bool) -> None:
+        process = subprocess.Popen(
+            [str(self._root / ADAPTER_EXECUTABLE), str(request_path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=not interactive,
+        )
+        self._process, self._group = process, not interactive
+        assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+        # Writes never block past the bound: a far side that stops reading cannot hang this process.
+        os.set_blocking(process.stdin.fileno(), False)
+        self._selector = selectors.DefaultSelector()
+        self._selector.register(process.stdin.fileno(), selectors.EVENT_WRITE)
+        self._reader = threading.Thread(
+            target=_read_transfer_session, args=(process.stdout, self._events), name="httk-transfer-reader", daemon=True
+        )
+        self._reader.start()
+        errors = io.TextIOWrapper(process.stderr, encoding="utf-8", errors="replace")
+        self._error_reader = threading.Thread(target=_keep_tail, args=(errors, self._errors), daemon=True)
+        self._error_reader.start()
+
+    def _classify(self, detail: str) -> BaseException:
+        """Return what a failure before the session was open means; the one place that decides on a fallback.
+
+        The far side's input is closed and its exit status waited for (:data:`_EXIT_GRACE`) first. A :meth:`close`
+        from another thread is never a fallback, and neither is ssh's own failure (status 255 of an ``ssh`` remote):
+        falling back would log in again. Everything else is :class:`SessionUnsupported`.
+
+        :param detail: What failed.
+        :return: The exception to raise.
+        """
+
+        status, tail = self._discard(wait=_EXIT_GRACE)
+        message = f"{detail} (exit status {status}): {tail}" if tail else f"{detail} (exit status {status})"
+        if self._closing:
+            self._state = "closed"
+            return RuntimeError(f"the transfer session was closed while opening: {message}")
+        if self._ssh and status == 255:
+            return RuntimeError(f"the transfer session's ssh connection failed: {message}")
+        return SessionUnsupported(message)
+
+    def _hello(self) -> None:
+        try:
+            event = self._events.get(self._limit)
+        except queue.Empty:
+            if self._closing:
+                raise self._classify("no hello") from None
+            raise TimeoutError(f"the transfer session did not start within {self._limit:g} seconds") from None
+        document = event.value
+        if event.tag == "refused":
+            raise self._classify(str(document.get("error", "the adapter refused the session")))
+        if event.tag == "foreign":
+            raise self._classify(
+                f"the far side speaks {document.get('format')!r} version {document.get('format_version')!r}, "
+                "not a transfer session"
+            )
+        if event.tag == "nohello":
+            raise self._classify(f"no transfer session hello within {_SESSION_PREAMBLE_LINES} lines")
+        if event.tag != "hello":
+            raise self._classify("the transfer session ended before its hello")
+        if document.get("format_version") != TRANSFER_SESSION_FORMAT_VERSION:
+            raise self._classify(f"unsupported transfer session version: {document.get('format_version')!r}")
+        ops = document.get("ops")
+        if not isinstance(ops, list) or not all(isinstance(op, str) for op in ops):
+            raise self._classify("the transfer session hello lists no ops")
+        missing = sorted(self._needs - set(ops))
+        if missing:
+            raise self._classify(f"the far side's transfer session lacks the ops {', '.join(missing)}")
+        self.ops = frozenset(ops)
+
+    def _echo(self) -> None:
+        received = bytearray()
+        bound = min(self._limit, _ECHO_BOUND)  # absolute: the far side's progress cannot extend it
+        try:
+            response = self._request(
+                "echo",
+                {},
+                upload=lambda stream: stream.write(_ECHO_PAYLOAD),
+                download=lambda stream: received.extend(stream.read()),
+                bound=bound,
+                deadline=time.monotonic() + bound,
+            )
+        except (SessionFailed, RequestAborted) as exc:
+            raise self._classify(f"the transfer session echo failed: {exc}") from None
+        if response.get("ok") is not True or bytes(received) != _ECHO_PAYLOAD:
+            raise self._classify("the transfer session does not carry binary data intact")
+
+    def request(
+        self,
+        op: str,
+        header: Mapping[str, Any] | None = None,
+        *,
+        upload: Callable[[BinaryIO], object] | None = None,
+        download: Callable[[BinaryIO], object] | None = None,
+    ) -> dict[str, Any]:
+        """Run one request: send it and its upload, hand its download to *download*, and return its response.
+
+        :param op: The op name.
+        :param header: The op's own request members.
+        :param upload: Writes the upload to the writable stream it is given (in this thread; each write goes out as
+            ``D`` frames). If it raises, the far side gets an aborting terminal and the request raises
+            :class:`RequestAborted` once the response arrived.
+        :param download: Reads the download from the readable stream it is given (in this thread), which reads as
+            ended at a successful terminal and raises :class:`~httk.workflow.errors.StreamAborted` at an aborting
+            one. It is called only when a download arrives; a refusal may come without one, but an ``ok`` response
+            without a download breaks the protocol. What it leaves unread is dropped, provided the download ends
+            successfully.
+        :return: The response document (``ok`` and the op's members).
+        :raises SessionFailed: If the session is not open, or the request failed with an unknown outcome (a
+            bound expired, the far side ended or broke the protocol, the op was fatal); the session is closed.
+        :raises RequestAborted: If the upload or the download was aborted; the session stays usable.
+        :raises RuntimeError: If called from within a request's own callback.
+        """
+
+        with self._held():
+            if self._state != "open":
+                raise SessionFailed(f"the transfer session is {self._state}: {self._reason}".rstrip(": "))
+            return self._request(op, header or {}, upload=upload, download=download, bound=self._bound())
+
+    def _request(
+        self,
+        op: str,
+        header: Mapping[str, Any],
+        *,
+        upload: Callable[[BinaryIO], object] | None,
+        download: Callable[[BinaryIO], object] | None,
+        bound: float,
+        deadline: float | None = None,
+    ) -> dict[str, Any]:
+        document: dict[str, Any] = {**header, "op": op}
+        document.pop("upload", None)
+        if upload is not None:
+            document["upload"] = True
+        request_id = self._next_id + 1
+        encoded = encode_json(REQUEST, request_id, document)  # an unsendable header raises before anything changed
+        self._next_id = request_id
+        watch = _Watch(bound, deadline)
+        aborted: BaseException | None = None
+        streamed = False
+        try:
+            self._expect_nothing()
+            self._write(encoded, request_id, watch)
+            if upload is not None:
+                aborted = self._upload(request_id, upload, watch)
+            while True:
+                frame = self._receive(request_id, watch)
+                if frame.kind == PROGRESS:
+                    continue
+                if frame.kind == RESPONSE:
+                    break
+                if frame.kind not in {DATA, END} or download is None or streamed:
+                    raise TransferProtocolError(f"an unexpected {frame.kind} frame in the answer to {op}")
+                streamed = True
+                aborted = self._download(request_id, download, frame, watch, aborted)
+            assert frame.document is not None
+            response = frame.document
+            if download is not None and response["ok"] is True and not streamed:
+                raise TransferProtocolError(f"{op} answered ok without its download")
+        except TransferProtocolError as exc:
+            raise self._fail(f"the transfer session broke its protocol: {exc}") from None
+        except SessionFailed:
+            raise
+        except BaseException:
+            # Interrupted between frames of the request: what follows on the pipe is no longer known.
+            self._fail("the transfer session request was interrupted")
+            raise
+        if aborted is not None:
+            raise RequestAborted(f"{op} was aborted: {aborted}", response=response) from aborted
+        return response
+
+    def _upload(self, request_id: int, upload: Callable[[BinaryIO], object], watch: _Watch) -> BaseException | None:
+        """Run the upload callable, then send exactly one terminal; return what aborted the upload, if anything."""
+
+        stream = _UploadStream(self, request_id, watch)
+        try:
+            upload(stream)
+        except (SessionFailed, TransferProtocolError):
+            raise
+        except Exception as exc:
+            stream.close()
+            abort = f"{type(exc).__name__}: {exc}"
+            watch.rearm()
+            self._write(encode_json(END, request_id, {"ok": False, "abort": abort}), request_id, watch)
+            return exc
+        stream.close()
+        watch.rearm()
+        self._write(encode_json(END, request_id, {"ok": True}), request_id, watch)
+        return None
+
+    def _download(
+        self,
+        request_id: int,
+        download: Callable[[BinaryIO], object],
+        first: Frame,
+        watch: _Watch,
+        aborted: BaseException | None,
+    ) -> BaseException | None:
+        """Hand the download starting at *first* to *download*; return what aborted the request, if anything."""
+
+        stream = StreamReader(lambda: self._stream_frame(request_id, watch), request_id, first)
+        try:
+            if aborted is None:
+                try:
+                    download(stream)
+                except (SessionFailed, TransferProtocolError):
+                    raise
+                except Exception as exc:
+                    aborted = exc
+            if aborted is None:
+                try:
+                    stream.finish()
+                except StreamAborted as exc:
+                    aborted = exc
+            else:
+                stream.discard()
+        finally:
+            stream.close()
+        return aborted
+
+    def _stream_frame(self, request_id: int, watch: _Watch) -> Frame:
+        """Return the next ``D`` or ``E`` frame of the request's download, servicing its progress."""
+
+        while True:
+            frame = self._receive(request_id, watch)
+            if frame.kind in {DATA, END}:
+                return frame
+            if frame.kind != PROGRESS:
+                raise self._fail(f"the transfer session broke its protocol: a {frame.kind} frame inside a download")
+
+    def _receive(self, request_id: int, watch: _Watch) -> Frame:
+        if self._process is None:
+            raise SessionFailed(f"the transfer session is {self._state}: {self._reason}")
+        # A queued event is judged by when it arrived (``_frame``), however long it waited for this side.
+        event = self._events.take()
+        if event is None:
+            remaining, reason = watch.remaining(self._events.held_back())
+            if remaining <= 0:
+                raise self._fail(reason)
+            try:
+                event = self._events.get(remaining)
+            except queue.Empty:
+                raise self._fail(reason) from None
+        return self._frame(event, request_id, watch)
+
+    def _frame(self, event: _Event, request_id: int, watch: _Watch) -> Frame:
+        """Return the frame of *event* for the active request, or fail the session for anything else it means."""
+
+        if event.tag in {"eof", "cut"}:
+            raise self._fail(f"the transfer session ended: {event.value or 'end of output'}", wait=_EXIT_GRACE)
+        if event.tag != "frame":
+            raise self._fail(f"the transfer session broke its protocol: {event.value}")
+        frame: Frame = event.value
+        if frame.kind == RESPONSE and frame.id == request_id:
+            assert frame.document is not None
+            if frame.document.get("fatal") is True:
+                raise self._fail(f"the far side failed: {frame.document.get('error')}", frame.document)
+            if not isinstance(frame.document.get("ok"), bool):
+                raise self._fail("the transfer session broke its protocol: a response needs a boolean ok")
+        late = watch.late(event)
+        if late is not None:
+            raise self._fail(late)
+        if frame.id != request_id or frame.kind == REQUEST:
+            raise self._fail(
+                f"the transfer session broke its protocol: a {frame.kind} frame of request {frame.id} "
+                f"during request {request_id}"
+            )
+        try:
+            watch.saw(frame, event.arrival)
+        except TransferProtocolError as exc:
+            raise self._fail(f"the transfer session broke its protocol: {exc}") from None
+        return frame
+
+    def _expect_nothing(self) -> None:
+        """Fail the session for anything the far side sent between requests, before a new request is sent."""
+
+        event = self._events.take()
+        if event is None:
+            return
+        if event.tag in {"eof", "cut"}:
+            raise self._fail("the transfer session ended between requests", wait=_EXIT_GRACE)
+        frame = event.value
+        detail = f"an unsolicited {frame.kind} frame of request {frame.id}" if event.tag == "frame" else event.value
+        raise self._fail(f"the transfer session broke its protocol between requests: {detail}")
+
+    def _write(self, data: Buffer, request_id: int, watch: _Watch) -> None:
+        """Write all of *data*, servicing progress; fail the session when a bound expires while it blocks."""
+
+        process, selector = self._process, self._selector
+        if process is None or process.stdin is None or selector is None:
+            raise SessionFailed(f"the transfer session is {self._state}: {self._reason}")
+        descriptor = process.stdin.fileno()
+        view = memoryview(data).cast("B")
+        while view:
+            while (event := self._events.take()) is not None:
+                frame = self._frame(event, request_id, watch)
+                if frame.kind != PROGRESS:
+                    raise self._fail(
+                        f"the transfer session broke its protocol: a {frame.kind} frame before the upload ended"
+                    )
+            try:
+                written = os.write(descriptor, view)
+            except BlockingIOError:
+                written = 0
+            except OSError as exc:
+                raise self._fail(
+                    f"the transfer session ended: {exc}", self._fatal_response(request_id), wait=_EXIT_GRACE
+                ) from None
+            if written:
+                view = view[written:]
+                watch.sent()
+                continue
+            remaining, reason = watch.remaining(self._events.held_back())
+            if remaining <= 0:
+                raise self._fail(reason)
+            selector.select(min(remaining, 0.1))
+
+    def _fatal_response(self, request_id: int) -> dict[str, Any] | None:
+        """After a refused write, look briefly (2 seconds at most) for the fatal response the far side sent."""
+
+        deadline = time.monotonic() + 2.0
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                event = self._events.get(remaining)
+            except queue.Empty:
+                return None
+            if event.tag != "frame":
+                return None
+            frame: Frame = event.value
+            if frame.kind == RESPONSE and frame.id == request_id and frame.document is not None:
+                return dict(frame.document) if frame.document.get("fatal") is True else None
+        return None
+
+    def _fail(self, message: str, response: Mapping[str, Any] | None = None, *, wait: float = 0.0) -> SessionFailed:
+        """Close the session for good and return the :class:`SessionFailed` to raise.
+
+        :param message: What failed.
+        :param response: The far side's fatal response, if any.
+        :param wait: How many seconds the far side may take to exit on its own (its output ended); while the session
+            is opening, always :data:`_EXIT_GRACE`, so that the classification sees its exit status.
+        :return: The exception.
+        """
+
+        _status, tail = self._discard(wait=max(wait, _EXIT_GRACE) if self._state == "new" else wait)
+        if self._state in {"new", "open"}:
+            self._state, self._reason = "failed", message
+        return SessionFailed(f"{message}: {tail}" if tail else message, response=response)
+
+    def close(self) -> None:
+        """End the session: say ``bye`` (5 seconds at most) when it is idle and healthy, then stop the far side.
+
+        A request in flight (in another thread, or this one's callback) is not waited for: the far side is killed
+        and that request fails. A closed session is never reopened.
+        """
+
+        self._closing = True
+        if self._owner == threading.get_ident() or not self._lock.acquire(timeout=1.0):
+            self._kill()
+            return
+        try:
+            self._owner = threading.get_ident()
+            if self._state == "open":
+                with contextlib.suppress(SessionFailed, RequestAborted):
+                    deadline = time.monotonic() + _BYE_BOUND
+                    self._request("bye", {}, upload=None, download=None, bound=self._bound(), deadline=deadline)
+            if self._state in {"new", "open"}:
+                self._state, self._reason = "closed", "closed by its owner"
+            process = self._process
+            if process is not None and process.stdin is not None:
+                with contextlib.suppress(OSError):
+                    process.stdin.close()
+            self._discard(wait=2.0)
+        finally:
+            self._owner = None
+            self._lock.release()
+
+    def _kill(self) -> None:
+        """Kill the far side (its process group when it has one) without reaping it."""
+
+        process = self._process
+        if process is None:
+            return
+        with contextlib.suppress(OSError):
+            if self._group:
+                os.killpg(process.pid, signal.SIGKILL)
+            elif process.returncode is None:
+                process.kill()
+
+    def _discard(self, *, wait: float = 0.0) -> tuple[int | None, str]:
+        """Stop the far side and everything around it: kill, reap, and join the reader threads.
+
+        The process group of a non-interactive session is killed whether or not its leader still runs, so nothing
+        the far side started survives it.
+
+        :param wait: How many seconds the far side may take to exit on its own first, its input closed.
+        :return: The exit status (negative when killed) and the stderr tail.
+        """
+
+        process, self._process = self._process, None
+        if process is not None:
+            if wait:
+                with contextlib.suppress(OSError):  # a far side waiting for input ends at its end
+                    if process.stdin is not None:
+                        process.stdin.close()
+            status = _exit_status(process, wait)
+            with contextlib.suppress(OSError):
+                if self._group:
+                    os.killpg(process.pid, signal.SIGKILL)
+                elif status is None:
+                    process.kill()
+            process.wait()
+            self._status = status if status is not None else process.returncode
+            with contextlib.suppress(OSError):
+                if process.stdin is not None:
+                    process.stdin.close()
+            self._events.close()
+            if self._selector is not None:
+                self._selector.close()
+                self._selector = None
+            for thread in (self._reader, self._error_reader):
+                if thread is not None:
+                    thread.join(timeout=2.0)
+        return self._status, "".join(self._errors).strip()
