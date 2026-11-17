@@ -521,7 +521,7 @@ members through a cached descriptor). Recorded differences from tarfile's
 - hard links arrive as copies: the names no longer alias and each takes its own
   space.
 
-**`Barrier(anchor, setting, inline=False, quiet=False, prime=True)`**, committed with
+**`Barrier(anchor, setting, errors="fail", inline=False, quiet=False, prime=True)`**, committed with
 `commit(count_hint=None, unit="file", tree=None)`, makes a landing
 durable once, before any of it is published: a job must not be renamed into
 `jobs/<state>/` before its files are on disk, and nothing is reported to
@@ -610,8 +610,25 @@ descriptor, the *prime*: it flushes what was dirty already and consumes an
 unseen writeback error of someone else, so its error is logged and ignored;
 `ENOSYS`, `EPERM` or `EINVAL` there make the strategy `fsync` for that
 filesystem for the rest of the process. `commit()` calls `syncfs` on the same
-descriptor, the *commit*: any error raises `SyncFailed` (an `OSError`) after
-one warning naming the strategy, and is never attributed to someone else.
+descriptor, the *commit*: under the default `errors="fail"`, any error raises
+`SyncFailed` (an `OSError`) after one warning naming the strategy, and is never
+attributed to someone else.
+`errors` is the `io.sync_errors` application setting, read by the caller in
+the same settings read as `io.sync` (`Workspace.io_sync_policy()`: `fail`
+when unset, and with a warning when invalid or unreadable). Under `ignore` a
+commit error other than `ENOSYS`, `EPERM` or `EINVAL` is trusted: `syncfs` is
+called once more on the same descriptor (another full flush), one warning says
+`... reported a writeback error, which io.sync_errors=ignore trusts (a second
+flush reported no further error)` when that completes without reporting a further error (which does
+not prove that the pages whose writeback failed reached the disk), or `... the
+flush may be incomplete` when it fails too, and the commit returns, so the
+landing is published. Nothing else changes under `ignore`: the prime and its
+unsupported fallback, the no-prime commit's unsupported fallback to the walk,
+an unsupported `syncfs` at a primed commit (which fails), `SyncUnreadable`, and
+the walk and inline fsync errors of strategy `fsync` behave as under `fail`. It applies to every site
+above (and to `sync_written(..., errors=)`), except the workflow store, which
+always passes `fail`: a package with lost pages would run for every later job,
+and an installation is rare and cheap to redo.
 Under `fsync` an `inline` caller writes every file with fsync on its writing
 descriptor (`extract_tar(durable=True)`, `copy_tree` in durable mode) and the
 commit has nothing left to do; otherwise (a pull, which the adapter's process
@@ -626,22 +643,63 @@ for an inline landing. Once it has read an adoption that was not refused, the
 client of a push prints, prefixed with the destination and unless `-q`, only
 these lines of the far side's standard error: this progress line, lines
 beginning `warning:` (except the uninstalled-workflows warning, which the
-client reports itself), and the barrier's own logged warnings (the far side
-prints a logged warning as its bare message, beginning `io.sync ` or `the
-sync barrier`); ssh warnings, login banners, module-system output,
+client reports itself), and the logged warnings of the barrier and of the sync
+settings (the far side prints a logged warning as its bare message, beginning
+`io.sync `, `io.sync_errors ` or `the sync barrier`, such as `io.sync_errors
+is 'x', not fail or ignore: using fail`); ssh warnings, login banners, module-system output,
 tracebacks and each bundle's own message are not relayed. A running `syncfs` cannot be interrupted: Ctrl-C waits for
 it.
 
-A failed commit publishes nothing of the landing: the far side of a push
-refuses the stream (landing discarded, the refusal document printed), and the
-client takes a local source's holds back (`not_moved`) or keeps a remote
-source's held; a pull's chunk fails with its holds kept at the source
-(`--resume` delivers it again); landing copies are discarded and made once
-more with an fsync of every file (their sources are untouched), the chunk
-failing with its holds kept if that fails, while any other copy error fails
-the chunk at once. `syncfs` also flushes other users' dirty data of that
-filesystem on this node, a writeback error of another process on it during
-the landing fails the transfer (resumable), and tmpfs is never persistent.
+A failed commit publishes nothing of the landing. A failed `syncfs` commit of
+a barrier whose policy is `fail` is retried once by the transfers (under
+`ignore` a writeback error does not fail, and an unsupported `syncfs` at a
+primed commit, which still fails, is not retried; job creation, `job submit`,
+`job adopt PATH` and the store have no retry):
+
+- the far side of a push refuses the stream (landing discarded, the refusal
+  document printed). When the barrier's `syncfs` commit itself raised
+  `SyncFailed` under `fail` (and for no other refusal), the `--json` document
+  carries `"sync_failed": true`, and without `--json` the message ends with a
+  hint. The client (`_deliver_remote`, a `bool`-validated marker, acted on only
+  in a refusal) delivers the same bundles once more, from the same local
+  directory (a remote source's relay copy, not pulled again), to a fresh
+  `--token` with `--sync fsync`: a hidden `job adopt` option, valid only with
+  `--stdin-tar`, that forces the strategy `fsync` for that command's barrier
+  (inline fsync on the writing descriptors in `extract_tar`, which no foreign
+  error can fail; only a strengthening, nothing in a non-durable workspace; the
+  progress line says `fsync: --sync fsync`). It needs a fresh landing, in any
+  workspace, durable or not: the parents are created, then
+  `transfers/incoming/<token>/` itself with an exclusive `mkdir`, and an
+  existing one (or one created concurrently) refuses the stream before
+  anything is extracted or discarded. Whatever the option, `receive_tar`
+  adopts only the top-level names the stream itself carried (collected by
+  `extract_tar(top_level=)`), never what a reused landing held before (an
+  interrupted earlier delivery's leftovers stay in place, with a `warning:`
+  line). The second answer is
+  the one answer the transfer processes (take-back of a local source's holds
+  after a refusal, release, workflow shipping and the destination's
+  `workspace_id`); it is never retried. A second answer reporting another
+  `workspace_id` than the first one reported keeps the holds for `--resume`:
+  as an unreadable answer when it is a refusal, and, when it is an adoption,
+  with a message saying that the jobs were adopted by that workspace, not the
+  expected one. The retry runs under the same `--adapter-timeout` as the first
+  delivery. The retry costs one more connection and one more remote
+  `httk` start, only when it happens;
+- a pull (`_deliver` from a remote source) whose `syncfs` commit failed under
+  `fail` discards the landing and pulls the chunk once more into a fresh
+  landing scratch under a fresh, primed barrier (one more adapter `pull`); a
+  clean commit of that one proves it durable, and a second failure fails the
+  chunk with its holds kept at the source (`--resume` delivers it again). A
+  failed walk of strategy `fsync` is exact and not pulled again. A remote-to-remote relay's pull leg has no barrier
+  (a temporary copy); its delivery follows the push rule;
+- landing copies are discarded and made once more with an fsync of every file
+  (their sources are untouched), the chunk failing with its holds kept if that
+  fails, while any other copy error fails the chunk at once.
+
+`syncfs` also flushes other users' dirty data of that filesystem on this node,
+a writeback error of another process on it during the landing fails the
+landing under `fail` (retried once as above, then resumable), and tmpfs is
+never persistent.
 Inline per-file fsync remains for the other copies: the isolating copy of an
 exchange bundle, an eject or `job adopt PATH` across filesystems, and the
 cross-filesystem copy inside `adopt` itself (kept for equal-`st_dev` bind

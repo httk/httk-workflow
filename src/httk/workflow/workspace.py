@@ -41,6 +41,10 @@ DEFAULT_IO_WORKERS = 8
 #: The application setting of how files landed by a transfer are made durable before they are published:
 #: ``auto`` (when unset), ``syncfs`` or ``fsync`` (plan WORKFLOW_SYNC_BARRIER §8.3).
 IO_SYNC = "io.sync"
+#: The application setting of what a ``syncfs`` writeback error at a sync barrier does: ``fail`` (when unset) the
+#: landing, or ``ignore`` it with a warning, trusting the writes that returned successfully (plan
+#: WORKFLOW_SYNC_SEGMENTS_AND_TRANSFER_SESSION §7.1).
+IO_SYNC_ERRORS = "io.sync_errors"
 
 #: The largest accepted ``format.json``.
 _FORMAT_LIMIT = 1 << 20
@@ -104,6 +108,14 @@ def _validate_io_sync(value: object) -> object:
 
     if not isinstance(value, str) or value not in _fs.SYNC_SETTINGS:
         raise ValueError(f"application setting {IO_SYNC} must be auto, syncfs or fsync, not {value!r}")
+    return value
+
+
+def _validate_io_sync_errors(value: object) -> object:
+    """Return a valid ``io.sync_errors`` value: ``fail`` or ``ignore``."""
+
+    if not isinstance(value, str) or value not in _fs.SYNC_ERRORS:
+        raise ValueError(f"application setting {IO_SYNC_ERRORS} must be fail or ignore, not {value!r}")
     return value
 
 
@@ -498,6 +510,31 @@ class Workspace:
             _LOGGER.warning("using %s = fsync: %s", IO_SYNC, exc)
             return "fsync"
 
+    def io_sync_policy(self) -> tuple[object, _fs.SyncErrors]:
+        """Return the ``io.sync`` and ``io.sync_errors`` settings as stored now, from one re-read of ``format.json``.
+
+        Read afresh at every sync barrier, as :meth:`io_sync` is. ``io.sync`` is returned as stored (``auto`` when
+        unset; :func:`httk.workflow._fs.resolve_sync` takes an invalid one as ``fsync``); ``io.sync_errors`` is
+        ``fail`` when unset, and also, with one warning, when the stored value is neither ``fail`` nor ``ignore``.
+        When the settings cannot be read or are not valid, the result is ``fsync`` and ``fail``, with one warning.
+        The warnings begin with the name of a setting (``io.sync`` or ``io.sync_errors``), so that the client of a
+        push relays the far side's.
+
+        :return: The ``io.sync`` value and the ``io.sync_errors`` policy.
+        """
+
+        try:
+            settings = self.read_settings()
+        except (ValueError, WorkflowError) as exc:
+            _LOGGER.warning(
+                "%s is fsync and %s is fail, since the settings cannot be read: %s", IO_SYNC, IO_SYNC_ERRORS, exc
+            )
+            return "fsync", "fail"
+        stored = settings.get(IO_SYNC_ERRORS, "fail")
+        if stored not in _fs.SYNC_ERRORS:
+            _LOGGER.warning("%s is %r, not fail or ignore: using fail", IO_SYNC_ERRORS, stored)
+        return settings.get(IO_SYNC, "auto"), "ignore" if stored == "ignore" else "fail"
+
     def refresh_format(self) -> dict[str, object]:
         """Re-read ``format.json`` and refresh the enabled :attr:`extensions` from it.
 
@@ -601,6 +638,8 @@ class Workspace:
                     _validate_io_workers(value)
                 if key == IO_SYNC:
                     _validate_io_sync(value)
+                if key == IO_SYNC_ERRORS:
+                    _validate_io_sync_errors(value)
                 self._check_setting_collision(key, settings)
                 settings[key] = value
             stored["settings"] = settings
@@ -626,6 +665,8 @@ class Workspace:
             _validate_io_workers(merged[IO_WORKERS])
         if IO_SYNC in merged:
             _validate_io_sync(merged[IO_SYNC])
+        if IO_SYNC_ERRORS in merged:
+            _validate_io_sync_errors(merged[IO_SYNC_ERRORS])
 
         def seed(stored: dict[str, Any]) -> dict[str, object]:
             current = _validate_settings(_section(stored, "settings"))

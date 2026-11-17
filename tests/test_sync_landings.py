@@ -227,7 +227,9 @@ def test_a_failed_commit_refuses_the_pushed_stream_and_adopts_nothing(
     events = Events(monkeypatch, syncfs_failures=[None, errno.EIO])
     assert adopt_stream(monkeypatch, tmp_path, data, "--workspace", far_name) == 2
     document = json.loads(capsys.readouterr().out)
-    assert set(document) == {"bundles", "workspace_id", "refused"}
+    # sync_failed (P1 of WORKFLOW_SYNC_SEGMENTS_AND_TRANSFER_SESSION §7.2): the sender delivers once more.
+    assert set(document) == {"bundles", "workspace_id", "refused", "sync_failed"}
+    assert document["sync_failed"] is True
     assert document["bundles"] == [] and document["workspace_id"] == far.workspace_id
     assert document["refused"].startswith("refused the stream, nothing of it was used: ")
     assert "not durable" in document["refused"]
@@ -252,7 +254,7 @@ def in_process_far_side(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(transfer_cli, "_deliver_call", deliver_call)
 
 
-def test_a_push_refused_by_a_failed_commit_takes_its_holds_back(
+def test_a_push_refused_by_a_failed_commit_is_delivered_once_more_with_fsync(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name = registered(tmp_path, "near")
@@ -261,15 +263,17 @@ def test_a_push_refused_by_a_failed_commit_takes_its_holds_back(
     plan = jobs(near, 2)
     in_process_far_side(monkeypatch)
     events = Events(monkeypatch, syncfs_failures=[None, errno.EDQUOT])
-    assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
+    assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
     outcomes = statuses(capsys)
-    assert [outcome["status"] for outcome in outcomes] == ["not_moved"] * 2
-    assert all("refused the stream" in outcome["message"] for outcome in outcomes)
-    # The refused stream published nothing there; the client took its holds back.
-    assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
-    assert_in(near, plan)
+    # Before P1 the refusal took the holds back (not_moved); now its one retry, with --sync fsync, adopts them
+    # (the refused retry's take-back is in test_sync_errors_retry.py).
+    assert [outcome["status"] for outcome in outcomes] == ["adopted"] * 2
+    assert_in(far, plan)
     assert outgoing(near) == [] and landings(far) == []
+    # The failed commit's two syncfs share one descriptor; the retry's fsync barrier calls none.
+    assert len(events.syncfs_descriptors()) == 2
     assert events.syncfs_descriptors()[0] == events.syncfs_descriptors()[1]
+    assert [strategy for strategy, _ in events.barriers] == ["syncfs", "fsync"]
 
 
 def test_a_long_lived_workspace_reads_io_sync_afresh_at_each_barrier(
@@ -371,12 +375,14 @@ def test_a_failed_commit_fails_the_pulled_chunk_and_keeps_every_hold(
     far, far_name = registered(tmp_path, "far")
     near.configure_settings({"io.sync": "syncfs"})
     plan = jobs(far, 2)
-    events = Events(monkeypatch, syncfs_failures=[None, errno.EIO])
+    # Both commits fail: the first chunk's and that of its one re-pull (P1); before P1 the first alone failed it.
+    events = Events(monkeypatch, syncfs_failures=[None, errno.EIO, None, errno.EIO])
     assert transfer(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
     outcomes = statuses(capsys)
     assert [outcome["status"] for outcome in outcomes] == ["failed"] * 2
     assert all("not durable" in outcome["message"] and "stays held" in outcome["message"] for outcome in outcomes)
     assert "take" not in events.kinds()
+    assert events.kinds().count("pull-start") == 2 and events.kinds().count("syncfs") == 4
     assert all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
     assert sorted(outgoing(far)) == sorted(outcome["transfer_id"] for outcome in outcomes)
     assert not list((near.control / "tmp").glob("*.landing.*"))

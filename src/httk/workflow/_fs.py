@@ -36,6 +36,7 @@ from httk.workflow.errors import FormatError, WorkflowError
 __all__ = [
     "DEFAULT_LIMITS",
     "STAGING_MARK",
+    "SYNC_ERRORS",
     "SYNC_SETTINGS",
     "Barrier",
     "CrossDevice",
@@ -47,6 +48,7 @@ __all__ = [
     "Loc",
     "MoveFailed",
     "Moved",
+    "SyncErrors",
     "SyncFailed",
     "SyncStrategy",
     "SyncUnreadable",
@@ -1288,6 +1290,8 @@ class _Landing:
         self.written: set[_Parts] = set()
         #: The directory members, whose times are restored after the last member.
         self.directories: dict[_Parts, tarfile.TarInfo] = {}
+        #: The first component of every member name the stream carried (none for a member naming the target).
+        self.top: set[str] = set()
         #: Regular-file bytes read from the stream, and bytes written by hard-link copies.
         self.received = 0
         self.copied = 0
@@ -1588,7 +1592,9 @@ def _extract_member(
         if name != rename[0] or not member.isreg():
             raise tarfile.FilterError(f"unexpected member in a single-file pull: {name!r}")
         name = rename[1]
-    _dispatch(landing, archive, member, _member_parts(member, name, landing.target))
+    parts = _member_parts(member, name, landing.target)
+    landing.top.update(parts[:1])
+    _dispatch(landing, archive, member, parts)
 
 
 def _dispatch(landing: _Landing, archive: tarfile.TarFile, member: tarfile.TarInfo, parts: _Parts) -> None:
@@ -1692,6 +1698,7 @@ class _Reader:
 
         landing = self.landing
         parts = _member_parts(member, member.name, landing.target)
+        landing.top.update(parts[:1])
         keys = [_folded(parts)]
         if (
             member.islnk()
@@ -1772,6 +1779,7 @@ def extract_tar(
     rename: tuple[str, str] | None = None,
     workers: int = 1,
     durable: bool = False,
+    top_level: set[str] | None = None,
 ) -> int:
     """Extract an untrusted tar stream under *target*, never resolving a path by name.
 
@@ -1829,6 +1837,9 @@ def extract_tar(
         the worker that wrote it), and after the last member and the directory times every directory the stream
         created or wrote into, deepest first, then *target*: the strategy ``fsync`` of a :class:`Barrier`. A
         failed fsync is an ``OSError`` like any other write error.
+    :param top_level: A set that a successful extraction adds the first component of every member name to (after
+        the normalization above; a member naming *target* itself adds none): what this stream put in *target*,
+        as opposed to what was there before.
     :return: How many regular files the stream wrote (hard-link copies included).
     :raises tarfile.FilterError: For a refused member; a subclass (``OutsideDestinationError``,
         ``SpecialFileError``, ``AbsoluteLinkError``, ``LinkOutsideDestinationError``) where one applies.
@@ -1863,6 +1874,8 @@ def extract_tar(
             _fsync_directories(landing)
     finally:
         landing.close()
+    if top_level is not None:
+        top_level.update(landing.top)
     return len(landing.written)
 
 
@@ -2002,6 +2015,8 @@ def rename_probe(a: Path, b: Path) -> None:
 
 #: The values of the ``io.sync`` application setting; an absent setting is ``auto``.
 SYNC_SETTINGS = ("auto", "syncfs", "fsync")
+#: The values of the ``io.sync_errors`` application setting; an absent setting is ``fail``.
+SYNC_ERRORS = ("fail", "ignore")
 #: The filesystem types ``auto`` trusts ``syncfs`` on (Linux 5.8 or later): Lustre by the user's decision, the
 #: local journalling filesystems whose writeback errors reach the superblock, and tmpfs (no persistence either way).
 _SYNCFS_VETTED = frozenset({"lustre", "ext4", "xfs", "tmpfs"})
@@ -2012,6 +2027,8 @@ _SYNCFS_KERNEL = (5, 8)
 _MOUNTINFO = Path("/proc/self/mountinfo")
 
 type SyncStrategy = Literal["syncfs", "fsync"]
+#: What a barrier does when its ``syncfs`` commit reports a writeback error (``io.sync_errors``).
+type SyncErrors = Literal["fail", "ignore"]
 
 #: The deepest directory the late walk descends into, in path components below the landing (as extract_tar).
 _LANDING_DEPTH = 256
@@ -2295,19 +2312,39 @@ class Barrier:
     evicted inode, is not), and also any unseen one of someone else on that filesystem; where ``syncfs`` turns
     out not to be supported, the commit walks its *tree* instead.
 
+    With *errors* ``ignore`` (``io.sync_errors``), a writeback error that the commit's ``syncfs`` reports is
+    trusted rather than raised: ``syncfs`` is called once more on the same descriptor (another full flush of the
+    filesystem), a warning says whether it completed without reporting a further error (which does not prove that
+    the pages whose writeback failed reached the disk), and the commit returns, so the landing is published.
+    Nothing else is ignored: a ``syncfs`` that is not supported (``ENOSYS``, ``EPERM``, ``EINVAL``) fails a primed
+    commit and falls back to the walk at a no-prime one, as under ``fail``; the prime, the walk and inline fsync of
+    strategy ``fsync`` behave as under ``fail``.
+
     :param anchor: The landing directory, which the caller has created durably.
     :param setting: The ``io.sync`` value, read fresh by the caller.
+    :param errors: The ``io.sync_errors`` value, read with *setting*: ``fail`` or ``ignore``.
     :param inline: The caller writes every file of the landing with fsync on its writing descriptor when
         :attr:`fsync_inline` is true (an extraction or a copy), rather than another process writing it.
     :param quiet: Print no progress line.
     :param prime: Prime the barrier at entry; false only for a tree written before it was entered.
+    :raises ValueError: When *errors* is neither ``fail`` nor ``ignore``.
     """
 
     def __init__(
-        self, anchor: Path, setting: object, *, inline: bool = False, quiet: bool = False, prime: bool = True
+        self,
+        anchor: Path,
+        setting: object,
+        *,
+        errors: SyncErrors = "fail",
+        inline: bool = False,
+        quiet: bool = False,
+        prime: bool = True,
     ) -> None:
+        if errors not in SYNC_ERRORS:
+            raise ValueError(f"io.sync_errors is fail or ignore, not {errors!r}")
         self.anchor = anchor
         self.setting = setting
+        self.errors: SyncErrors = errors
         self.inline = inline
         self.quiet = quiet
         self.prime = prime
@@ -2366,12 +2403,17 @@ class Barrier:
         (fsync: ...)`` for an *inline* landing under ``fsync``, whose files were fsynced as they were written (so
         nothing is left to do).
 
+        Under *errors* ``ignore`` a writeback error of the ``syncfs`` is logged as a warning instead, after a
+        second ``syncfs`` on the same descriptor (see the class).
+
         :param count_hint: How many were landed, for the progress line.
         :param unit: What *count_hint* counts, for the progress line: ``file`` or ``bundle``.
         :param tree: The directory (or anchored location of one) below *anchor*, or *anchor* itself (the default),
             that the walk of strategy ``fsync`` covers.
-        :raises SyncFailed: When the ``syncfs`` or the walk fails (:class:`SyncUnreadable` when the walk cannot
-            read an entry); it is logged once as a warning naming the strategy.
+
+        :raises SyncFailed: When the ``syncfs`` (unless *errors* is ``ignore`` and it is supported) or the walk
+            fails (:class:`SyncUnreadable` when the walk cannot read an entry); it is logged once as a warning
+            naming the strategy.
         :raises ValueError: Outside the context.
         """
 
@@ -2393,10 +2435,38 @@ class Barrier:
                 self.strategy, self.reason = "fsync", "fsync (syncfs is not supported on this filesystem here)"
                 self._walk(tree)
                 return
+            if self.errors == "ignore" and exc.errno not in _SYNCFS_UNSUPPORTED:
+                self._trust(exc)
+                return
             _LOGGER.warning("the sync barrier (%s) of %s failed: %s", self.reason, self.anchor, exc)
             raise SyncFailed(
                 exc.errno, f"syncfs of {self.anchor} failed, so what landed there is not durable: {exc.strerror}"
             ) from exc
+
+    def _trust(self, error: OSError) -> None:
+        # io.sync_errors=ignore: the commit's writeback error is trusted. One more syncfs on the same descriptor (a
+        # full flush again) tells whether flushing now completes without a further error; 0 does not prove that the
+        # pages whose writeback failed reached the disk.
+        assert self._descriptor is not None
+        try:
+            _syncfs(self._descriptor)
+        except OSError as again:
+            _LOGGER.warning(
+                "the sync barrier (%s) of %s reported a writeback error, which io.sync_errors=ignore trusts, and a "
+                "second syncfs failed too, so the flush may be incomplete (first %s, then %s)",
+                self.reason,
+                self.anchor,
+                error,
+                again,
+            )
+            return
+        _LOGGER.warning(
+            "the sync barrier (%s) of %s reported a writeback error, which io.sync_errors=ignore trusts "
+            "(a second flush reported no further error): %s",
+            self.reason,
+            self.anchor,
+            error,
+        )
 
     def _walk(self, tree: "Path | Loc | None") -> None:
         # The late walk of strategy fsync over *tree* (the anchor by default), logged once when it fails.
@@ -2422,7 +2492,9 @@ class Barrier:
             raise
 
 
-def sync_written(anchor: Path, trees: Sequence[Path | Loc], setting: object) -> list[Path | Loc]:
+def sync_written(
+    anchor: Path, trees: Sequence[Path | Loc], setting: object, *, errors: SyncErrors = "fail"
+) -> list[Path | Loc]:
     """Make trees that were written before httk ran (operators' bundles or payloads) durable, together.
 
     Only the trees that are directories on the filesystem of *anchor* are synced (another filesystem's are copied
@@ -2431,11 +2503,13 @@ def sync_written(anchor: Path, trees: Sequence[Path | Loc], setting: object) -> 
     effort: a writeback error is reported only while nobody has seen it yet, and an unseen one of someone else on
     that filesystem fails the call too. An error cannot be attributed to one tree; once reported, it is seen, so
     the failed pages may read back intact from memory while not on disk: every tree must then be re-created from
-    its source, never merely synced again.
+    its source, never merely synced again. Under *errors* ``ignore`` a writeback error of the ``syncfs`` is trusted
+    with a warning (see :class:`Barrier`), so the trees count as synced.
 
     :param anchor: An existing directory on the filesystem written (the workspace's control directory).
     :param trees: The trees: absolute paths, or anchored locations (a trusted name below a directory descriptor).
     :param setting: The ``io.sync`` value, read fresh by the caller.
+    :param errors: The ``io.sync_errors`` value, read with *setting*.
     :return: The trees synced (those on *anchor*'s filesystem).
     :raises SyncFailed: When the ``syncfs`` or a walk fails (:class:`SyncUnreadable` when a walk cannot read an
         entry).
@@ -2455,7 +2529,7 @@ def sync_written(anchor: Path, trees: Sequence[Path | Loc], setting: object) -> 
             synced.append(tree)
     if not synced:
         return synced
-    with Barrier(anchor, setting, quiet=True, prime=False) as barrier:
+    with Barrier(anchor, setting, errors=errors, quiet=True, prime=False) as barrier:
         pending = synced
         if barrier.strategy == "syncfs":
             # One syncfs for every tree; where it turns out not to be supported, the first tree is walked instead.

@@ -229,7 +229,8 @@ finished by running it again or with `httk job transfer --resume`;
 travel together, so the cost is the same whether it moves one job or a thousand:
 a push to a remote workspace is one ssh connection and one remote `httk` start
 (the bundles stream straight into the adoption there), plus one of each when the
-destination lacks a workflow the jobs need or its build; a pull from a remote
+destination lacks a workflow the jobs need or its build, and one more of each
+only when a failed synchronization there is retried (see {doc}`../workspaces`); a pull from a remote
 workspace is three connections and two `httk` starts (hold, copy, release); a
 remote-to-remote transfer four connections and three starts. On a site where
 every Python start is slow, that is what a transfer costs. It reports each step

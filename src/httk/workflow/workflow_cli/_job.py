@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shlex
+import stat
 import sys
 import tempfile
 import time
@@ -1945,9 +1946,11 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
             raise ValueError("give BUNDLE paths, or --stdin-tar to read the bundles from standard input, not both")
         if arguments.token is not None and not arguments.stdin_tar:
             raise ValueError("--token names the landing of --stdin-tar")
+        if arguments.sync is not None and not arguments.stdin_tar:
+            raise ValueError("--sync applies to the landing of --stdin-tar")
         workspace = _modifiable(arguments, context, action="adopt jobs into it")
         if arguments.stdin_tar:
-            landing, bundles = _receive_bundles(workspace, arguments.token)
+            landing, bundles = _receive_bundles(workspace, arguments.token, force_fsync=arguments.sync == "fsync")
             sources = [landing / name for name in bundles]
             parents.add(landing.resolve())  # removed when empty, even after an empty stream
         else:
@@ -1963,11 +1966,18 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
         # Nothing of the stream was adopted: its landing goes, and with --json the one document says so.
         if workspace is not None and landing is not None:
             _fs.discard(_fs.loc(landing), trash_dir=workspace.control / "tmp", durable=workspace.durable)
+        sync_failed = isinstance(exc, _CommitFailed)
         if not (arguments.stdin_tar and arguments.json):
+            if sync_failed:
+                raise ValueError(f"{exc} {_COMMIT_FAILED_HINT}") from None
             raise
         print(f"job adopt: {exc}", file=sys.stderr)
         workspace_id = None if workspace is None else workspace.workspace_id
-        print(json.dumps({"bundles": [], "workspace_id": workspace_id, "refused": str(exc)}, indent=2))
+        refusal: dict[str, object] = {"bundles": [], "workspace_id": workspace_id, "refused": str(exc)}
+        if sync_failed:
+            # Only for the commit's writeback error: the sender delivers once more with --sync fsync.
+            refusal["sync_failed"] = True
+        print(json.dumps(refusal, indent=2))
         return 2
     entries: list[dict[str, object]] = []
     unsynced: str | None = None
@@ -2021,13 +2031,15 @@ def handle_job_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
 _LANDING_TOKEN = re.compile(r"[0-9a-z]{16,64}")
 
 
-def _receive_bundles(workspace: Workspace, token: str | None) -> tuple[Path, list[str]]:
+def _receive_bundles(workspace: Workspace, token: str | None, *, force_fsync: bool = False) -> tuple[Path, list[str]]:
     """Extract the tar stream on standard input into ``transfers/incoming/<token>/`` (a fresh token by default).
 
     :param workspace: The adopting workspace.
     :param token: The landing's name, so that a retried delivery lands in the same place, or ``None``.
+    :param force_fsync: ``--sync fsync``: fsync every landed file as it is written, whatever ``io.sync`` says.
     :return: The landing, and the names of the bundles in it, sorted.
-    :raises ValueError: For a malformed token or stream, or a refused member.
+    :raises ValueError: For a malformed token or stream, or a refused member (:class:`_CommitFailed` when the
+        sync barrier's commit failed).
     """
 
     if token is None:
@@ -2035,53 +2047,119 @@ def _receive_bundles(workspace: Workspace, token: str | None) -> tuple[Path, lis
     elif not _LANDING_TOKEN.fullmatch(token):
         raise ValueError(f"--token must be 16 to 64 lowercase letters and digits: {token!r}")
     landing = workspace.control / "transfers" / "incoming" / token
-    return landing, receive_tar(workspace, landing, barrier=True)
+    return landing, receive_tar(workspace, landing, barrier=True, force_fsync=force_fsync)
 
 
-def _extract_landing(workspace: Workspace, landing: Path, *, durable: bool) -> tuple[list[os.DirEntry[str]], int]:
-    """Extract standard input into *landing*, checking that every top-level entry is a directory."""
+def _extract_landing(workspace: Workspace, landing: Path, *, durable: bool) -> tuple[list[str], int]:
+    """Extract standard input into *landing*: the top-level names the stream carried, sorted, each checked to be a
+    directory, and how many regular files it wrote.
 
-    count = _fs.extract_tar(sys.stdin.buffer, landing, workers=workspace.io_workers, durable=durable)
-    with os.scandir(landing) as found:
-        entries = sorted(found, key=lambda entry: entry.name)
-    for entry in entries:
-        if not entry.is_dir(follow_symlinks=False):
-            raise ValueError(f"not a directory: {entry.name!r}")
-    return entries, count
+    Anything else in *landing* (a reused token's leftovers of an earlier, interrupted delivery) is left untouched
+    and not returned, with one ``warning:`` line on standard error.
+    """
+
+    names: set[str] = set()
+    count = _fs.extract_tar(sys.stdin.buffer, landing, workers=workspace.io_workers, durable=durable, top_level=names)
+    for name in names:
+        found = _fs.lstat(_fs.loc(landing / name))
+        if found is None or not stat.S_ISDIR(found.st_mode):
+            raise ValueError(f"not a directory: {name!r}")
+    with os.scandir(landing) as listing:
+        others = sorted(entry.name for entry in listing if entry.name not in names)
+    if others:
+        print(
+            f"warning: left {len(others)} entr(ies) in {landing} that this stream did not carry untouched (not "
+            f"adopted): {', '.join(others[:5])}{', ...' if len(others) > 5 else ''}",
+            file=sys.stderr,
+        )
+    return sorted(names), count
 
 
-def receive_tar(workspace: Workspace, landing: Path, *, barrier: bool = False) -> list[str]:
+class _CommitFailed(ValueError):
+    """A stream refused because its sync barrier's ``syncfs`` commit failed under ``io.sync_errors`` ``fail``: a
+    writeback error on the landing's filesystem, possibly another user's, so a delivery with ``--sync fsync``
+    (whose fsyncs no foreign error can fail) may succeed. The ``job adopt --json`` refusal document says so with
+    ``"sync_failed": true``."""
+
+
+#: What ``job adopt`` without ``--json`` adds to the message of a stream refused by a failed commit.
+_COMMIT_FAILED_HINT = (
+    "(a writeback error on this filesystem, possibly another process's: deliver the stream again, or see the "
+    "io.sync and io.sync_errors settings)"
+)
+
+
+def receive_tar(workspace: Workspace, landing: Path, *, barrier: bool = False, force_fsync: bool = False) -> list[str]:
     """Extract the tar stream on standard input into *landing* (created when absent): its top-level directories.
 
     The anchored extraction of the adapter's pull (:func:`httk.workflow._fs.extract_tar`) is the trust boundary,
-    writing small files with up to the workspace's ``io.workers`` threads; every top-level entry must be a
-    directory. A stream that fails either is refused whole and *landing* discarded (only after every write of the
-    extraction finished), so nothing of it is used.
+    writing small files with up to the workspace's ``io.workers`` threads; every top-level entry of the stream must
+    be a directory. A stream that fails either is refused whole and *landing* discarded (only after every write of
+    the extraction finished), so nothing of it is used. Only the top-level names this stream carried are returned:
+    a reused landing's other entries (leftovers of an earlier, interrupted delivery) are left in place, never
+    adopted, with a ``warning:`` line.
 
     :param workspace: The workspace *landing* belongs to (its ``tmp/`` takes the discarded landing).
     :param landing: The directory to extract into.
     :param barrier: The landing is what gets published (the far side of a push): in a durable workspace it is
         made durable before this returns, through a :class:`~httk.workflow._fs.Barrier` entered before the first
-        member is extracted (``io.sync`` read afresh); a failed commit refuses the stream like a refused member.
-        ``workflow install --stdin-tar`` leaves it off: its landing is copied into the store, not published.
-    :return: The names of the top-level directories, sorted.
-    :raises ValueError: For a malformed stream, a refused member or a failed sync barrier.
+        member is extracted (``io.sync`` and ``io.sync_errors`` read afresh); a failed commit refuses the stream
+        like a refused member. ``workflow install --stdin-tar`` leaves it off: its landing is copied into the store,
+        not published.
+    :param force_fsync: Use the strategy ``fsync`` whatever ``io.sync`` says, with *barrier*: every landed file is
+        fsynced on its writing descriptor as it is extracted (``job adopt --sync fsync``, a push's one retry after a
+        failed commit); nothing more in a non-durable workspace. In any workspace, durable or not, *landing* must
+        not exist yet: its parents are created, then *landing* itself exclusively, and an existing one (or one
+        created concurrently) refuses the stream before anything is extracted or discarded.
+    :return: The names of the top-level directories the stream carried, sorted.
+    :raises ValueError: For a malformed stream, a refused member or a failed sync barrier (:class:`_CommitFailed`
+        when the barrier's ``syncfs`` commit failed under ``io.sync_errors`` ``fail``), or, with *force_fsync*,
+        when *landing* exists already (nothing is changed then).
     """
 
     import tarfile
 
-    _fs.make_dirs(landing, durable=workspace.durable)
+    if force_fsync:
+        _fs.make_dirs(landing.parent, durable=workspace.durable)
+        try:
+            os.mkdir(landing)
+        except FileExistsError:
+            raise ValueError(
+                f"--sync fsync needs a fresh landing, and {landing.name} exists already; nothing was used"
+            ) from None
+        if workspace.durable:
+            parent = os.open(landing.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                os.fsync(parent)  # the landing's own entry, as make_dirs makes it durable
+            finally:
+                os.close(parent)
+    else:
+        _fs.make_dirs(landing, durable=workspace.durable)
     try:
         if barrier and workspace.durable:
-            with _fs.Barrier(landing, workspace.io_sync(), inline=True) as sync:
+            # --sync fsync only strengthens: inline fsync on the writing descriptors, which no foreign error fails.
+            policy: tuple[object, _fs.SyncErrors] = ("fsync", "fail") if force_fsync else workspace.io_sync_policy()
+            with _fs.Barrier(landing, policy[0], errors=policy[1], inline=True) as sync:
+                if force_fsync:
+                    sync.reason = "fsync (--sync fsync)"
                 entries, count = _extract_landing(workspace, landing, durable=sync.fsync_inline)
-                sync.commit(count)
+                try:
+                    # Inline, so no walk: only a syncfs commit can fail here, and under ignore only for an
+                    # unsupported syncfs, which a retry would not help.
+                    sync.commit(count)
+                except _fs.SyncFailed as exc:
+                    if sync.errors != "fail":
+                        raise
+                    raise _CommitFailed(str(exc)) from exc
         else:
             entries, _count = _extract_landing(workspace, landing, durable=False)
     except (tarfile.TarError, EOFError, OSError, ValueError) as exc:
         _fs.discard(_fs.loc(landing), trash_dir=workspace.control / "tmp", durable=workspace.durable)
-        raise ValueError(f"refused the stream, nothing of it was used: {exc}") from None
-    return [entry.name for entry in entries]
+        message = f"refused the stream, nothing of it was used: {exc}"
+        if isinstance(exc, _CommitFailed):
+            raise _CommitFailed(message) from None
+        raise ValueError(message) from None
+    return entries
 
 
 def _foreign_bundle(workspace: Workspace, bundle: Path) -> str | None:
@@ -2831,6 +2909,8 @@ def build_job_parser(
     )
     # Hidden: the transfer protocol's landing name and the workflows the sender asks about.
     adopt.add_argument("--token", metavar="TOKEN", help=argparse.SUPPRESS)
+    # Hidden: a push's one retry after the far side's failed sync commit fsyncs every landed file as it is written.
+    adopt.add_argument("--sync", choices=("fsync",), help=argparse.SUPPRESS)
     adopt.add_argument("--built-for", action="append", default=[], metavar="ID", help=argparse.SUPPRESS)
     adopt.add_argument(
         "--move",

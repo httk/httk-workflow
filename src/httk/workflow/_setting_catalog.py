@@ -68,6 +68,7 @@ def _engine_keys(layer: SettingLayer) -> frozenset[str]:
             "children.placement",
             "io.workers",
             "io.sync",
+            "io.sync_errors",
             "httk_v1.timeout",
             "httk_v1.wrapper",
             "httk_v1.log_compression",

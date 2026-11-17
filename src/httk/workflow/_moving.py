@@ -922,6 +922,8 @@ def sync_operator_bundles(workspace: "Workspace", bundles: Sequence[Path | _fs.L
     They were written before httk ran (unpacked by scp or tar, say): one no-prime ``syncfs`` on the control
     directory for all of them, or under ``fsync`` a walk of each (:func:`httk.workflow._fs.sync_written`); a bundle
     on another filesystem is left to the adoption's copy, which fsyncs it. Nothing in a non-durable workspace.
+    ``io.sync`` and ``io.sync_errors`` are read together afresh; under ``ignore`` a writeback error is trusted with a
+    warning (the operator's own lost data included).
 
     :param workspace: The workspace taking them.
     :param bundles: Their paths, or anchored locations.
@@ -934,7 +936,8 @@ def sync_operator_bundles(workspace: "Workspace", bundles: Sequence[Path | _fs.L
     if not workspace.durable:
         return
     try:
-        _fs.sync_written(workspace.control, bundles, workspace.io_sync())
+        setting, errors = workspace.io_sync_policy()
+        _fs.sync_written(workspace.control, bundles, setting, errors=errors)
     except _fs.SyncUnreadable as exc:
         # Nothing reported a write error: the entry is to be made readable, the files are as they were.
         raise _fs.SyncUnreadable(exc.errno, f"not taken: {exc.strerror}") from exc

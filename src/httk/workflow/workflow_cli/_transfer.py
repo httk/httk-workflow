@@ -883,13 +883,16 @@ def _adoption(out: str, bundles: list[str]) -> dict[str, Any]:
     """The checked document of a remote ``job adopt --json --stdin-tar`` of *bundles*: as printed, with ``entries``
     by bundle added; :class:`ValueError` when it is no such document.
 
-    A document with ``refused`` says that nothing was adopted and lists no bundle; any other names every bundle
-    sent, each with a known status.
+    A document with ``refused`` says that nothing was adopted and lists no bundle, and with ``sync_failed`` true
+    that the far side's sync commit failed (a writeback error there, possibly another user's); any other names
+    every bundle sent, each with a known status.
     """
 
     document = json.loads(out)
     if not isinstance(document, dict) or not isinstance(document.get("bundles"), list):
         raise ValueError("not an adoption report")
+    if not isinstance(document.get("sync_failed", False), bool):
+        raise ValueError("an ambiguous sync_failed")
     workspace_id = document.get("workspace_id")
     if workspace_id is not None:
         document["workspace_id"] = canonical_uuid(str(workspace_id), "workspace_id")
@@ -927,11 +930,13 @@ def _deliver_call(
 def _sync_barrier(
     workspace: Workspace, anchor: Path, arguments: argparse.Namespace, *, inline: bool
 ) -> contextlib.AbstractContextManager[_fs.Barrier | None]:
-    """The sync barrier of a landing in *workspace* (``io.sync`` read afresh); none in a non-durable workspace."""
+    """The sync barrier of a landing in *workspace* (``io.sync`` and ``io.sync_errors`` read afresh); none in a
+    non-durable workspace."""
 
     if not workspace.durable:
         return contextlib.nullcontext(None)
-    return _fs.Barrier(anchor, workspace.io_sync(), inline=inline, quiet=arguments.quiet)
+    setting, errors = workspace.io_sync_policy()
+    return _fs.Barrier(anchor, setting, errors=errors, inline=inline, quiet=arguments.quiet)
 
 
 def _other_filesystem(holds: list[_moving.Hold], dst: Workspace) -> bool:
@@ -1000,8 +1005,10 @@ def _deliver(
 
     Holds on the same filesystem move in (adoption takes them); with ``--keep``, or from another filesystem, they
     are copied into a landing scratch first (see :func:`_land_copies`); a remote *src*'s are pulled into one. A
-    landing is made durable (a sync barrier entered before its first byte, committed before any adoption), and
-    a failed commit of a pull fails the chunk with the holds kept at the source.
+    landing is made durable (a sync barrier entered before its first byte, committed before any adoption). When
+    the ``syncfs`` commit of a pull fails under ``io.sync_errors`` ``fail``, the landing is discarded and the chunk
+    pulled once more into a fresh one under a fresh barrier; a second failure (or any other failed commit, such
+    as a walk of strategy ``fsync``, never pulled again) fails the chunk with the holds kept at the source.
 
     The result is each hold's adoption entry by transfer id (``status`` as ``job adopt --json`` gives it); an
     error raised fails the whole chunk.
@@ -1027,13 +1034,31 @@ def _deliver(
                 scratch = owner.scratch("landing")
                 sources = _land_copies(dst.workspace, owner, holds, scratch, arguments)
             else:
-                scratch = owner.scratch("landing")
                 _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
-                # Entered before the adapter writes anything; committed before anything is adopted.
-                with _sync_barrier(dst.workspace, scratch, arguments, inline=False) as barrier:
-                    _adapter(src, context, arguments, "pull", outgoing, str(scratch / "outgoing"), ids)
-                    if barrier is not None:
-                        barrier.commit()
+                retried = False
+                while True:
+                    scratch = owner.scratch("landing")
+                    failed: _fs.SyncFailed | None = None
+                    # Entered (and primed) before the adapter writes anything; committed before anything is adopted.
+                    with _sync_barrier(dst.workspace, scratch, arguments, inline=False) as barrier:
+                        _adapter(src, context, arguments, "pull", outgoing, str(scratch / "outgoing"), ids)
+                        if barrier is not None:
+                            try:
+                                barrier.commit()
+                            except _fs.SyncFailed as exc:
+                                # Only a syncfs commit's error under io.sync_errors fail is pulled again (a primed
+                                # syncfs barrier never walks): no later sync could clear it, and a clean commit of a
+                                # fresh landing proves that one durable. A failed walk of strategy fsync is exact;
+                                # under ignore only an unsupported syncfs fails, which a re-pull would not help.
+                                if retried or barrier.strategy != "syncfs" or barrier.errors != "fail":
+                                    raise
+                                failed = exc
+                    if failed is None:
+                        break
+                    retried = True
+                    _say(arguments, f"pulling {len(ids)} bundle(s) from {src.locator} again: {failed}")
+                    owner.discard_scratch(scratch)
+                    scratch = None
                 sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
             _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
             workspace = dst.workspace
@@ -1072,43 +1097,100 @@ def _deliver_remote(
     The result is the checked adoption document (see :func:`_adoption`). A :class:`RuntimeError` says that *dst*
     gave no usable answer, so whether anything was adopted is unknown. Once an adoption is read, the far side's
     standard error lines (its sync line, its warnings) are printed here (:func:`_relay`).
+
+    A refusal marked ``sync_failed`` (the far side's sync commit failed under ``io.sync_errors`` ``fail``, maybe
+    for another user's writeback error) is delivered once more, the same bundles from the same local directory
+    (a remote *src*'s relay is not pulled again), to a fresh token with ``--sync fsync``, whose inline fsyncs no
+    foreign error can fail; the answer to that delivery is the result, never retried itself. When it reports
+    another ``workspace_id`` than the first, the result is unknown (:class:`RuntimeError`).
     """
 
     ids = [hold.transfer_id for hold in holds]
     outgoing = str(PurePosixPath(holds[0].path).parent)
-    argv = [*REMOTE_JOB_ADOPT_COMMAND, "--json", "--stdin-tar", "--token", token, "--workspace", dst.plain]
-    argv += [item for workflow_id in built_for for item in ("--built-for", workflow_id)]
     if src.workspace is not None:
         _say(arguments, f"delivering {len(ids)} bundle(s) to {dst.locator}")
-        code, out, err = _deliver_call(dst, context, arguments, outgoing, ids, argv)
-    else:
-        with tempfile.TemporaryDirectory(prefix="httk-transfer-") as relay:
-            _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
-            for chunk in _chunks(ids):  # a pull names its files on the far side's command line
-                _adapter(src, context, arguments, "pull", outgoing, f"{relay}/outgoing", chunk)
-            _say(arguments, f"delivering {len(ids)} bundle(s) to {dst.locator}")
-            code, out, err = _deliver_call(dst, context, arguments, f"{relay}/outgoing", ids, argv)
-    try:
-        document = _adoption(out, ids)
-    except (ValueError, TypeError, WorkflowError):
-        detail = err.strip() if code and err.strip() else f"{dst.locator} returned an unrecognised adoption report"
-        if "unrecognized arguments" in err or "invalid choice" in err:
-            detail += f" ({dst.locator} may run an older httk-workflow; upgrade it)"
-        raise RuntimeError(
-            f"{detail}; whether the jobs arrived is unknown: check with `httk job show` on {dst.locator}, then "
-            f"deliver again with `httk job transfer --resume {src.locator} {dst.locator}` or, if they are there, "
-            f"release with {_release_remedy(arguments, 'TRANSFER_ID', None, src, dst)}"
-        ) from None
+        return _deliver_adoption(src, dst, context, arguments, outgoing, ids, token, built_for)
+    with tempfile.TemporaryDirectory(prefix="httk-transfer-") as relay:
+        _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
+        for chunk in _chunks(ids):  # a pull names its files on the far side's command line
+            _adapter(src, context, arguments, "pull", outgoing, f"{relay}/outgoing", chunk)
+        _say(arguments, f"delivering {len(ids)} bundle(s) to {dst.locator}")
+        # Inside the relay's lifetime: a retry delivers the same copies again.
+        return _deliver_adoption(src, dst, context, arguments, f"{relay}/outgoing", ids, token, built_for)
+
+
+def _deliver_adoption(
+    src: _End,
+    dst: _End,
+    context: CLIContext,
+    arguments: argparse.Namespace,
+    source: str,
+    ids: list[str],
+    token: str,
+    built_for: list[str],
+) -> dict[str, Any]:
+    """Deliver the bundles *ids* in the local directory *source* to ``job adopt --stdin-tar`` on *dst*, once more
+    with ``--sync fsync`` after a ``sync_failed`` refusal: the checked adoption document (see
+    :func:`_deliver_remote`)."""
+
+    def deliver(landing: str, *strengthen: str) -> tuple[dict[str, Any], str]:
+        argv = [*REMOTE_JOB_ADOPT_COMMAND, "--json", "--stdin-tar", "--token", landing, *strengthen]
+        argv += [
+            "--workspace",
+            dst.plain,
+            *(item for workflow_id in built_for for item in ("--built-for", workflow_id)),
+        ]
+        code, out, err = _deliver_call(dst, context, arguments, source, ids, argv)
+        try:
+            return _adoption(out, ids), err
+        except (ValueError, TypeError, WorkflowError):
+            detail = err.strip() if code and err.strip() else f"{dst.locator} returned an unrecognised adoption report"
+            if "unrecognized arguments" in err or "invalid choice" in err:
+                detail += f" ({dst.locator} may run an older httk-workflow; upgrade it)"
+            raise _unknown_adoption(detail, src, dst, arguments) from None
+
+    document, err = deliver(token)
+    if "refused" in document and document.get("sync_failed") is True:
+        _say(
+            arguments,
+            f"{dst.locator} could not make the delivery durable ({document['refused']}); delivering {len(ids)} "
+            "bundle(s) again, with an fsync of every file",
+        )
+        first = document.get("workspace_id")
+        document, err = deliver(_fs.fresh_token(), "--sync", "fsync")
+        second = document.get("workspace_id")
+        if first is not None and second is not None and second != first:
+            if "refused" not in document:
+                # The jobs arrived, but in another workspace than the one that answered first: nothing is
+                # released, and no away copy can name the right destination.
+                raise RuntimeError(
+                    f"{dst.locator} adopted the jobs into workspace {second}, not the expected workspace {first} "
+                    f"that answered the first delivery; the holds are kept on {src.locator}: check with `httk job "
+                    f"show` on {dst.locator}, then `httk job transfer --resume {src.locator} {dst.locator}` reports "
+                    "them already adopted there and releases the holds"
+                )
+            detail = f"{dst.locator} answered the second delivery as workspace {second}, the first as {first}"
+            raise _unknown_adoption(detail, src, dst, arguments)
     if "refused" not in document:
         _relay(dst, arguments, err)
     return document
 
 
+def _unknown_adoption(detail: str, src: _End, dst: _End, arguments: argparse.Namespace) -> RuntimeError:
+    """The error of a delivery without a usable answer: whether the jobs arrived is unknown, the holds stay."""
+
+    return RuntimeError(
+        f"{detail}; whether the jobs arrived is unknown: check with `httk job show` on {dst.locator}, then "
+        f"deliver again with `httk job transfer --resume {src.locator} {dst.locator}` or, if they are there, "
+        f"release with {_release_remedy(arguments, 'TRANSFER_ID', None, src, dst)}"
+    )
+
+
 #: The far side's standard error lines of an adoption that a push relays: the sync barrier's progress line,
-#: ``warning:`` lines, and the barrier's own logged warnings, which the far side's httk renders as their bare
-#: message (so they are told apart by their fixed beginnings). Nothing else (ssh warnings, login banners, module
+#: ``warning:`` lines, and the barrier's and the sync settings' own logged warnings, which the far side's httk
+#: renders as their bare message (so they are told apart by their fixed beginnings). Nothing else (ssh warnings, login banners, module
 #: system output, tracebacks, a bundle's own message and its continuation lines) is relayed.
-_RELAYED = ("syncing ", "made ", "warning:", "io.sync ", "the sync barrier")
+_RELAYED = ("syncing ", "made ", "warning:", "io.sync ", "io.sync_errors ", "the sync barrier")
 #: Relayed lines the client reports itself (its workflow shipping), left out.
 _REPORTED_HERE = ("warning: these workflows are not installed",)
 

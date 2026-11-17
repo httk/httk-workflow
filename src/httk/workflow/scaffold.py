@@ -1894,17 +1894,18 @@ def _sync_barrier(
 ) -> AbstractContextManager[_fs.Barrier | None]:
     """The sync barrier of payloads staged below *anchor* in a durable *workspace*; none in a non-durable one.
 
-    ``io.sync`` is read afresh, and no progress line is printed. :func:`new_jobs` and ``job submit`` hold one for
-    the whole command, anchored on the control ``tmp/`` that holds every submit scratch, entered before the first
-    byte is staged and committed once per payload (:func:`_commit_staged`) before it is renamed to ``job/``; a
-    :func:`submit_payload` copy without one takes its own on its scratch. Under ``fsync`` the copies are fsynced
-    as they are written and, unless *inline* (every file is httk's own fsynced copy), each commit walks that
-    payload's scratch for what hooks wrote and for the directories.
+    ``io.sync`` and ``io.sync_errors`` are read afresh, and no progress line is printed. :func:`new_jobs` and
+    ``job submit`` hold one for the whole command, anchored on the control ``tmp/`` that holds every submit scratch,
+    entered before the first byte is staged and committed once per payload (:func:`_commit_staged`) before it is
+    renamed to ``job/``; a :func:`submit_payload` copy without one takes its own on its scratch. Under ``fsync`` the
+    copies are fsynced as they are written and, unless *inline* (every file is httk's own fsynced copy), each commit
+    walks that payload's scratch for what hooks wrote and for the directories.
     """
 
     if not workspace.durable:
         return nullcontext(None)
-    return _fs.Barrier(anchor, workspace.io_sync(), inline=inline, quiet=True)
+    setting, errors = workspace.io_sync_policy()
+    return _fs.Barrier(anchor, setting, errors=errors, inline=inline, quiet=True)
 
 
 def _command_barrier(workspace: Workspace, *, inline: bool = False) -> AbstractContextManager[_fs.Barrier | None]:

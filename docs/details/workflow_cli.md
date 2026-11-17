@@ -680,11 +680,20 @@ job's placement satisfying the
 bundles as one `tar` stream on standard input, extracts it whole into a fresh
 landing `transfers/incoming/<token>/` with the same filters as a pull (a
 malformed stream or a refused member exits `2` and adopts nothing), then adopts
-every top-level bundle directory in it and removes the emptied landing. A bundle
+every top-level bundle directory the stream carried and removes the emptied
+landing (anything else a reused `--token` landing held is left there, not
+adopted, with a `warning:` line). A bundle
 whose `bundle.json` records another destination workspace id is refused and
 discarded there. The `--json` document then also carries `workspace_id`, this
 workspace's id, and, for each hidden `--built-for ID`, a `workflows` entry
 `{"id", "status", "tree_sha256"}` with status `present`, `unbuilt` or `missing`.
+A stream refused before any adoption (exit `2`) prints instead the document
+`{"bundles": [], "workspace_id": ..., "refused": REASON}` (`workspace_id` is
+`null` when the workspace could not be opened); when the refusal is the landing's
+failed `syncfs` under `io.sync_errors` `fail` (a write error on that filesystem,
+possibly another user's; see {doc}`../workspaces`), and only then, it also
+carries `"sync_failed": true`, which makes a push deliver once more. Exit `0`
+means every bundle was adopted or already adopted, `1` that one was not.
 
 Both commands are crash-safe and take no file locks: each records what it needs
 to finish before it moves anything, so an interrupted eject or adoption is
@@ -795,7 +804,10 @@ start), and one release call on a remote SRC. Local to remote takes one ssh
 connection and one remote `httk` start; remote to local three connections
 (hold, pull, release) and two starts; remote to remote four connections and
 three starts. Shipping missing or unbuilt workflows to a remote DST adds one
-connection and one start.
+connection and one start. A push retried after DST's failed `syncfs` adds one
+connection and one start (the bundles are delivered again; a remote SRC's are
+not fetched again), and a pull chunk fetched again after a failed `syncfs` of
+its landing adds one `pull`; nothing is added when no retry happens.
 A delivery is one call for the whole batch (its bundles travel in the stream);
 only a hold, pull or release whose id list exceeds 64 KiB of command text (some
 1500 jobs) is split, into as many such calls as it needs.
@@ -806,7 +818,11 @@ held on SRC and is reported; one whose jobs are all at DST already is "already
 adopted", and its hold is released. When a remote DST refuses a delivery before
 adopting anything (the workspace name is unknown there, the stream was
 refused), a local SRC takes those holds back at once and reports them
-`not_moved` with DST's reason; a remote SRC keeps them held (`failed`). An
+`not_moved` with DST's reason; a remote SRC keeps them held (`failed`). A
+refusal marked `sync_failed` is first delivered once more, to a fresh landing
+with every file synchronized as it is written there; only that second answer
+counts (a refusal then takes the holds back as above; one from another
+workspace id than the first answer is treated as unreadable). An
 answer that cannot be read (a banner on the connection, a crash, a timeout)
 marks every hold of that call `failed` and leaves it held: whether the jobs
 arrived is unknown, and `--resume` delivers again (they then report "already

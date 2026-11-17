@@ -119,7 +119,8 @@ costs one round trip a file on a shared filesystem. `auto` uses `syncfs` on
 Linux 5.8 or later for Lustre, ext4, XFS and tmpfs, and `fsync` elsewhere
 (older kernels report no write errors through `syncfs`); `syncfs` forces it on
 any filesystem type you vouch for, still falling back to `fsync` below Linux
-5.8 or where the call is not available. tmpfs is never persistent, whatever
+5.8 or where the call is not available (found by the first call on a
+filesystem, made before anything lands). tmpfs is never persistent, whatever
 the setting. A value other than the three is refused when set, and one stored
 otherwise counts as `fsync`; the setting is read afresh at every landing, so a
 running daemon sees a change at once, and a `--no-durable` workspace
@@ -138,18 +139,74 @@ strategy on standard error, unless `-q`: `syncing 120 landed file(s) to disk
 (syncfs: lustre, Linux 5.14)`, or `made 3 landed bundle(s) durable (fsync:
 zfs is not vetted for auto)` when every file was synchronized as it was
 written. For a push, that is the destination's line, relayed with its name in
-front. When the synchronization fails, nothing of that landing is adopted:
+front. When the synchronization fails, nothing of that landing is adopted.
+Where the landing was synchronized with one `syncfs` and `io.sync_errors` is
+`fail` (see below), the transfer then tries once more by itself, since the
+error may be another user's on the same filesystem, which `syncfs` reports to
+everyone on it:
 
-- a push from a local workspace is refused and its jobs are taken back into
-  the source (`not_moved`); run the transfer again;
-- a pull, or a push from a remote workspace, fails and its jobs stay held at
-  the source; `job transfer --resume` delivers them again;
-- copies from another filesystem are made once more with every file
-  synchronized as it is written, and the chunk fails (jobs held at the source)
-  only if that fails too.
+- a push is delivered once more, the same bundles to a fresh landing at the
+  destination, where every file is synchronized as it is written (which
+  another user's error cannot fail); this costs one more connection and one
+  more remote `httk` start, only when it happens, and a push from a remote
+  workspace delivers its local copies again rather than fetching them anew. If
+  that delivery is refused too, a push from a local workspace takes its jobs
+  back into the source (`not_moved`; run the transfer again), and from a
+  remote workspace its jobs stay held there (`job transfer --resume`);
+- a pull is fetched once more into a fresh landing under a fresh
+  synchronization (one more fetch, only when it happens); if that fails too,
+  the chunk fails and its jobs stay held at the source, and `job transfer
+  --resume` delivers them again.
+
+A failure is not retried otherwise. A destination (or, for a pull, this
+workspace) on `io.sync fsync`, whose per-file errors are exact, fails at once:
+a push from a local workspace takes its jobs back into the source
+(`not_moved`; run the transfer again), and a pull, or a push from a remote
+workspace, keeps the jobs held at the source for `job transfer --resume`. Job
+creation (`job new`, campaigns), `job submit` of copies and workflow
+installation have no retry either: the command fails, and running it again is
+safe. `job adopt PATH` and `job submit --move` take files written before httk
+ran, so after a failed synchronization re-create them from their source first,
+as described above, rather than merely running the command again. Copies from
+another filesystem whose `syncfs` failed are made once more with every file
+synchronized as it is written, and the chunk fails (jobs held at the source)
+only if that fails too. The retried delivery or fetch runs under the same
+`--adapter-timeout` as the first one; when it times out, its outcome is
+unknown and the jobs stay held at the source, and `job transfer --resume`
+then reports those that arrived as `already_adopted` and releases them.
 
 ```console
 httk workspace settings set --key io.sync --value fsync default
+```
+
+`io.sync_errors` (`fail`, the default, or `ignore`) sets what a write error
+that a `syncfs` reports does. `syncfs` cannot tell whose write failed: on a
+busy shared login node another user's late quota error (`EDQUOT`) on the same
+filesystem fails our landing too, which `fail` handles by the retries above.
+`ignore` trusts the writes that returned successfully: the landing is still
+flushed, and after a failed `syncfs` another full `syncfs` is made; a warning
+says whether that one completed without reporting a further error
+(`... reported a writeback error, which io.sync_errors=ignore trusts (a
+second flush reported no further error)`; this does not prove that the data
+whose write failed reached the disk) or failed too (`... the flush may be incomplete`), and the
+jobs are published anyway, with no retry. Choose it for speed when you expect
+no quota trouble and accept removing a batch whose files turn out damaged: any
+file can then have lost data, `job.json`, `state.json` and bundle records
+included (a job may be unreadable, not only its outputs wrong), compute nodes
+see the loss without any crash, and a `job submit --move` payload, the only
+copy, is consumed all the same. A write error that `write()` itself reports
+(a quota already full) still fails. `ignore` changes nothing else: under
+`io.sync fsync` every per-file error fails; a `syncfs` that the system does not
+support falls back to `fsync` when the first, priming call finds it so (or,
+for bundles written before httk ran, at their one synchronization), but if it
+reports so only at the final call, the landing fails under `ignore` too, without
+a retry; and workflow installation and builds always fail on an error (a
+damaged package would run for every later job). A value other than the two is
+refused when set, and one stored otherwise counts as `fail` (with a warning);
+like `io.sync`, it is read afresh at every landing.
+
+```console
+httk workspace settings set --key io.sync_errors --value ignore default
 ```
 
 Engine tunables (the visibility deadline of a shared filesystem and the
