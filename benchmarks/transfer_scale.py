@@ -933,11 +933,13 @@ def run(arguments: argparse.Namespace) -> int:
         "tree": arguments.tree,
         "strace_subset": arguments.strace_subset,
         "probe": arguments.probe,
+        "io_sync": arguments.io_sync,
     }
     stamp = time.strftime("%Y%m%dT%H%M%S")
     run_id = (
         f"{p['direction']}-{p['session']}-{p['placement']}-n{p['jobs']}-d{p['deadline']:g}"
-        f"-m{p['prepopulate']}{'-tree' if p['tree'] else ''}{'-light' if p['probe'] == 'light' else ''}-{stamp}"
+        f"-m{p['prepopulate']}{'-tree' if p['tree'] else ''}{'-light' if p['probe'] == 'light' else ''}"
+        f"{'' if p['io_sync'] == 'auto' else '-' + p['io_sync']}-{stamp}"
     )
     work, logs, results = out / "work" / run_id, out / "logs" / run_id, out / "results"
     probes = logs / "probes"
@@ -996,6 +998,8 @@ def run(arguments: argparse.Namespace) -> int:
     for name, root in zip(names, (source_root, destination_root), strict=True):
         create_workspace(name, root)
         Workspace(root).set_policy({"visibility_deadline_seconds": p["deadline"]})
+        if p["io_sync"] != "auto":
+            Workspace(root).set_setting("io.sync", p["io_sync"])
     os.environ["TS_SRC_ROOT"], os.environ["TS_DST_ROOT"] = str(source_root), str(destination_root)
     policy = {}
     for label, root in (("src", source_root), ("dst", destination_root)):
@@ -1261,6 +1265,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--strace-subset", type=int, default=0, metavar="K", help="trace K more jobs (strace)")
     parser.add_argument("--setup-workers", type=int, default=8, help="processes making the jobs")
     parser.add_argument("--keep-work", action="store_true", help="keep the run's workspaces")
+    parser.add_argument(
+        "--io-sync", choices=("auto", "syncfs", "fsync"), default="auto", help="the workspaces' io.sync setting"
+    )
     parser.add_argument(
         "--probe",
         choices=("full", "light"),
