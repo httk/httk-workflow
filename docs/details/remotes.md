@@ -233,7 +233,10 @@ destination lacks and retries a failed synchronization there (see
 {doc}`../workspaces`); a pull from a remote workspace is one connection and one
 `httk` start too, a transfer session that holds, copies the workflows and the
 jobs, and releases (three connections and two starts without one: hold, copy,
-release); a remote-to-remote transfer four connections and three starts. On a site where
+release); a remote-to-remote transfer one connection and one start at each end
+when both serve a session, relayed through a temporary directory here (four
+connections and three starts when neither does; see *Remote to remote* in
+{doc}`workflow_cli` for the mixed cases, the relay and `TMPDIR`). On a site where
 every Python start is slow, that is what a transfer costs. It reports each step
 on stderr (`-q` silences that). The
 steps and their recovery are in the `job transfer` section of {doc}`workflow_cli`.
@@ -250,8 +253,17 @@ workspace to a local one at its first request to the source (the check of its
 selection, or for `--resume` the listing of its holds); either closes it at the
 end of the command,
 whatever the number of pages it holds (see *Paged holds* in
-{doc}`workflow_cli`). Remote-to-remote
-transfers do not use one yet.
+{doc}`workflow_cli`). A remote-to-remote transfer opens one to each end that
+serves one, SRC's first, DST's before the first hold for it; every bundle passes
+through a temporary directory here (the default temporary location, `TMPDIR`
+when set), removed once what it holds is settled: one fetch of about 16 GiB from
+a source with a session (never splitting a bundle, so possibly more), 256
+bundles of any size from one without, the whole batch for a destination
+without a session, and the workflow store entries separately. With a selection,
+the destination's session opens before the source holds anything, so an empty
+selection still connects to it. A remote
+source never takes a hold back: a refusal, an unknown outcome or a failure of
+that directory (a full disk) leaves the holds held there for `--resume`.
 
 A push holds and delivers its jobs a page at a time. Over the session it first
 asks the destination which of the workflows a page's jobs need it lacks or has

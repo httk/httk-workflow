@@ -713,7 +713,8 @@ workspace or project; a sealed job keeps its seal.
 (`REMOTE:WS` for a workspace on a remote) or else a workspace directory; a
 registered name wins over a same-named directory, so `./NAME` addresses the
 directory. Any combination of local and remote ends works, and a
-remote-to-remote transfer is relayed through the client:
+remote-to-remote transfer is relayed through the client (a temporary directory
+here, see *Remote to remote* below):
 
 ```console
 httk job push [SRC] DST [--no-keep] [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--no-workflows] [--json] [-q]
@@ -828,8 +829,9 @@ the push runs over one transfer session (see *The transfer session* in
 {doc}`remotes`); remote to local one connection and one start too, whatever it
 ships or retries and however many pages it holds, over one transfer session to
 SRC (`--resume` without DST: one session for each remote end in play); remote to
-remote four
-connections and three starts. Without a session (a far side whose `httk`
+remote one connection and one start at each end when both serve a session (two
+and two in all, whatever the pages and segments), and four connections and
+three starts when neither does (see *Remote to remote* for the mixed cases). Without a session (a far side whose `httk`
 predates it, which costs one more connection and start for the refused session,
 or the remote setting `transfer_session=off`), a pull costs three connections
 (hold, pull, release) and two starts, and a push what it did before sessions: one `deliver`
@@ -837,10 +839,10 @@ of the whole batch, plus one connection and one start for shipping missing or
 unbuilt workflows, for the second delivery when a push from a local SRC both
 re-drives holds an earlier run left bound for DST and holds new jobs (the two
 sets travel separately, the earlier holds first), and for each delivery retried
-after DST's failed `syncfs`. Remote to remote ships and retries the same way
-(its holds travel as one delivery: a remote SRC's holds are never taken back,
-so they are not separated), and a remote SRC's bundles are not fetched again
-for a retry. Without a session, a
+after DST's failed `syncfs`. Remote to remote without a session at DST ships and
+retries the same way (its holds travel as one delivery: a remote SRC's holds are
+never taken back, so they are not separated), and a remote SRC's bundles are not
+fetched again for a retry. Without a session, a
 pull chunk fetched again after a failed `syncfs` of its landing adds one
 `pull`; nothing is added when no retry happens.
 Only a hold, pull or release whose id list exceeds 64 KiB of command text (some
@@ -933,6 +935,74 @@ and the adapter's tar copy has the same property). Per segment:
 - a release that fails leaves the jobs in DST and their holds on SRC: the
   outcome says "the jobs are in DST, but the hold was not released" and names
   `--resume` or the hand release; a session failing in it stops the pull too.
+
+**Remote to remote.** A transfer between two remote workspaces passes every
+bundle and store entry through this machine: each fetch lands in a temporary
+directory, the *relay* (`httk-transfer-*` in the default temporary location,
+`TMPDIR` when set), removed once what it holds is settled. A relay holds, from a
+SRC with a session, one fetch: SRC closes it once 16 GiB of file data (or 16,384
+archive members) went, but never inside a bundle, so it may exceed that by the
+last bundle, and a single larger bundle is a fetch of its own; from a SRC
+without one, one segment of 256 bundles, whatever their size; for a destination
+without a session, the whole batch. The workflow store entries a page needs are
+fetched into a relay of their own, separately. A relay that cannot be made,
+written, read or removed (a full disk, say) stops that destination as a refusal
+naming no hold does. A relay is not a workspace landing: nothing in it is synchronized
+(DST makes what it adopts durable, segment by segment, as in a push); a fetch
+over SRC's session is extracted by the same untrusted-archive rules as a
+landing and its stream's end is checked before anything of it is sent on.
+Each end's session is decided before anything is held: SRC's first (its
+selection check), DST's before the first hold for it (one that cannot open
+holds nothing). With a selection, DST's session opens before SRC holds the
+first page, because SRC learns whether a `--state` selection is empty only by
+holding it: an empty selection therefore still connects to DST, and fails when
+DST cannot be reached. The four combinations:
+
+- **Both ends serve a session**: SRC holds page by page as a pull does; for
+  each page DST is asked which workflows it lacks or has unbuilt, their store
+  entries are fetched from SRC into a relay and installed and built over DST's
+  session, all before the page's first segment; then each segment is fetched
+  into its own relay (SRC closes a fetch at 16 GiB or 16,384 members, so a
+  segment may take several), adopted over DST's session by the rules of a push
+  (a failed `syncfs` delivered once more from the same relay with every file
+  synchronized, as every later segment to that DST then is; a refused member's
+  bundle fails alone and the rest go once more from the relay; the first
+  adopting workspace id is kept), and released on SRC over its session right
+  after (with `--keep` recording DST's workspace id). One connection and one
+  start at each end.
+- **SRC serves a session, DST does not**: SRC holds page by page, but the
+  holds for DST are gathered, fetched into one relay after the last page,
+  delivered with one adapter `deliver` as before sessions (the workflows after
+  the adoption, from its report, their store entries fetched over SRC's
+  session), and released over SRC's session. Each fetch asks for at most 256
+  holds and each release names at most 16,384, so no request grows with the
+  batch; a stop while fetching (a failed session, a refusal naming no hold, the
+  relay) delivers nothing, and an unknown outcome or a refusal of the delivery
+  stops the destination too. SRC one connection and one start;
+  DST what a push to it costs without a session.
+- **DST serves a session, SRC does not**: SRC holds everything first (`job
+  transfer --hold`); its bundles are pulled with the adapter a segment at a
+  time into a relay and each segment is adopted over DST's session (the
+  workflows first, their store entries pulled with the adapter and installed
+  over the session); the holds are released with one adapter release at the
+  end. SRC one hold, one `pull` a segment (a segment is 256 bundles) and one
+  release (three connections and two starts for one segment); DST one
+  connection and one start.
+- **Neither**: as before sessions, four connections and three starts.
+
+A remote SRC never takes a hold back: every refusal, of one bundle or of a whole
+segment, leaves the holds held there (`failed`, with `--resume`; a hold an earlier
+run left, refused by DST, by SRC or by the relay, names the conditional remedy
+above, its hand take-back to be run on SRC's host). An unknown outcome at DST, a refusal of a whole segment, an
+answer from another workspace id, a failure of the relay here (a full disk, a
+relay that cannot be made, or this side's relay that cannot be read while it is
+sent) or a refusal by SRC naming no hold stops that destination: the segment and
+every later hold stay held on SRC, and what earlier segments settled (adopted,
+released) stays so. A failure of
+SRC's session (in a fetch or a release) stops every destination of the command.
+A release that fails after the adoption leaves the jobs in DST and their holds on
+SRC ("not released"). `--resume` lists SRC's holds over its session, or with
+`transfer status` without one, and drives them by the same combinations.
 
 Each answer of a page (holds, errors, notes and diagnostics alike) is held to
 16 MiB as encoded, the diagnostics cut to their last 64 KiB and each error to the
@@ -1085,10 +1155,11 @@ between pages (an owner that cannot be registered, a hold that cannot be read)
 stops the destination (reading SRC's holds: every destination) and the pages
 already driven are still reported.
 
-Remote to remote, a remote SRC without a session (an older far side, which also
-covers one that serves sessions without paged holds, `transfer_session=off`, a
-`mount-daemon` remote), a local SRC whose DST serves no session, and `job
-transfer --hold` still hold everything first.
+A remote SRC without a session (an older far side, which also covers one that
+serves sessions without paged holds, `transfer_session=off`, a `mount-daemon`
+remote), a local SRC whose DST serves no session, and `job transfer --hold`
+still hold everything first; a remote SRC with a session whose remote DST serves
+none holds page by page but delivers once, after the last page.
 
 **Recovery.** Delivery is at least once. Every run, and
 `job transfer --resume`, first re-drives the holds of SRC bound for DST

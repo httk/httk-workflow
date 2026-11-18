@@ -260,6 +260,9 @@ def test_local_to_remote_and_pull_back_ship_through_the_adapter(
         for workflow_id in ("local:caller", GIT_ID):
             _store.uninstall(far, owner, workflow_id)
     calls.clear()
+    # Through the adapter operations of both ends, (A, A) (over sessions: test_remote_to_remote).
+    adapter_path(project, "cluster")
+    adapter_path(project, "other")
     assert run(project, "--json", "--job", job_id, f"cluster:{near_name}", f"other:{far_name}") == 0
     (outcome,) = outcomes(capsys)["transfers"]
     assert shipped(outcome) == {GIT_ID: "installed", "local:caller": "installed"}

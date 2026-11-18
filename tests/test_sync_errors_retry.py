@@ -838,8 +838,9 @@ def test_remote_to_remote_over_ssh_costs_one_more_call_only_for_a_retry(
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="ssh-relay-retry")
-    fake_remote(project)
-    fake_remote(project, name="other")
+    # The adapter path on both ends, (A, A): its count (the sessions' retry: test_remote_to_remote).
+    fake_remote(project, transfer_session="off")
+    fake_remote(project, name="other", transfer_session="off")
     near, near_name = registered(remote.root, "near")
     far, far_name = registered(remote.root, "far")
     far.configure_settings({"io.sync": "syncfs"})

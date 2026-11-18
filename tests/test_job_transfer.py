@@ -710,8 +710,9 @@ def test_remote_to_remote_over_ssh_makes_four_calls_whatever_the_number_of_jobs(
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="ssh-relay")
-    fake_remote(project)
-    fake_remote(project, name="other")
+    # The adapter path on both ends, (A, A): its pinned count (the sessions' combinations: test_remote_to_remote).
+    fake_remote(project, transfer_session="off")
+    fake_remote(project, name="other", transfer_session="off")
     near, near_name = registered(remote.root, "near")
     far, far_name = registered(remote.root, "far")
     calls = adapter_calls(monkeypatch)

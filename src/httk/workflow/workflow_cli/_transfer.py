@@ -57,7 +57,7 @@ from ..adapters import (
     split_settings,
     store_credentials,
 )
-from ..errors import WorkflowError
+from ..errors import StreamAborted, TransferProtocolError, WorkflowError
 from ..hygiene import describe_remote, remove_remote
 from ..introspection import iter_jobs, read_job, read_state, resolve_job_selectors
 from ..models import WORKSPACE_DIRECTORY, canonical_uuid, normalize_placement
@@ -2025,15 +2025,51 @@ def _install_shipped(
     return rows
 
 
-def _receive_store(
-    session: TransferSession, src: _End, workspace: Workspace, landing: Path, directories: list[str]
-) -> None:
-    """Fetch the store entries *directories* of a remote *src* into *landing* in the local *workspace* with one
-    ``send`` request on the pull's transfer *session* (not synchronized: the installation copies them durably).
+#: The threads that write a relay's small files (the default of ``io.workers``; a relay belongs to no workspace).
+_RELAY_WORKERS = 8
 
-    :param session: The pull's transfer session.
+
+def _extract_relay(landing: Path, stream: StreamReader) -> list[str]:
+    """Extract a transfer session's download into the relay directory *landing* (created here, inside a temporary
+    directory of this machine) by the untrusted-tar rules (:func:`httk.workflow._fs.extract_tar`), and validate its
+    terminal before anything of it is used: the top-level directories it carried, sorted.
+
+    A relay is no workspace landing: nothing is synchronized (the destination makes what it adopts durable), and a
+    refused stream is not discarded here (its temporary directory goes with it).
+
+    :param landing: The directory to extract into, which must not exist yet.
+    :param stream: The download.
+    :return: The names of the top-level directories.
+    :raises httk.workflow._landing.StreamRefused: For a malformed, aborted or cut stream, a refused member (naming
+        its bundle), a top-level entry that is no directory, or a local failure (a full disk).
+    """
+
+    names: set[str] = set()
+    try:
+        landing.mkdir()
+        _fs.extract_tar(stream, landing, workers=_RELAY_WORKERS, top_level=names)
+        stream.finish()  # the stream is whole before anything of it is used
+        for name in names:
+            found = _fs.lstat(_fs.loc(landing / name))
+            if found is None or not stat.S_ISDIR(found.st_mode):
+                raise _landing.StreamRefused(f"not a directory: {name!r}", bundle=name)
+    except (tarfile.TarError, EOFError, OSError, ValueError, StreamAborted, TransferProtocolError) as exc:
+        message = f"refused the stream, nothing of it was used: {exc}"
+        bundle = _landing._offending_bundle(exc)
+        raise _landing.StreamRefused(message, bundle=bundle, stream_aborted=isinstance(exc, StreamAborted)) from None
+    return sorted(names)
+
+
+def _receive_store(
+    session: TransferSession, src: _End, workspace: Workspace | None, landing: Path, directories: list[str]
+) -> None:
+    """Fetch the store entries *directories* of a remote *src* into *landing* in the local *workspace* (``None``: a
+    relay, see :func:`_extract_relay`) with one ``send`` request on SRC's transfer *session* (not synchronized: the
+    installation copies them durably).
+
+    :param session: SRC's transfer session.
     :param src: The remote source end.
-    :param workspace: The local destination workspace.
+    :param workspace: The local destination workspace, or ``None`` for a relay.
     :param landing: The directory they land in.
     :param directories: The store directory names.
     :raises RuntimeError: When they did not arrive whole (:class:`~httk.workflow.adapters.SessionFailed` when the
@@ -2042,7 +2078,10 @@ def _receive_store(
 
     def download(stream: BinaryIO) -> None:
         assert isinstance(stream, StreamReader)
-        _landing.receive_tar(workspace, landing, stream, finish=stream.finish)
+        if workspace is None:
+            _extract_relay(landing, stream)
+        else:
+            _landing.receive_tar(workspace, landing, stream, finish=stream.finish)
 
     try:
         response = session.request(
@@ -2068,12 +2107,15 @@ def _install_remote(
     context: CLIContext,
     arguments: argparse.Namespace,
     session: TransferSession | None = None,
+    source: TransferSession | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str | None]]:
     """In one remote ``httk`` start, install SRC's store entries ``<store>/<directory>/{install.json,package}``
     in a remote *dst* (one ``deliver`` to ``workflow install --stdin-tar --build``, a remote *src*'s entries relayed
     through a local directory) and build the installations *rebuild* names (``--also-build``); with no
-    directories, only build them (one ``invoke``). With a push's transfer *session*, one ``install`` request on it
-    instead (a local *src*'s entries uploaded), in the far side's ``httk`` start of the push.
+    directories, only build them (one ``invoke``). With *dst*'s transfer *session*, one ``install`` request on it
+    instead (the entries uploaded: a local *src*'s from its store, a remote one's from a relay), in the far side's
+    ``httk`` start of the transfer. A remote *src*'s entries are fetched into the relay with one ``send`` request on
+    its transfer session *source* when there is one, else with the adapter's ``pull``.
 
     The result is the install rows by directory, and each *rebuild* id's build failure (``None`` when built); a
     :class:`RuntimeError` says that *dst* gave no usable answer.
@@ -2085,7 +2127,13 @@ def _install_remote(
     argv = [*_WORKFLOW_COMMAND, "install", "--json", "--workspace", dst.plain, *also]
     if session is not None:
         _say(arguments, f"installing {len(directories)} and building {len(rebuild)} workflow(s) in {dst.locator}")
-        code, out, err = _install_over_session(session, dst, store, directories, rebuild, label)
+        if src.workspace is None and directories:
+            assert store is not None
+            with tempfile.TemporaryDirectory(prefix="httk-transfer-") as relay:
+                _fetch_store(src, source, store, directories, Path(relay) / "workflows", context, arguments)
+                code, out, err = _install_over_session(session, dst, f"{relay}/workflows", directories, rebuild, label)
+        else:
+            code, out, err = _install_over_session(session, dst, store, directories, rebuild, label)
     elif not directories:
         _say(arguments, f"building {len(rebuild)} workflow(s) in {dst.locator}")
         code, out, err = _remote(dst, context, arguments, argv)
@@ -2097,8 +2145,7 @@ def _install_remote(
             code, out, err = _deliver_call(dst, context, arguments, store, files, argv)
         else:
             with tempfile.TemporaryDirectory(prefix="httk-transfer-") as relay:
-                for chunk in _chunks(files):
-                    _adapter(src, context, arguments, "pull", store, f"{relay}/workflows", chunk)
+                _fetch_store(src, source, store, directories, Path(relay) / "workflows", context, arguments)
                 code, out, err = _deliver_call(dst, context, arguments, f"{relay}/workflows", files, argv)
     try:
         document = json.loads(out) if code in (0, 1) else None
@@ -2122,6 +2169,36 @@ def _install_remote(
     return by_directory, failures
 
 
+def _fetch_store(
+    src: _End,
+    source: TransferSession | None,
+    store: str,
+    directories: list[str],
+    target: Path,
+    context: CLIContext,
+    arguments: argparse.Namespace,
+) -> None:
+    """Fetch a remote *src*'s store entries ``<store>/<directory>/{install.json,package}`` into the local relay
+    directory *target*: with one ``send`` request on its transfer session *source* when there is one (see
+    :func:`_receive_store`), else with the adapter's ``pull`` (a call per 64 KiB of names).
+
+    :param src: The remote source end.
+    :param source: SRC's transfer session, or ``None``.
+    :param store: SRC's store directory.
+    :param directories: The store directory names.
+    :param target: The relay directory they land in.
+    :param context: The CLI invocation.
+    :param arguments: The command's arguments.
+    """
+
+    if source is not None:
+        _receive_store(source, src, None, target, directories)
+        return
+    files = [f"{directory}/{name}" for directory in directories for name in ("install.json", "package")]
+    for chunk in _chunks(files):
+        _adapter(src, context, arguments, "pull", store, str(target), chunk)
+
+
 def _ship_workflows(
     src: _End,
     dst: _End,
@@ -2130,6 +2207,7 @@ def _ship_workflows(
     arguments: argparse.Namespace,
     have: dict[str, tuple[object, bool]] | None = None,
     session: TransferSession | None = None,
+    source: TransferSession | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Install in *dst*, under the same ids, the workflows the holds need that it lacks and *src* has.
 
@@ -2137,8 +2215,9 @@ def _ship_workflows(
     already has it, with the same or another tree, and keeps it), ``missing`` (installed in neither),
     ``installed``, ``refused``, ``failed`` or ``unbuilt``; ``build`` marks one a local *dst*'s
     :func:`_build_shipped` builds. A remote *dst* reported what it has (*have*) with the adoption (or, over a push's
-    transfer *session*, before it), and builds in the same start that installs (on the session when there is one).
-    A local *dst* fetches the entries from a remote *src* over a pull's transfer *session* when there is one.
+    transfer *session*, before it), and builds in the same start that installs (on the session when there is one);
+    a remote *src*'s entries reach it through a relay, fetched over SRC's transfer session *source* when there is
+    one. A local *dst* fetches the entries from a remote *src* over a pull's transfer *session* when there is one.
     Nothing is ever replaced, and a failure here never fails the transfer: the jobs then wait at *dst*.
     """
 
@@ -2182,7 +2261,7 @@ def _ship_workflows(
             _say(arguments, f"installing {len(ship)} workflow(s) in {dst.locator}")
             rows = _install_shipped(src, dst, str(base), sorted(ship), context, arguments, session)
         else:
-            rows, failures = _install_remote(src, dst, base, sorted(ship), rebuild, context, arguments, session)
+            rows, failures = _install_remote(src, dst, base, sorted(ship), rebuild, context, arguments, session, source)
     except _ERRORS as exc:
         rows = {directory: {"status": "failed", "reason": str(exc)} for directory in ship}
         failures = dict.fromkeys(rebuild, str(exc))
@@ -2358,6 +2437,8 @@ def _release_over_session(
     return unconfirmed, set(transfer_ids) - set(unconfirmed)
 
 
+#: The most transfer ids one ``release`` request over a transfer session carries (its header stays far below a frame).
+_RELEASE_IDS = 16384
 #: A push over a transfer session closes a segment at this many bundles, ...
 _SEGMENT_BUNDLES = 256
 #: ... or this many regular-file bytes landed (a hard link counted with its target's size), ...
@@ -2521,8 +2602,8 @@ def _session_adopt(
     upload fails (a hold changed under the writer), the far side's answer to the aborted stream is used, and only a
     ``refused`` document is a usable one.
 
-    :param session: The push's open transfer session.
-    :param src: The local source end.
+    :param session: DST's open transfer session.
+    :param src: The source end.
     :param dst: The remote destination end.
     :param arguments: The command's arguments.
     :param holds: The segment's holds.
@@ -2571,18 +2652,21 @@ def _session_workflows(
     holds: list[_moving.Hold],
     context: CLIContext,
     arguments: argparse.Namespace,
+    source: TransferSession | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Before a push's first segment: ask *dst* (one ``workflows`` request) which of the workflows the holds need it
     has, and install the missing ones and build the unbuilt ones there (one ``install`` request), so that every
     segment is runnable as soon as it is adopted. The result is :func:`_ship_workflows`'s; a failure is reported
-    in it and never stops the push.
+    in it and never stops the push. A remote *src*'s store entries travel through a relay (see
+    :func:`_install_remote`).
 
-    :param session: The push's open transfer session.
-    :param src: The local source end.
+    :param session: DST's open transfer session.
+    :param src: The source end.
     :param dst: The remote destination end.
     :param holds: Every hold the push delivers.
     :param context: The CLI invocation.
     :param arguments: The command's arguments.
+    :param source: A remote *src*'s transfer session, if any.
     :return: The status of every needed workflow, by id.
     :raises SessionFailed: When the session failed while asking (nothing was adopted).
     """
@@ -2595,7 +2679,7 @@ def _session_workflows(
     if have is None:
         reason = f"{dst.locator} did not report its workflows: {response.get('error', 'an unusable answer')}"
         return {workflow_id: {"status": "failed", "reason": reason} for workflow_id in needed}
-    return _ship_workflows(src, dst, holds, context, arguments, have, session)
+    return _ship_workflows(src, dst, holds, context, arguments, have, session, source)
 
 
 def _install_over_session(
@@ -2680,6 +2764,9 @@ class _Deliveries:
         self.refusal: dict[str, Any] | None = None
         #: A pull's transfer session to the remote SRC, which then releases over it.
         self.session: TransferSession | None = None
+        #: *fresh* names this run's holds of a remote SRC too (remote → remote over a session), so that a refused hold
+        #: an earlier run left gets the conditional remedy.
+        self.fresh_known = False
 
     def fail(self, holds: list[_moving.Hold], message: str, *, complete: bool = False) -> None:
         """Report *holds* failed with *message*; they stay held, which the outcome adds unless *complete* (the
@@ -2694,10 +2781,11 @@ class _Deliveries:
         """Settle the checked adoption *document* of a delivery of *holds*: the transfer ids it delivered.
 
         A ``refused`` document (nothing of the delivery adopted) takes back the holds this run created from a local
-        SRC; a hold that predates the run, or one of a remote SRC, stays held, reported ``failed``.
+        SRC; a hold that predates the run, or one of a remote SRC, stays held, reported ``failed`` (one that predates
+        the run with the conditional remedy, when that is known of a remote SRC's).
         """
 
-        src, dst, arguments = self.src, self.dst, self.arguments
+        src, dst = self.src, self.dst
         ids = [hold.transfer_id for hold in holds]
         self.answered = self.answered or document.get("workspace_id")
         if "refused" in document:
@@ -2706,25 +2794,18 @@ class _Deliveries:
             if src.workspace is None:
                 message = f"refused before anything was adopted: {reason}; it stays held on {src.locator}"
                 message += f" (`httk job transfer --resume {src.locator} {dst.locator}` delivers it again)"
-                for key in ids:
-                    self.outcomes[key].update(status="failed", message=message)
+                for hold in holds:
+                    earlier = self.fresh_known and hold.transfer_id not in self.fresh
+                    self.outcomes[hold.transfer_id].update(
+                        status="failed", message=self.earlier(hold, reason, document) if earlier else message
+                    )
                 return []
             if back := [hold for hold in holds if hold.transfer_id in self.fresh]:
                 for transfer_id, update in _take_back(src, back, reason).items():
                     self.outcomes[transfer_id].update(update)
             for hold in holds:
                 if hold.transfer_id not in self.fresh:
-                    # An earlier run's delivery of this hold may have been adopted, its answer lost.
-                    remedy = _release_remedy(
-                        arguments, hold.transfer_id, self.destination_id or document.get("workspace_id"), src, dst
-                    )
-                    message = (
-                        f"refused before anything was adopted: {reason}; it stays held on {src.locator}, because "
-                        f"an earlier delivery may already have adopted it: check with `httk job show` on "
-                        f"{dst.locator}, then deliver again with `httk job transfer --resume {src.locator} "
-                        f"{dst.locator}` or, if the jobs are there, release with {remedy}, or, if they are not "
-                        f"there, take it back with `httk job adopt --workspace {src.locator} {hold.path}`"
-                    )
+                    message = self.earlier(hold, reason, document)
                     self.outcomes[hold.transfer_id].update(status="failed", message=message)
             return []
         self.entries.update(document["entries"])
@@ -2733,13 +2814,34 @@ class _Deliveries:
         self.shipped_for += holds
         return [key for key in ids if document["entries"][key]["status"] in _DELIVERED]
 
+    def earlier(self, hold: _moving.Hold, reason: str, document: dict[str, Any]) -> str:
+        """The outcome message of a refused *hold* that predates the run: it stays held, with the conditional remedy
+        (an earlier run's delivery of it may have been adopted, its answer lost)."""
+
+        src, dst = self.src, self.dst
+        remedy = _release_remedy(
+            self.arguments, hold.transfer_id, self.destination_id or document.get("workspace_id"), src, dst
+        )
+        # A remote SRC's hold is taken back by hand on its own host, where its path is.
+        where = "" if src.workspace is not None else f" on the host of {src.locator}"
+        workspace = src.locator if src.workspace is not None else src.plain
+        return (
+            f"refused before anything was adopted: {reason}; it stays held on {src.locator}, because "
+            f"an earlier delivery may already have adopted it: check with `httk job show` on "
+            f"{dst.locator}, then deliver again with `httk job transfer --resume {src.locator} "
+            f"{dst.locator}` or, if the jobs are there, release with {remedy}, or, if they are not "
+            f"there, take it back{where} with `httk job adopt --workspace {workspace} {hold.path}`"
+        )
+
     def release(self, transfer_ids: list[str]) -> None:
         """Release the delivered *transfer_ids* on SRC (step 4), recording which were released."""
 
         self.handled.update(transfer_ids)
-        # A session's request carries the ids in its header, not on a command line.
+        # A session's request carries the ids in its header, not on a command line: a bounded number a request.
         chunks = (
-            _chunks(transfer_ids, flag="--release") if self.session is None else [transfer_ids] * bool(transfer_ids)
+            _chunks(transfer_ids, flag="--release")
+            if self.session is None
+            else [transfer_ids[start : start + _RELEASE_IDS] for start in range(0, len(transfer_ids), _RELEASE_IDS)]
         )
         for chunk in chunks:
             try:
@@ -2753,12 +2855,20 @@ class _Deliveries:
 
 
 def _deliver_segment(
-    session: TransferSession, settled: "_Deliveries", holds: list[_moving.Hold], token: str, fsync: bool
+    session: TransferSession,
+    settled: "_Deliveries",
+    holds: list[_moving.Hold],
+    base: Path | None,
+    token: str,
+    fsync: bool,
 ) -> tuple[dict[str, Any], str]:
-    """One delivery of a segment for :func:`_adopt_with_retry` (:func:`_session_adopt`), recording in *settled*
-    that the session now goes with ``--sync fsync``."""
+    """One delivery of a segment for :func:`_adopt_with_retry` (:func:`_session_adopt`; the bundles uploaded from
+    *base*, a remote SRC's relay, when given), recording in *settled* that the session now goes with ``--sync
+    fsync``."""
 
     settled.fsync = settled.fsync or fsync  # a retry after a failed commit: the rest go so too
+    if base is not None:
+        holds = [replace(hold, path=str(base / hold.transfer_id)) for hold in holds]
     return _session_adopt(session, settled.src, settled.dst, settled.arguments, holds, token, fsync)
 
 
@@ -2791,56 +2901,94 @@ def _push_over_session(session: TransferSession, deliveries: list[list[_moving.H
             continue
         which = f" (segment {number} of {len(segments)})" if len(segments) > 1 else ""
         _say(arguments, f"delivering {len(segment)} bundle(s) to {dst.locator}{which}")
-        holds: list[_moving.Hold] = segment
-        resent = False
-        while holds:
-            deliver = partial(_deliver_segment, session, settled, holds)
-            try:
-                document, err = _adopt_with_retry(
-                    deliver, src, dst, arguments, len(holds), _fs.fresh_token(), settled.answered, fsync=settled.fsync
-                )
-            except _ERRORS as exc:
-                settled.fail(holds, str(exc))
-                settled.stopped = str(exc).split(";", 1)[0]
-                break
-            refused = "refused" in document
-            member = refused and not document.get("sync_failed") and not resent
-            offender: _moving.Hold | None = next(
-                (hold for hold in holds if hold.transfer_id == document.get("bundle")), None
+        _push_segment(session, settled, segment)
+
+
+def _push_segment(
+    session: TransferSession,
+    settled: _Deliveries,
+    holds: list[_moving.Hold],
+    base: Path | None = None,
+    *,
+    release: bool = True,
+) -> None:
+    """Deliver one segment over DST's transfer *session* by the rules of :func:`_push_over_session`: adopted (with
+    the retry of a failed commit, from the same bundles), its offending bundle refused and the rest sent once more,
+    or refused or unknown (*settled* says whether that stopped the session); its adopted holds released at once
+    (unless not *release*: then the batch's one release after its last segment does).
+
+    :param session: DST's open transfer session.
+    :param settled: The batch's deliveries, updated in place.
+    :param holds: The segment's holds.
+    :param base: The local directory holding the bundles as ``<transfer_id>/`` (a remote SRC's relay); by default
+        each hold's own path.
+    :param release: Release the adopted holds right after the segment.
+    """
+
+    src, dst, arguments = settled.src, settled.dst, settled.arguments
+    resent = False
+    while holds:
+        deliver = partial(_deliver_segment, session, settled, holds, base)
+        try:
+            document, err = _adopt_with_retry(
+                deliver, src, dst, arguments, len(holds), _fs.fresh_token(), settled.answered, fsync=settled.fsync
             )
-            if member and offender is not None:
-                # One bundle's member was refused: that bundle alone is refused, the others go once more without it.
-                settled.settle([offender], document)
-                holds, resent = [hold for hold in holds if hold is not offender], True
-                continue
-            done = settled.settle(holds, document)
-            if not refused:
-                _relay(dst, arguments, err)
-                settled.release(done)
-            elif not any(document.get(key) for key in ("bundle", "sync_failed", "stream_aborted")):
-                # Refused as a whole, by the far side's statement (an unknown or sealed workspace, a quota), whatever
-                # this side's upload did: every later segment would be too.
-                settled.stopped, settled.refusal = f"{dst.locator}: {document['refused']}", document
+        except _ERRORS as exc:
+            settled.fail(holds, str(exc))
+            settled.stopped = str(exc).split(";", 1)[0]
             break
+        refused = "refused" in document
+        if refused and base is not None and document.get("stream_aborted"):
+            # The upload of this side's own relay failed (it could not be read): a local failure naming no hold.
+            settled.settle(holds, document)
+            settled.stopped = f"this machine's relay could not be read while it was sent to {dst.locator}"
+            break
+        member = refused and not document.get("sync_failed") and not resent
+        offender: _moving.Hold | None = next(
+            (hold for hold in holds if hold.transfer_id == document.get("bundle")), None
+        )
+        if member and offender is not None:
+            # One bundle's member was refused: that bundle alone is refused, the others go once more without it.
+            settled.settle([offender], document)
+            holds, resent = [hold for hold in holds if hold is not offender], True
+            continue
+        done = settled.settle(holds, document)
+        if not refused:
+            _relay(dst, arguments, err)
+            if release:
+                settled.release(done)
+        elif not any(document.get(key) for key in ("bundle", "sync_failed", "stream_aborted")):
+            # Refused as a whole, by the far side's statement (an unknown or sealed workspace, a quota), whatever
+            # this side's upload did: every later segment would be too.
+            settled.stopped, settled.refusal = f"{dst.locator}: {document['refused']}", document
+        break
 
 
 def _receive_part(
-    session: TransferSession, settled: _Deliveries, holds: list[_moving.Hold], landing: Path, fsync: bool
+    session: TransferSession,
+    settled: _Deliveries,
+    holds: list[_moving.Hold],
+    landing: Path,
+    fsync: bool,
+    *,
+    relay: bool = False,
 ) -> tuple[str, Any]:
     """One ``send`` request of a pull's segment (or of what is left of it) on *session*, received into *landing* in
-    the local DST: what happened, and what it is about.
+    the local DST (or, with *relay*, in a relay on the way to a remote DST): what happened, and what it is about.
 
     The download is extracted into *landing* (:func:`httk.workflow._landing.receive_tar`, the trust boundary), its
     terminal validated, and the landing made durable (a sync barrier entered before its first byte; with *fsync*
-    every file synchronized as it is written instead) before the far side's answer is read. SRC may carry only a
-    prefix of *holds* (it closes a request at :data:`_SEGMENT_BYTES` or :data:`_SEGMENT_MEMBERS`); its answer must
-    name exactly what arrived.
+    every file synchronized as it is written instead) before the far side's answer is read. A relay is extracted by
+    the same rules and its terminal validated, but nothing is synchronized (:func:`_extract_relay`). SRC may carry
+    only a prefix of *holds* (it closes a request at :data:`_SEGMENT_BYTES` or :data:`_SEGMENT_MEMBERS`); its answer
+    must name exactly what arrived.
 
-    :param session: The pull's transfer session.
+    :param session: SRC's transfer session.
     :param settled: The batch's deliveries.
     :param holds: The holds to fetch, in order.
     :param landing: The landing directory, which must not exist yet.
     :param fsync: Synchronize every file as it is written.
+    :param relay: *landing* is a relay (see above).
     :return: ``("received", sent)`` (the transfer ids that arrived, a prefix of *holds*, in *landing*);
         ``("sync", reason)`` (the landing's ``syncfs`` commit failed under ``io.sync_errors`` ``fail``);
         ``("refused", (ids, reason, gone))`` (SRC could not send those holds, *gone* the ones it no longer has, or
@@ -2851,8 +2999,9 @@ def _receive_part(
     """
 
     src, dst, arguments = settled.src, settled.dst, settled.arguments
-    assert dst.workspace is not None
-    workspace = dst.workspace
+    workspace = None if relay else dst.workspace
+    assert relay or workspace is not None
+    where = "this machine's relay" if relay else dst.locator
     ids = [hold.transfer_id for hold in holds]
     header = {
         "workspace": src.plain,
@@ -2865,6 +3014,9 @@ def _receive_part(
 
     def download(stream: BinaryIO) -> None:
         assert isinstance(stream, StreamReader)
+        if workspace is None:
+            received[:] = _extract_relay(landing, stream)
+            return
         # The terminal is validated (stream.finish) before the commit, and the commit precedes the answer.
         received[:] = _landing.receive_tar(
             workspace, landing, stream, barrier=True, force_fsync=fsync, finish=stream.finish, quiet=arguments.quiet
@@ -2892,8 +3044,8 @@ def _receive_part(
         if isinstance(cause, _landing.CommitFailed):
             return "sync", str(cause)
         if isinstance(cause, _landing.StreamRefused) and cause.bundle in ids:
-            return "refused", ([cause.bundle], f"refused in {dst.locator}: {cause}", [])
-        return "failed", f"the copy from {src.locator} was refused in {dst.locator}: {cause}"
+            return "refused", ([cause.bundle], f"refused in {where}: {cause}", [])
+        return "failed", f"the copy from {src.locator} was refused in {where}: {cause}"
     sent = response.get("sent")
     if not isinstance(sent, list) or not sent or sent != ids[: len(sent)] or sorted(sent) != received:
         session.close()  # a far side that answers something else is not asked anything more
@@ -3057,7 +3209,9 @@ def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settle
 
 def _fail_offenders(settled: _Deliveries, holds: list[_moving.Hold], reason: str, gone: list[str]) -> None:
     """Fail the holds SRC could not send (or this side refused) with *reason*; those in *gone* are no longer on SRC
-    (another actor released or took them), which the message says instead of their staying held there."""
+    (another actor released or took them), which the message says instead of their staying held there. A hold an
+    earlier run left, when that is known (remote → remote), gets the conditional remedy: an earlier delivery of it
+    may have been adopted."""
 
     src, dst = settled.src, settled.dst
     for hold in holds:
@@ -3067,8 +3221,253 @@ def _fail_offenders(settled: _Deliveries, holds: list[_moving.Hold], reason: str
                 f"`httk job show` on {src.locator} and on {dst.locator} where its jobs are"
             )
             settled.fail([hold], message, complete=True)
+        elif settled.fresh_known and hold.transfer_id not in settled.fresh:
+            settled.fail([hold], settled.earlier(hold, reason, {}), complete=True)
         else:
             settled.fail([hold], reason)
+
+
+def _pull_relay(settled: _Deliveries, holds: list[_moving.Hold], landing: Path) -> tuple[str, Any]:
+    """Fetch *holds* of a remote SRC that serves no transfer session into the relay directory *landing* with the
+    adapter's ``pull`` (a call per 64 KiB of ids).
+
+    :param settled: The batch's deliveries.
+    :param holds: The holds, in order.
+    :param landing: The relay directory.
+    :return: ``("received", ids)``, every one; or ``("failed", reason)``, naming no hold.
+    """
+
+    src, context, arguments = settled.src, settled.context, settled.arguments
+    ids = [hold.transfer_id for hold in holds]
+    outgoing = str(PurePosixPath(holds[0].path).parent)
+    try:
+        for chunk in _chunks(ids):  # a pull names its files on the far side's command line
+            _adapter(src, context, arguments, "pull", outgoing, str(landing), chunk)
+    except _ERRORS as exc:
+        return "failed", f"copying from {src.locator} into this machine's relay failed: {exc}"
+    return "received", ids
+
+
+def _make_relay() -> "tempfile.TemporaryDirectory[str] | str":
+    """A new relay, a temporary directory of this machine (the default temporary location: ``TMPDIR``), or why it
+    could not be made (a local refusal naming no hold)."""
+
+    try:
+        return tempfile.TemporaryDirectory(prefix="httk-transfer-")
+    except OSError as exc:
+        return f"this machine's relay could not be made: {exc}"
+
+
+def _remove_relay(relay: "tempfile.TemporaryDirectory[str]") -> str | None:
+    """Remove *relay*: ``None``, or why it could not be removed (a local failure, which stops the pair)."""
+
+    try:
+        relay.cleanup()
+    except OSError as exc:
+        return f"this machine's relay could not be removed: {exc}"
+    return None
+
+
+def _relay_over_session(
+    session: TransferSession, holds: list[_moving.Hold], settled: _Deliveries, source: TransferSession | None
+) -> None:
+    """Deliver the batch *holds* of a remote SRC to a remote DST over DST's transfer *session*, segment by segment,
+    each through a local temporary relay (plan §7.9).
+
+    Segments close at :data:`_SEGMENT_BUNDLES`. Each part of a segment is fetched into its own relay, a temporary
+    directory of this machine (``TMPDIR``) removed once the part is settled: over SRC's transfer session *source*
+    with one ``send`` request (SRC closes it at :data:`_SEGMENT_BYTES` or :data:`_SEGMENT_MEMBERS`, so a segment may
+    take several), extracted by the untrusted-tar rules and its terminal validated before the relay is used; without
+    one, with the adapter's ``pull``. The part is then delivered by the rules of a push (:func:`_push_segment`: a
+    failed commit's retry goes from the same relay, an offending bundle fails and the rest go once more from it) and
+    its adopted holds are released on SRC at once over *source* (without it, by the batch's one adapter release after
+    the last segment, as before sessions). A remote SRC never takes a hold back: every refusal leaves its holds held
+    there. Per segment, as in a pull:
+
+    - holds SRC cannot send (gone, or changed while read), or whose member the relay refuses, fail and the rest is
+      fetched once more without them; after a second such refusal the rest of the segment is not fetched;
+    - a refusal naming no hold (by SRC, or a local one: a relay that cannot be made, written, read or removed, a full
+      disk), a failed SRC session or an unusable answer stops the transfer to DST, that part and every later hold
+      held on SRC (what earlier parts settled stays settled);
+    - so do an unknown outcome at DST, a refusal of a whole segment and another ``workspace_id``
+      (:func:`_push_segment`).
+
+    :param session: DST's open transfer session.
+    :param holds: The batch, in order.
+    :param settled: The batch's deliveries, updated in place.
+    :param source: SRC's open transfer session, or ``None`` when SRC takes the adapter operations.
+    """
+
+    src, dst, arguments = settled.src, settled.dst, settled.arguments
+    resume = f"`httk job transfer --resume {src.locator} {dst.locator}`"
+    segments = _segments(holds, measure=lambda _hold: (0, 0))
+    for number, segment in enumerate(segments, 1):
+        which = f" (segment {number} of {len(segments)})" if len(segments) > 1 else ""
+        pending: list[_moving.Hold] = segment
+        resent = False
+        if settled.stopped is None:
+            _say(arguments, f"copying {len(segment)} bundle(s) from {src.locator}{which}")
+        while pending and settled.stopped is None:
+            relay = _make_relay()
+            detail: Any
+            if isinstance(relay, str):
+                kind, detail = "failed", relay
+            else:
+                try:
+                    landing = Path(relay.name) / "outgoing"
+                    if source is not None:
+                        kind, detail = _receive_part(source, settled, pending, landing, False, relay=True)
+                    else:
+                        kind, detail = _pull_relay(settled, pending, landing)
+                    if kind == "received":
+                        part, pending = pending[: len(detail)], pending[len(detail) :]
+                        _say(arguments, f"delivering {len(part)} bundle(s) to {dst.locator}{which}")
+                        # Without SRC's session, its holds are released by the batch's one adapter release at the end.
+                        _push_segment(session, settled, part, landing, release=source is not None)
+                finally:
+                    removed = _remove_relay(relay)
+                if removed is not None and kind != "failed":
+                    settled.stopped = settled.stopped or removed  # what this part settled stays settled
+            if kind == "received":
+                if source is not None and not source.is_open:
+                    settled.stopped = settled.stopped or f"{src.locator}: the transfer session failed"
+            elif kind == "refused":
+                offenders, reason, gone = detail
+                _fail_offenders(settled, [hold for hold in pending if hold.transfer_id in offenders], reason, gone)
+                pending = [hold for hold in pending if hold.transfer_id not in offenders]
+                if resent and pending:
+                    message = (
+                        f"not fetched: another hold of its segment was refused twice ({offenders[0]}: {reason}); "
+                        f"it stays held on {src.locator}: --resume retries it"
+                    )
+                    settled.fail(pending, message, complete=True)
+                    pending = []
+                resent = True
+            else:
+                # SRC refused naming no hold, the session failed, SRC answered something else, or the relay could not
+                # be made or written (a full disk): nothing of this part reached DST.
+                settled.stopped = str(detail)
+                settled.fail(pending, f"{detail}; nothing of it was adopted in {dst.locator}; deliver it with {resume}")
+                pending = []
+        if pending:
+            settled.fail(
+                pending, f"not delivered, since the transfer stopped ({settled.stopped}); deliver it with {resume}"
+            )
+
+
+def _deliver_relayed(
+    source: TransferSession, settled: _Deliveries, holds: list[_moving.Hold], built_for: list[str]
+) -> None:
+    """Deliver the batch *holds* of a remote SRC to a remote DST that serves no transfer session (plan §7.9, (S, A)):
+    fetched over SRC's transfer session *source* into one relay, a ``send`` request a part of at most
+    :data:`_SEGMENT_BUNDLES` holds (SRC closes each at :data:`_SEGMENT_BYTES` or :data:`_SEGMENT_MEMBERS`), then
+    what arrived delivered with one adapter ``deliver`` (:func:`_deliver_adoption`: a failed commit's retry goes from
+    the same relay, nothing is fetched again), asking about *built_for*, and settled in *settled*. Holds SRC cannot
+    send, or whose member the relay refuses, fail and the rest of their part is fetched once more without them (after
+    a second such refusal the rest of the part is not fetched); a refusal naming no hold, a local failure of the
+    relay, a failed SRC session or an unusable answer stops the transfer to DST with nothing delivered: every hold
+    stays held on SRC. An unknown outcome of the delivery, or its refusal, stops the transfer to DST too.
+
+    :param source: SRC's open transfer session.
+    :param settled: The batch's deliveries, updated in place.
+    :param holds: The batch, in order.
+    :param built_for: The workflow ids DST reports with the adoption.
+    """
+
+    src, dst, context, arguments = settled.src, settled.dst, settled.context, settled.arguments
+    resume = f"`httk job transfer --resume {src.locator} {dst.locator}`"
+
+    def stop(reason: str) -> None:
+        settled.stopped = settled.stopped or reason
+        message = f"{reason}; nothing of it was delivered to {dst.locator}; deliver it with {resume}"
+        settled.fail([hold for hold in holds if hold.transfer_id not in settled.entries], message)
+
+    _say(arguments, f"copying {len(holds)} bundle(s) from {src.locator}")
+    relay = _make_relay()
+    if isinstance(relay, str):
+        stop(relay)
+        return
+    document: dict[str, Any] | None = None
+    arrived: list[_moving.Hold] = []
+    try:
+        base = Path(relay.name)
+        outgoing = base / "outgoing"
+        number = 0
+        for window in _segments(holds, measure=lambda _hold: (0, 0)):
+            pending, resent = window, False
+            while pending:
+                number += 1
+                part = base / f"part-{number}"
+                kind, detail = _receive_part(source, settled, pending, part, False, relay=True)
+                if kind == "received":
+                    try:
+                        for transfer_id in detail:
+                            _fs.move_owned(_fs.loc(part / transfer_id), _fs.loc(outgoing / transfer_id), durable=False)
+                        _fs.discard(_fs.loc(part), trash_dir=base, durable=False)
+                    except _ERRORS as exc:
+                        stop(f"this machine's relay failed: {exc}")
+                        return
+                    arrived, pending = [*arrived, *pending[: len(detail)]], pending[len(detail) :]
+                elif kind == "refused":
+                    offenders, reason, gone = detail
+                    _fail_offenders(settled, [hold for hold in pending if hold.transfer_id in offenders], reason, gone)
+                    pending = [hold for hold in pending if hold.transfer_id not in offenders]
+                    if resent and pending:
+                        message = (
+                            f"not fetched: another hold of its part was refused twice ({offenders[0]}: {reason}); "
+                            f"it stays held on {src.locator}: --resume retries it"
+                        )
+                        settled.fail(pending, message, complete=True)
+                        pending = []
+                    resent = True
+                else:
+                    stop(str(detail))
+                    return
+        if not arrived:
+            return
+        ids = [hold.transfer_id for hold in arrived]
+        _say(arguments, f"delivering {len(ids)} bundle(s) to {dst.locator}")
+        try:
+            document = _deliver_adoption(
+                src, dst, context, arguments, str(outgoing), ids, _fs.fresh_token(), built_for, settled.answered
+            )
+        except _ERRORS as exc:
+            settled.fail(arrived, str(exc))
+            settled.stopped = settled.stopped or str(exc).split(";", 1)[0]
+            return
+    finally:
+        removed = _remove_relay(relay)
+        if removed is not None:
+            settled.stopped = settled.stopped or removed
+    settled.settle(arrived, document)
+    if "refused" in document:
+        settled.stopped = settled.stopped or f"{dst.locator}: {document['refused']}"
+
+
+def _contained(settled: _Deliveries, holds: list[_moving.Hold], deliver: Callable[[], object]) -> None:
+    """Run *deliver*, the remote → remote delivery of *holds*, containing an unexpected error to the pair: it stops,
+    and the holds it had not settled are reported held on SRC unless adopted (what it settled stays settled).
+
+    :param settled: The batch's deliveries.
+    :param holds: The holds *deliver* delivers.
+    :param deliver: The delivery.
+    """
+
+    try:
+        deliver()
+    except _ERRORS as exc:
+        src, dst = settled.src, settled.dst
+        settled.stopped = settled.stopped or f"{dst.locator}: the transfer failed while it was driven: {exc}"
+        left = [
+            hold
+            for hold in holds
+            if hold.transfer_id not in settled.entries and "status" not in settled.outcomes[hold.transfer_id]
+        ]
+        message = (
+            f"the transfer to {dst.locator} failed while it was driven ({exc}); it stays held on {src.locator} unless "
+            f"it was adopted: `httk job transfer --resume {src.locator} {dst.locator}` delivers or releases it"
+        )
+        settled.fail(left, message, complete=True)
 
 
 class _Pair:
@@ -3143,7 +3542,12 @@ def _drive(
     serves no session gets one adapter ``deliver`` a delivery instead. From a remote *src* to a local *dst*, the
     pull's transfer session to *src* (*source*) carries the workflows and then the holds, segment by segment
     (:func:`_pull_over_session`); without one, the adapter's ``pull`` copies them a chunk at a time and ``invoke``
-    releases them.
+    releases them. From a remote *src* to a remote *dst* (plan §7.9), every copy goes through a local temporary
+    relay: with *dst*'s transfer session (the *pair*'s), the workflows first and then segment by segment
+    (:func:`_relay_over_session`), each fetched over *src*'s transfer session (*source*) when it serves one, else
+    with the adapter's ``pull``; without one, *src*'s session fetches the batch into one relay for one adapter
+    ``deliver`` (:func:`_deliver_relayed`), or, serving none either, the adapter operations relay it as before
+    sessions. A remote *src* never takes a hold back.
 
     With *pair*, the batch is one page of a paged transfer (plan §7.8), or an adapter pair's gathered holds: the
     pair's session, pinned ``workspace_id``, sticky fsync and workflow attempts carry over from its earlier pages
@@ -3156,9 +3560,10 @@ def _drive(
     :param holds: The batch.
     :param context: The CLI invocation.
     :param arguments: The command's arguments.
-    :param fresh: The transfer ids of the holds this run created in a local *src*.
+    :param fresh: The transfer ids of the holds this run created in a local *src* (in a remote one too, with a
+        *pair* to a remote *dst*).
     :param sessions: Closes the command's transfer sessions at its end.
-    :param source: The command's transfer session to a remote *src* that a pull uses, if any.
+    :param source: The command's transfer session to a remote *src*, if any.
     :param pair: The pair whose page this is.
     :return: One outcome per hold, in the order of *holds*.
     """
@@ -3187,6 +3592,8 @@ def _drive(
         )
     # A pull from a remote SRC over its transfer session (opened already, by the first request to SRC).
     pulling = source.get() if source is not None and src.workspace is None and dst.workspace is not None else None
+    # Remote to remote: SRC's transfer session, which fetches into the relays and releases.
+    relaying = source.get() if source is not None and src.workspace is None and dst.workspace is None else None
     # The workflows a pair attempted on an earlier page are not attempted again.
     unattempted = ready if pair is None else _unattempted(ready, pair.shipping)
     shipping: dict[str, dict[str, Any]] = {}
@@ -3205,7 +3612,8 @@ def _drive(
     report: object = None
     by_id = {hold.transfer_id: hold for hold in ready}
     settled = _Deliveries(src, dst, outcomes, fresh, context, arguments)
-    settled.session = pulling
+    settled.session = pulling or relaying
+    settled.fresh_known = pair is not None and src.workspace is None and dst.workspace is None
     if pair is not None:
         settled.answered, settled.destination_id, settled.fsync = pair.answered, pair.destination_id, pair.fsync
     session: TransferSession | None = None
@@ -3235,7 +3643,7 @@ def _drive(
                 [hold for hold in ready if hold.transfer_id in fresh],
             ]
         deliveries = [delivery for delivery in deliveries if delivery]
-        if src.workspace is not None and pair is not None:
+        if pair is not None:
             session = pair.session  # opened (or found not served) before the pair's first hold
         elif src.workspace is not None:
             try:
@@ -3252,24 +3660,33 @@ def _drive(
             stepped = [hold for delivery in deliveries for hold in delivery]
             try:
                 attempt = stepped if pair is None else _unattempted(stepped, pair.shipping)
-                shipping = _session_workflows(session, src, dst, attempt, context, arguments)
+                shipping = _session_workflows(session, src, dst, attempt, context, arguments, relaying)
                 failure = None if session.is_open else "while installing the workflows"
+                failed = dst.locator
+                if failure is None and relaying is not None and not relaying.is_open:
+                    failure, failed = "while its workflows were fetched", src.locator
             except SessionFailed as exc:
-                failure = str(exc)
+                failure, failed = str(exc), dst.locator
             if failure is not None:
                 message = (
-                    f"{dst.locator}: the transfer session failed before anything was adopted ({failure}); deliver "
+                    f"{failed}: the transfer session failed before anything was adopted ({failure}); deliver "
                     f"it with `httk job transfer --resume {src.locator} {dst.locator}`"
                 )
                 for delivery in deliveries:
                     settled.fail(delivery, message)
                 deliveries = []
-                settled.stopped = f"{dst.locator}: the transfer session failed ({failure})"
+                settled.stopped = f"{failed}: the transfer session failed ({failure})"
                 unshipped = True
-        if session is not None:
+        if session is not None and src.workspace is None:
+            for delivery in deliveries:
+                _contained(settled, delivery, partial(_relay_over_session, session, delivery, settled, relaying))
+        elif session is not None:
             _push_over_session(session, deliveries, settled)
         for delivery in deliveries if session is None else ():
             built_for = sorted({entry[0] for hold in delivery for entry in hold.workflows or ()}) if workflows else []
+            if relaying is not None:
+                _contained(settled, delivery, partial(_deliver_relayed, relaying, settled, delivery, built_for))
+                continue
             try:
                 document = _deliver_remote(
                     src, dst, delivery, context, arguments, _fs.fresh_token(), built_for, expected=settled.answered
@@ -3305,7 +3722,9 @@ def _drive(
         # After the adoption, from its report: a manager skips a ready job whose workflow is not installed yet.
         # Only for the holds of a delivery that answered with an adoption (its report covers no other). Over a
         # session they were installed before the first segment.
-        shipping = _ship_workflows(src, dst, shipped_for, context, arguments, _reported_workflows(report))
+        shipping = _ship_workflows(
+            src, dst, shipped_for, context, arguments, _reported_workflows(report), source=relaying
+        )
     settled.release([transfer_id for transfer_id in delivered if transfer_id not in settled.handled])
     for transfer_id in delivered:
         # A local release keeps copies only of a hold it took that records its destination's id, or for which the
@@ -3514,8 +3933,7 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     outcomes: list[dict[str, Any]] = []
     #: The listed jobs left out as changed since the listing, when the selection was paged.
     changed: int | None = None
-    # Each remote end's transfer session, closed at the end: a remote DST's of a push, a remote SRC's of a pull (a
-    # remote-to-remote transfer still takes the adapter operations).
+    # Each remote end's transfer session, closed at the end: a remote DST's, a remote SRC's.
     with contextlib.ExitStack() as sessions:
         if selected:
             assert dst is not None
@@ -3545,10 +3963,10 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
             changed = _transfer_local(run, selection)
             outcomes, errors = run.outcomes, run.errors
         else:
-            pull = dst is None or dst.workspace is not None
-            source = _SourceSession(src, context, arguments, sessions) if pull else None
+            # A remote SRC's session decides first (step 0 is its select); each DST's at its pair's first use.
+            source = _SourceSession(src, context, arguments, sessions)
             try:
-                session = None if source is None else source.get()
+                session = source.get()
             except _ERRORS as exc:
                 if not selected:
                     raise
@@ -3590,13 +4008,45 @@ def _transfer_adapter(
 ) -> None:
     """A transfer from a remote SRC on the adapter path, hold-everything-first as before sessions: the selection held
     with ``job transfer --hold`` there, then every hold bound for DST (with ``--resume`` and no DST: every hold)
-    driven, each destination's as one batch."""
+    driven, each destination's as one batch.
+
+    A remote DST that serves a transfer session (plan §7.9, (A, S)) gets it opened before anything is held for it
+    (for ``--resume``, before its batch is driven; one that cannot open holds or drives nothing), and its batch is
+    relayed segment by segment over it (:func:`_relay_over_session`, which fetches with the adapter's ``pull``).
+    With a DST that serves none, nothing changes."""
+
+    pairs: dict[str, _Pair | str | None] = {}
+
+    def pair_of(end: _End) -> _Pair | str | None:
+        """The pair of a remote *end* that serves a transfer session (decided at the first call), or why its session
+        did not open; ``None`` for a local end or one that serves no session (nothing changes for those)."""
+
+        if end.workspace is not None:
+            return None
+        if end.locator not in pairs:
+            try:
+                session = None if _session_disabled(end, context) else _push_session(end, context, arguments, sessions)
+            except _ERRORS as exc:
+                pairs[end.locator] = str(exc)
+            else:
+                pair = None
+                if session is not None:
+                    pair = _Pair(end)
+                    pair.mode, pair.session = "page", session
+                pairs[end.locator] = pair
+        return pairs[end.locator]
 
     known: list[_moving.Hold] | None = None
+    fresh: frozenset[str] = frozenset()
     if arguments.jobs or arguments.state or arguments.step:
         assert dst is not None
+        if isinstance(failed := pair_of(dst), str):
+            # Before anything is held: a destination that cannot take the jobs would only leave them held.
+            errors.append(f"{dst.locator}: the transfer session did not open: {failed}; nothing was held")
+            return
         _holding(arguments, src)
         held, before = _hold_jobs(src, dst, context, arguments, errors)
+        fresh = frozenset(hold.transfer_id for hold in held)
         if before is not None:
             # SRC listed the other holds bound for DST with the hold: no transfer status call.
             known = sorted({hold.transfer_id: hold for hold in [*before, *held]}.values(), key=lambda h: h.transfer_id)
@@ -3618,12 +4068,52 @@ def _transfer_adapter(
                 continue
         batches.setdefault(locator, []).append(hold)
     for locator, holds in batches.items():
-        outcomes.extend(_drive(src, ends[locator], holds, context, arguments, sessions=sessions))
+        pair = pair_of(ends[locator])
+        if pair is None:
+            outcomes.extend(_drive(src, ends[locator], holds, context, arguments, sessions=sessions))
+            continue
+        resume = f"`httk job transfer --resume {src.locator} {locator}`"
+        if isinstance(pair, str):
+            message = f"{locator}: the transfer session did not open: {pair}; it stays held on {src.locator}: {resume}"
+            outcomes.extend(
+                {
+                    "transfer_id": hold.transfer_id,
+                    "members": list(hold.members),
+                    "destination": locator,
+                    "status": "failed",
+                    "message": message,
+                }
+                for hold in holds
+            )
+            continue
+        try:
+            outcomes.extend(_drive(src, pair.dst, holds, context, arguments, fresh=fresh, sessions=sessions, pair=pair))
+        except _ERRORS as exc:
+            # Contained to this destination, as a paged transfer's pair is.
+            pair.stopped = pair.stopped or str(exc)
+            message = (
+                f"the transfer to {locator} failed while it was driven ({exc}); it stays held on {src.locator} "
+                f"unless it was adopted: {resume} delivers or releases it"
+            )
+            outcomes.extend(
+                {
+                    "transfer_id": hold.transfer_id,
+                    "members": list(hold.members),
+                    "destination": locator,
+                    "status": "failed",
+                    "message": message,
+                }
+                for hold in holds
+            )
+        if pair.stopped is not None:
+            errors.append(
+                f"the transfer to {locator} stopped: {pair.stopped}; {resume} drives the holds left on {src.locator}"
+            )
 
 
 class _Transfer:
     """One paged transfer (plan §7.8): a local SRC's (push, local → local), or a remote SRC's over its transfer
-    session (pull); its pairs of ends, outcomes and errors.
+    session (pull, and remote → remote, plan §7.9); its pairs of ends, outcomes and errors.
 
     :param src: The source end.
     :param dst: The destination end; ``None`` for ``--resume`` without DST (each hold goes where it records).
@@ -3693,18 +4183,19 @@ class _Transfer:
         return [(self.pair(self.ends[locator]), group) for locator, group in groups.items()]
 
     def start(self, pair: _Pair) -> None:
-        """Decide how *pair* is driven, at its first use (before its first hold is made or driven): a push opens its
-        DST's transfer session here (one that cannot open stops the pair: nothing of it is held), or finds it not
-        served and gathers the pair's holds for the adapter operations; remote → remote takes those too."""
+        """Decide how *pair* is driven, at its first use (before its first hold is made or driven): a remote DST's
+        transfer session is opened here (one that cannot open stops the pair: nothing of it is held), or found not
+        served, and the pair's holds are then gathered for the adapter operations (remote → remote: for one adapter
+        delivery relayed over SRC's session, plan §7.9)."""
 
         if pair.mode is not None:
             return
         pair.mode = "page"
         if pair.dst.workspace is not None:
             return
-        if self.src.workspace is None or _session_disabled(pair.dst, self.context):
-            # Remote → remote (T4), or a DST that serves no session by its setting: the adapter operations, as before
-            # sessions (nothing opened, nothing said).
+        if _session_disabled(pair.dst, self.context):
+            # A DST that serves no session by its setting: the adapter operations, as before sessions (nothing
+            # opened, nothing said).
             pair.mode = "adapter"
             return
         try:
@@ -3724,7 +4215,8 @@ class _Transfer:
         :param fresh: Those this run created.
         """
 
-        self.start(pair)
+        if pair.stopped is None:
+            self.start(pair)  # not for a stopped pair: no session is opened for it
         if pair.stopped is not None:
             self.outcomes += self._undriven(pair, holds)
             return
@@ -3792,7 +4284,12 @@ class _Transfer:
 
         src = self.src
         unlisted = f"the holds not yet listed stay held on {src.locator}; " if self.unlisted else ""
-        for pair in self.pairs.values():
+        for pair in list(self.pairs.values()):
+            if pair.held and pair.stopped is None and self.source is not None:
+                session = self.source.get()
+                if session is not None and not session.is_open:
+                    # SRC's session failed while an earlier pair was driven: every pair stops.
+                    self.stop_all(f"the transfer session to {src.locator} failed")
             if pair.held and pair.stopped is None:
                 holds = sorted(pair.held, key=lambda hold: hold.transfer_id)
                 try:
@@ -3804,6 +4301,7 @@ class _Transfer:
                         self.arguments,
                         fresh=frozenset(pair.fresh),
                         sessions=self.sessions,
+                        source=self.source,
                         pair=pair,
                     )
                 except _ERRORS as exc:
@@ -4121,7 +4619,7 @@ def _pull_pages(run: _Transfer, session: TransferSession, pair: _Pair) -> tuple[
         left = remaining
         _oversized(run, oversized)
         if holds:
-            run.drive(pair, holds)
+            run.drive(pair, holds, fresh=frozenset(hold.transfer_id for hold in holds))  # made by this run
         if not session.is_open:
             return left, False, carried, changed, f"the transfer session to {src.locator} failed"
         if done:

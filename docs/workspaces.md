@@ -158,9 +158,9 @@ everyone on it:
   another user's error cannot fail). Over a push's transfer session this is one
   more request on it, per segment, and every later segment of the session is
   then synchronized file by file at once; without a session it costs one more
-  connection and one more remote `httk` start, only when it happens, and a
-  push from a remote workspace delivers its local copies again rather than
-  fetching them anew. If
+  connection and one more remote `httk` start, only when it happens. A
+  push from a remote workspace (remote to remote) delivers its relayed local
+  copies again rather than fetching them anew. If
   that delivery is refused too, a push from a local workspace takes the jobs
   it held itself back into the source (`not_moved`; run the transfer again),
   and from a remote workspace its jobs stay held there (`job transfer

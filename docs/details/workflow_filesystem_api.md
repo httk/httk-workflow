@@ -748,8 +748,8 @@ primed commit, which still fails, is not retried; job creation, `job submit`,
   into a fresh landing scratch under a fresh, primed barrier (one more adapter
   `pull`); a clean commit of that one proves it durable, and a second failure
   fails the chunk with its holds kept at the source (`--resume` delivers it
-  again). A failed walk of strategy `fsync` is exact and not pulled again. A remote-to-remote relay's pull leg has no barrier
-  (a temporary copy); its delivery follows the push rule;
+  again). A failed walk of strategy `fsync` is exact and not pulled again. A remote-to-remote relay (with or without
+  sessions) has no barrier (a temporary copy); its delivery follows the push rule;
 - landing copies are discarded and made once more with an fsync of every file
   (their sources are untouched), the chunk failing with its holds kept if that
   fails, while any other copy error fails the chunk at once.
