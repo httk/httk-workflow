@@ -12,6 +12,8 @@ decision here depends on a clock; time only paces visibility retries and dates
 records.
 """
 
+import contextlib
+import contextvars
 import dataclasses
 import enum
 import errno
@@ -84,6 +86,7 @@ __all__ = [
     "list_jobs",
     "list_names",
     "list_owners",
+    "listing_progress",
     "locate",
     "locate_many",
     "parse_job_name",
@@ -361,6 +364,35 @@ def _pause(seconds: float) -> None:
     time.sleep(seconds)
 
 
+#: What :func:`listing_progress` was given in this context: told once after each directory listed.
+_LISTED: contextvars.ContextVar[Callable[[], object] | None] = contextvars.ContextVar("httk_listed", default=None)
+
+
+@contextlib.contextmanager
+def listing_progress(tell: Callable[[], object]) -> Iterator[None]:
+    """Call *tell* once after each directory :func:`list_names` (or a walk of placements) lists in this context, and
+    in the worker threads of :mod:`httk.workflow._pool` it starts (which run in a copy of it; other threads do not
+    see it): a transfer session's far side reports it as progress, so that a slow listing of a large placement is not
+    taken for a stalled request.
+
+    :param tell: Called with no arguments, after the listing (a missing directory counts as listed); an exception it
+        raises is ignored, so that it never changes a listing's result.
+    :return: A context manager.
+    """
+
+    token = _LISTED.set(tell)
+    try:
+        yield
+    finally:
+        _LISTED.reset(token)
+
+
+def _listed() -> None:
+    if (tell := _LISTED.get()) is not None:
+        with contextlib.suppress(Exception):  # an observer never masks the listing's result
+            tell()
+
+
 def list_names(directory: Path) -> list[str]:
     """List a directory's entry names, sorted; a missing directory (or a non-directory) has none.
 
@@ -372,6 +404,8 @@ def list_names(directory: Path) -> list[str]:
         return sorted(os.listdir(directory))
     except (FileNotFoundError, NotADirectoryError):
         return []
+    finally:
+        _listed()
 
 
 def _subdirectories(directory: Path) -> list[str]:
@@ -380,6 +414,8 @@ def _subdirectories(directory: Path) -> list[str]:
             return sorted(entry.name for entry in listing if entry.is_dir(follow_symlinks=False))
     except (FileNotFoundError, NotADirectoryError):
         return []
+    finally:
+        _listed()
 
 
 def _read_bytes(path: Path, limit: int) -> bytes | None:

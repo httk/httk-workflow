@@ -115,6 +115,7 @@ __all__ = [
     "Busy",
     "EjectReport",
     "Hold",
+    "WorkflowCache",
     "adopt",
     "away_root",
     "destination_problem",
@@ -1631,6 +1632,12 @@ def _outgoing(workspace: _kernel.KernelWorkspace) -> Path:
     return workspace.control / "transfers" / "outgoing"
 
 
+#: The store's resolution of workflow roots (:func:`httk.workflow._store.resolve_calls` of each root alone), by root
+#: reference: filled by the holds of one page, dropped at its end, so that a workflow installed meanwhile is seen by
+#: the next page.
+type WorkflowCache = dict[str, dict[str, _store.Installed | None]]
+
+
 def hold(
     workspace: "Workspace",
     owner: Owner,
@@ -1640,6 +1647,7 @@ def hold(
     destination_locator: str | None = None,
     destination_workspace_id: str | None = None,
     workflows: bool = False,
+    workflow_cache: WorkflowCache | None = None,
 ) -> Hold:
     """Eject into this workspace's own ``transfers/outgoing/<transfer-id>/``: the held bundle of a transfer.
 
@@ -1652,6 +1660,7 @@ def hold(
         resumption adopts only into that workspace.
     :param workflows: Also report the workflows its members need (:attr:`Hold.workflows`); when they cannot be
         resolved the hold, published already, reports none (``None``) and a warning is logged.
+    :param workflow_cache: The page's workflow resolutions, used and filled (see :data:`WorkflowCache`).
     :return: The hold.
     :raises Busy: As :func:`eject`, which also gives the other failures and their outcome: *root*'s handle is
         retired whatever happens.
@@ -1670,16 +1679,18 @@ def hold(
     needed = None
     if workflows:
         try:
-            needed = _needed_workflows(workspace, report.destination, manifest)
+            needed = _needed_workflows(workspace, report.destination, manifest, cache=workflow_cache)
         except Exception as exc:  # the hold is published: it is reported, without its workflows, whatever this is
             _LOGGER.warning("the workflows of hold %s could not be resolved: %s", manifest.transfer_id, exc)
     return Hold.from_manifest(report.destination, manifest, needed)
 
 
 def _needed_workflows(
-    workspace: _kernel.KernelWorkspace, bundle: Path, manifest: BundleManifest
+    workspace: _kernel.KernelWorkspace, bundle: Path, manifest: BundleManifest, *, cache: WorkflowCache | None = None
 ) -> tuple[tuple[str, str | None, str | None], ...]:
-    """The workflows a held bundle's members need, as :attr:`Hold.workflows` reports them, by id."""
+    """The workflows a held bundle's members need, as :attr:`Hold.workflows` reports them, by id; each root resolved
+    in the store once per *cache* (a page's), when one is given: at most once per root per page per worker;
+    duplicates resolve the same closure."""
 
     roots: set[str] = set()
     for member in manifest.members:
@@ -1692,8 +1703,16 @@ def _needed_workflows(
         if job.embedded is None:  # an embedded workflow travels in the job's workflow/, never in the store
             roots.add(effective_workflow(job, read_state_unowned(directory / "state.json")[0])[0])
         roots.update(bound_workflows(job))
+    if cache is None:
+        resolved = _store.resolve_calls(workspace, sorted(roots))
+    else:
+        resolved = {}
+        for root in sorted(roots):
+            if (closure := cache.get(root)) is None:
+                closure = cache[root] = _store.resolve_calls(workspace, [root])
+            resolved.update(closure)
     needed: dict[str, tuple[str, str | None, str | None]] = {}
-    for reference, found in _store.resolve_calls(workspace, sorted(roots)).items():
+    for reference, found in resolved.items():
         if found is None:
             needed.setdefault(reference, (reference, None, None))
         else:
@@ -1713,8 +1732,9 @@ def held(workspace: "Workspace", *, workflows: bool = False) -> list[Hold]:
     """
 
     holds = []
+    cache: WorkflowCache = {}  # one listing, one resolution of each root
     for name in _kernel.list_names(_outgoing(workspace)):
-        if (found := held_one(workspace, name, workflows=workflows)) is not None:
+        if (found := held_one(workspace, name, workflows=workflows, workflow_cache=cache)) is not None:
             holds.append(found)
     return holds
 
@@ -1729,12 +1749,15 @@ def held_names(workspace: _kernel.KernelWorkspace) -> list[str]:
     return [name for name in _kernel.list_names(_outgoing(workspace)) if _TRANSFER_ID.fullmatch(name)]
 
 
-def held_one(workspace: "Workspace", name: str, *, workflows: bool = False) -> Hold | None:
+def held_one(
+    workspace: "Workspace", name: str, *, workflows: bool = False, workflow_cache: WorkflowCache | None = None
+) -> Hold | None:
     """Read one held bundle, ``transfers/outgoing/<name>/``.
 
     :param workspace: The workspace.
     :param name: Its transfer id.
     :param workflows: Also report the workflows its members need (see :func:`held`).
+    :param workflow_cache: The page's workflow resolutions, used and filled (see :data:`WorkflowCache`).
     :return: The hold, or ``None`` when *name* is no transfer id or the hold is gone.
     :raises httk.workflow._bundles.BundleError: For a malformed manifest.
     """
@@ -1742,7 +1765,7 @@ def held_one(workspace: "Workspace", name: str, *, workflows: bool = False) -> H
     bundle = _outgoing(workspace) / name
     if not _TRANSFER_ID.fullmatch(name) or (read := read_manifest(bundle / "bundle.json")) is None:
         return None
-    needed = _needed_workflows(workspace, bundle, read[1]) if workflows else None
+    needed = _needed_workflows(workspace, bundle, read[1], cache=workflow_cache) if workflows else None
     return Hold.from_manifest(bundle, read[1], needed)
 
 

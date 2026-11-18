@@ -17,13 +17,16 @@ A push's segments may be staged (``stage``: received, committed and the first sc
 adopted later on the same connection (``adopt_staged``, one token a request, in staging order; plan
 WORKFLOW_TRANSFER_SESSION §7.10). Tokens are connection-local; a ``bye`` (before it answers) or the end of the input
 abandons the stages whose adoption never began (their landings discarded); after a fatal op, or when the process
-ends otherwise, they are left to recovery, which discards them.
+ends otherwise, they are left to recovery, which discards them. While ``adopt``, ``stage`` and ``adopt_staged`` run,
+every directory they list (the settle's scans, the presence lookups, any placement) advances the current phase's
+count by one (``_kernel.listing_progress``), so that a slow listing of a large placement is not taken for a stall.
 
 Accepted limitation: the far side has no read bound. A client that vanishes without closing the connection (a
 half-open TCP connection) leaves it waiting for input until the transport notices (ssh's keepalives) and ends it.
 """
 
 import argparse
+import bisect
 import contextlib
 import io
 import json
@@ -41,7 +44,7 @@ from typing import IO, TYPE_CHECKING, Any, BinaryIO, NamedTuple, Self, cast
 
 from httk.core.cli import CLIContext
 
-from .. import _frames, _fs
+from .. import _frames, _fs, _kernel
 from .._frames import (
     PROGRESS,
     REQUEST,
@@ -305,7 +308,7 @@ def _adopt(request: Request) -> Mapping[str, Any]:
     from ._job import adopt_stream
 
     context = CLIContext("httk", Path.cwd())
-    with _captured() as stderr:
+    with _captured() as stderr, _kernel.listing_progress(request.advance):
         document, returncode = adopt_stream(
             lambda: _modifiable(_workspace_arguments(workspace), context, action="adopt jobs into it"),
             upload,
@@ -394,7 +397,7 @@ def _stage(request: Request) -> Mapping[str, Any]:
     from ._transfer import _measure
 
     context = CLIContext("httk", Path.cwd())
-    with _captured() as stderr:
+    with _captured() as stderr, _kernel.listing_progress(request.advance):
         document, stage = stage_stream(
             lambda: _modifiable(_workspace_arguments(workspace), context, action="adopt jobs into it"),
             upload,
@@ -458,7 +461,7 @@ def _adopt_staged(request: Request) -> Mapping[str, Any]:
     from ._job import adopt_stage
 
     del stages[token]  # consumed: from here on, an error is fatal
-    with _captured() as stderr:
+    with _captured() as stderr, _kernel.listing_progress(request.advance):
         document, returncode = adopt_stage(entry.stage, progress=request.progress)
     return {"document": document, "returncode": returncode, "stderr": stderr.getvalue()}
 
@@ -856,18 +859,41 @@ def _hold_page(request: Request) -> Mapping[str, Any]:
     return answer
 
 
+#: The bytes of one transfer id in a frozen enumeration of holds (:func:`_holds_page`).
+_ID_BYTES = 16
+
+
+def _frozen_holds(request: Request, root: Path, list_names: Callable[[], list[str]], *, first: bool) -> bytes:
+    """The connection's frozen enumeration of the holds of the workspace at *root* (resolved): the sorted transfer
+    ids, :data:`_ID_BYTES` bytes each, one after another; taken from *list_names* by the *first* request of an
+    enumeration (``after`` null, which drops an earlier one) or by a request that finds none, and kept until
+    :func:`_holds_page` reports it exhausted."""
+
+    frozen = cast(dict[Path, bytes], request.session.setdefault("frozen_holds", {}))
+    if first:
+        frozen.pop(root, None)
+    entries = frozen.get(root)
+    if entries is None:
+        entries = frozen[root] = bytes.fromhex("".join(list_names()))
+    return entries
+
+
 def _holds_page(request: Request) -> Mapping[str, Any]:
-    """Report a page of the workspace's holds (read only; plan §7.8): a stateless cursor over the live listing of
-    ``transfers/outgoing/``.
+    """Report a page of the workspace's holds (read only; plan §7.8, §7.10): a cursor over one frozen enumeration of
+    ``transfers/outgoing/`` a connection keeps per workspace.
 
     Header: ``workspace``, ``destination`` (the locator the holds record; ``null`` for every hold), ``after`` (the
-    transfer id the page follows, ``null`` for the first) and ``limit_holds``, ``limit_members`` (clamped). The
-    names after ``after`` are read in order, at most 4096 a request (a name bound elsewhere or gone since the
-    listing is passed over), until the page has its holds, job keys or :data:`_ANSWER_BUDGET`. The response carries
-    ``holds`` (as ``transfer status --json`` lists them, with their workflows; the whole answer within
-    :data:`_ANSWER_BUDGET`, see :func:`_fit`), ``next``: the ``after`` of the next page (the name before the first
-    hold not answered), ``null`` when the listing is exhausted, and the end of the captured ``stderr``. Progress:
-    ``list`` with the holds read.
+    transfer id the page follows, ``null`` for the first) and ``limit_holds``, ``limit_members`` (clamped). A
+    request with ``after`` null starts a new enumeration of the workspace (by its resolved root): it lists the
+    transfer ids once, sorted, and freezes them for the connection (16 bytes each), dropping any earlier one; a later
+    request without one (after exhaustion) takes one too. Every request reads that enumeration from the first id
+    greater than ``after`` (which need not be one of them), at most 4096 names a request (a name bound elsewhere or gone since the listing
+    is passed over), until the page has its holds, job keys or :data:`_ANSWER_BUDGET`. A hold made after the
+    freeze is not seen by it (it belongs to another run). The response carries ``holds`` (as ``transfer status
+    --json`` lists them, with their workflows; the whole answer within :data:`_ANSWER_BUDGET`, see :func:`_fit`),
+    ``next``: the ``after`` of the next page (the name before the first hold not answered), ``null`` when the
+    enumeration is exhausted, which frees it (the next request takes a new one), and the end of the captured
+    ``stderr``. Progress: ``list`` with the holds read.
     """
 
     from .. import _moving
@@ -886,23 +912,36 @@ def _holds_page(request: Request) -> Mapping[str, Any]:
     limit_holds = _limit(header, "limit_holds", _PAGE_HOLDS)
     limit_members = _limit(header, "limit_members", _PAGE_MEMBERS)
     context = CLIContext("httk", Path.cwd())
-    #: The holds read, each with the index of its name.
+    #: The holds read, each with the index of its name in the enumeration.
     holds: list[tuple[int, Any]] = []
     following: str | None = None
     with _captured() as stderr:
         try:
             workspace = Workspace(_local_root(_workspace_arguments(workspace_name), context, action="list its holds"))
-            names = [name for name in _moving.held_names(workspace) if after is None or name > after]
+            root = Path(workspace.root).resolve()
+            entries = _frozen_holds(request, root, lambda: _moving.held_names(workspace), first=after is None)
+
+            def entry(index: int) -> bytes:
+                return entries[_ID_BYTES * index : _ID_BYTES * (index + 1)]
+
+            def name(index: int) -> str:
+                return entry(index).hex()
+
+            count = len(entries) // _ID_BYTES
+            # The first entry greater than after (a lower bound, perhaps no entry), by bisection.
+            first = 0 if after is None else bisect.bisect_right(range(count), bytes.fromhex(after), key=entry)
             members = size = 0
+            workflow_cache: _moving.WorkflowCache = {}  # this page's workflow resolutions
             request.progress("list", 0)
-            for index, name in enumerate(names):
-                if index >= _PAGE_SCANNED or len(holds) >= limit_holds or members >= limit_members:
-                    following = names[index - 1]
+            for index in range(first, count):
+                scanned = index - first
+                if scanned >= _PAGE_SCANNED or len(holds) >= limit_holds or members >= limit_members:
+                    following = name(index - 1)
                     break
                 if size >= _ANSWER_BUDGET:
-                    following = names[index - 1]
+                    following = name(index - 1)
                     break
-                hold = _moving.held_one(workspace, name, workflows=True)
+                hold = _moving.held_one(workspace, name(index), workflows=True, workflow_cache=workflow_cache)
                 request.advance()
                 if hold is None or destination not in (None, hold.destination_locator):
                     continue
@@ -915,10 +954,13 @@ def _holds_page(request: Request) -> Mapping[str, Any]:
     rest = _fit(answer, [("hold", hold) for _, hold in holds], optional=("stderr",))
     if rest:
         # The next page starts at the first hold this answer did not carry; the first hold always goes.
-        first = holds[len(holds) - len(rest)][0]
-        assert first > 0 and len(rest) < len(holds), "an answer of holds_page carries its first hold"
-        following = names[first - 1]
+        index = holds[len(holds) - len(rest)][0]
+        assert index > first and len(rest) < len(holds), "an answer of holds_page carries its first hold"
+        following = name(index - 1)
     answer["next"] = following
+    if following is None:
+        frozen = cast(dict[Path, bytes], request.session["frozen_holds"])
+        del frozen[root]  # exhausted: freed, and the next request takes a new enumeration
     return answer
 
 

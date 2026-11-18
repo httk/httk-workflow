@@ -955,7 +955,11 @@ adoption is, which may still publish its jobs; `--resume` then reports them
 already adopted. An interrupt (Ctrl-C) gives up the staged segments the same
 way; the holds already adopted are released only over a session that is still
 usable. A far side without these requests (an older `httk-workflow`) gets one
-`adopt` request a segment, which waits out its own deadline, as before.
+`adopt` request a segment, which waits out its own deadline, as before. While
+DST's far side looks for a segment's jobs (the two looks, each bundle's fresh
+look), every directory it lists counts as progress of its request, so a slow
+listing of a large placement is not taken for a far side that stopped
+answering.
 
 A pull from a remote SRC into a local DST over a transfer session first drives
 the holds an earlier run left bound for DST (every hold for `--resume` without
@@ -1134,7 +1138,12 @@ gets jobs from the first page on. The `--job` selectors are resolved and checked
 first (on a remote SRC, by SRC, in the session's first request): a bad one
 stops the command before anything is held or driven. The holds an earlier run
 left bound for DST are driven next, a page at a time from one listing; they are
-never taken back, whatever DST answers. Then the
+never taken back, whatever DST answers. A remote SRC lists the names of its
+holds once for the session (sorted, frozen, 16 bytes each; a first page asked
+for anew lists them anew) and answers each page from that listing, freeing it
+once the last page is answered: a hold made after
+the listing (by another run) is not driven by this one, and one gone since is
+passed over. Then the
 `--state` (or `--step`) listing and the jobs present in SRC (`owned` and `away`
 included) are taken once, and the selection is held page by page, in order: the
 `--job` jobs first, one at a time, then the listed ones, together over
@@ -1181,9 +1190,32 @@ Memory grows per page, except for what lives for the whole command: the
 listing (state, placement and name of each listed job), the ids present in SRC
 and those of the candidates no page looked at yet (16 bytes each, besides the
 set's own overhead), the job keys moved so far and those left to move with their
-root, the names of the earlier holds listed once (a local SRC), the workflow
-attempts, the errors gathered, and the outcomes and report, one entry a
-hold.
+root, the names of the earlier holds listed once (a local SRC; a remote SRC
+keeps them, 16 bytes each, until their last page), and the workflow attempts
+and shipped workflows (one entry a workflow). The outcomes and errors are not
+kept: each is appended to a private temporary file (unlinked at once, in
+`TMPDIR` when set) once it is final, after its release and its workflows'
+report, and the report is printed from that file at the end, exactly as it
+would be printed from memory (each of standard output and standard error); a
+command interrupted or failing before then prints no report. The file takes
+about 0.65 KB a single-job hold, about 0.65 GB for a million: for a very
+large transfer, point `TMPDIR` at a disk-backed directory, since a `tmpfs`
+`/tmp` is memory. The files are made before anything is held, so a `TMPDIR`
+that cannot take them stops the command with nothing held or moved. Should
+writing them fail later (a full disk), the transfer goes on unchanged: one
+warning says that the report could not be spooled, the rest of it is kept in
+memory, and the report printed at the end is still complete. The report is
+not also held in memory, so a spool that cannot be read back at the end (an
+I/O error on the file just written) stops the report where it is, perhaps
+leaving standard output with an incomplete JSON document, and the command
+exits with status 2 after one diagnostic on standard error: the transfers
+themselves are done as reported so far, and `httk transfer status` shows what
+is still held. Every page
+driven also adopts the staged segments of every destination whose deadline
+has passed, so that one destination's last staged segment does not hold back
+the report of the others. The workflows a page's holds need are resolved in
+the workflow store once for each root workflow a page, so a workflow installed
+meanwhile is seen by the next page.
 
 Paging is not the same as holding everything first, deliberately:
 

@@ -23,14 +23,14 @@ import tarfile
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Collection, Container, Iterator, Sequence
+from collections.abc import Callable, Collection, Container, Iterable, Iterator, Sequence
 from contextlib import redirect_stdout
 from copy import copy
 from dataclasses import dataclass, replace
 from functools import partial
 from io import StringIO
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, NamedTuple, cast
+from typing import IO, Any, BinaryIO, NamedTuple, Self, cast
 
 from httk.core.cli import CLIContext
 
@@ -679,6 +679,7 @@ def _eject_claimed(
     destination_workspace_id: str | None = None,
     owner_key: str | None = None,
     workflows: bool = False,
+    workflow_cache: _moving.WorkflowCache | None = None,
 ) -> _moving.EjectReport | _moving.Hold | str:
     """Eject or hold the claimed *root*, as :func:`eject_once` does once it won the claim.
 
@@ -691,6 +692,7 @@ def _eject_claimed(
     :param destination_workspace_id: The destination workspace's id a hold records.
     :param owner_key: The optional key that may control the adopted root through the workspace daemon.
     :param workflows: Have a hold report the workflows its members need.
+    :param workflow_cache: The page's workflow resolutions, used and filled.
     :return: The report (the hold, when held), or why it cannot move now.
     """
 
@@ -705,6 +707,7 @@ def _eject_claimed(
             destination_locator=locator,
             destination_workspace_id=destination_workspace_id,
             workflows=workflows,
+            workflow_cache=workflow_cache,
         )
     except _moving.Busy as exc:
         return str(exc)
@@ -1249,6 +1252,8 @@ class _Selection:
         made: list[_moving.Hold] = []
         size = 0 if measure is None else sum(measure(error) for error in found)
         held = handled = missed = 0
+        # The page's: a workflow installed meanwhile is seen by the next page.
+        workflow_cache: _moving.WorkflowCache = {}
 
         def full() -> bool:
             return (
@@ -1279,6 +1284,7 @@ class _Selection:
                     locator=self._locator,
                     destination_workspace_id=self._destination_id,
                     workflows=self._workflows,
+                    workflow_cache=workflow_cache,
                 )
             except _ERRORS as exc:
                 return f"{ref.job_key}: {exc}"
@@ -1380,8 +1386,9 @@ def _held_pages(
     while index < len(names):
         page: list[_moving.Hold] = []
         members = looked = 0
+        cache: _moving.WorkflowCache = {}  # the page's: a workflow installed meanwhile is seen by the next page
         while index < len(names) and len(page) < _PAGE_HOLDS and members < _PAGE_MEMBERS and looked < _PAGE_SCANNED:
-            hold = _moving.held_one(workspace, names[index], workflows=workflows)
+            hold = _moving.held_one(workspace, names[index], workflows=workflows, workflow_cache=cache)
             index += 1
             looked += 1
             if hold is not None and destination in (None, hold.destination_locator):
@@ -1412,6 +1419,7 @@ def hold_document(
 
     new = {hold.transfer_id for hold in holds}
     before = []
+    cache: _moving.WorkflowCache = {}
     for hold in _moving.held(workspace):
         if hold.destination_locator != locator or hold.transfer_id in new:
             continue
@@ -1419,7 +1427,7 @@ def hold_document(
             read = read_manifest(Path(hold.path) / "bundle.json")
         except BundleError:
             read = None  # changed since it was listed: reported without workflows, as by an older SRC
-        needed = None if read is None else _moving._needed_workflows(workspace, Path(hold.path), read[1])
+        needed = None if read is None else _moving._needed_workflows(workspace, Path(hold.path), read[1], cache=cache)
         before.append(replace(hold, workflows=needed).as_mapping())
     return {"holds": [hold.as_mapping() for hold in holds], "held_before": before, "errors": errors}
 
@@ -1531,8 +1539,8 @@ def _checked_adoption(document: Any, bundles: list[str], *, exact: bool = False)
 
     A document with ``refused`` says that nothing was adopted and lists no bundle, and with ``sync_failed`` true
     that the far side's sync commit failed (a writeback error there, possibly another user's); any other names
-    every bundle sent, each with a known status. With *exact* (a staged segment's adoption), it names exactly
-    *bundles*, each once, and nothing else.
+    every bundle sent, each with a known status (and ``missing_workflows``, when present, a list of ids). With
+    *exact* (a staged segment's adoption), it names exactly *bundles*, each once, and nothing else.
     """
 
     if not isinstance(document, dict) or not isinstance(document.get("bundles"), list):
@@ -1548,6 +1556,10 @@ def _checked_adoption(document: Any, bundles: list[str], *, exact: bool = False)
         return document
     if not all(isinstance(entry, dict) and isinstance(entry.get("bundle"), str) for entry in document["bundles"]):
         raise ValueError("an adoption entry without its bundle")
+    for entry in document["bundles"]:
+        missing = entry.get("missing_workflows", [])
+        if not isinstance(missing, list) or not all(isinstance(workflow, str) for workflow in missing):
+            raise ValueError(f"an adoption entry whose missing_workflows is no list of ids: {entry['bundle']}")
     entries = {entry["bundle"]: entry for entry in document["bundles"] if entry.get("status") in _ADOPT_STATUSES}
     if workspace_id is None or not all(bundle in entries for bundle in bundles):
         raise ValueError("not an adoption report of the bundles sent")
@@ -3408,6 +3420,9 @@ def _push_segment(
             _relay(dst, arguments, err)
             if release:
                 settled.release(done)
+                if settled.session is not None and not settled.session.is_open:
+                    # SRC failed while it released: nothing more is adopted (as after a staged segment's release).
+                    settled.stopped = settled.stopped or f"{src.locator}: the transfer session failed while releasing"
         elif not any(document.get(key) for key in ("bundle", "sync_failed", "stream_aborted")):
             # Refused as a whole, by the far side's statement (an unknown or sealed workspace, a quota), whatever
             # this side's upload did: every later segment would be too.
@@ -4176,6 +4191,7 @@ def _drive(
     sessions: contextlib.ExitStack,
     source: "_SourceSession | None" = None,
     pair: _Pair | None = None,
+    concluded: Callable[[], object] | None = None,
 ) -> list[dict[str, Any]]:
     """Copy, adopt and release a batch of holds bound for *dst*: one outcome per hold, in order.
 
@@ -4224,6 +4240,7 @@ def _drive(
     :param sessions: Closes the command's transfer sessions at its end.
     :param source: The command's transfer session to a remote *src*, if any.
     :param pair: The pair whose page this is.
+    :param concluded: Called once the outcomes are concluded (perhaps before this returns); never when this raises.
     :return: One outcome per hold, in the order of *holds* (concluded in place, later, when a stage waits).
     """
 
@@ -4383,6 +4400,8 @@ def _drive(
             unshipped=unshipped,
             relaying=relaying,
         )
+        if concluded is not None:
+            concluded()
 
     settled.page.close(conclude)  # at once, or once the last segment of the batch staged is adopted or abandoned
     return list(outcomes.values())
@@ -4484,57 +4503,322 @@ _SHIPPED = {
 }
 
 
-def _report(
-    outcomes: list[dict[str, Any]],
-    errors: list[str],
-    *,
-    json_output: bool,
-    source: str,
-    empty: str = "no held transfers to drive",
-    changed: int | None = None,
-) -> int:
-    missing = sorted({workflow for outcome in outcomes for workflow in outcome.get("missing_workflows", ())})
-    # One warning per id: a root the adoption names as missing is left to its line below.
-    shipped = {
-        entry["id"]: entry
-        for outcome in outcomes
-        for entry in outcome.get("workflows", ())
-        if not (entry["status"] == "missing" and entry["id"] in missing)
-    }
-    for status, text in _SHIPPED.items():
-        if listed := sorted(workflow_id for workflow_id, entry in shipped.items() if entry["status"] == status):
-            print(f"{text}: {', '.join(listed)}", file=sys.stderr)
-    for workflow_id, entry in sorted(shipped.items()):
-        if "reason" in entry:
-            print(f"warning: workflow {workflow_id} {entry['status']}: {entry['reason']}", file=sys.stderr)
-    if missing:
-        print(f"warning: these workflows are not installed, so their jobs wait: {', '.join(missing)}", file=sys.stderr)
-    if changed:
-        print(
-            f"{changed} selected job(s) changed since they were listed: left out; run again to select them",
-            file=sys.stderr,
-        )
-    for error in errors:
-        print(error, file=sys.stderr)
-    if json_output:
-        document: dict[str, object] = {"transfers": outcomes, "errors": errors}
-        if changed is not None:
-            document["changed"] = changed  # a paged selection's
-        print(json.dumps(document, indent=2, sort_keys=True))
-    else:
-        if not outcomes and not errors:
-            print(empty)
-        for outcome in outcomes:
+class _Slot:
+    """A batch's place in a :class:`_Spool`: its outcomes once its drive returned them, final once concluded, and how
+    many of them were spooled."""
+
+    def __init__(self, outcomes: list[dict[str, Any]] | None = None, *, concluded: bool = False) -> None:
+        self.outcomes = outcomes
+        self.concluded = concluded
+        self.written = 0
+
+
+#: What a :class:`_Spool` keeps: its errors and its outcomes, a file each.
+_SPOOLED = ("errors", "outcomes")
+
+
+def _spool_file() -> BinaryIO:
+    """A private temporary file for a :class:`_Spool`, unbuffered (each line is written by itself), in ``TMPDIR``
+    and unlinked at once."""
+
+    return cast(BinaryIO, tempfile.TemporaryFile(buffering=0))  # kept open by the spool until it is closed
+
+
+def _spool_directory() -> str:
+    """Where the spool's files go, for messages."""
+
+    try:
+        return tempfile.gettempdir()
+    except OSError:  # no usable temporary directory at all
+        return "TMPDIR"
+
+
+class _Unreadable(Exception):
+    """A :class:`_Spool`'s file could not be read back while its report was printed."""
+
+
+class _Spool:
+    """A transfer's report (plan WORKFLOW_TRANSFER_SESSION §7.10, 4): its outcomes and errors appended as JSON lines
+    to private unlinked temporary files (in ``TMPDIR``) as each becomes final, and rendered from them at the end
+    (:meth:`report`), so that a run keeps no list of them.
+
+    Outcomes keep the order the batches were given in (:meth:`add`, :meth:`driven`): a batch whose outcomes are
+    concluded later (its staged segments adopted while a later page is driven) holds its place, and the batches after
+    it wait in memory until it is concluded (as many as the pipeline keeps open). Memory keeps only aggregates: the
+    counts, whether anything failed, the away copies kept, the missing workflows and the shipped workflows by id.
+
+    The files are made on entering the spool, before anything is held: one that cannot be made is an error then,
+    with nothing moved. Writing never fails the transfer: once a line cannot be written (a full disk), the file is cut
+    back to its last whole line, a warning says so, and the rest of the report is kept in memory, after the file's
+    lines; the report stays complete. A spool not entered keeps everything in memory. A file that cannot be read
+    back when the report is printed (an I/O error on it) ends the report there, with a diagnostic and exit status 2
+    (:meth:`report`): the report is not held in memory to guard against that.
+    """
+
+    def __init__(self) -> None:
+        self._files: dict[str, BinaryIO] = {}
+        #: Per kind, the length of the file's whole lines, and the lines kept in memory after them.
+        self._ends: dict[str, int] = dict.fromkeys(_SPOOLED, 0)
+        self._tails: dict[str, list[bytes]] = {kind: [] for kind in _SPOOLED}
+        #: Why the files are no longer written, once they could not be.
+        self._broken: str | None = None
+        self._waiting: collections.deque[_Slot] = collections.deque()
+        #: The outcomes and errors spooled.
+        self.outcomes = self.errors = 0
+        self._failed = False
+        self._kept = 0
+        self._missing: set[str] = set()
+        #: Per workflow id, the last shipped entry, and the last whose status is not ``missing``.
+        self._shipped: dict[str, dict[str, Any]] = {}
+        self._shipped_present: dict[str, dict[str, Any]] = {}
+
+    def __enter__(self) -> Self:
+        try:
+            for kind in _SPOOLED:
+                self._files[kind] = _spool_file()
+        except OSError as exc:
+            self.close()
+            raise OSError(
+                f"the transfer report cannot be spooled in {_spool_directory()} ({exc}); nothing was held or moved: "
+                "set TMPDIR to a writable directory"
+            ) from exc
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close (and so remove) the spool's files."""
+
+        for file in self._files.values():
+            with contextlib.suppress(OSError):
+                file.close()
+        self._files.clear()
+
+    def _write(self, kind: str, item: object) -> None:
+        """Append *item* as one line: to its file while it can be written, else to memory. Never raises
+        :class:`OSError`."""
+
+        line = json.dumps(item).encode("ascii") + b"\n"
+        file = self._files.get(kind)
+        if file is not None and self._broken is None:
+            end = self._ends[kind]
+            try:
+                view = memoryview(line)
+                while view:
+                    view = view[file.write(view) :]
+            except OSError as exc:
+                with contextlib.suppress(OSError):  # a part of the line written: cut it off
+                    file.truncate(end)
+                    file.seek(end)
+                self._broken = str(exc)
+                self._tails[kind].append(line)  # kept before anything else may fail
+                with contextlib.suppress(OSError, ValueError):  # a standard error that fails too (or is closed)
+                    print(
+                        f"warning: the transfer report could not be spooled in {_spool_directory()} ({exc}): the rest "
+                        "of it is kept in memory",
+                        file=sys.stderr,
+                    )
+                return
+            self._ends[kind] = end + len(line)
+            return
+        self._tails[kind].append(line)
+
+    def _read(self, kind: str) -> Iterator[Any]:
+        """The items of *kind*, in order: the file's whole lines, then those kept in memory; a file that cannot be
+        read back raises :class:`_Unreadable`."""
+
+        file = self._files.get(kind)
+        if file is not None and (end := self._ends[kind]):
+            try:
+                with open(file.fileno(), "rb", closefd=False) as reader:
+                    reader.seek(0)
+                    position = 0
+                    for line in reader:
+                        position += len(line)
+                        if position > end:
+                            break  # what a failed write left and could not be cut off
+                        yield json.loads(line)
+            except (OSError, ValueError) as exc:
+                raise _Unreadable(str(exc)) from exc
+        for line in self._tails[kind]:
+            yield json.loads(line)
+
+    def error(self, error: str) -> None:
+        """Spool one error.
+
+        :param error: The error.
+        """
+
+        self._write("errors", error)
+        self.errors += 1
+
+    def extend_errors(self, errors: Iterable[str]) -> None:
+        """Spool *errors*, in order.
+
+        :param errors: The errors.
+        """
+
+        for error in errors:
+            self.error(error)
+
+    def add(self, outcomes: Iterable[dict[str, Any]]) -> None:
+        """Spool final *outcomes*, after the batches given before them.
+
+        :param outcomes: The outcomes, in order.
+        """
+
+        self._waiting.append(_Slot(list(outcomes), concluded=True))
+        self._drain()
+
+    def driven(self, drive: Callable[..., list[dict[str, Any]]], *arguments: Any, **options: Any) -> None:
+        """Drive a batch, ``drive(*arguments, **options, concluded=...)`` (:func:`_drive`), and spool the outcomes it
+        returns once they are concluded, which *concluded* is called for (at once, or later, when the batch's staged
+        segments are adopted). A *drive* that raises spools nothing.
+
+        :param drive: Drives the batch and returns its outcomes.
+        :param *arguments: Its positional arguments.
+        :param **options: Its keyword arguments, but *concluded*.
+        """
+
+        slot = _Slot()
+        self._waiting.append(slot)
+
+        def concluded() -> None:
+            slot.concluded = True
+            self._drain()
+
+        try:
+            slot.outcomes = drive(*arguments, **options, concluded=concluded)
+        except BaseException:
+            self._waiting.remove(slot)
+            raise
+        self._drain()
+
+    def _drain(self, *, force: bool = False) -> None:
+        """Spool the waiting batches that are final, in order, up to the first that is not (with *force*: all)."""
+
+        while self._waiting and (force or (self._waiting[0].concluded and self._waiting[0].outcomes is not None)):
+            slot = self._waiting[0]
+            outcomes = slot.outcomes or []
+            while slot.written < len(outcomes):  # left only once every outcome of it is spooled
+                self._outcome(outcomes[slot.written])
+                slot.written += 1
+            self._waiting.popleft()
+
+    def _outcome(self, outcome: dict[str, Any]) -> None:
+        self._write("outcomes", outcome)
+        self.outcomes += 1
+        self._missing.update(outcome.get("missing_workflows", ()))
+        for entry in outcome.get("workflows", ()):
+            self._shipped[entry["id"]] = entry
+            if entry["status"] != "missing":
+                self._shipped_present[entry["id"]] = entry
+        if outcome.get("kept"):
+            self._kept += len(outcome["members"])
+        self._failed = self._failed or outcome.get("status") not in _DELIVERED or "message" in outcome
+
+    def report(
+        self, *, json_output: bool, source: str, empty: str = "no held transfers to drive", changed: int | None = None
+    ) -> int:
+        """Print the transfer's report from the spool: the workflow lines, the errors and each outcome's message on
+        standard error, the outcomes (``--json``: one document) on standard output.
+
+        :param json_output: Print one JSON document ``{"transfers", "errors"}`` (and ``changed``, when given).
+        :param source: SRC's locator, for the line on kept away copies.
+        :param empty: The line without outcomes or errors.
+        :param changed: The listed jobs left out as changed since the listing, for a paged selection.
+        :return: 1 when there was an error or an outcome that did not deliver or carries a message, else 0; 2 when
+            the spool could not be read back (the report then stops where it was, perhaps inside its JSON document,
+            and a diagnostic on standard error says so).
+        """
+
+        try:
+            return self._render(json_output=json_output, source=source, empty=empty, changed=changed)
+        except _Unreadable as exc:
+            with contextlib.suppress(OSError, ValueError):
+                sys.stdout.flush()  # what was printed of the report goes before the diagnostic
+            with contextlib.suppress(OSError, ValueError):
+                print(
+                    f"the transfer report could not be read back from {_spool_directory()} ({exc}): the transfers "
+                    "themselves are done as reported so far; the report is incomplete; `httk transfer status` shows "
+                    "what is still held",
+                    file=sys.stderr,
+                )
+            return 2
+
+    def _render(self, *, json_output: bool, source: str, empty: str, changed: int | None) -> int:
+        # report(), which a file that cannot be read back interrupts (_Unreadable).
+
+        self._drain(force=True)  # anything still waiting is reported as it stands
+        for file in self._files.values():
+            # Nothing is pending (each line was written unbuffered, or kept in memory): before the first byte out.
+            with contextlib.suppress(OSError):
+                file.flush()
+        missing = sorted(self._missing)
+        # One warning per id: a root the adoption names as missing is left to its line below.
+        shipped: dict[str, dict[str, Any]] = {}
+        for workflow_id, entry in self._shipped.items():
+            last = self._shipped_present.get(workflow_id) if workflow_id in self._missing else entry
+            if last is not None:
+                shipped[workflow_id] = last
+        for status, text in _SHIPPED.items():
+            if listed := sorted(workflow_id for workflow_id, entry in shipped.items() if entry["status"] == status):
+                print(f"{text}: {', '.join(listed)}", file=sys.stderr)
+        for workflow_id, entry in sorted(shipped.items()):
+            if "reason" in entry:
+                print(f"warning: workflow {workflow_id} {entry['status']}: {entry['reason']}", file=sys.stderr)
+        if missing:
             print(
-                f"{outcome['transfer_id']}\t{outcome['status']}\t{len(outcome['members'])} job(s)\t{outcome['destination']}"
+                f"warning: these workflows are not installed, so their jobs wait: {', '.join(missing)}", file=sys.stderr
             )
-        if kept := sum(len(outcome["members"]) for outcome in outcomes if outcome.get("kept")):
-            print(f"kept {kept} away copies in {source} (httk job list --state away; httk job recover JOB to resend)")
-    for outcome in outcomes:
-        if "message" in outcome:
-            print(f"{outcome['transfer_id']}: {outcome['message']}", file=sys.stderr)
-    failed = errors or any(outcome["status"] not in _DELIVERED or "message" in outcome for outcome in outcomes)
-    return 1 if failed else 0
+        if changed:
+            print(
+                f"{changed} selected job(s) changed since they were listed: left out; run again to select them",
+                file=sys.stderr,
+            )
+        for error in self._read("errors"):
+            print(error, file=sys.stderr)
+        if json_output:
+            # json.dumps({"transfers", "errors"[, "changed"]}, indent=2, sort_keys=True), written a member at a time.
+            out = sys.stdout
+            out.write("{\n")
+            if changed is not None:
+                out.write(f'  "changed": {json.dumps(changed)},\n')
+            _json_list(out, "errors", self._read("errors"))
+            out.write(",\n")
+            _json_list(out, "transfers", self._read("outcomes"))
+            out.write("\n}\n")
+        else:
+            if not self.outcomes and not self.errors:
+                print(empty)
+            for outcome in self._read("outcomes"):
+                print(
+                    f"{outcome['transfer_id']}\t{outcome['status']}\t{len(outcome['members'])} job(s)\t"
+                    f"{outcome['destination']}"
+                )
+            if self._kept:
+                print(
+                    f"kept {self._kept} away copies in {source} (httk job list --state away; httk job recover JOB to "
+                    "resend)"
+                )
+        for outcome in self._read("outcomes"):
+            if "message" in outcome:
+                print(f"{outcome['transfer_id']}: {outcome['message']}", file=sys.stderr)
+        return 1 if self.errors or self._failed else 0
+
+
+def _json_list(out: IO[str], name: str, items: Iterable[object]) -> None:
+    """Write the member *name* of *items* as :func:`json.dumps` with ``indent=2`` and ``sort_keys`` writes it one
+    level down, without the comma or line that follows it."""
+
+    out.write(f"  {json.dumps(name)}: [")
+    first = True
+    for item in items:
+        text = json.dumps(item, indent=2, sort_keys=True)
+        out.write(("\n" if first else ",\n") + "\n".join("    " + line for line in text.split("\n")))
+        first = False
+    out.write("]" if first else "\n  ]")
 
 
 def _handle_release(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -4651,64 +4935,62 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
         if dst.locator == src.locator:
             raise ValueError(f"SRC and DST are the same workspace: {src.locator}")
         ends[dst.locator] = dst
-    errors: list[str] = []
-    outcomes: list[dict[str, Any]] = []
     #: The listed jobs left out as changed since the listing, when the selection was paged.
     changed: int | None = None
-    # Each remote end's transfer session, closed at the end: a remote DST's, a remote SRC's.
-    with contextlib.ExitStack() as sessions:
-        if selected:
-            assert dst is not None
-            if dst.workspace is not None:
-                # Before anything is held: a destination that cannot take the jobs would only leave them held.
-                require_cli_modifiable(dst.workspace)
-            if src.workspace is None:
-                for selector in arguments.jobs:
-                    try:
-                        canonical_uuid(selector, "JOB")
-                    except (WorkflowError, ValueError) as exc:
-                        raise ValueError(f"a remote source requires canonical job ids: {selector!r}") from exc
-        if src.workspace is not None:
-            selection = None
+    # The outcomes and errors, spooled as each becomes final and rendered at the end, once the sessions are closed.
+    with _Spool() as report:
+        # Each remote end's transfer session, closed at the end: a remote DST's, a remote SRC's.
+        with contextlib.ExitStack() as sessions:
             if selected:
                 assert dst is not None
-                # Step 0: a bad selector stops the command here, before anything is held or driven.
-                selection = _Selection(
-                    src.workspace,
-                    context.cwd,
-                    arguments,
-                    locator=dst.locator,
-                    destination_id=dst.workspace_id,
-                    workflows=not arguments.no_workflows,
-                )
-            run = _Transfer(src, dst, ends, context, arguments, sessions)
-            with run.interruptible():
-                changed = _transfer_local(run, selection)
-            outcomes, errors = run.outcomes, run.errors
-        else:
-            # A remote SRC's session decides first (step 0 is its select); each DST's at its pair's first use.
-            source = _SourceSession(src, context, arguments, sessions)
-            try:
-                session = source.get()
-            except _ERRORS as exc:
-                if not selected:
-                    raise
-                errors.append(f"{src.locator}: the transfer session did not open: {exc}; nothing was held")
+                if dst.workspace is not None:
+                    # Before anything is held: a destination that cannot take the jobs would only leave them held.
+                    require_cli_modifiable(dst.workspace)
+                if src.workspace is None:
+                    for selector in arguments.jobs:
+                        try:
+                            canonical_uuid(selector, "JOB")
+                        except (WorkflowError, ValueError) as exc:
+                            raise ValueError(f"a remote source requires canonical job ids: {selector!r}") from exc
+            if src.workspace is not None:
+                selection = None
+                if selected:
+                    assert dst is not None
+                    # Step 0: a bad selector stops the command here, before anything is held or driven.
+                    selection = _Selection(
+                        src.workspace,
+                        context.cwd,
+                        arguments,
+                        locator=dst.locator,
+                        destination_id=dst.workspace_id,
+                        workflows=not arguments.no_workflows,
+                    )
+                run = _Transfer(src, dst, ends, context, arguments, sessions, report=report)
+                with run.interruptible():
+                    changed = _transfer_local(run, selection)
             else:
-                if session is not None:
-                    run = _Transfer(src, dst, ends, context, arguments, sessions, source)
-                    with run.interruptible():
-                        changed = _transfer_pull(run, session, bool(selected))
-                    outcomes, errors = run.outcomes, run.errors
+                # A remote SRC's session decides first (step 0 is its select); each DST's at its pair's first use.
+                source = _SourceSession(src, context, arguments, sessions)
+                try:
+                    session = source.get()
+                except _ERRORS as exc:
+                    if not selected:
+                        raise
+                    report.error(f"{src.locator}: the transfer session did not open: {exc}; nothing was held")
                 else:
-                    _transfer_adapter(src, dst, ends, context, arguments, sessions, errors, outcomes)
-    if arguments.state or arguments.step:
-        under = f" under {arguments.placement}" if arguments.placement is not None else ""
-        which = f"{' or '.join(arguments.state)} " if arguments.state else ""
-        at = f" at step {' or '.join(arguments.step)}" if arguments.step else ""
-        empty = f"no {which}job{at} to move in {src.locator}{under}"
-        return _report(outcomes, errors, json_output=arguments.json, source=src.locator, empty=empty, changed=changed)
-    return _report(outcomes, errors, json_output=arguments.json, source=src.locator, changed=changed)
+                    if session is not None:
+                        run = _Transfer(src, dst, ends, context, arguments, sessions, source, report)
+                        with run.interruptible():
+                            changed = _transfer_pull(run, session, bool(selected))
+                    else:
+                        _transfer_adapter(src, dst, ends, context, arguments, sessions, report)
+        if arguments.state or arguments.step:
+            under = f" under {arguments.placement}" if arguments.placement is not None else ""
+            which = f"{' or '.join(arguments.state)} " if arguments.state else ""
+            at = f" at step {' or '.join(arguments.step)}" if arguments.step else ""
+            empty = f"no {which}job{at} to move in {src.locator}{under}"
+            return report.report(json_output=arguments.json, source=src.locator, empty=empty, changed=changed)
+        return report.report(json_output=arguments.json, source=src.locator, changed=changed)
 
 
 def _holding(arguments: argparse.Namespace, src: _End) -> None:
@@ -4727,12 +5009,11 @@ def _transfer_adapter(
     context: CLIContext,
     arguments: argparse.Namespace,
     sessions: contextlib.ExitStack,
-    errors: list[str],
-    outcomes: list[dict[str, Any]],
+    report: _Spool,
 ) -> None:
     """A transfer from a remote SRC on the adapter path, hold-everything-first as before sessions: the selection held
     with ``job transfer --hold`` there, then every hold bound for DST (with ``--resume`` and no DST: every hold)
-    driven, each destination's as one batch.
+    driven, each destination's as one batch, its outcomes and errors spooled to *report*.
 
     A remote DST that serves a transfer session (plan §7.9, (A, S)) gets it opened before anything is held for it
     (for ``--resume``, before its batch is driven; one that cannot open holds or drives nothing), and its batch is
@@ -4766,10 +5047,14 @@ def _transfer_adapter(
         assert dst is not None
         if isinstance(failed := pair_of(dst), str):
             # Before anything is held: a destination that cannot take the jobs would only leave them held.
-            errors.append(f"{dst.locator}: the transfer session did not open: {failed}; nothing was held")
+            report.error(f"{dst.locator}: the transfer session did not open: {failed}; nothing was held")
             return
         _holding(arguments, src)
-        held, before = _hold_jobs(src, dst, context, arguments, errors)
+        errors: list[str] = []
+        try:
+            held, before = _hold_jobs(src, dst, context, arguments, errors)
+        finally:
+            report.extend_errors(errors)
         fresh = frozenset(hold.transfer_id for hold in held)
         if before is not None:
             # SRC listed the other holds bound for DST with the hold: no transfer status call.
@@ -4782,24 +5067,24 @@ def _transfer_adapter(
         if dst is not None and locator not in ends:
             continue
         if locator is None:
-            errors.append(f"{hold.transfer_id}: the hold records no destination; adopt or release it by hand")
+            report.error(f"{hold.transfer_id}: the hold records no destination; adopt or release it by hand")
             continue
         if locator not in ends:
             try:
                 ends[locator] = _end(locator, context, arguments)
             except _ERRORS as exc:
-                errors.append(f"{hold.transfer_id}: cannot reach its destination {locator}: {exc}")
+                report.error(f"{hold.transfer_id}: cannot reach its destination {locator}: {exc}")
                 continue
         batches.setdefault(locator, []).append(hold)
     for locator, holds in batches.items():
         pair = pair_of(ends[locator])
         if pair is None:
-            outcomes.extend(_drive(src, ends[locator], holds, context, arguments, sessions=sessions))
+            report.add(_drive(src, ends[locator], holds, context, arguments, sessions=sessions))  # concluded
             continue
         resume = f"`httk job transfer --resume {src.locator} {locator}`"
         if isinstance(pair, str):
             message = f"{locator}: the transfer session did not open: {pair}; it stays held on {src.locator}: {resume}"
-            outcomes.extend(
+            report.add(
                 {
                     "transfer_id": hold.transfer_id,
                     "members": list(hold.members),
@@ -4811,7 +5096,7 @@ def _transfer_adapter(
             )
             continue
         try:
-            outcomes.extend(_drive(src, pair.dst, holds, context, arguments, fresh=fresh, sessions=sessions, pair=pair))
+            report.driven(_drive, src, pair.dst, holds, context, arguments, fresh=fresh, sessions=sessions, pair=pair)
             _flush(pair)  # its one batch: every segment it staged is adopted now
         except _ERRORS as exc:
             # Contained to this destination, as a paged transfer's pair is.
@@ -4821,7 +5106,7 @@ def _transfer_adapter(
                 f"the transfer to {locator} failed while it was driven ({exc}); it stays held on {src.locator} "
                 f"unless it was adopted: {resume} delivers or releases it"
             )
-            outcomes.extend(
+            report.add(
                 {
                     "transfer_id": hold.transfer_id,
                     "members": list(hold.members),
@@ -4832,7 +5117,7 @@ def _transfer_adapter(
                 for hold in holds
             )
         if pair.stopped is not None:
-            errors.append(
+            report.error(
                 f"the transfer to {locator} stopped: {pair.stopped}; {resume} drives the holds left on {src.locator}"
             )
 
@@ -4848,6 +5133,7 @@ class _Transfer:
     :param arguments: The command's arguments.
     :param sessions: Closes the command's transfer sessions at its end.
     :param source: A pull's transfer session to SRC.
+    :param report: Where its outcomes and errors go (a fresh spool when ``None``).
     """
 
     def __init__(
@@ -4859,12 +5145,13 @@ class _Transfer:
         arguments: argparse.Namespace,
         sessions: contextlib.ExitStack,
         source: _SourceSession | None = None,
+        report: _Spool | None = None,
     ) -> None:
         self.src, self.dst, self.ends = src, dst, ends
         self.context, self.arguments, self.sessions, self.source = context, arguments, sessions, source
         self.pairs: dict[str, _Pair] = {}
-        self.outcomes: list[dict[str, Any]] = []
-        self.errors: list[str] = []
+        #: The outcomes and errors, spooled as each becomes final.
+        self.report = _Spool() if report is None else report
         self._unreachable: dict[str, str] = {}
         #: Why every pair stopped (SRC failed), when one did.
         self.failure: str | None = None
@@ -4894,7 +5181,7 @@ class _Transfer:
             if self.dst is not None and locator != self.dst.locator:
                 continue
             if locator is None:
-                self.errors.append(f"{hold.transfer_id}: the hold records no destination; adopt or release it by hand")
+                self.report.error(f"{hold.transfer_id}: the hold records no destination; adopt or release it by hand")
                 continue
             if locator not in self.ends and locator not in self._unreachable:
                 try:
@@ -4903,7 +5190,7 @@ class _Transfer:
                     self._unreachable[locator] = str(exc)
             if locator in self._unreachable:
                 reason = self._unreachable[locator]
-                self.errors.append(f"{hold.transfer_id}: cannot reach its destination {locator}: {reason}")
+                self.report.error(f"{hold.transfer_id}: cannot reach its destination {locator}: {reason}")
                 continue
             groups.setdefault(locator, []).append(hold)
         return [(self.pair(self.ends[locator]), group) for locator, group in groups.items()]
@@ -4934,24 +5221,57 @@ class _Transfer:
 
     def drive(self, pair: _Pair, holds: list[_moving.Hold], fresh: frozenset[str] = frozenset()) -> None:
         """Drive one page of *pair* (an adapter pair's holds are gathered, driven once by :meth:`finish`). An error
-        escaping the drive stops the pair, the page's holds reported as left held unless adopted.
+        escaping the drive stops the pair, the page's holds reported as left held unless adopted. Then every pair's
+        staged segments whose deadline has run are adopted (:meth:`adopt_matured`).
 
         :param pair: The pair.
         :param holds: The page's holds bound for it.
         :param fresh: Those this run created.
         """
 
+        self._drive_page(pair, holds, fresh)
+        self.adopt_matured()
+
+    def adopt_matured(self) -> None:
+        """Adopt every pair's staged segments whose deadline has run, not only those of the pair a page was driven
+        for: a pair whose last page left a segment staged concludes it while other pairs' pages are driven, so the
+        report holds back no later outcome for it. A failure is contained to its pair, as in :meth:`finish`; a
+        failed SRC session stops every pair, before anything is adopted and after each pair."""
+
+        for pair in list(self.pairs.values()):
+            if self._source_failed():
+                return
+            if not pair.pending or pair.stopped is not None:
+                continue
+            try:
+                _adopt_matured(pair)
+            except Exception as exc:  # a stage's own failures are settled inside: this is the queue's, reported
+                pair.stopped = pair.stopped or f"the transfer failed while its staged segments were adopted: {exc}"
+                with contextlib.suppress(Exception):
+                    _abandon_pending(pair)
+        self._source_failed()
+
+    def _source_failed(self) -> bool:
+        """Whether SRC's transfer session failed: then every pair is stopped, nothing more adopted or released."""
+
+        if self.source is not None and (session := self.source.get()) is not None and not session.is_open:
+            self.stop_all(f"the transfer session to {self.src.locator} failed")
+            return True
+        return False
+
+    def _drive_page(self, pair: _Pair, holds: list[_moving.Hold], fresh: frozenset[str]) -> None:
         if pair.stopped is None:
             self.start(pair)  # not for a stopped pair: no session is opened for it
         if pair.stopped is not None:
-            self.outcomes += self._undriven(pair, holds)
+            self.report.add(self._undriven(pair, holds))
             return
         if pair.mode == "adapter":
             pair.held += holds
             pair.fresh.update(fresh)
             return
         try:
-            self.outcomes += _drive(
+            self.report.driven(
+                _drive,
                 self.src,
                 pair.dst,
                 holds,
@@ -4969,7 +5289,7 @@ class _Transfer:
                 f"{self.src.locator} unless it was adopted: `httk job transfer --resume {self.src.locator} "
                 f"{pair.dst.locator}` delivers or releases it"
             )
-            self.outcomes += [self._outcome(pair, hold, message) for hold in holds]
+            self.report.add(self._outcome(pair, hold, message) for hold in holds)
             _abandon_pending(pair)
 
     def _outcome(self, pair: _Pair, hold: _moving.Hold, message: str) -> dict[str, Any]:
@@ -5047,7 +5367,8 @@ class _Transfer:
             if pair.held and pair.stopped is None:
                 holds = sorted(pair.held, key=lambda hold: hold.transfer_id)
                 try:
-                    self.outcomes += _drive(
+                    self.report.driven(
+                        _drive,
                         src,
                         pair.dst,
                         holds,
@@ -5062,10 +5383,10 @@ class _Transfer:
                 except _ERRORS as exc:
                     pair.stopped = str(exc)
                     message = f"the transfer failed ({exc}); it stays held on {src.locator} unless it was adopted"
-                    self.outcomes += [self._outcome(pair, hold, message) for hold in holds]
+                    self.report.add(self._outcome(pair, hold, message) for hold in holds)
                     _abandon_pending(pair)
             elif pair.held:
-                self.outcomes += self._undriven(pair, pair.held)
+                self.report.add(self._undriven(pair, pair.held))
             if pair.stopped is None:
                 continue
             message = f"the transfer to {pair.dst.locator} stopped: {pair.stopped}; {unlisted}"
@@ -5076,9 +5397,9 @@ class _Transfer:
             )
             if selection is not None:
                 message += " (it does not select the rest: run the transfer again for that)"
-            self.errors.append(message)
+            self.report.error(message)
         if self.failure is not None and not self.pairs:
-            self.errors.append(
+            self.report.error(
                 f"{self.failure}; the holds on {src.locator} stay held there: `httk job transfer --resume "
                 f"{src.locator}` drives them"
             )
@@ -5146,15 +5467,19 @@ def _transfer_local(run: _Transfer, selection: "_Selection | None") -> int | Non
             _holding(arguments, src)
         if pair.stopped is None and pair.mode == "adapter":
             # As before sessions: everything held first, delivered once.
-            held = hold_selected(
-                src.workspace,
-                run.context,
-                arguments,
-                run.errors,
-                locator=dst.locator,
-                destination_id=dst.workspace_id,
-                workflows=not arguments.no_workflows,
-            )
+            errors: list[str] = []
+            try:
+                held = hold_selected(
+                    src.workspace,
+                    run.context,
+                    arguments,
+                    errors,
+                    locator=dst.locator,
+                    destination_id=dst.workspace_id,
+                    workflows=not arguments.no_workflows,
+                )
+            finally:
+                run.report.extend_errors(errors)
             pair.held += held
             pair.fresh.update(hold.transfer_id for hold in held)
             changed = None
@@ -5162,7 +5487,7 @@ def _transfer_local(run: _Transfer, selection: "_Selection | None") -> int | Non
             page = selection.next_page(
                 holds=_PAGE_HOLDS, errors=_PAGE_ERRORS, scanned=_PAGE_SCANNED, members=_PAGE_MEMBERS
             )
-            run.errors.extend(page.errors)
+            run.report.extend_errors(page.errors)
             changed += page.changed
             if page.holds:
                 run.drive(pair, page.holds, fresh=frozenset(hold.transfer_id for hold in page.holds))
@@ -5217,7 +5542,7 @@ def _transfer_pull(run: _Transfer, session: TransferSession, selected: bool) -> 
         assert dst is not None
         refusal, failed = _pull_select(run, session)
         if refusal is not None:
-            run.errors.append(refusal)  # nothing changed: nothing held or driven
+            run.report.error(refusal)  # nothing changed: nothing held or driven
             return None
         if failed is not None:
             run.stop_all(failed)
@@ -5370,7 +5695,7 @@ def _pull_pages(run: _Transfer, session: TransferSession, pair: _Pair) -> tuple[
         except (ValueError, TypeError, WorkflowError) as exc:
             session.close()  # a far side that answers something else is not asked anything more
             return left, True, carried, changed, f"{lost} (an unusable answer: {exc})"
-        run.errors.extend(str(error) for error in errors)
+        run.report.extend_errors(str(error) for error in errors)
         changed += page_changed
         left = remaining
         _oversized(run, oversized)
@@ -5396,14 +5721,16 @@ def _oversized(run: _Transfer, holds: list[tuple[str, int]]) -> None:
             f"its {count} job(s) are too many for one answer of the transfer session; it stays held on {src.locator}: "
             f"set `httk remote configure --set transfer_session=off {src.binding.remote}`, then {resume} drives it"
         )
-        run.outcomes.append(
-            {
-                "transfer_id": transfer_id,
-                "members": [],
-                "destination": None if dst is None else dst.locator,
-                "status": "failed",
-                "message": message,
-            }
+        run.report.add(
+            [
+                {
+                    "transfer_id": transfer_id,
+                    "members": [],
+                    "destination": None if dst is None else dst.locator,
+                    "status": "failed",
+                    "message": message,
+                }
+            ]
         )
 
 

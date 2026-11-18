@@ -1362,13 +1362,90 @@ def test_src_failing_in_a_release_stops_the_other_destinations_too(
     requests = recorded_requests(monkeypatch)
     assert run(relay_ends.project, "--json", "-q", "--resume", relay_ends.src) == 1
     transfers = outcomes(capsys)["transfers"]
-    assert [op for op, _ in requests].count("adopt_staged") == 1  # nothing more, for either destination
+    ops = [op for op, _ in requests]
+    assert ops.count("adopt_staged") == 1  # nothing more, for either destination
+    assert ops.count("release") == 1 and ops[ops.index("release") + 1 :] == []  # no request after SRC died
     adopted = [outcome for outcome in transfers if outcome["status"] == "adopted"]
     assert len(adopted) == 1 and "the hold was not released" in adopted[0]["message"]
     rest = [outcome for outcome in transfers if outcome["status"] != "adopted"]
-    assert len(rest) == 3 and all("not adopted, since the transfer stopped" in o["message"] for o in rest)
+    # Left staged and abandoned ("not adopted"), or never staged when the first pair matured before the other's page
+    # was driven ("not delivered"): either way stopped, and held.
+    stopped = ("not adopted, since the transfer stopped", "not delivered, since the transfer")
+    assert len(rest) == 3 and all(any(text in o["message"] for text in stopped) for o in rest)
+    assert all("stopped" in o["message"] for o in rest)
     assert len(outgoing(relay_ends.near)) == 4
-    assert sum(find(other, entry[0]["id"]) is not None for _, entry in left) == 0
+    # Whichever pair went first (the holds go in transfer id order): its one job arrived, nothing else anywhere.
+    (staged,) = [header for op, header in requests if op == "adopt_staged"]
+    arrived = {
+        name: sum(find(workspace, entry[0]["id"]) is not None for _, entry in left)
+        for name, workspace in ((relay_ends.dst.split(":", 1)[1], relay_ends.far), (other_name, other))
+    }
+    assert arrived == {name: int(name == staged["workspace"]) for name in arrived}
+    assert adopted[0]["destination"] == f"other:{staged['workspace']}"
+
+
+def test_src_failing_in_a_page_s_release_adopts_no_other_pair_s_matured_stage(
+    relay_ends: Ends, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Pair A's page leaves a staged segment; it has matured when pair B's page is driven, whose segment is adopted at
+    # once and whose release kills SRC. The sweep after B's page must not adopt A's stage: SRC is known dead.
+    from httk.workflow import _bundles
+
+    other, other_name = registered(remote.root, "other-far")
+    relay_ends.far.set_policy({"visibility_deadline_seconds": 0.1})  # A: staged, matured by B's page
+    other.set_policy({"visibility_deadline_seconds": 0})  # B: adopted (and released) within its page
+    made = []
+    for number, locator in ((1, relay_ends.dst), (2, f"other:{other_name}")):  # A's hold first, then B's
+        monkeypatch.setattr(_bundles, "uuid", SimpleNamespace(uuid4=lambda number=number: uuid.UUID(int=number)))
+        made += held(relay_ends.near, locator, 1)
+    monkeypatch.setattr(_bundles, "uuid", uuid)
+    monkeypatch.setattr(transfer_cli, "_PAGE_HOLDS", 1)
+    real_page = transfer_cli._Transfer._drive_page
+    pages: list[int] = []
+
+    def drive_page(run_: Any, *arguments: Any, **options: Any) -> None:
+        pages.append(1)
+        if len(pages) == 2:
+            time.sleep(0.5)  # A's stage has matured before B's page
+        real_page(run_, *arguments, **options)
+
+    monkeypatch.setattr(transfer_cli._Transfer, "_drive_page", drive_page)
+    monkeypatch.setenv("HTTK_TEST_EXIT_ON_OP", "release")  # SRC dies at the first release: B's
+    requests = recorded_requests(monkeypatch)
+    assert run(relay_ends.project, "--json", "-q", "--resume", relay_ends.src) == 1
+    transfers = {outcome["destination"]: outcome for outcome in outcomes(capsys)["transfers"]}
+    ops = [op for op, _ in requests]
+    assert ops.count("release") == 1 and ops[ops.index("release") + 1 :] == []  # nothing adopted after SRC died
+    assert [header["workspace"] for op, header in requests if op == "adopt_staged"] == [other_name]
+    a, b = transfers[relay_ends.dst], transfers[f"other:{other_name}"]
+    assert b["status"] == "adopted" and "the hold was not released" in b["message"]
+    assert a["status"] == "failed" and "not adopted, since the transfer stopped" in a["message"]
+    assert len(outgoing(relay_ends.near)) == 2  # both held: B's unreleased, A's never adopted
+    assert find(relay_ends.far, made[0][1][0]["id"]) is None and find(other, made[1][1][0]["id"]) is not None
+
+
+def test_src_failing_in_a_direct_adoption_s_release_adopts_no_further_piece_of_its_part(
+    relay_ends: Ends, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A DST without stage/adopt_staged: each piece of a relayed part is adopted at once and released on SRC. SRC dies
+    # in the first piece's release: the part's next piece is not adopted (SRC is known dead), its hold kept there.
+    monkeypatch.setenv("HTTK_TEST_NO_STAGE", "1")
+    made = held(relay_ends.near, relay_ends.dst, 2)
+    largest = max(_sizes(relay_ends.near).values())
+    _caps(monkeypatch, largest + 1, 4 * largest)  # one send of both; delivered as two pieces of one bundle each
+    monkeypatch.setenv("HTTK_TEST_EXIT_ON_OP", "release")
+    requests = recorded_requests(monkeypatch)
+    assert run(relay_ends.project, "--json", "-q", "--resume", relay_ends.src, relay_ends.dst) == 1
+    transfers = outcomes(capsys)["transfers"]
+    ops = [op for op, _ in requests]
+    assert ops.count("send") == 1 and ops.count("adopt") == 1 and "adopt_staged" not in ops
+    assert ops[ops.index("release") + 1 :] == []
+    adopted = [outcome for outcome in transfers if outcome["status"] == "adopted"]
+    assert len(adopted) == 1 and "the hold was not released" in adopted[0]["message"]
+    (rest,) = [outcome for outcome in transfers if outcome["status"] != "adopted"]
+    assert "since the transfer stopped" in rest["message"] and "the transfer session failed" in rest["message"]
+    assert len(outgoing(relay_ends.near)) == 2  # kept on SRC: the adopted one unreleased, the other never sent
+    assert sum(find(relay_ends.far, entry[0]["id"]) is not None for _, entry in made) == 1
 
 
 @pytest.mark.parametrize("where", ["setup", "fetch"])
