@@ -2082,23 +2082,11 @@ def adopt_stream(
         # Nothing of the stream was adopted: its landing goes, and with --json the one document says so.
         if workspace is not None and landing is not None:
             _fs.discard(_fs.loc(landing), trash_dir=workspace.control / "tmp", durable=workspace.durable)
-        sync_failed = isinstance(exc, _CommitFailed)
         if not json_output:
-            if sync_failed:
+            if isinstance(exc, _CommitFailed):
                 raise ValueError(f"{exc} {_COMMIT_FAILED_HINT}") from None
             raise
-        print(f"job adopt: {exc}", file=sys.stderr)
-        workspace_id = None if workspace is None else workspace.workspace_id
-        refusal: dict[str, object] = {"bundles": [], "workspace_id": workspace_id, "refused": str(exc)}
-        if isinstance(exc, StreamRefused) and exc.bundle is not None:
-            refusal["bundle"] = exc.bundle
-        if isinstance(exc, StreamRefused) and exc.stream_aborted:
-            # The sender's own stream was incomplete (it aborted it, or the input ended): no verdict on the bundles.
-            refusal["stream_aborted"] = True
-        if sync_failed:
-            # Only for the commit's writeback error: the sender delivers once more with --sync fsync.
-            refusal["sync_failed"] = True
-        return refusal, 2
+        return _refusal(exc, workspace), 2
     with stack:
         # Outside the try above: an unexpected error after bundles were adopted gives no "refused" document.
         entries = _adopt_sources(
@@ -2117,6 +2105,112 @@ def adopt_stream(
     if built_for and json_output:
         document["workflows"] = _built_for(workspace, built_for)
     return document, _adoption_status(entries)
+
+
+def _refusal(exc: Exception, workspace: Workspace | None) -> dict[str, object]:
+    """The ``job adopt --json --stdin-tar`` document of a stream refused whole (nothing of it adopted), its
+    ``job adopt:`` line printed to standard error.
+
+    :param exc: Why.
+    :param workspace: The adopting workspace, when it was resolved.
+    :return: ``{"bundles": [], "workspace_id", "refused"}``, with ``bundle``, ``stream_aborted`` and ``sync_failed``
+        when they apply (see :func:`adopt_stream`).
+    """
+
+    print(f"job adopt: {exc}", file=sys.stderr)
+    workspace_id = None if workspace is None else workspace.workspace_id
+    refusal: dict[str, object] = {"bundles": [], "workspace_id": workspace_id, "refused": str(exc)}
+    if isinstance(exc, StreamRefused) and exc.bundle is not None:
+        refusal["bundle"] = exc.bundle
+    if isinstance(exc, StreamRefused) and exc.stream_aborted:
+        # The sender's own stream was incomplete (it aborted it, or the input ended): no verdict on the bundles.
+        refusal["stream_aborted"] = True
+    if isinstance(exc, _CommitFailed):
+        # Only for the commit's writeback error: the sender delivers once more with --sync fsync.
+        refusal["sync_failed"] = True
+    return refusal
+
+
+def stage_stream(
+    resolve: Callable[[], Workspace],
+    stream: IO[bytes],
+    *,
+    force_fsync: bool = False,
+    finish: Callable[[], object] | None = None,
+    progress: _landing.Progress | None = None,
+) -> tuple[dict[str, object], _moving.Stage | None]:
+    """Stage a tar stream of bundles for a later adoption (plan WORKFLOW_TRANSFER_SESSION §7.10, 1a): the
+    transfer session's ``stage`` op.
+
+    The stage's own owner is registered first; the stream is received into its ``landing`` scratch as
+    ``outgoing/<name>`` (:func:`httk.workflow._landing.receive_tar`: the terminal validated, then the sync
+    commit), and the first scan of the settle is taken (:meth:`~httk.workflow._moving.Stage.commit`). Until the
+    commit any failure refuses the whole stream (after the landing is discarded and the owner closed), with the
+    refusal document of :func:`adopt_stream`; an error after it escapes (the far side fails, its owner left for
+    recovery, which discards the landing).
+
+    :param resolve: Returns the adopting workspace (checked to be modifiable); its error refuses the stream.
+    :param stream: The binary tar stream.
+    :param force_fsync: ``--sync fsync``: fsync every landed file as it is written.
+    :param finish: Called once the stream is extracted, before its commit (see
+        :func:`~httk.workflow._landing.receive_tar`).
+    :param progress: Told the phases of :func:`~httk.workflow._landing.receive_tar`, then ``settle``.
+    :return: ``({"bundles": names, "workspace_id"}, stage)``, the names the stream carried sorted; or the refusal
+        document and ``None``.
+    """
+
+    workspace: Workspace | None = None
+    stage: _moving.Stage | None = None
+    try:
+        workspace = resolve()
+        stage = _moving.Stage(
+            workspace, _kernel.register_owner(workspace, kind="cli", label="job adopt", allocation=None, advertised={})
+        )
+        stage.landing = stage.owner.scratch("landing")
+        landing = stage.landing / "outgoing"
+        bundles = _landing.receive_tar(
+            workspace, landing, stream, barrier=True, force_fsync=force_fsync, finish=finish, progress=progress
+        )
+    except _ERRORS as exc:
+        if stage is not None:
+            stage.abandon()  # its landing discarded, its owner closed: nothing of the stream is left
+        return _refusal(exc, workspace), None
+    if progress is not None:
+        progress("settle", None)
+    stage.commit([landing / name for name in bundles])
+    return {"bundles": bundles, "workspace_id": workspace.workspace_id}, stage
+
+
+def adopt_stage(stage: _moving.Stage, *, progress: _landing.Progress | None = None) -> tuple[dict[str, object], int]:
+    """Adopt a committed stage (:func:`stage_stream`) once its visibility deadline has run: the transfer session's
+    ``adopt_staged`` op.
+
+    It waits out what is left of the deadline (``settle``), takes the final scan and adopts every bundle as
+    :func:`adopt_stream` does (a bundle bound for another workspace refused and discarded), then closes the stage.
+    An error escapes (the far side fails; its adoption is left to recovery).
+
+    :param stage: The committed stage.
+    :param progress: Told ``settle``, then ``adopt`` with the bundles adopted.
+    :return: The ``job adopt --json`` document (``bundles``, ``workspace_id``) and its exit status.
+    """
+
+    workspace = stage.workspace
+    if progress is not None:
+        progress("settle", None)
+    settled = stage.begin()
+    sources = list(stage.bundles)
+    entries = _adopt_sources(
+        workspace,
+        stage.owner,
+        sources,
+        [source.name for source in sources],
+        settled,
+        delivered=True,
+        json_output=True,
+        progress=progress,
+    )
+    stage.close()
+    return {"bundles": entries, "workspace_id": workspace.workspace_id}, _adoption_status(entries)
 
 
 def _adoption_status(entries: Sequence[Mapping[str, object]]) -> int:

@@ -67,7 +67,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, NamedTuple, Self, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, Self, cast
 
 from httk.workflow import _fs, _kernel, _store
 from httk.workflow._bundles import (
@@ -1042,30 +1042,43 @@ class Settled(NamedTuple):
     serial: frozenset[Path]
 
 
-def settle_absent(workspace: "Workspace", bundles: Sequence[Path]) -> Settled:
-    """Settle once which members of trusted *bundles*, and which of their roots' parents, are not in *workspace*.
+class FirstSettle(NamedTuple):
+    """The first half of :func:`settle_absent`: what the first scan found, before the visibility deadline has run.
 
-    One wait of the visibility deadline for a batch of adoptions, instead of one for each: :func:`adopt` given
-    the result settles none of these ids again, while a fresh listing still sees every job published since (by
-    an adoption of the batch, say). A bundle that cannot be read contributes nothing; its adoption reports it.
+    :param bundles: The bundle directories.
+    :param related: Per bundle, its member UUIDs and its root's parent UUID (for :func:`_serial`).
+    :param scan: The kernel's first scan of every wanted id (members and roots' parents).
+    """
+
+    bundles: tuple[Path, ...]
+    related: tuple[tuple[frozenset[str], str | None], ...]
+    scan: _kernel.FirstScan
+
+
+def settle_first(workspace: "Workspace", bundles: Sequence[Path]) -> FirstSettle:
+    """Take the first scan of :func:`settle_absent` for *bundles*; :func:`settle_final` completes it.
+
+    The wanted ids are read from the bundles' manifests as :func:`settle_absent` reads them: every member's id and
+    placement, and the root's parent's (read from the root's ``job.json``, ``detached`` not considered). A bundle
+    that cannot be read contributes nothing; its adoption reports it.
 
     :param workspace: The workspace the bundles are adopted into.
     :param bundles: The bundle directories, before any of them is adopted.
-    :return: The absent job UUIDs, and the bundles to adopt one after another.
+    :return: The first scan, whose deadline (``scan.deadline``) runs from its end.
     """
 
     wanted: dict[str, PurePosixPath] = {}
     # Per bundle: its member UUIDs and its root's parent UUID, for the components of related bundles.
-    related: list[tuple[set[str], str | None]] = []
+    related: list[tuple[frozenset[str], str | None]] = []
     for bundle in bundles:
-        related.append((set(), None))
+        related.append((frozenset(), None))
         try:
             read = read_manifest(bundle / "bundle.json")
             if read is None:
                 continue
             manifest = read[1]
             wanted.update((member.job_id, member.placement) for member in manifest.members)
-            related[-1] = ({member.job_id for member in manifest.members}, None)
+            related[-1] = (frozenset(member.job_id for member in manifest.members), None)
             parent = JobDefinition.from_path(manifest.member_dir(bundle, manifest.members[0]) / "job.json").parent
             if parent is not None:
                 parent_id = canonical_uuid(str(parent.get("job_id")), "parent job_id")
@@ -1073,11 +1086,128 @@ def settle_absent(workspace: "Workspace", bundles: Sequence[Path]) -> Settled:
                 related[-1] = (related[-1][0], parent_id)
         except (BundleError, FormatError, OSError, ValueError):
             continue
-    found = _kernel.locate_many(workspace, list(wanted), placements=list(wanted.values()), settle=True, poll=False)
-    return Settled(frozenset(wanted.keys() - found.keys()), _serial(bundles, related))
+    scan = _kernel.scan_first(workspace, list(wanted), placements=list(wanted.values()))
+    return FirstSettle(tuple(bundles), tuple(related), scan)
 
 
-def _serial(bundles: Sequence[Path], related: list[tuple[set[str], str | None]]) -> frozenset[Path]:
+def settle_final(workspace: "Workspace", first: FirstSettle) -> Settled:
+    """Complete the settle *first* began: wait until its deadline, take the final scan, and answer as
+    :func:`settle_absent` does. The absent ids are those neither scan found.
+
+    :param workspace: The workspace the bundles are adopted into.
+    :param first: The first scan (:func:`settle_first`), taken after the bundles were made durable.
+    :return: The absent job UUIDs, and the bundles to adopt one after another.
+    """
+
+    found = _kernel.scan_final(workspace, first.scan)
+    return Settled(frozenset(first.scan.wanted - found.keys()), _serial(first.bundles, list(first.related)))
+
+
+def settle_absent(workspace: "Workspace", bundles: Sequence[Path]) -> Settled:
+    """Settle once which members of trusted *bundles*, and which of their roots' parents, are not in *workspace*.
+
+    One wait of the visibility deadline for a batch of adoptions, instead of one for each: :func:`adopt` given
+    the result settles none of these ids again, while a fresh listing still sees every job published since (by
+    an adoption of the batch, say). A bundle that cannot be read contributes nothing; its adoption reports it.
+    It is :func:`settle_first`, then :func:`settle_final`.
+
+    :param workspace: The workspace the bundles are adopted into.
+    :param bundles: The bundle directories, before any of them is adopted.
+    :return: The absent job UUIDs, and the bundles to adopt one after another.
+    """
+
+    return settle_final(workspace, settle_first(workspace, bundles))
+
+
+#: The states of a :class:`Stage`.
+type StageState = Literal["received", "committed", "adopting", "adopted", "abandoned"]
+
+
+class Stage:
+    """A segment of a transfer staged in the workspace that adopts it (plan WORKFLOW_TRANSFER_SESSION §7.10, 1a):
+    received, made durable and the first scan of its settle taken, then adopted once the visibility deadline has
+    run from the end of that scan, while later segments are copied.
+
+    Its states: ``received`` (being received) → ``committed`` (durable, first scan taken) → ``adopting`` (its
+    adoption began: :meth:`begin`) → ``adopted`` (:meth:`close` after the adoption); or ``abandoned``
+    (:meth:`abandon`, before the adoption began). The stage's own receiver *owner* is held from the reception until
+    it is adopted or abandoned. Until its adoption begins it holds only the discardable copies in its *landing*
+    scratch (``<landing>/outgoing/<transfer id>``): closing the owner, or recovering it after its process died,
+    discards them, and nothing ever adopts them unasked (a stage has no persisted token or deadline). Once its
+    adoption began, a bundle taken into an ``adopt`` scratch is reconciled as for any adoption (its publication may
+    complete later); what is still in the landing was never taken and is discarded with it.
+
+    :param workspace: The adopting workspace.
+    :param owner: The stage's own receiver owner, registered for it.
+    :param landing: Its ``landing`` scratch, once made; ``None`` while it is not, and for the original holds of a
+        local SRC on the same filesystem (adopted in place, never discarded).
+    """
+
+    def __init__(self, workspace: "Workspace", owner: Owner, landing: Path | None = None) -> None:
+        self.workspace = workspace
+        self.owner = owner
+        self.landing = landing
+        self.state: StageState = "received"
+        self._first: FirstSettle | None = None
+
+    @property
+    def bundles(self) -> tuple[Path, ...]:
+        """The committed bundles (none before :meth:`commit`)."""
+
+        return () if self._first is None else self._first.bundles
+
+    def commit(self, bundles: Sequence[Path]) -> None:
+        """Take the first scan of the received, durable *bundles*; their visibility deadline runs from its end.
+
+        :param bundles: The bundle directories, each ``<landing>/outgoing/<transfer id>`` or an original hold.
+        :raises ValueError: When the stage is not ``received``.
+        """
+
+        if self.state != "received":
+            raise ValueError(f"a {self.state} stage cannot be committed")
+        self._first = settle_first(self.workspace, bundles)
+        self.state = "committed"
+
+    def remaining(self) -> float:
+        """Return the seconds until the stage matures (its final scan may start); zero once it has."""
+
+        return 0.0 if self._first is None else self._first.scan.remaining()
+
+    def begin(self) -> Settled:
+        """Begin the adoption: wait out what is left of the visibility deadline, then take the final scan.
+
+        :return: The settled absences of the bundles, for their adoptions (:func:`adopt`'s ``absent``).
+        :raises ValueError: When the stage is not ``committed``.
+        """
+
+        if self.state != "committed" or self._first is None:
+            raise ValueError(f"a {self.state} stage cannot be adopted")
+        self.state = "adopting"
+        return settle_final(self.workspace, self._first)
+
+    def close(self) -> None:
+        """End the stage: after its adoption (``adopted``), or abandoning it before (``abandoned``). What is left in
+        its landing was never taken (an unstarted copy) and is discarded; the owner closes, reconciling any other
+        scratch of it as usual. An error leaves the owner for recovery."""
+
+        if self.landing is not None:
+            self.owner.discard_scratch(self.landing)
+        self.owner.close()
+        self.state = "adopted" if self.state == "adopting" else "abandoned"
+
+    def abandon(self) -> bool:
+        """Abandon the stage when its adoption has not begun: :meth:`close`.
+
+        :return: Whether it was abandoned (``False`` once its adoption began, or after it ended).
+        """
+
+        if self.state not in ("received", "committed"):
+            return False
+        self.close()
+        return True
+
+
+def _serial(bundles: Sequence[Path], related: Sequence[tuple[Iterable[str], str | None]]) -> frozenset[Path]:
     """The bundles in a component of more than one under "shares a job UUID with" or "holds the root's parent of"."""
 
     holders: dict[str, list[int]] = {}

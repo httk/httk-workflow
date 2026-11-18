@@ -9,9 +9,11 @@ release the hold keeping the moved jobs in SRC as ``away`` copies, which a later
 """
 
 import argparse
+import collections
 import contextlib
 import enum
 import json
+import math
 import os
 import re
 import shlex
@@ -1522,13 +1524,15 @@ def _adoption(out: str, bundles: list[str]) -> dict[str, Any]:
     return _checked_adoption(json.loads(out), bundles)
 
 
-def _checked_adoption(document: Any, bundles: list[str]) -> dict[str, Any]:
+def _checked_adoption(document: Any, bundles: list[str], *, exact: bool = False) -> dict[str, Any]:
     """The checked document of a remote ``job adopt --json --stdin-tar`` of *bundles* (or of the transfer session's
-    ``adopt`` op): as given, with ``entries`` by bundle added; :class:`ValueError` when it is no such document.
+    ``adopt`` or ``adopt_staged`` op): as given, with ``entries`` by bundle added; :class:`ValueError` when it is no
+    such document.
 
     A document with ``refused`` says that nothing was adopted and lists no bundle, and with ``sync_failed`` true
     that the far side's sync commit failed (a writeback error there, possibly another user's); any other names
-    every bundle sent, each with a known status.
+    every bundle sent, each with a known status. With *exact* (a staged segment's adoption), it names exactly
+    *bundles*, each once, and nothing else.
     """
 
     if not isinstance(document, dict) or not isinstance(document.get("bundles"), list):
@@ -1542,13 +1546,13 @@ def _checked_adoption(document: Any, bundles: list[str]) -> dict[str, Any]:
         if document["bundles"] or not isinstance(document["refused"], str):
             raise ValueError("an ambiguous refusal")
         return document
-    entries = {
-        entry["bundle"]: entry
-        for entry in document["bundles"]
-        if isinstance(entry, dict) and entry.get("status") in _ADOPT_STATUSES
-    }
+    if not all(isinstance(entry, dict) and isinstance(entry.get("bundle"), str) for entry in document["bundles"]):
+        raise ValueError("an adoption entry without its bundle")
+    entries = {entry["bundle"]: entry for entry in document["bundles"] if entry.get("status") in _ADOPT_STATUSES}
     if workspace_id is None or not all(bundle in entries for bundle in bundles):
         raise ValueError("not an adoption report of the bundles sent")
+    if exact and (len(document["bundles"]) != len(bundles) or entries.keys() != set(bundles)):
+        raise ValueError("not an adoption report of exactly the bundles staged")
     document["entries"] = {bundle: entries[bundle] for bundle in bundles}
     return document
 
@@ -1643,20 +1647,20 @@ def _deliver(
     context: CLIContext,
     arguments: argparse.Namespace,
 ) -> dict[str, dict[str, Any]]:
-    """Steps 2 and 3 for a chunk bound for a local *dst*: copy its held bundles there and adopt them.
+    """Steps 2 and 3 for a chunk of a remote *src* that serves no transfer session, bound for a local *dst*: pull its
+    held bundles there and adopt them (a local *src*'s chunks are staged instead, :func:`_stage_local`).
 
-    Holds on the same filesystem move in (adoption takes them); with ``--keep``, or from another filesystem, they
-    are copied into a landing scratch first (see :func:`_land_copies`); a remote *src*'s are pulled into one. A
-    landing is made durable (a sync barrier entered before its first byte, committed before any adoption). When
-    the ``syncfs`` commit of a pull fails under ``io.sync_errors`` ``fail``, the landing is discarded and the chunk
-    pulled once more into a fresh one under a fresh barrier; a second failure (or any other failed commit, such
-    as a walk of strategy ``fsync``, never pulled again) fails the chunk with the holds kept at the source.
+    The holds are pulled into a landing scratch, made durable (a sync barrier entered before its first byte,
+    committed before any adoption). When the ``syncfs`` commit of a pull fails under ``io.sync_errors`` ``fail``, the
+    landing is discarded and the chunk pulled once more into a fresh one under a fresh barrier; a second failure (or
+    any other failed commit, such as a walk of strategy ``fsync``, never pulled again) fails the chunk with the holds
+    kept at the source.
 
     The result is each hold's adoption entry by transfer id (``status`` as ``job adopt --json`` gives it); an
     error raised fails the whole chunk.
     """
 
-    assert dst.workspace is not None
+    assert src.workspace is None and dst.workspace is not None
     ids = [hold.transfer_id for hold in holds]
     # One workspace's holds share its transfers/outgoing/.
     outgoing = str(PurePosixPath(holds[0].path).parent)
@@ -1667,41 +1671,32 @@ def _deliver(
         # Errors are kept, not raised, inside: an owner left by an error stays open for recovery.
         scratch = None
         try:
-            if src.workspace is not None and not arguments.keep and not _other_filesystem(holds, dst.workspace):
-                # One filesystem: adoption moves each hold in, and a refusal moves it back.
-                sources = [Path(hold.path) for hold in holds]
-            elif src.workspace is not None:
-                # Keeping away copies releases the hold itself, and another filesystem cannot take it by a rename:
-                # the adoption takes a durable copy of it.
+            _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
+            retried = False
+            while True:
                 scratch = owner.scratch("landing")
-                sources = _land_copies(dst.workspace, owner, holds, scratch, arguments)
-            else:
-                _say(arguments, f"copying {len(ids)} bundle(s) from {src.locator}")
-                retried = False
-                while True:
-                    scratch = owner.scratch("landing")
-                    failed: _fs.SyncFailed | None = None
-                    # Entered (and primed) before the adapter writes anything; committed before anything is adopted.
-                    with _sync_barrier(dst.workspace, scratch, arguments, inline=False) as barrier:
-                        _adapter(src, context, arguments, "pull", outgoing, str(scratch / "outgoing"), ids)
-                        if barrier is not None:
-                            try:
-                                barrier.commit()
-                            except _fs.SyncFailed as exc:
-                                # Only a syncfs commit's error under io.sync_errors fail is pulled again (a primed
-                                # syncfs barrier never walks): no later sync could clear it, and a clean commit of a
-                                # fresh landing proves that one durable. A failed walk of strategy fsync is exact;
-                                # under ignore only an unsupported syncfs fails, which a re-pull would not help.
-                                if retried or barrier.strategy != "syncfs" or barrier.errors != "fail":
-                                    raise
-                                failed = exc
-                    if failed is None:
-                        break
-                    retried = True
-                    _say(arguments, f"pulling {len(ids)} bundle(s) from {src.locator} again: {failed}")
-                    owner.discard_scratch(scratch)
-                    scratch = None
-                sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
+                failed: _fs.SyncFailed | None = None
+                # Entered (and primed) before the adapter writes anything; committed before anything is adopted.
+                with _sync_barrier(dst.workspace, scratch, arguments, inline=False) as barrier:
+                    _adapter(src, context, arguments, "pull", outgoing, str(scratch / "outgoing"), ids)
+                    if barrier is not None:
+                        try:
+                            barrier.commit()
+                        except _fs.SyncFailed as exc:
+                            # Only a syncfs commit's error under io.sync_errors fail is pulled again (a primed
+                            # syncfs barrier never walks): no later sync could clear it, and a clean commit of a
+                            # fresh landing proves that one durable. A failed walk of strategy fsync is exact;
+                            # under ignore only an unsupported syncfs fails, which a re-pull would not help.
+                            if retried or barrier.strategy != "syncfs" or barrier.errors != "fail":
+                                raise
+                            failed = exc
+                if failed is None:
+                    break
+                retried = True
+                _say(arguments, f"pulling {len(ids)} bundle(s) from {src.locator} again: {failed}")
+                owner.discard_scratch(scratch)
+                scratch = None
+            sources = [scratch / "outgoing" / transfer_id for transfer_id in ids]
             _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
             workspace = dst.workspace
             settled = _moving.settle_absent(workspace, sources)
@@ -1722,6 +1717,147 @@ def _deliver(
     if failure is not None:
         raise failure
     return entries
+
+
+def _stage_local(settled: "_Deliveries", holds: list[_moving.Hold]) -> None:
+    """Stage a chunk of a local SRC's holds in a local DST (plan §7.10, 1a, as amended), for its adoption once the
+    visibility deadline has run, while the next pages are held: at most :data:`_STAGES` staged chunks wait (a page is
+    one chunk unless its ids exceed the command-text budget), so the oldest is adopted first when that many do.
+
+    On one filesystem without ``--keep`` the stage is the first scan over the original holds in SRC's
+    ``transfers/outgoing/`` (adoption takes each in; nothing of them is ever discarded); otherwise the holds are
+    copied into the stage's landing scratch and committed first (:func:`_land_copies`), and the stage counts their
+    landed bytes against :data:`_STAGED_BYTES`. A chunk that cannot be staged fails, held on SRC, and stops the pair
+    (nothing more is held for a DST that cannot take it). An interrupt while the stage is made abandons it (its
+    owner closed once its writes finished, its copies discarded, the original holds untouched) before it propagates.
+
+    :param settled: The batch's deliveries; its entries get the chunk's adoption entries once it is adopted.
+    :param holds: The chunk's holds.
+    """
+
+    src, dst, arguments = settled.src, settled.dst, settled.arguments
+    assert src.workspace is not None and dst.workspace is not None
+    pair = settled.pair
+    workspace = dst.workspace
+
+    def failed(exc: BaseException) -> None:
+        settled.fail(holds, str(exc))
+        settled.stopped = f"{dst.locator}: {exc}"  # nothing more is held for a DST that cannot take it
+
+    try:
+        # Keeping away copies releases the hold itself, and another filesystem cannot take it by a rename: the
+        # adoption takes a durable copy of it, which counts against the staged bytes.
+        copied = arguments.keep or _other_filesystem(holds, workspace)
+        size = sum(_measure(Path(hold.path))[0] for hold in holds) if copied else 0
+    except _ERRORS as exc:
+        failed(exc)
+        return
+    _make_room(pair, size)
+    if settled.stopped is not None:
+        settled.fail(holds, f"not delivered, since the transfer stopped ({settled.stopped})")
+        return
+    stage: _moving.Stage | None = None
+    try:
+        require_cli_modifiable(workspace)
+        stage = _moving.Stage(workspace, _owner(workspace, "job transfer"))
+        if not copied:
+            # One filesystem: adoption moves each hold in, and a refusal moves it back.
+            sources = [Path(hold.path) for hold in holds]
+        else:
+            stage.landing = stage.owner.scratch("landing")
+            sources = _land_copies(workspace, stage.owner, holds, stage.landing, arguments)
+        stage.commit(sources)
+        # Queued inside the guard: from here on an interrupt reaches the stage through the pair's queue.
+        pending = _PendingStage(
+            holds,
+            settled,
+            size,
+            time.monotonic() + stage.remaining(),
+            partial(_adopt_local_stage, settled, stage, holds, stop=True),
+            partial(_abandon_local_stage, settled, stage, holds, dst.locator),
+        )
+        _stage_pending(pair, pending)
+    except BaseException as exc:
+        if stage is not None and stage.state != "abandoned" and not any(item.holds is holds for item in pair.pending):
+            with contextlib.suppress(Exception):  # an owner that cannot close is left for recovery
+                stage.abandon()
+        if not isinstance(exc, _ERRORS):
+            raise  # an interrupt: nothing of the chunk is staged, its holds stay
+        failed(exc)
+        return
+    _adopt_matured(pair)
+
+
+def _adopt_local_stage(settled: "_Deliveries", stage: _moving.Stage, holds: list[_moving.Hold], *, stop: bool) -> bool:
+    """Adopt a stage in this machine's DST once its deadline has run (:meth:`~httk.workflow._moving.Stage.begin`,
+    :func:`_adopt_local` for each bundle), recording each hold's adoption entry in *settled*; the stage closes
+    either way. A failed adoption fails the holds (some may be adopted: ``--resume`` reports those already
+    adopted), and with *stop* stops the pair. A DST that cannot be modified any more (sealed since the stage) adopts
+    nothing: the stage is given up (an original hold stays where it is), its holds stay held and the pair stops.
+
+    :param settled: The deliveries of the stage's batch.
+    :param stage: The committed stage.
+    :param holds: Its holds, in the order of its bundles.
+    :param stop: Stop the pair when the adoption fails.
+    :return: Whether the holds were adopted (each its own entry).
+    """
+
+    src, dst, arguments = settled.src, settled.dst, settled.arguments
+    workspace, owner = stage.workspace, stage.owner
+    ids = [hold.transfer_id for hold in holds]
+    failure: Exception | None = None
+    adopted: list[dict[str, Any]] = []
+    try:
+        require_cli_modifiable(workspace)  # as a far side's adopt_staged does, before anything is adopted
+    except _ERRORS as exc:
+        with contextlib.suppress(*_ERRORS):  # an owner that cannot close is left for recovery
+            stage.abandon()
+        settled.fail(
+            holds,
+            f"not adopted: {dst.locator} cannot take it any more ({exc}); nothing of it was adopted: deliver it "
+            f"with `httk job transfer --resume {src.locator} {dst.locator}`",
+        )
+        settled.stopped = settled.stopped or f"{dst.locator}: {exc}"
+        return False
+    _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
+    try:
+        absent = stage.begin()
+        sources = list(stage.bundles)
+        serial = {index for index, source in enumerate(sources) if source in absent.serial}
+        adopted = run_batch(
+            owner,
+            lambda source: _adopt_local(workspace, owner, source, absent.absent),
+            sources,
+            workspace.io_workers,
+            serial=serial,
+        )
+    except _ERRORS as exc:
+        failure = exc
+    except (KeyboardInterrupt, SystemExit) as exc:
+        stage.owner.__exit__(type(exc), exc, exc.__traceback__)  # quiescent jobs go back, the owner closes
+        raise
+    try:
+        stage.close()  # what is left in its landing was never taken
+    except _ERRORS as exc:
+        failure = failure or exc  # its owner is left for recovery
+    if failure is not None:
+        settled.fail(holds, str(failure))
+        if stop:
+            settled.stopped = settled.stopped or f"{dst.locator}: {failure}"
+        return False
+    settled.entries.update(zip(ids, adopted, strict=True))
+    return True
+
+
+def _abandon_local_stage(
+    settled: "_Deliveries", stage: _moving.Stage, holds: list[_moving.Hold], where: str, reason: str
+) -> None:
+    """Abandon a stage in this machine's DST that was never adopted, since the transfer stopped (*reason*): its
+    landing (copies only) is discarded and its owner closed; the holds stay held."""
+
+    with contextlib.suppress(*_ERRORS):  # an owner that cannot close is left for recovery, which discards its copies
+        stage.abandon()
+    _abandon_staged(settled, holds, where, reason, copied=stage.landing is not None)
 
 
 def _deliver_remote(
@@ -1839,6 +1975,14 @@ def _adopt_with_retry(
     def same_workspace(document: dict[str, Any], first: str | None, pair: tuple[str, str]) -> None:
         second = document.get("workspace_id")
         if first is not None and second is not None and second != first:
+            if "token" in document:
+                # Staged, never adopted: the other workspace discards the stage when the session ends.
+                raise RuntimeError(
+                    f"{dst.locator} staged the segment in workspace {second}, not the expected workspace {first} "
+                    f"that answered {pair[1]}; nothing of it was adopted, and its holds stay held on {src.locator}: "
+                    f"check which workspace {dst.locator} names, then deliver it with `httk job transfer --resume "
+                    f"{src.locator} {dst.locator}`"
+                )
             if "refused" not in document:
                 # The jobs arrived, but in another workspace than the one that answered first: nothing is
                 # released, and no away copy can name the right destination.
@@ -2472,18 +2616,23 @@ def _measure(path: Path) -> tuple[int, int]:
 
 
 def _segments(
-    holds: list[_moving.Hold], measure: Callable[[_moving.Hold], tuple[int, int]] | None = None
+    holds: list[_moving.Hold],
+    measure: Callable[[_moving.Hold], tuple[int, int]] | None = None,
+    sizes: dict[str, int] | None = None,
 ) -> list[list[_moving.Hold]]:
     """Split *holds*, in order, into the segments of a push: each closed once it reaches :data:`_SEGMENT_BUNDLES`,
     :data:`_SEGMENT_BYTES` or :data:`_SEGMENT_MEMBERS`, and before a hold that would take it beyond the bytes or
     the members (so a hold beyond either alone is a segment of its own). Each hold's bytes and members are what
-    *measure* says, by default its local directory's (:func:`_measure`)."""
+    *measure* says, by default its local directory's (:func:`_measure`); *sizes*, when given, gets each hold's bytes
+    by transfer id (a staged segment declares them without measuring again)."""
 
     segments: list[list[_moving.Hold]] = []
     current: list[_moving.Hold] = []
     size = members = 0
     for hold in holds:
         hold_size, hold_members = _measure(Path(hold.path)) if measure is None else measure(hold)
+        if sizes is not None:
+            sizes[hold.transfer_id] = hold_size
         if current and (size + hold_size > _SEGMENT_BYTES or members + hold_members > _SEGMENT_MEMBERS):
             segments.append(current)
             current, size, members = [], 0, 0
@@ -2617,19 +2766,63 @@ def _session_adopt(
     header: dict[str, Any] = {"workspace": dst.plain, "token": token}
     if fsync:
         header["sync"] = "fsync"
+    response, aborted = _upload_holds(session, "adopt", header, holds, src, dst, arguments)
+    return _checked_upload(response, aborted, ids, src, dst, arguments), str(response.get("stderr", ""))
+
+
+def _upload_holds(
+    session: TransferSession,
+    op: str,
+    header: dict[str, Any],
+    holds: list[_moving.Hold],
+    src: _End,
+    dst: _End,
+    arguments: argparse.Namespace,
+) -> tuple[dict[str, Any], str]:
+    """One *op* request on *session* uploading *holds* as one tar archive, each as ``<transfer_id>/...``, written as
+    it is read: the response, and (when this side's upload failed: a hold changed under the writer) why, for the
+    message; the far side's answer to the aborted stream is the response then.
+
+    :param session: DST's open transfer session.
+    :param op: The op (``adopt`` or ``stage``).
+    :param header: Its header.
+    :param holds: The holds to upload.
+    :param src: The source end.
+    :param dst: The remote destination end.
+    :param arguments: The command's arguments.
+    :return: The response, and the reason of this side's failed upload (empty when it did not fail).
+    :raises RuntimeError: When the session failed: whether anything was adopted is unknown.
+    """
 
     def upload(stream: BinaryIO) -> None:
         with tarfile.open(fileobj=stream, mode="w|", bufsize=DATA_LIMIT) as archive:
             for hold in holds:
                 archive.add(hold.path, arcname=hold.transfer_id)
 
-    aborted = ""
     try:
-        response = session.request("adopt", header, upload=upload)
+        return session.request(op, header, upload=upload), ""
     except RequestAborted as exc:
-        response, aborted = exc.response, f"; this side's upload failed: {exc}"
+        return exc.response, f"; this side's upload failed: {exc}"
     except SessionFailed as exc:
         raise _unknown_adoption(f"the transfer session to {dst.locator} failed: {exc}", src, dst, arguments) from None
+
+
+def _checked_upload(
+    response: dict[str, Any], aborted: str, ids: list[str], src: _End, dst: _End, arguments: argparse.Namespace
+) -> dict[str, Any]:
+    """The checked adoption document of an ``adopt`` request's *response* (or the refusal of a ``stage`` request) of
+    the bundles *ids*; after this side's own *aborted* upload only a ``refused`` document is a usable one.
+
+    :param response: The response.
+    :param aborted: Why this side's upload failed, or empty.
+    :param ids: The transfer ids uploaded.
+    :param src: The source end.
+    :param dst: The remote destination end.
+    :param arguments: The command's arguments.
+    :return: The checked document (:func:`_checked_adoption`).
+    :raises RuntimeError: When the answer is unusable: whether anything was adopted is unknown.
+    """
+
     try:
         document = _checked_adoption(response.get("document"), ids)
         refused = "refused" in document
@@ -2642,7 +2835,147 @@ def _session_adopt(
     except (ValueError, TypeError, WorkflowError):
         detail = f"{dst.locator} gave no usable adoption report ({response.get('error', 'no document')}){aborted}"
         raise _unknown_adoption(detail, src, dst, arguments) from None
+    return document
+
+
+class _Capacity(Exception):
+    """DST refused a ``stage`` request at its capacity, before it used the upload: adopt a staged segment first."""
+
+
+def _session_stage(
+    session: TransferSession,
+    src: _End,
+    dst: _End,
+    arguments: argparse.Namespace,
+    holds: list[_moving.Hold],
+    size: int,
+    fsync: bool,
+) -> tuple[dict[str, Any], str]:
+    """One ``stage`` request of *holds* (*size* landed bytes) on *session* (plan §7.10): ``{"token", "workspace_id",
+    "matures_in", "bytes"}`` (the bytes that landed) once DST holds the segment committed and its first scan taken, or the checked refusal document
+    (see :func:`_checked_upload`); and the far side's standard error.
+
+    :param session: DST's open transfer session.
+    :param src: The source end.
+    :param dst: The remote destination end.
+    :param arguments: The command's arguments.
+    :param holds: The segment's holds.
+    :param size: Their landed regular-file bytes.
+    :param fsync: Ask for ``--sync fsync``.
+    :return: The stage (or refusal) document and the far side's standard error.
+    :raises _Capacity: When DST refused it for its capacity (nothing of it used).
+    :raises RuntimeError: When the answer is unusable or the session failed: the outcome is unknown (DST may hold
+        the segment staged; it never adopts it unasked).
+    """
+
+    ids = [hold.transfer_id for hold in holds]
+    header: dict[str, Any] = {"workspace": dst.plain, "transfer_ids": ids, "bytes": size}
+    if fsync:
+        header["sync"] = "fsync"
+    response, aborted = _upload_holds(session, "stage", header, holds, src, dst, arguments)
+    if response.get("ok") is False and response.get("capacity") is True and "document" not in response:
+        raise _Capacity(str(response.get("error")))
+    if response.get("ok") is not True:
+        return _checked_upload(response, aborted, ids, src, dst, arguments), str(response.get("stderr", ""))
+    token, matures, landed = response.get("token"), response.get("matures_in"), response.get("bytes")
+    try:
+        workspace_id = canonical_uuid(str(response.get("workspace_id")), "workspace_id")
+        if aborted:
+            raise ValueError("a stage of an aborted upload")
+        if not isinstance(token, str) or not token or response.get("transfer_ids") != ids:
+            raise ValueError("a stage of other bundles")
+        if isinstance(matures, bool) or not isinstance(matures, (int, float)) or not 0 <= matures < math.inf:
+            raise ValueError(f"a stage maturing in {matures!r} seconds")
+        if isinstance(landed, bool) or not isinstance(landed, int) or landed < 0:
+            raise ValueError(f"a stage of {landed!r} landed bytes")
+    except (ValueError, TypeError, WorkflowError) as exc:
+        detail = f"{dst.locator} gave no usable adoption report (the stage of a segment: {exc}){aborted}"
+        raise _unknown_adoption(detail, src, dst, arguments) from None
+    document = {"token": token, "workspace_id": workspace_id, "matures_in": float(matures), "bytes": landed}
     return document, str(response.get("stderr", ""))
+
+
+def _adopt_staged(
+    session: TransferSession,
+    settled: "_Deliveries",
+    holds: list[_moving.Hold],
+    staged: dict[str, Any],
+    err: str,
+    *,
+    release: bool,
+) -> None:
+    """Adopt the segment of *holds* DST staged (*staged*: its token and workspace id; *err* its ``stage``'s standard
+    error) with one ``adopt_staged`` request, and settle it: the answer must be the adoption of exactly those
+    bundles in the pinned workspace, else the outcome is unknown (the holds stay held, the pair stops). A refusal
+    (DST answered without adopting anything: an unknown token, a workspace sealed since) keeps the holds held and
+    stops the pair too. The adopted holds are released at once when *release*; a source session that failed in that
+    release stops the pair before anything more is adopted.
+    """
+
+    src, dst, arguments = settled.src, settled.dst, settled.arguments
+    ids = [hold.transfer_id for hold in holds]
+    header = {"workspace": dst.plain, "token": staged["token"], "transfer_ids": ids}
+    try:
+        try:
+            response = session.request("adopt_staged", header)
+        except SessionFailed as exc:
+            detail = f"the transfer session to {dst.locator} failed while it adopted a staged segment: {exc}"
+            raise _unknown_adoption(detail, src, dst, arguments) from None
+        if response.get("ok") is False and "document" not in response:
+            # Refused before anything was touched (the far side's rule): the stage stays there, unadopted.
+            error = str(response.get("error"))
+            refusal = f"{dst.locator} refused to adopt a staged segment: {error}"
+            said = "" if "nothing was adopted" in error else "; nothing of it was adopted"
+            settled.fail(
+                holds,
+                f"{refusal}{said}: deliver it with `httk job transfer --resume {src.locator} {dst.locator}`",
+            )
+            settled.stopped = settled.stopped or refusal
+            return
+        try:
+            if response.get("ok") is not True:
+                raise ValueError(str(response.get("error", "not adopted")))
+            document = _checked_adoption(response.get("document"), ids, exact=True)
+            if "refused" in document:
+                raise ValueError("a refusal after the stage")
+        except (ValueError, TypeError, WorkflowError) as exc:
+            detail = f"{dst.locator} gave no usable adoption report of a staged segment ({exc})"
+            raise _unknown_adoption(detail, src, dst, arguments) from None
+        if (answered := document["workspace_id"]) != staged["workspace_id"]:
+            # The jobs arrived, but in another workspace than the one the stage was made in: nothing is released.
+            raise RuntimeError(
+                f"{dst.locator} adopted the jobs into workspace {answered}, not the expected workspace "
+                f"{staged['workspace_id']} that answered their stage; the holds are kept on {src.locator}: check with "
+                f"`httk job show` on {dst.locator}, then `httk job transfer --resume {src.locator} {dst.locator}` "
+                "reports them already adopted there and releases the holds"
+            )
+    except RuntimeError as exc:
+        settled.fail(holds, str(exc))
+        settled.stopped = settled.stopped or str(exc).split(";", 1)[0]
+        return
+    done = settled.settle(holds, document)
+    _relay(dst, arguments, err + str(response.get("stderr", "")))
+    if release:
+        settled.release(done)
+        if settled.session is not None and not settled.session.is_open:
+            # SRC failed while it released: nothing more is adopted (the queued stages are abandoned, held on SRC).
+            settled.stopped = settled.stopped or f"{src.locator}: the transfer session failed while releasing"
+
+
+def _abandon_staged(
+    settled: "_Deliveries", holds: list[_moving.Hold], where: str, reason: str, *, copied: bool = True
+) -> None:
+    """Settle the holds of a segment staged in *where* and never adopted, since the transfer stopped (*reason*): they
+    stay held (they were sent, so they are never taken back), for ``--resume``. Without *copied* the stage was the
+    original holds in SRC (one filesystem, no ``--keep``): nothing of them was copied."""
+
+    src, dst = settled.src, settled.dst
+    staged = f"it was staged in {where} and discarded there" if copied else "nothing of it was copied"
+    message = (
+        f"not adopted, since the transfer stopped ({reason}); {staged}, and it is delivered again by "
+        f"`httk job transfer --resume {src.locator} {dst.locator}`"
+    )
+    settled.fail(holds, message)
 
 
 def _session_workflows(
@@ -2729,6 +3062,9 @@ class _Deliveries:
     :param fresh: The transfer ids of the holds this run created in a local *src*.
     :param context: The CLI invocation.
     :param arguments: The command's arguments.
+    :param pair: The pair whose page the batch is: what lives for the whole command (the pinned ``workspace_id``,
+        the destination's id, the sticky fsync, the stop and the staged segments) is the pair's; by default the
+        batch's own.
     """
 
     def __init__(
@@ -2739,13 +3075,15 @@ class _Deliveries:
         fresh: frozenset[str],
         context: CLIContext,
         arguments: argparse.Namespace,
+        pair: "_Pair | None" = None,
     ) -> None:
         self.src, self.dst, self.outcomes, self.fresh = src, dst, outcomes, fresh
         self.context, self.arguments = context, arguments
-        #: The ``workspace_id`` of the first answer: every later delivery of the command must report it.
-        self.answered: str | None = None
-        #: The adopting workspace's id, for the releases' away copies.
-        self.destination_id: str | None = dst.workspace_id
+        #: The pair: the pinned ``workspace_id`` (``answered``), ``destination_id``, ``fsync``, ``stopped`` and the
+        #: staged segments not yet adopted.
+        self.pair = _Pair(dst) if pair is None else pair
+        #: The batch's outcomes are concluded once its deliveries ended and its last staged segment was settled.
+        self.page = _Concluding()
         #: The adoption entries by transfer id.
         self.entries: dict[str, dict[str, Any]] = {}
         #: The ``workflows`` reports of the adopting deliveries.
@@ -2756,10 +3094,6 @@ class _Deliveries:
         self.released: set[str] = set()
         self.unreleased: list[tuple[str, str]] = []
         self.handled: set[str] = set()
-        #: Why the session stopped: an unknown outcome, after which nothing more is sent.
-        self.stopped: str | None = None
-        #: A sync commit failed in this session: later segments go with ``--sync fsync`` directly.
-        self.fsync = False
         #: The refusal of a whole segment that stopped the session: the segments never sent are settled by it.
         self.refusal: dict[str, Any] | None = None
         #: A pull's transfer session to the remote SRC, which then releases over it.
@@ -2767,6 +3101,46 @@ class _Deliveries:
         #: *fresh* names this run's holds of a remote SRC too (remote → remote over a session), so that a refused hold
         #: an earlier run left gets the conditional remedy.
         self.fresh_known = False
+
+    @property
+    def answered(self) -> str | None:
+        """The ``workspace_id`` of the first answer: every later delivery of the command must report it."""
+
+        return self.pair.answered
+
+    @answered.setter
+    def answered(self, value: str | None) -> None:
+        self.pair.answered = value
+
+    @property
+    def destination_id(self) -> str | None:
+        """The adopting workspace's id, for the releases' away copies."""
+
+        return self.pair.destination_id
+
+    @destination_id.setter
+    def destination_id(self, value: str | None) -> None:
+        self.pair.destination_id = value
+
+    @property
+    def fsync(self) -> bool:
+        """A sync commit failed in this session: later segments go with ``--sync fsync`` directly."""
+
+        return self.pair.fsync
+
+    @fsync.setter
+    def fsync(self, value: bool) -> None:
+        self.pair.fsync = value
+
+    @property
+    def stopped(self) -> str | None:
+        """Why the session stopped: an unknown outcome, after which nothing more is sent."""
+
+        return self.pair.stopped
+
+    @stopped.setter
+    def stopped(self, value: str | None) -> None:
+        self.pair.stopped = value
 
     def fail(self, holds: list[_moving.Hold], message: str, *, complete: bool = False) -> None:
         """Report *holds* failed with *message*; they stay held, which the outcome adds unless *complete* (the
@@ -2837,6 +3211,10 @@ class _Deliveries:
         """Release the delivered *transfer_ids* on SRC (step 4), recording which were released."""
 
         self.handled.update(transfer_ids)
+        if self.pair.interrupted and self.session is not None and not self.session.is_open:
+            # Interrupted, and SRC's session with it: the jobs are adopted, their holds stay for --resume.
+            self.unreleased += [(transfer_id, "the transfer was interrupted") for transfer_id in transfer_ids]
+            return
         # A session's request carries the ids in its header, not on a command line: a bounded number a request.
         chunks = (
             _chunks(transfer_ids, flag="--release")
@@ -2854,21 +3232,29 @@ class _Deliveries:
                 self.unreleased += [(transfer_id, str(exc)) for transfer_id in chunk]
 
 
+#: The ops a destination's transfer session serves when it stages segments (plan §7.10): a push then stages each
+#: segment and adopts it once its deadline has run, while later segments are copied; without them, one ``adopt``.
+_STAGE_OPS = frozenset({"stage", "adopt_staged"})
+
+
 def _deliver_segment(
     session: TransferSession,
     settled: "_Deliveries",
     holds: list[_moving.Hold],
     base: Path | None,
+    size: int | None,
     token: str,
     fsync: bool,
 ) -> tuple[dict[str, Any], str]:
-    """One delivery of a segment for :func:`_adopt_with_retry` (:func:`_session_adopt`; the bundles uploaded from
-    *base*, a remote SRC's relay, when given), recording in *settled* that the session now goes with ``--sync
-    fsync``."""
+    """One delivery of a segment for :func:`_adopt_with_retry` (:func:`_session_adopt`, or with *size*, its landed
+    bytes, :func:`_session_stage`; the bundles uploaded from *base*, a remote SRC's relay, when given), recording in
+    *settled* that the session now goes with ``--sync fsync``."""
 
     settled.fsync = settled.fsync or fsync  # a retry after a failed commit: the rest go so too
     if base is not None:
         holds = [replace(hold, path=str(base / hold.transfer_id)) for hold in holds]
+    if size is not None:
+        return _session_stage(session, settled.src, settled.dst, settled.arguments, holds, size, fsync)
     return _session_adopt(session, settled.src, settled.dst, settled.arguments, holds, token, fsync)
 
 
@@ -2884,10 +3270,20 @@ def _push_over_session(session: TransferSession, deliveries: list[list[_moving.H
     sent is settled by the same refusal, as the one delivery of the adapter path would have been. An unknown
     outcome (an unusable answer, a failed session, another workspace answering) stops it too: that segment's holds
     and every later one's stay held for ``--resume``.
+
+    When DST serves ``stage`` and ``adopt_staged`` (decided when the session opened; plan §7.10) a segment is staged
+    instead (``stage``: received, committed and the first scan of its settle taken, answered at once) and adopted
+    with ``adopt_staged`` once its visibility deadline has run, between later stages and, for the rest, when the
+    pair ends (at most :data:`_STAGES` staged segments and :data:`_STAGED_BYTES` bytes wait; DST refusing one at its
+    capacity gets the oldest adopted first). A staged segment's outcome is final only after its adoption and release
+    (its refusals are the ``stage`` request's, ruled as above); a stop abandons the staged segments not yet adopted,
+    their holds kept for ``--resume`` (they were sent: never taken back), and a lost ``adopt_staged`` answer is an
+    unknown outcome of its segment.
     """
 
     src, dst, arguments = settled.src, settled.dst, settled.arguments
-    segments = [segment for delivery in deliveries for segment in _segments(delivery)]
+    sizes: dict[str, int] = {}
+    segments = [segment for delivery in deliveries for segment in _segments(delivery, sizes=sizes)]
     for number, segment in enumerate(segments, 1):
         if settled.refusal is not None:
             settled.settle(segment, settled.refusal)  # never sent: this run's holds are taken back
@@ -2901,7 +3297,7 @@ def _push_over_session(session: TransferSession, deliveries: list[list[_moving.H
             continue
         which = f" (segment {number} of {len(segments)})" if len(segments) > 1 else ""
         _say(arguments, f"delivering {len(segment)} bundle(s) to {dst.locator}{which}")
-        _push_segment(session, settled, segment)
+        _push_segment(session, settled, segment, sizes=sizes)
 
 
 def _push_segment(
@@ -2911,31 +3307,86 @@ def _push_segment(
     base: Path | None = None,
     *,
     release: bool = True,
+    sizes: dict[str, int] | None = None,
 ) -> None:
     """Deliver one segment over DST's transfer *session* by the rules of :func:`_push_over_session`: adopted (with
     the retry of a failed commit, from the same bundles), its offending bundle refused and the rest sent once more,
     or refused or unknown (*settled* says whether that stopped the session); its adopted holds released at once
-    (unless not *release*: then the batch's one release after its last segment does).
+    (unless not *release*: then the batch's one release after its last segment does). A staged segment is queued on
+    the pair for its ``adopt_staged`` (after the oldest were adopted to make room), and those whose deadline has run
+    are adopted after it.
 
     :param session: DST's open transfer session.
     :param settled: The batch's deliveries, updated in place.
     :param holds: The segment's holds.
     :param base: The local directory holding the bundles as ``<transfer_id>/`` (a remote SRC's relay); by default
         each hold's own path.
-    :param release: Release the adopted holds right after the segment.
+    :param release: Release the adopted holds right after the segment (its adoption, when staged).
+    :param sizes: The holds' landed bytes by transfer id, measured by :func:`_segments`; a hold not in it (a relay's)
+        is measured here.
     """
 
     src, dst, arguments = settled.src, settled.dst, settled.arguments
+    pair = settled.pair
+    # Decided by the session's ops, at its opening: never after a segment was staged.
+    staging = _STAGE_OPS <= session.ops
     resent = False
     while holds:
-        deliver = partial(_deliver_segment, session, settled, holds, base)
+        size: int | None = None
+        if staging:
+            size = sum(
+                sizes[hold.transfer_id]
+                if sizes is not None and hold.transfer_id in sizes
+                else _measure(Path(hold.path) if base is None else base / hold.transfer_id)[0]
+                for hold in holds
+            )
+            _make_room(pair, size)
+            if settled.stopped is not None:
+                # An adoption of an earlier segment stopped the pair: this one is never sent.
+                settled.fail(
+                    holds,
+                    f"not delivered, since the transfer session stopped ({settled.stopped}); deliver it with "
+                    f"`httk job transfer --resume {src.locator} {dst.locator}`",
+                )
+                break
+        deliver = partial(_deliver_segment, session, settled, holds, base, size)
         try:
             document, err = _adopt_with_retry(
                 deliver, src, dst, arguments, len(holds), _fs.fresh_token(), settled.answered, fsync=settled.fsync
             )
+        except _Capacity as exc:
+            if not pair.pending:
+                # A DST with a smaller cap than this side's segments: the transfer cannot stage there.
+                remote = dst.binding.remote if dst.binding is not None else dst.locator
+                settled.fail(
+                    holds,
+                    f"{dst.locator} refused to stage it at its capacity, with nothing staged: {exc}; it stays held: "
+                    f"deliver it without staging, with `httk remote configure --set transfer_session=off {remote}` "
+                    f"for this run, then `httk job transfer --resume {src.locator} {dst.locator}`",
+                )
+                settled.stopped = f"{dst.locator}: a stage refused at its capacity with nothing staged"
+                break
+            _adopt_oldest(pair)  # DST counts otherwise: one adopted, the segment goes once more
+            continue
         except _ERRORS as exc:
             settled.fail(holds, str(exc))
             settled.stopped = str(exc).split(";", 1)[0]
+            break
+        if "token" in document:
+            # Staged: adopted once its deadline has run, while later segments are copied.
+            settled.answered = settled.answered or document["workspace_id"]
+            mature_at = time.monotonic() + document["matures_in"]
+            where = f"{dst.locator}"
+            stage = _PendingStage(
+                holds,
+                settled,
+                document["bytes"],  # what landed there, as DST counts it
+                mature_at,
+                partial(_adopt_staged, session, settled, holds, document, err, release=release),
+                partial(_abandon_staged, settled, holds, where),
+            )
+            _stage_pending(pair, stage)
+            _adopt_matured(pair)
             break
         refused = "refused" in document
         if refused and base is not None and document.get("stream_aborted"):
@@ -3056,64 +3507,88 @@ def _receive_part(
 
 
 def _pull_part(
-    session: TransferSession, settled: _Deliveries, holds: list[_moving.Hold], fsync: bool
+    source: "_SourceSession", settled: _Deliveries, holds: list[_moving.Hold], fsync: bool
 ) -> tuple[str, Any]:
-    """Fetch a prefix of *holds* from a remote SRC over a pull's *session* into an owner scratch landing in the local
-    DST and, once it is durable, adopt it there (:func:`_adopt_local`). The landing is discarded either way.
+    """Fetch a prefix of *holds* from a remote SRC over a pull's transfer session (*source*) into the landing of a
+    new stage in the local DST (plan §7.10, 1a): its own owner and ``landing`` scratch, the landing made durable, and
+    only once SRC's answer is validated too (the exact prefix it sent), the first scan of its settle; the stage is
+    then queued on the pair (inside the same guard, so an interrupt always reaches it). Anything else discards the
+    landing and closes the stage's owner.
 
-    :param session: The pull's transfer session.
+    :param source: The pull's transfer session to SRC.
     :param settled: The batch's deliveries.
     :param holds: The holds to fetch, in order.
     :param fsync: Synchronize every landed file as it is written.
-    :return: ``("adopted", (sent, entries))``, the adoption entries of the transfer ids that arrived by id, or what
-        :func:`_receive_part` says went wrong (nothing adopted); ``("failed", reason)`` also when no landing could be
-        made before the request (the owner or its scratch), a local refusal naming no hold.
-    :raises WorkflowError: Or another error of the CLI's kinds, when the adoption failed (some may be adopted).
+    :return: ``("staged", sent)``: the transfer ids that arrived, staged and queued; or what :func:`_receive_part`
+        says went wrong (nothing staged); ``("failed", reason)`` also when no landing could be made before the request
+        (the owner or its scratch), a local refusal naming no hold.
+    :raises WorkflowError: Or another error of the CLI's kinds, when the first scan failed (nothing adopted).
     """
 
-    dst, arguments = settled.dst, settled.arguments
+    session = source.get()
+    assert session is not None
+
+    dst = settled.dst
     assert dst.workspace is not None
     workspace = dst.workspace
     unusable = f"no landing could be made in {dst.locator}"
+    stage: _moving.Stage | None = None
     try:
         require_cli_modifiable(workspace)
-        registered = _owner(workspace, "job transfer")
-    except _ERRORS as exc:
-        return "failed", f"{unusable}: {exc}"
-    outcome: tuple[str, Any] = ("failed", unusable)
-    failure: Exception | None = None
-    with registered as owner:
-        # Errors are kept, not raised, inside: an owner left by an error stays open for recovery.
-        scratch = None
-        try:
-            try:
-                scratch = owner.scratch("landing")
-            except _ERRORS as exc:
-                return "failed", f"{unusable}: {exc}"  # before the request: nothing was asked of SRC
-            landing = scratch / "outgoing"
-            outcome = _receive_part(session, settled, holds, landing, fsync)
-            if outcome[0] == "received":
-                sent: list[str] = outcome[1]
-                sources = [landing / transfer_id for transfer_id in sent]
-                _say(arguments, f"adopting {len(sent)} bundle(s) in {dst.locator}")
-                absent = _moving.settle_absent(workspace, sources)
-                serial = {index for index, source in enumerate(sources) if source in absent.serial}
-                adopted = run_batch(
-                    owner,
-                    lambda source: _adopt_local(workspace, owner, source, absent.absent),
-                    sources,
-                    workspace.io_workers,
-                    serial=serial,
-                )
-                outcome = ("adopted", (sent, dict(zip(sent, adopted, strict=True))))
-        except _ERRORS as exc:
-            failure = exc
-        finally:
-            if scratch is not None:
-                owner.discard_scratch(scratch)
-    if failure is not None:
-        raise failure
+        stage = _moving.Stage(workspace, _owner(workspace, "job transfer"))
+        stage.landing = stage.owner.scratch("landing")
+    except BaseException as exc:
+        if stage is not None:
+            with contextlib.suppress(Exception):  # an owner that cannot close is left for recovery
+                stage.abandon()
+        if not isinstance(exc, _ERRORS):
+            raise  # an interrupt: nothing was asked of SRC
+        return "failed", f"{unusable}: {exc}"  # before the request: nothing was asked of SRC
+    landing = stage.landing / "outgoing"
+    queued = False
+    try:
+        outcome = _receive_part(session, settled, holds, landing, fsync)
+        if outcome[0] == "received":
+            sent: list[str] = outcome[1]
+            # Only after the download's terminal and SRC's answer (the exact prefix sent) were validated.
+            stage.commit([landing / transfer_id for transfer_id in sent])
+            part = holds[: len(sent)]
+            pending = _PendingStage(
+                part,
+                settled,
+                # The landed regular-file bytes (hard-link copies counted), against the pair's staged bytes.
+                sum(_measure(landing / transfer_id)[0] for transfer_id in sent),
+                time.monotonic() + stage.remaining(),
+                partial(_adopt_pulled, source, settled, stage, part),
+                partial(_abandon_local_stage, settled, stage, part, settled.dst.locator),
+            )
+            _stage_pending(settled.pair, pending)
+            queued = True
+            return "staged", sent
+    except BaseException:
+        if not queued:
+            with contextlib.suppress(Exception):
+                stage.abandon()
+        raise
+    stage.abandon()
     return outcome
+
+
+def _adopt_pulled(
+    source: "_SourceSession", settled: _Deliveries, stage: _moving.Stage, holds: list[_moving.Hold]
+) -> None:
+    """Adopt a pull's stage in the local DST once its deadline has run (:func:`_adopt_local_stage`) and release its
+    adopted holds on SRC over the pull's transfer session; a session that failed while releasing stops the pull."""
+
+    src = settled.src
+    session = source.get()
+    assert session is not None
+    if not _adopt_local_stage(settled, stage, holds, stop=False):
+        return
+    ids = [hold.transfer_id for hold in holds]
+    settled.release([key for key in ids if settled.entries[key]["status"] in _DELIVERED])
+    if not session.is_open:
+        settled.stopped = settled.stopped or f"{src.locator}: the transfer session failed while releasing"
 
 
 def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settled: _Deliveries) -> None:
@@ -3121,9 +3596,14 @@ def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settle
 
     Segments close at :data:`_SEGMENT_BUNDLES`; SRC closes each ``send`` request at :data:`_SEGMENT_BYTES` of landed
     bytes or :data:`_SEGMENT_MEMBERS` archive members (it measures the bundles), so a segment may take several
-    requests, each a prefix of what is left of it. Each request has its own landing, durable before anything of it is
-    adopted (:func:`_pull_part`), and the holds it adopted (or found adopted already) are released on SRC right after
-    it, over the session. Per segment:
+    requests, each a prefix of what is left of it. Each request has its own landing, staged in the local DST
+    (:func:`_pull_part`, plan §7.10: durable, SRC's answer validated, the first scan of its settle taken) and adopted
+    once the visibility deadline has run from that scan, between later requests (at most :data:`_STAGES` stages and
+    :data:`_STAGED_BYTES` landed bytes wait, the incoming request counted at :data:`_SEGMENT_BYTES` (it may carry one
+    bundle more, which then exceeds the bytes until it is adopted); the pair adopts the
+    rest at its end, across pages); the holds a stage adopted (or found adopted already) are released on SRC right
+    after its adoption, over the session. A stop abandons the stages not yet adopted (their landings discarded,
+    their holds kept on SRC). Per segment:
 
     - a failed ``syncfs`` commit of a landing (``io.sync_errors`` ``fail``) fetches it once more into a fresh landing
       with every file synchronized as it is written, as every later request of the session then is (for every
@@ -3138,8 +3618,8 @@ def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settle
     - a release that fails leaves the jobs in DST with their holds on SRC (reported, with the remedy); a session
       failing in it stops the pull too.
 
-    A failed adoption fails what is left of its segment (held on SRC; some may be adopted, which ``--resume``
-    reports as already adopted).
+    A failed adoption fails the holds of its stage (held on SRC; some may be adopted, which ``--resume`` reports as
+    already adopted).
 
     :param source: The command's transfer session to SRC (open).
     :param holds: The batch, in order.
@@ -3164,20 +3644,19 @@ def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settle
         pending: list[_moving.Hold] = segment
         retried = resent = False
         while pending:
+            # One fetch reserved: SRC closes it at _SEGMENT_BYTES, or one bundle beyond (never split; documented).
+            _make_room(settled.pair, _SEGMENT_BYTES)
+            if settled.stopped is not None:
+                settled.fail(pending, f"not delivered, since {settled.stopped}; deliver it with {resume}")
+                break
             try:
-                kind, detail = _pull_part(session, settled, pending, source.fsync)
+                kind, detail = _pull_part(source, settled, pending, source.fsync)
             except _ERRORS as exc:
                 settled.fail(pending, str(exc))
                 break
-            if kind == "adopted":
-                sent, entries = detail
-                settled.entries.update(entries)
-                settled.release([key for key in sent if entries[key]["status"] in _DELIVERED])
-                pending = pending[len(sent) :]
-                if not session.is_open:
-                    settled.stopped = f"{src.locator}: the transfer session failed while releasing"
-                    settled.fail(pending, f"not delivered, since {settled.stopped}; deliver it with {resume}")
-                    break
+            if kind == "staged":
+                pending = pending[len(detail) :]
+                _adopt_matured(settled.pair)
             elif kind == "sync" and not retried:
                 _say(
                     arguments,
@@ -3268,6 +3747,12 @@ def _remove_relay(relay: "tempfile.TemporaryDirectory[str]") -> str | None:
     return None
 
 
+def _measure_relayed(base: Path, hold: _moving.Hold) -> tuple[int, int]:
+    """The regular-file bytes and tar members of *hold*'s copy in the relay *base* (:func:`_measure`)."""
+
+    return _measure(base / hold.transfer_id)
+
+
 def _relay_over_session(
     session: TransferSession, holds: list[_moving.Hold], settled: _Deliveries, source: TransferSession | None
 ) -> None:
@@ -3275,13 +3760,17 @@ def _relay_over_session(
     each through a local temporary relay (plan §7.9).
 
     Segments close at :data:`_SEGMENT_BUNDLES`. Each part of a segment is fetched into its own relay, a temporary
-    directory of this machine (``TMPDIR``) removed once the part is settled: over SRC's transfer session *source*
+    directory of this machine (``TMPDIR``) removed once the part is delivered (staged, when DST stages: the relay is
+    neither a stage nor a receipt; plan §7.10): over SRC's transfer session *source*
     with one ``send`` request (SRC closes it at :data:`_SEGMENT_BYTES` or :data:`_SEGMENT_MEMBERS`, so a segment may
     take several), extracted by the untrusted-tar rules and its terminal validated before the relay is used; without
-    one, with the adapter's ``pull``. The part is then delivered by the rules of a push (:func:`_push_segment`: a
+    one, with the adapter's ``pull``. The part is then delivered in the segments of a push (:func:`_segments`, by the
+    bytes measured in the relay, so that no staged segment exceeds what DST admits) by the rules of a push
+    (:func:`_push_segment`: a
     failed commit's retry goes from the same relay, an offending bundle fails and the rest go once more from it) and
-    its adopted holds are released on SRC at once over *source* (without it, by the batch's one adapter release after
-    the last segment, as before sessions). A remote SRC never takes a hold back: every refusal leaves its holds held
+    its adopted holds are released on SRC once adopted, over *source* (without it, by the batch's one adapter
+    release after the last segment, as before sessions). A remote SRC never takes a hold back: every refusal leaves
+    its holds held
     there. Per segment, as in a pull:
 
     - holds SRC cannot send (gone, or changed while read), or whose member the relay refuses, fail and the rest is
@@ -3322,8 +3811,22 @@ def _relay_over_session(
                     if kind == "received":
                         part, pending = pending[: len(detail)], pending[len(detail) :]
                         _say(arguments, f"delivering {len(part)} bundle(s) to {dst.locator}{which}")
-                        # Without SRC's session, its holds are released by the batch's one adapter release at the end.
-                        _push_segment(session, settled, part, landing, release=source is not None)
+                        # A relayed part may hold more than a push's segment (an adapter SRC's 256 bundles of any
+                        # size, a send's last bundle beyond its limit): staged in the push's segments, each its own
+                        # stage, adoption and release, measured once, in the relay.
+                        sizes: dict[str, int] = {}
+                        relayed = partial(_measure_relayed, landing)
+                        for piece in _segments(part, measure=relayed, sizes=sizes):
+                            if settled.stopped is not None:
+                                settled.fail(
+                                    piece,
+                                    f"not delivered, since the transfer stopped ({settled.stopped}); deliver it "
+                                    f"with {resume}",
+                                )
+                                continue
+                            # Without SRC's session, its holds are released by the batch's one adapter release at the
+                            # end.
+                            _push_segment(session, settled, piece, landing, release=source is not None, sizes=sizes)
                 finally:
                     removed = _remove_relay(relay)
                 if removed is not None and kind != "failed":
@@ -3501,6 +4004,154 @@ class _Pair:
         #: An adapter pair's holds, and those of them this run created.
         self.held: list[_moving.Hold] = []
         self.fresh: set[str] = set()
+        #: The segments staged in DST (by its transfer session, or in this machine's DST) and not yet adopted, in
+        #: staging order, across pages (plan §7.10).
+        self.pending: collections.deque[_PendingStage] = collections.deque()
+        #: The command was interrupted: a release goes only over a session that is still usable.
+        self.interrupted = False
+
+
+class _Concluding:
+    """When a batch's (a page's) outcomes are concluded: once its deliveries ended (:meth:`close`) and none of its
+    staged segments waits for adoption (:meth:`settled`), possibly while a later page is driven."""
+
+    def __init__(self) -> None:
+        self._open = 0
+        self._conclude: Callable[[], object] | None = None
+        self._delivering = True
+
+    def staged(self) -> None:
+        """Count one more staged segment of the batch."""
+
+        self._open += 1
+
+    def settled(self) -> None:
+        """Count one staged segment of the batch as adopted or abandoned (its outcomes settled)."""
+
+        self._open -= 1
+        self._maybe()
+
+    def close(self, conclude: Callable[[], object]) -> None:
+        """End the batch's deliveries; *conclude* runs once nothing of it is staged any more (perhaps at once).
+
+        :param conclude: Concludes the batch's outcomes.
+        """
+
+        self._conclude, self._delivering = conclude, False
+        self._maybe()
+
+    def _maybe(self) -> None:
+        if not self._delivering and self._open == 0 and (conclude := self._conclude) is not None:
+            self._conclude = None
+            conclude()
+
+
+@dataclass
+class _PendingStage:
+    """A segment staged and not yet adopted (plan §7.10): its holds, its batch's deliveries, the bytes it holds and
+    when it matures by this machine's clock (advisory: the receiver waits out its own deadline).
+
+    :param holds: The segment's holds.
+    :param settled: The deliveries of the batch it belongs to.
+    :param size: Its landed regular-file bytes, as staged.
+    :param mature_at: This machine's :func:`time.monotonic` time from which its adoption need not wait.
+    :param adopt: Adopts it and settles its outcomes (an unknown outcome stops the pair); never raises the CLI's
+        errors.
+    :param abandon: Settles its holds as left held, since the pair stopped (given why).
+    """
+
+    holds: list[_moving.Hold]
+    settled: "_Deliveries"
+    size: int
+    mature_at: float
+    adopt: Callable[[], object]
+    abandon: Callable[[str], object]
+
+
+#: A pair keeps at most this many segments staged and not yet adopted (plan §7.10, 1a; a transfer session's far side
+#: enforces the same), ...
+_STAGES = 8
+#: ... holding at most this many landed regular-file bytes, the incoming segment included; one segment larger than
+#: this alone is staged only when nothing else is, and adopted before another is staged.
+_STAGED_BYTES = 32 << 30
+
+
+def _stage_pending(pair: _Pair, stage: _PendingStage) -> None:
+    """Queue *stage*, the newest of *pair*, for its adoption."""
+
+    pair.pending.append(stage)
+    stage.settled.page.staged()
+
+
+def _adopt_oldest(pair: _Pair) -> None:
+    """Adopt *pair*'s oldest staged segment (waiting out what is left of its deadline); a stop that follows abandons
+    the others."""
+
+    stage = pair.pending.popleft()
+    try:
+        stage.adopt()
+    except (KeyboardInterrupt, SystemExit):
+        # An interrupt: its batch is not concluded (no release) while it unwinds; see _Transfer.interruptible.
+        pair.interrupted = True
+        raise
+    except Exception as exc:
+        # Anything else escaping the adoption or the release that follows it: the outcome of the holds not released
+        # is unknown (the adoption may have begun), and the pair stops; the batch still concludes, with a status for
+        # every hold.
+        settled = stage.settled
+        src, dst = settled.src, settled.dst
+        settled.fail(
+            [hold for hold in stage.holds if hold.transfer_id not in settled.handled],
+            f"the transfer to {dst.locator} failed while its staged segment was adopted ({exc}); it stays held on "
+            f"{src.locator} unless it was adopted: `httk job transfer --resume {src.locator} {dst.locator}` delivers "
+            "or releases it",
+            complete=True,
+        )
+        pair.stopped = pair.stopped or f"{dst.locator}: the transfer failed while a staged segment was adopted: {exc}"
+    stage.settled.page.settled()
+    if pair.stopped is not None:
+        _abandon_pending(pair)
+
+
+def _abandon_pending(pair: _Pair) -> None:
+    """Abandon every segment *pair* staged and has not adopted, since it stopped: their holds stay held (they were
+    sent, so they are never taken back)."""
+
+    while pair.pending:
+        stage = pair.pending.popleft()
+        try:
+            stage.abandon(pair.stopped or "the transfer stopped")
+        finally:
+            stage.settled.page.settled()
+
+
+def _make_room(pair: _Pair, size: int) -> None:
+    """Adopt *pair*'s oldest staged segments until one more, of *size* bytes, fits: fewer than :data:`_STAGES`
+    staged and at most :data:`_STAGED_BYTES` bytes with it (or nothing staged)."""
+
+    while (
+        pair.pending
+        and pair.stopped is None
+        and (len(pair.pending) >= _STAGES or sum(stage.size for stage in pair.pending) + size > _STAGED_BYTES)
+    ):
+        _adopt_oldest(pair)
+    if pair.stopped is not None:
+        _abandon_pending(pair)
+
+
+def _adopt_matured(pair: _Pair) -> None:
+    """Adopt *pair*'s staged segments whose deadline has run, oldest first."""
+
+    while pair.pending and pair.stopped is None and pair.pending[0].mature_at <= time.monotonic():
+        _adopt_oldest(pair)
+
+
+def _flush(pair: _Pair) -> None:
+    """Adopt every segment *pair* staged, in staging order, or abandon them once it stopped."""
+
+    while pair.pending and pair.stopped is None:
+        _adopt_oldest(pair)
+    _abandon_pending(pair)
 
 
 def _unattempted(holds: list[_moving.Hold], attempted: Collection[str]) -> list[_moving.Hold]:
@@ -3555,6 +4206,14 @@ def _drive(
     adoption), and a stop of this page (a session failure, an unknown outcome, a refusal naming no hold, another
     ``workspace_id``, and from a local *src* to a local *dst* a chunk that could not be delivered) stops the pair.
 
+    Staged segments (plan §7.10: a push or relay to a *dst* whose session serves ``stage``, a pull's landings, a
+    local *src*'s chunks for a local *dst*) are adopted once their visibility deadline has run, possibly while a
+    later page is driven (:class:`_Pair`'s queue, at most :data:`_STAGES` staged segments a pair, a page a segment for
+    a local *dst* of a local *src*): the
+    returned outcomes are concluded (:func:`_conclude`) once every segment of the batch was adopted or abandoned. A
+    stop abandons the pair's staged segments, their holds kept. Without *pair*, every one is adopted before this
+    returns.
+
     :param src: The end holding the jobs.
     :param dst: The destination every hold of the batch records.
     :param holds: The batch.
@@ -3565,7 +4224,7 @@ def _drive(
     :param sessions: Closes the command's transfer sessions at its end.
     :param source: The command's transfer session to a remote *src*, if any.
     :param pair: The pair whose page this is.
-    :return: One outcome per hold, in the order of *holds*.
+    :return: One outcome per hold, in the order of *holds* (concluded in place, later, when a stage waits).
     """
 
     outcomes: dict[str, dict[str, Any]] = {
@@ -3611,21 +4270,26 @@ def _drive(
     destination_id = dst.workspace_id
     report: object = None
     by_id = {hold.transfer_id: hold for hold in ready}
-    settled = _Deliveries(src, dst, outcomes, fresh, context, arguments)
+    settled = _Deliveries(src, dst, outcomes, fresh, context, arguments, pair)
     settled.session = pulling or relaying
     settled.fresh_known = pair is not None and src.workspace is None and dst.workspace is None
-    if pair is not None:
-        settled.answered, settled.destination_id, settled.fsync = pair.answered, pair.destination_id, pair.fsync
     session: TransferSession | None = None
+    # The holds whose workflows were installed before the first segment: reported whatever their segments do.
+    stepped: list[_moving.Hold] | None = None
     if pulling is not None:
         assert source is not None
         _pull_over_session(source, ready, settled)
         entries = settled.entries
     elif dst.workspace is not None:
+        if src.workspace is not None:
+            entries = settled.entries  # filled as each chunk's stage is adopted
         for chunk in _chunks(list(by_id)):
             if settled.stopped is not None:
                 message = f"not delivered, since the transfer stopped ({settled.stopped})"
                 entries.update({transfer_id: {"status": "failed", "message": message} for transfer_id in chunk})
+                continue
+            if src.workspace is not None:
+                _stage_local(settled, [by_id[transfer_id] for transfer_id in chunk])
                 continue
             try:
                 entries.update(_deliver(src, dst, [by_id[transfer_id] for transfer_id in chunk], context, arguments))
@@ -3653,8 +4317,6 @@ def _drive(
                 for delivery in deliveries:
                     settled.fail(delivery, f"{dst.locator}: the transfer session did not open: {exc}")
                 deliveries = []
-        # The holds whose workflows were installed before the first segment: reported whatever their segments do.
-        stepped: list[_moving.Hold] | None = None
         if session is not None and workflows and deliveries:
             # Before the first segment, so that each adopted segment can start at once.
             stepped = [hold for delivery in deliveries for hold in delivery]
@@ -3695,12 +4357,75 @@ def _drive(
                 settled.fail(delivery, str(exc))
                 continue
             settled.settle(delivery, document)
-        entries, destination_id, shipped_for = settled.entries, settled.destination_id, settled.shipped_for
-        if stepped is not None:
-            shipped_for = stepped
-        if any(isinstance(rows, list) for rows in settled.reports):
-            # Each delivery asked about its own holds' workflows: together, about the batch's.
-            report = [row for rows in settled.reports if isinstance(rows, list) for row in rows]
+    # A remote DST's adoption entries, its id and the holds whose workflows it reported are known once every segment
+    # the batch staged was adopted.
+    remote = dst.workspace is None and bool(ready)
+    if pair is not None and not unshipped:
+        # At once: a later page, driven before this one concludes, attempts none of these again.
+        pair.shipping.update(shipping)
+    if pair is None:
+        _flush(settled.pair)  # no later page adopts what this batch staged
+    elif pair.stopped is not None:
+        _abandon_pending(pair)
+
+    def conclude() -> None:
+        _conclude(
+            settled,
+            by_id,
+            paged=pair is not None,
+            workflows=workflows,
+            entries=settled.entries if remote else entries,
+            destination_id=settled.destination_id if remote else destination_id,
+            shipped_for=(settled.shipped_for if stepped is None else stepped) if remote else shipped_for,
+            report=_joined_reports(settled.reports) if remote else report,
+            session=session,
+            shipping=shipping,
+            unshipped=unshipped,
+            relaying=relaying,
+        )
+
+    settled.page.close(conclude)  # at once, or once the last segment of the batch staged is adopted or abandoned
+    return list(outcomes.values())
+
+
+def _joined_reports(reports: list[object]) -> object:
+    """The ``workflows`` reports of a batch's deliveries joined (each asked about its own holds' workflows), or
+    ``None`` when none is a list."""
+
+    if any(isinstance(rows, list) for rows in reports):
+        return [row for rows in reports if isinstance(rows, list) for row in rows]
+    return None
+
+
+def _conclude(
+    settled: _Deliveries,
+    by_id: dict[str, _moving.Hold],
+    *,
+    paged: bool,
+    workflows: bool,
+    entries: dict[str, dict[str, Any]],
+    destination_id: str | None,
+    shipped_for: list[_moving.Hold],
+    report: object,
+    session: TransferSession | None,
+    shipping: dict[str, dict[str, Any]],
+    unshipped: bool,
+    relaying: TransferSession | None,
+) -> None:
+    """Conclude the outcomes of a batch of :func:`_drive` once its deliveries ended and every segment it staged was
+    adopted or abandoned: each hold's status from its adoption entry, the releases, the away copies kept, the
+    workflows shipped and reported. The arguments are :func:`_drive`'s state of the batch (*paged*: it was given a
+    pair).
+    """
+
+    src, dst, context, arguments, outcomes = (
+        settled.src,
+        settled.dst,
+        settled.context,
+        settled.arguments,
+        settled.outcomes,
+    )
+    pair = settled.pair
     delivered = []
     for transfer_id, entry in entries.items():
         outcome, status = outcomes[transfer_id], entry["status"]
@@ -3737,11 +4462,9 @@ def _drive(
             f"the jobs are in {dst.locator}, but the hold was not released: {reason}; "
             f"run `httk job transfer --resume` or {_release_remedy(arguments, transfer_id, destination_id, src, dst)}"
         )
-    if dst.workspace is not None and pair is None:
+    if dst.workspace is not None and not paged:
         _build_shipped(dst, shipping, arguments)
-    if pair is not None:
-        pair.answered, pair.destination_id, pair.fsync = settled.answered, settled.destination_id, settled.fsync
-        pair.stopped = pair.stopped or settled.stopped
+    if paged:
         if not unshipped:
             pair.shipping.update(shipping)  # attempted, failures included: never attempted again for the pair
         shipping = {**pair.shipping, **shipping}
@@ -3751,7 +4474,6 @@ def _drive(
             outcomes[hold.transfer_id]["workflows"] = [
                 {"id": workflow_id, **shipping[workflow_id]} for workflow_id, _, _ in hold.workflows
             ]
-    return list(outcomes.values())
 
 
 #: The report lines of the shipped workflows by status (those with a reason get a line each).
@@ -3960,7 +4682,8 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
                     workflows=not arguments.no_workflows,
                 )
             run = _Transfer(src, dst, ends, context, arguments, sessions)
-            changed = _transfer_local(run, selection)
+            with run.interruptible():
+                changed = _transfer_local(run, selection)
             outcomes, errors = run.outcomes, run.errors
         else:
             # A remote SRC's session decides first (step 0 is its select); each DST's at its pair's first use.
@@ -3974,7 +4697,8 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
             else:
                 if session is not None:
                     run = _Transfer(src, dst, ends, context, arguments, sessions, source)
-                    changed = _transfer_pull(run, session, bool(selected))
+                    with run.interruptible():
+                        changed = _transfer_pull(run, session, bool(selected))
                     outcomes, errors = run.outcomes, run.errors
                 else:
                     _transfer_adapter(src, dst, ends, context, arguments, sessions, errors, outcomes)
@@ -4088,9 +4812,11 @@ def _transfer_adapter(
             continue
         try:
             outcomes.extend(_drive(src, pair.dst, holds, context, arguments, fresh=fresh, sessions=sessions, pair=pair))
+            _flush(pair)  # its one batch: every segment it staged is adopted now
         except _ERRORS as exc:
             # Contained to this destination, as a paged transfer's pair is.
             pair.stopped = pair.stopped or str(exc)
+            _abandon_pending(pair)
             message = (
                 f"the transfer to {locator} failed while it was driven ({exc}); it stays held on {src.locator} "
                 f"unless it was adopted: {resume} delivers or releases it"
@@ -4244,6 +4970,7 @@ class _Transfer:
                 f"{pair.dst.locator}` delivers or releases it"
             )
             self.outcomes += [self._outcome(pair, hold, message) for hold in holds]
+            _abandon_pending(pair)
 
     def _outcome(self, pair: _Pair, hold: _moving.Hold, message: str) -> dict[str, Any]:
         return {
@@ -4261,6 +4988,23 @@ class _Transfer:
         )
         return [self._outcome(pair, hold, message) for hold in holds]
 
+    @contextlib.contextmanager
+    def interruptible(self) -> Iterator[None]:
+        """On an interrupt (or another escaping exception), abandon every pair's staged segments (their owners
+        closed, their landings discarded; their holds stay) before it propagates. The batches that then end conclude:
+        the holds already adopted are released only over a session that is still usable, else reported with the
+        ``--resume`` remedy (a stage interrupted in its adoption concludes nothing while the interrupt unwinds)."""
+
+        try:
+            yield
+        except BaseException:
+            for pair in self.pairs.values():
+                pair.stopped = pair.stopped or "the transfer was interrupted"
+                pair.interrupted = True
+                with contextlib.suppress(Exception):
+                    _abandon_pending(pair)
+            raise
+
     def stop_all(self, reason: str) -> None:
         """Stop every pair at once (SRC failed): nothing more is driven or held for any.
 
@@ -4268,11 +5012,11 @@ class _Transfer:
         """
 
         self.failure = self.failure or reason
+        if self.dst is not None:
+            self.pair(self.dst)
         for pair in self.pairs.values():
             pair.stopped = pair.stopped or reason
-        if self.dst is not None:
-            pair = self.pair(self.dst)
-            pair.stopped = pair.stopped or reason
+            _abandon_pending(pair)  # their holds stay held: a pull's could not be released on SRC
 
     def finish(self, selection: str | None = None) -> None:
         """Drive each adapter pair's gathered holds once, as before sessions, and report every stopped pair: its
@@ -4284,6 +5028,16 @@ class _Transfer:
 
         src = self.src
         unlisted = f"the holds not yet listed stay held on {src.locator}; " if self.unlisted else ""
+        for pair in list(self.pairs.values()):
+            # What each pair staged and has not adopted yet, before anything is reported (plan §7.10).
+            try:
+                _flush(pair)
+            except Exception as exc:  # a stage's own failures are settled inside: this is the queue's, reported
+                pair.stopped = pair.stopped or f"the transfer failed while its staged segments were adopted: {exc}"
+                with contextlib.suppress(Exception):
+                    _abandon_pending(pair)
+            if self.source is not None and (session := self.source.get()) is not None and not session.is_open:
+                self.stop_all(f"the transfer session to {src.locator} failed")
         for pair in list(self.pairs.values()):
             if pair.held and pair.stopped is None and self.source is not None:
                 session = self.source.get()
@@ -4304,10 +5058,12 @@ class _Transfer:
                         source=self.source,
                         pair=pair,
                     )
+                    _flush(pair)
                 except _ERRORS as exc:
                     pair.stopped = str(exc)
                     message = f"the transfer failed ({exc}); it stays held on {src.locator} unless it was adopted"
                     self.outcomes += [self._outcome(pair, hold, message) for hold in holds]
+                    _abandon_pending(pair)
             elif pair.held:
                 self.outcomes += self._undriven(pair, pair.held)
             if pair.stopped is None:

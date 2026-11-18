@@ -12,6 +12,7 @@ import errno
 import io
 import json
 import os
+import sys
 import tarfile
 import tempfile
 from collections.abc import Iterator
@@ -28,13 +29,17 @@ from httk.workflow.workflow_cli import _transfer as transfer_cli
 from test_job_transfer import (
     adapter_calls,
     adapter_path,
+    adopted_or_abandoned,
+    at_once,
     away_of,
     jobs,
     outcomes,
     outgoing,
     recorded_requests,
     registered,
+    requests_in_order,
     run,
+    same_requests,
     selected,
     starts,
 )
@@ -49,7 +54,7 @@ from v3_helpers import cli_owner
 PATCHED_R2R = PATCHED_PULL.replace(
     'sys.argv = ["httk", *argv]\n',
     'if argv[:2] == ["workflow", "transfer-session"] and os.environ.get("HTTK_TEST_NO_PUSH_OPS"):\n'
-    "    for op in ('adopt', 'install', 'workflows'):\n"
+    "    for op in ('adopt', 'stage', 'adopt_staged', 'install', 'workflows'):\n"
     "        _transfer_session.OPS.pop(op, None)\n"
     'sys.argv = ["httk", *argv]\n',
 )
@@ -59,7 +64,7 @@ SRC_HOST = "src.example.test"
 DST_HOST = "dst.example.test"
 #: The ops of each end's session.
 SRC_OPS = {"select", "holds_page", "hold_page", "send", "release"}
-DST_OPS = {"workflows", "install", "adopt"}
+DST_OPS = {"workflows", "install", "adopt", "stage", "adopt_staged"}
 COMBINATIONS = [("S", "S"), ("S", "A"), ("A", "S"), ("A", "A")]
 
 
@@ -72,6 +77,28 @@ class Ends:
     dst: str
     relays: Path
     remote: Remote
+
+
+#: The tests skipped with a positive visibility deadline, and why (by design; see each).
+AT_ONCE_ONLY: dict[str, str] = {}
+#: The visibility deadline of the workspaces the running test registers (see :func:`_visibility_deadline`).
+DEADLINE = 0.0
+
+
+@pytest.fixture(autouse=True, params=[0, 0.05], ids=["D0", "D0.05"])
+def _visibility_deadline(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> float:
+    """Every test of this module twice: with a zero visibility deadline (each staged segment is adopted before the
+    next is staged or the next page held, as before the pipelined settle of plan §7.10), and with a positive one
+    (staged segments wait while later ones are copied). A test whose assertions are a request order of the first
+    kind only is named in :data:`AT_ONCE_ONLY` and skipped with the positive deadline. Request orders are compared
+    with :func:`same_requests`, and what a stop gives up with :func:`adopted_or_abandoned`, both by :data:`DEADLINE`."""
+
+    deadline = float(request.param)
+    if deadline and request.node.originalname in AT_ONCE_ONLY:
+        pytest.skip(AT_ONCE_ONLY[request.node.originalname])
+    monkeypatch.setattr(sys.modules[__name__], "registered", at_once(registered, deadline))
+    monkeypatch.setattr(sys.modules[__name__], "DEADLINE", deadline)
+    return deadline
 
 
 @pytest.fixture
@@ -184,7 +211,7 @@ def test_each_combination_moves_the_jobs_at_its_counts(
     assert_in(ends.far, plan)
     assert outgoing(ends.near) == [] and relays_in(ends.relays) == []
     measured = counts(ends.remote, before)
-    adopts = len(headers(requests, "adopt"))
+    adopts = len(headers(requests, "stage"))
     if (src_mode, dst_mode) == ("S", "S"):
         # One session a end, whatever the pages (three) and segments: every request on it.
         assert measured == {"src": (1, 1), "dst": (1, 1)} and calls == []
@@ -217,7 +244,7 @@ def test_a_far_side_lacking_the_paged_ops_takes_the_adapter_path_for_that_end_on
     captured = capsys.readouterr()
     assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 3
     assert "lacks the ops hold_page, holds_page, select" in captured.err
-    assert calls == ["job transfer", "pull", "job transfer"] and ops(requests) == ["workflows", "adopt"]
+    assert calls == ["job transfer", "pull", "job transfer"] and ops(requests) == ["workflows", "stage", "adopt_staged"]
     assert counts(ends.remote, 0) == {"src": (4, 3), "dst": (1, 1)}
     assert_in(ends.far, plan)
 
@@ -266,7 +293,7 @@ def test_the_terminal_is_validated_before_the_relay_is_used(
     assert [outcome["status"] for outcome in transfers] == ["failed"] * 4
     assert any("aborted the download" in outcome["message"] for outcome in transfers)
     assert any("--resume" in error for error in errors)
-    assert "adopt" not in ops(requests) and ops(requests, SRC_OPS)[-1] == "send"
+    assert "stage" not in ops(requests) and ops(requests, SRC_OPS)[-1] == "send"
     assert len(outgoing(ends.near)) == 4 and all(find(ends.far, mapping["id"]) is None for mapping, _, _ in plan)
     monkeypatch.delenv("HTTK_TEST_ABORT_DOWNLOAD")
     assert run(ends.project, "--json", "-q", "--resume", ends.src, ends.dst) == 0
@@ -299,7 +326,7 @@ def test_a_full_relay_stops_the_pair_with_its_holds_kept_on_src(
     assert any("this machine's relay" in outcome["message"] for outcome in transfers)
     assert any("stopped" in error and "--resume" in error for error in errors)
     # Nothing reached DST; the one fetch was the last request; nothing was released.
-    assert "adopt" not in ops(requests) and calls == [] and ops(requests, SRC_OPS)[-1] == "send"
+    assert "stage" not in ops(requests) and calls == [] and ops(requests, SRC_OPS)[-1] == "send"
     assert len(outgoing(ends.near)) == 4 and relays_in(ends.relays) == []
     assert run(ends.project, "--json", "-q", "--resume", ends.src, ends.dst) == 0
     assert [outcome["status"] for outcome in statuses(capsys)[0]] == ["adopted"] * 4
@@ -324,7 +351,7 @@ def test_a_member_the_relay_refuses_fails_its_hold_and_the_rest_is_fetched_again
     assert outgoing(ends.near) == [failed["transfer_id"]] and len(by_member) == 3
     # Fetched once more without it; adopted once.
     assert [len(header["names"]) for header in headers(requests, "send")] == [3, 2] and len(
-        headers(requests, "adopt")
+        headers(requests, "stage")
     ) == 1
     assert_in(ends.far, [plan[0], plan[2]])
 
@@ -342,19 +369,19 @@ def test_a_failed_commit_is_delivered_again_from_the_same_relay_with_fsync(
     calls = adapter_calls(monkeypatch)
     requests = recorded_requests(monkeypatch)
     sources: list[tuple[str, bool]] = []
-    real = transfer_cli._session_adopt
+    real = transfer_cli._session_stage  # DST stages each segment (plan §7.10)
 
-    def session_adopt(*arguments: Any) -> Any:
+    def session_stage(*arguments: Any) -> Any:
         path = Path(arguments[4][0].path)
         sources.append((str(path.parent), path.is_dir()))
         return real(*arguments)
 
-    monkeypatch.setattr(transfer_cli, "_session_adopt", session_adopt)
+    monkeypatch.setattr(transfer_cli, "_session_stage", session_stage)
     plan = jobs(ends.near, 3)
     assert run(ends.project, "--json", "-q", *selected(plan), ends.src, ends.dst) == 0
     assert [outcome["status"] for outcome in statuses(capsys)[0]] == ["adopted"] * 3
     # The retry and the later segment both with fsync (sticky); the retry from the same relay, not fetched again.
-    assert [header.get("sync") for header in headers(requests, "adopt")] == [None, "fsync", "fsync"]
+    assert [header.get("sync") for header in headers(requests, "stage")] == [None, "fsync", "fsync"]
     assert sources[0] == sources[1] and sources[0][1] and sources[2][0] != sources[0][0]
     fetches = len(headers(requests, "send")) if src_mode == "S" else calls.count("pull")
     assert fetches == 2
@@ -380,7 +407,7 @@ def test_a_bundle_dst_refuses_fails_alone_and_the_rest_goes_again_from_the_relay
     plain = ends.src.split(":", 1)[1]
     assert f"take it back on the host of {ends.src} with `httk job adopt --workspace {plain} " in message
     assert sorted(outcome["status"] for outcome in transfers) == ["adopted", "adopted", "failed"]
-    assert len(headers(requests, "send")) == 1 and len(headers(requests, "adopt")) == 2
+    assert len(headers(requests, "send")) == 1 and len(headers(requests, "stage")) == 2
     assert outgoing(ends.near) == [refused]
     assert_in(ends.far, [plan for hold, plan in left if hold.transfer_id != refused])
 
@@ -402,7 +429,7 @@ def test_a_whole_segment_refusal_stops_the_pair_and_keeps_every_hold_on_src(
     assert any("a scripted refusal" in error and "--resume" in error for error in errors)
     # Nothing taken back, nothing more fetched or sent after the refusal, nothing released.
     assert len(outgoing(ends.near)) == 4 and all(find(ends.near, mapping["id"]) is None for mapping, _, _ in plan)
-    assert len(headers(requests, "adopt")) == 1 and "release" not in ops(requests)
+    assert len(headers(requests, "stage")) == 1 and "release" not in ops(requests)
     fetches = len(headers(requests, "send")) if src_mode == "S" else calls.count("pull")
     assert fetches == 1 and calls.count("job transfer") == (1 if src_mode == "A" else 0)
     monkeypatch.delenv("HTTK_TEST_SCRIPT")
@@ -424,7 +451,7 @@ def test_dst_dying_in_a_segment_keeps_it_and_the_later_ones_held_and_releases_th
     assert [outcome["status"] for outcome in transfers] == ["adopted"] * 2 + ["failed"] * 4
     assert all("whether the jobs arrived is unknown" in outcome["message"] for outcome in transfers[2:4])
     assert all("not delivered" in outcome["message"] for outcome in transfers[4:])
-    assert len(headers(requests, "adopt")) == 2 and any("--resume" in error for error in errors)
+    assert len(headers(requests, "stage")) == 2 and any("--resume" in error for error in errors)
     assert sorted(outgoing(ends.near)) == sorted(outcome["transfer_id"] for outcome in transfers[2:])
     monkeypatch.delenv("HTTK_TEST_EXIT_AFTER_ADOPT")
     assert run(ends.project, "--json", "-q", "--resume", ends.src, ends.dst) == 0
@@ -445,7 +472,7 @@ def test_another_workspace_answering_a_later_segment_stops_the_pair(
     transfers, _ = statuses(capsys)
     assert [outcome["status"] for outcome in transfers] == ["adopted"] * 2 + ["failed"] * 4
     assert "not the expected workspace" in transfers[2]["message"]
-    assert len(headers(requests, "adopt")) == 2 and len(headers(requests, "send")) == 2
+    assert len(headers(requests, "stage")) == 2 and len(headers(requests, "send")) == 2
     assert len(outgoing(ends.near)) == 4
 
 
@@ -465,14 +492,15 @@ def test_src_dying_stops_every_pair(
     before = len(log(ends.remote))
     assert run(ends.project, "--json", "-q", "--resume", ends.src) == 1
     transfers, errors = statuses(capsys)
-    assert sorted(outcome["status"] for outcome in transfers) == ["adopted", "failed", "failed", "failed"]
-    (adopted,) = [outcome for outcome in transfers if outcome["status"] == "adopted"]
+    # The first segment adopted (or, still staged when SRC died with a positive deadline, given up and held).
+    (adopted,) = [outcome for outcome in transfers if adopted_or_abandoned(outcome, DEADLINE)]
+    assert sorted(outcome["status"] for outcome in transfers if outcome is not adopted) == ["failed"] * 3
     stopped = [outcome for outcome in transfers if outcome["destination"] != adopted["destination"]]
     assert len(stopped) == 2 and all("not delivered" in outcome["message"] for outcome in stopped)
     assert len(errors) == 2 and all("--resume" in error for error in errors)
-    # One adopt only; SRC's one session and the first pair's DST session, none for the second pair.
-    assert len(headers(requests, "adopt")) == 1 and counts(ends.remote, before) == {"src": (1, 1), "dst": (1, 1)}
-    assert len(outgoing(ends.near)) == 3
+    # One stage only; SRC's one session and the first pair's DST session, none for the second pair.
+    assert len(headers(requests, "stage")) == 1 and counts(ends.remote, before) == {"src": (1, 1), "dst": (1, 1)}
+    assert len(outgoing(ends.near)) == (3 if adopted["status"] == "adopted" else 4)
     monkeypatch.delenv("HTTK_TEST_EXIT_ON_SEND")
     assert run(ends.project, "--json", "-q", "--resume", ends.src) == 0
     assert outgoing(ends.near) == []
@@ -513,7 +541,7 @@ def test_src_dying_while_the_workflows_are_fetched_adopts_nothing(
     (outcome,), errors = statuses(capsys)
     assert outcome["status"] == "failed"
     assert f"{ends.src}: the transfer session failed before anything was adopted" in outcome["message"]
-    assert "adopt" not in ops(requests) and "install" not in ops(requests)
+    assert "stage" not in ops(requests) and "install" not in ops(requests)
     assert len(outgoing(ends.near)) == 1 and find(ends.far, job_id) is None and errors
 
 
@@ -561,8 +589,9 @@ def test_workflows_go_before_the_first_segment_or_after_the_adoption(
     if (src_mode, dst_mode) == ("S", "S"):
         # Before the first segment: DST's workflows, SRC's store entries into a relay, DST's install; then the job.
         assert ops(requests) == [
-            "select", "holds_page", "hold_page", "workflows", "send", "install", "send", "adopt", "release"
+            "select", "holds_page", "hold_page", "workflows", "send", "install", "send", "stage", "adopt_staged", "release"
         ]  # fmt: skip
+        assert requests_in_order(requests)
         assert [header["kind"] for header in headers(requests, "send")] == ["store", "holds"]
         assert calls == [] and measured == {"src": (1, 1), "dst": (1, 1)}
     elif (src_mode, dst_mode) == ("S", "A"):
@@ -572,7 +601,7 @@ def test_workflows_go_before_the_first_segment_or_after_the_adoption(
         assert ops(requests)[-1] == "release" and measured == {"src": (1, 1), "dst": (2, 2)}
     else:
         # The store entries pulled by the adapter, installed over DST's session before the first segment.
-        assert ops(requests) == ["workflows", "install", "adopt"]
+        assert ops(requests) == ["workflows", "install", "stage", "adopt_staged"] and requests_in_order(requests)
         assert calls == ["job transfer", "pull", "pull", "job transfer"]
         assert measured == {"src": (4, 2), "dst": (1, 1)}
 
@@ -617,7 +646,7 @@ def test_resume_drives_the_holds_left_in_each_combination(
     assert_in(ends.far, [plan for _, plan in left])
     # SRC's holds listed by holds_page (S) or transfer status (A); delivered over DST's session (S) or not (A).
     assert ("holds_page" in ops(requests)) == (src_mode == "S") and ("transfer status" in calls) == (src_mode == "A")
-    assert ("adopt" in ops(requests)) == (dst_mode == "S") and ("deliver job adopt" in calls) == (dst_mode == "A")
+    assert ("stage" in ops(requests)) == (dst_mode == "S") and ("deliver job adopt" in calls) == (dst_mode == "A")
 
 
 @pytest.mark.parametrize("src_mode", ["S", "A"])
@@ -656,8 +685,10 @@ def test_src_dying_in_a_release_stops_the_pair(
     # The first segment is adopted, not released; nothing more is fetched or adopted.
     assert [outcome["status"] for outcome in transfers] == ["adopted"] * 2 + ["failed"] * 2
     assert all("the hold was not released" in outcome["message"] for outcome in transfers[:2])
-    assert all("not delivered" in outcome["message"] for outcome in transfers[2:])
-    assert len(headers(requests, "adopt")) == 1 and ops(requests, SRC_OPS)[-1] == "release"
+    # Not sent, or (a positive deadline) staged and given up: nothing more is adopted after the failed release.
+    later = ("not delivered", "not adopted, since the transfer stopped") if DEADLINE else ("not delivered",)
+    assert all(any(said in outcome["message"] for said in later) for outcome in transfers[2:])
+    assert len(headers(requests, "adopt_staged")) == 1 and ops(requests, SRC_OPS)[-1] == "release"
     assert any("--resume" in error for error in errors) and len(outgoing(ends.near)) == 4
     monkeypatch.delenv("HTTK_TEST_EXIT_ON_OP")
     assert run(ends.project, "--json", "-q", "--resume", ends.src, ends.dst) == 0
@@ -678,8 +709,11 @@ def test_earlier_holds_are_driven_before_the_selection_s_pages(
     assert transfers[0]["transfer_id"] == left[0][0].transfer_id
     assert [outcome["status"] for outcome in transfers] == ["adopted"] * 3
     # One DST session for the earlier hold and every page.
-    assert ops(requests)[:6] == ["select", "holds_page", "workflows", "send", "adopt", "release"]
-    assert ops(requests)[6:] == ["hold_page", "send", "adopt", "release"] * 2  # the second page is the last
+    # The second page is the last.
+    expected = ["select", "holds_page", "workflows", "send", "stage", "adopt_staged", "release"]
+    assert same_requests(
+        ops(requests), expected + ["hold_page", "send", "stage", "adopt_staged", "release"] * 2, DEADLINE
+    )
     assert_in(ends.far, [*plan, left[0][1]])
 
 
@@ -713,15 +747,18 @@ def test_a_relay_that_cannot_be_made_for_a_later_segment_stops_the_pair_keeping_
     assert run(ends.project, "--json", "-q", *selected(plan), ends.src, ends.dst) == 1
     transfers, errors = statuses(capsys)  # a valid document
     # The first segment adopted and released (for an adapter SRC by the batch's one release at the end).
-    assert [outcome["status"] for outcome in transfers] == ["adopted"] * 2 + ["failed"] * 2
-    assert all("message" not in outcome for outcome in transfers[:2])
+    # The earlier segment adopted (or, still staged at the stop with a positive deadline, given up and held).
+    assert all(adopted_or_abandoned(outcome, DEADLINE) for outcome in transfers[:2])
+    assert [outcome["status"] for outcome in transfers[2:]] == ["failed"] * 2
+    assert all("message" not in outcome for outcome in transfers[:2] if outcome["status"] == "adopted")
     assert all("relay could not be made" in outcome["message"] for outcome in transfers[2:])
     assert all("--resume" in outcome["message"] for outcome in transfers[2:])
     assert any("stopped" in error and "--resume" in error for error in errors)
-    assert len(headers(requests, "adopt")) == 1
-    assert sorted(outgoing(ends.near)) == sorted(outcome["transfer_id"] for outcome in transfers[2:])
+    assert len(headers(requests, "stage")) == 1
+    left = sorted(outcome["transfer_id"] for outcome in transfers if outcome["status"] != "adopted")
+    assert sorted(outgoing(ends.near)) == left
     # (An adapter SRC's holds go in transfer id order, not the plan's.)
-    assert sum(find(ends.far, mapping["id"]) is not None for mapping, _, _ in plan) == 2
+    assert sum(find(ends.far, mapping["id"]) is not None for mapping, _, _ in plan) == 4 - len(left)
 
 
 def test_a_relay_that_cannot_be_made_for_an_adapter_dst_stops_with_nothing_delivered(
@@ -762,7 +799,7 @@ def test_a_relay_unreadable_during_the_upload_stops_the_pair(
     assert [outcome["status"] for outcome in transfers] == ["failed"] * 4
     assert any("relay could not be read" in error for error in errors)
     # No later fetch or adoption; everything held on SRC.
-    assert len(headers(requests, "send")) == 1 and len(headers(requests, "adopt")) == 1
+    assert len(headers(requests, "send")) == 1 and len(headers(requests, "stage")) == 1
     assert len(outgoing(ends.near)) == 4
 
 
@@ -783,10 +820,13 @@ def test_an_unexpected_error_in_a_later_segment_keeps_what_earlier_segments_sett
     plan = jobs(ends.near, 4)
     assert run(ends.project, "--json", "-q", *selected(plan), ends.src, ends.dst) == 1
     transfers, errors = statuses(capsys)
-    assert [outcome["status"] for outcome in transfers] == ["adopted"] * 2 + ["failed"] * 2
-    assert all("message" not in outcome for outcome in transfers[:2])
+    # The earlier segment adopted (or, still staged at the stop with a positive deadline, given up and held).
+    assert all(adopted_or_abandoned(outcome, DEADLINE) for outcome in transfers[:2])
+    assert [outcome["status"] for outcome in transfers[2:]] == ["failed"] * 2
+    assert all("message" not in outcome for outcome in transfers[:2] if outcome["status"] == "adopted")
     assert all("an unexpected failure" in outcome["message"] for outcome in transfers[2:])
-    assert any("stopped" in error for error in errors) and len(outgoing(ends.near)) == 2
+    assert any("stopped" in error for error in errors)
+    assert len(outgoing(ends.near)) == sum(outcome["status"] != "adopted" for outcome in transfers)
 
 
 def test_an_unexpected_error_driving_an_adapter_src_s_destination_is_contained(
@@ -901,7 +941,7 @@ def test_a_second_relay_refusal_in_a_segment_leaves_its_rest_unfetched(
     transfers, _ = statuses(capsys)
     assert [outcome["status"] for outcome in transfers] == ["failed"] * 3
     assert "refused twice" in transfers[2]["message"] and "--resume" in transfers[2]["message"]
-    assert len(headers(requests, "send")) == 2 and "adopt" not in ops(requests)
+    assert len(headers(requests, "send")) == 2 and "stage" not in ops(requests)
     assert len(outgoing(ends.near)) == 3
 
 
@@ -964,11 +1004,13 @@ def test_an_adapter_src_s_relay_failing_stops_the_pair_keeping_the_earlier_segme
     plan = jobs(ends.near, 4)
     assert run(ends.project, "--json", "-q", *selected(plan), ends.src, ends.dst) == 1
     transfers, errors = statuses(capsys)
-    assert [outcome["status"] for outcome in transfers] == ["adopted"] * 2 + ["failed"] * 2
+    assert all(adopted_or_abandoned(outcome, DEADLINE) for outcome in transfers[:2])
+    assert [outcome["status"] for outcome in transfers[2:]] == ["failed"] * 2
     assert all("this machine's relay failed" in outcome["message"] for outcome in transfers[2:])
     assert any("stopped" in error for error in errors) and len(pulls) == 2
     # The adopted segment released by the one adapter release at the end.
-    assert sorted(outgoing(ends.near)) == sorted(outcome["transfer_id"] for outcome in transfers[2:])
+    left = sorted(outcome["transfer_id"] for outcome in transfers if outcome["status"] != "adopted")
+    assert sorted(outgoing(ends.near)) == left
 
 
 def test_a_dst_lacking_the_push_ops_takes_the_adapter_path_for_dst_only(
@@ -997,7 +1039,7 @@ def test_one_resume_drives_a_session_dst_and_an_adapter_dst(
     requests = recorded_requests(monkeypatch)
     assert run(ends.project, "--json", "-q", "--resume", ends.src) == 0
     assert [outcome["status"] for outcome in statuses(capsys)[0]] == ["adopted"] * 4
-    assert len(headers(requests, "adopt")) == 1 and calls == ["deliver job adopt"]
+    assert len(headers(requests, "stage")) == 1 and calls == ["deliver job adopt"]
     assert outgoing(ends.near) == []
     assert_in(ends.far, [plan for hold, plan in left if hold.destination_locator == ends.dst])
     assert_in(third, [plan for hold, plan in left if hold.destination_locator != ends.dst])
@@ -1014,7 +1056,7 @@ def test_fsync_and_workflow_attempts_last_across_pages(
     assert [outcome["status"] for outcome in statuses(capsys)[0]] == ["adopted"] * 3
     # Three pages: the workflows asked once for the pair; every adoption after the failed commit with fsync.
     assert ops(requests, SRC_OPS).count("hold_page") >= 3 and ops(requests).count("workflows") == 1
-    assert [header.get("sync") for header in headers(requests, "adopt")] == [None, "fsync", "fsync", "fsync"]
+    assert [header.get("sync") for header in headers(requests, "stage")] == [None, "fsync", "fsync", "fsync"]
     assert_in(ends.far, plan)
 
 

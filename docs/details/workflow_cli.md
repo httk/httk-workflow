@@ -851,9 +851,9 @@ Only a hold, pull or release whose id list exceeds 64 KiB of command text (some
 Over a transfer session a push is delivered in segments, each closed at 256
 bundles, 16 GiB of file data or 16,384 archive members (a larger hold is a
 segment of its own; a hold is never split), and the earlier holds and the new
-ones never share a segment. Each segment is one request with its own archive,
-landing (`transfers/incoming/<token>/`), synchronization and adoption document,
-and the holds it adopted are released right after it. A push over a session is
+ones never share a segment. Each segment is its own delivery, with its own archive,
+landing, synchronization and adoption document, and the holds it adopted are
+released right after its adoption (see *Staged segments* below for when that is). A push over a session is
 therefore not all-or-nothing: the segments adopted before a failure stay
 adopted and released, and after an unknown outcome only the failed segment and
 those after it stay held for `--resume`. The rules below apply to each segment as to a delivery, and two
@@ -886,6 +886,77 @@ synchronized file by file at once. When the session fails while the workflows
 are installed, before the first segment, nothing has been adopted and every
 hold stays held.
 
+**Staged segments.** Before a segment is adopted, the jobs it carries (and
+its roots' parents) are looked for in DST twice: once when it is staged, and,
+for those not found then, once more at least one visibility deadline
+(`visibility_deadline_seconds`, 5 seconds by default) after the first look
+ended. A job either look found counts as present (one found first and moved
+out of sight by the second is not taken for absent), and each bundle's
+adoption looks for its jobs afresh as it always did. A job another host
+publishes after the second look, or that shows up too late for it, is caught
+only by that fresh look: the accepted race of concurrent transfers, as before.
+Rather than wait for that segment by segment, a push whose DST serves the
+`stage` and `adopt_staged` requests of a transfer session *stages* each
+segment: DST receives it into a landing scratch of its own (held by an owner of
+its own until the segment is adopted or given up), checks the stream's end,
+synchronizes the landing and takes the first look, and answers at once; the
+push goes on copying the next segments and has each staged segment adopted
+(`adopt_staged`, one request a segment, in the order they were staged) once its
+deadline has passed, and the rest at the end of the command, across pages. A
+pull stages each fetch's landing in the local DST the same way between its
+fetches (only once SRC's answer naming what it sent was checked); a
+remote-to-remote transfer stages at DST as a push does, in the segments of a
+push (a fetched part larger than one, such as 256 large bundles from a source
+without a session, is staged in several), and the relay is removed once its
+segments are staged; a local-to-local transfer stages each page (on one
+filesystem without `--keep`, the first look is over the original holds, which
+stay where they are) and holds the next pages while the staged ones mature.
+
+At most 8 staged segments, holding at most 32 GiB of file data, wait for their
+adoption, after which the oldest is adopted (waiting out what is left of its
+deadline) before another is staged. A push declares each segment's bytes and
+DST admits it by that declaration, then counts what actually landed (hard-link
+copies included), so a session's staged bytes exceed 32 GiB by at most one
+segment; a single bundle larger than that is staged only when nothing else is,
+and is adopted before another is staged (several bundles above it are refused
+for capacity). A DST that refuses a stage for capacity uses nothing of it: the
+oldest staged segment is adopted and the segment sent again. A pull reserves
+one fetch (16 GiB) before it asks for it and counts what landed after it; a
+fetch never splits a bundle, so one bundle can take it beyond the 32 GiB until
+it is adopted. A local-to-local transfer's copied stages (with `--keep` or
+across filesystems) count their copies; one on one filesystem without `--keep`
+copies nothing. The wall time of a long transfer is about the copying time plus
+one deadline only while those slots do not fill before the oldest segment's
+deadline has passed (a fast copy fills them, and then each further segment
+waits for the oldest one's adoption).
+
+A staged segment's outcome is final only once it was adopted and released, and
+its refusals are those of its `stage` request (the rules above). A stop (an
+unknown outcome, a whole-segment refusal, another workspace id, a failed
+session, a local failure) gives up the staged segments not yet adopted: DST
+discards their landings and their holds stay held, `failed` with the
+`--resume` remedy. They were sent, so they are never taken back, not even when
+a later segment is refused as a whole; that refusal takes back only this run's
+holds of the refused segment and of the segments never sent, and an earlier
+run's holds stay held in either case. A refusal of `adopt_staged` itself
+(nothing adopted) and a `stage` answered by another workspace (nothing adopted
+either) keep their holds and stop as well; a lost answer to `adopt_staged` is
+an unknown outcome of that segment. A source session that fails while a
+relayed segment's holds are released stops at once: nothing more is adopted.
+When the far side ends a session (a `bye`, which it answers only after
+discarding them, or the end of its input), its staged segments whose adoption
+had not begun are discarded (a discard that outlasts what this side waits for
+the far side at its end, 5 seconds for the `bye` answer and 2 more for the
+process to exit, is cut short when the far side is stopped, and what is left
+is discarded by recovery once that process is known dead); when it dies they are left to recovery, which
+discards them once its process is known dead: nothing ever adopts a staged
+segment unasked. One whose adoption had begun is recovered as any interrupted
+adoption is, which may still publish its jobs; `--resume` then reports them
+already adopted. An interrupt (Ctrl-C) gives up the staged segments the same
+way; the holds already adopted are released only over a session that is still
+usable. A far side without these requests (an older `httk-workflow`) gets one
+`adopt` request a segment, which waits out its own deadline, as before.
+
 A pull from a remote SRC into a local DST over a transfer session first drives
 the holds an earlier run left bound for DST (every hold for `--resume` without
 DST), listed a page at a time, then has SRC select the jobs and hold them a page
@@ -897,9 +968,9 @@ of file data or 16,384 archive members (directories and hard links included; a
 hold is never split), so a segment may take several fetches, each of what is
 left of it. Each fetch is one archive into its own landing scratch in DST: the
 stream's end is checked before the landing is synchronized, the landing
-synchronized (`io.sync`, read for each landing) before anything of it is
-adopted, and the holds it adopted, or found adopted already, are released on SRC
-right after it, over the same session (with `--keep` recording DST's workspace
+synchronized (`io.sync`, read for each landing) and staged before anything of it is
+adopted (*Staged segments* above), and the holds it adopted, or found adopted already, are released on SRC
+right after its adoption, over the same session (with `--keep` recording DST's workspace
 id in the away copies). While SRC sends a hold, each file is checked against its
 own open descriptor: a file replaced, shrunk or grown since it was listed aborts
 the fetch, which never ends as complete. A file changed in place without changing
@@ -1116,8 +1187,10 @@ hold.
 
 Paging is not the same as holding everything first, deliberately:
 
-- A transfer is not all-or-nothing: the pages driven before a failure or a stop
-  stay done.
+- A transfer is not all-or-nothing: what was adopted and released before a
+  failure or a stop stays done. A page's segments still staged (not yet
+  adopted) when the stop comes are given up and stay held (*Staged segments*),
+  so a stop can leave earlier pages' holds for `--resume` too.
 - A listed job that changed since the listing (its state, placement, priority
   or directory) is left out and counted, on stderr (`N selected job(s) changed
   since they were listed: left out; run again to select them`) and as `changed`
@@ -1126,13 +1199,19 @@ Paging is not the same as holding everything first, deliberately:
   claimed is an error.
 - With `--keep`, a job released in one page leaves an away copy, so its parent
   selected in a later page is refused (a tree member that is away blocks its
-  tree), where holding everything first held both; the refusal is reported. A
-  take-back in one page can change what a later page finds likewise.
+  tree), where holding everything first held both; the refusal is reported.
+  While the child's page is still staged (not yet adopted and released, see
+  *Staged segments*), the child is a hold, not an away copy, and its parent is
+  held by itself in the later page; which of the two happens depends on how
+  far the staged pages got. A take-back in one page can change what a later
+  page finds likewise.
 - A job adopted into SRC after the listing can be held alone although its parent
   is then present (whether a parent is present is a conservative filter, not a
   guarantee the claim makes), and the descendants a selected root gets after
   the listing move with it (a tree's members are read when the root is held).
-- Local to local takes one wait of the visibility deadline and one owner a page.
+- Local to local takes one owner a page; each page's wait of the visibility
+  deadline runs while the next pages are held (up to 8 pages staged ahead,
+  *Staged segments*).
 - A push opens its transfer session before its first hold, so one that cannot
   open holds nothing.
 

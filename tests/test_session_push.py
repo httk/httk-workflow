@@ -150,11 +150,13 @@ if argv[:2] == ["workflow", "transfer-session"]:
     # real answer's document).
     script = json.loads(os.environ.get("HTTK_TEST_SCRIPT", "{}"))
     real_adopt = _transfer_session.OPS["adopt"]
+    real_stage = _transfer_session.OPS["stage"]
+    real_adopt_staged = _transfer_session.OPS["adopt_staged"]
+    # One count of deliveries: an adopt request, or a stage request (whose adoption is its adopt_staged).
     adopts = []
+    delivery_of = {}
 
-    def adopt(request):
-        adopts.append(1)
-        step = script.get(str(len(adopts)), {})
+    def scripted(request, step):
         if "refuse" in step:
             document = {"bundles": [], "workspace_id": None, "refused": "a scripted refusal", **step["refuse"]}
             raise _transfer_session.Refused(document["refused"], document=document, returncode=2, stderr="")
@@ -164,15 +166,38 @@ if argv[:2] == ["workflow", "transfer-session"]:
             request.upload.finish()
             document = {"bundles": [], "workspace_id": None, "refused": "a refusal answered ok"}
             return {"document": document, "returncode": 2, "stderr": ""}
-        response = real_adopt(request)
-        if len(adopts) == exit_after:
+        return None
+
+    def adopted(response, number):
+        if number == exit_after:
             os._exit(3)  # adopted, but the answer is lost
-        if other_from and len(adopts) >= other_from:
+        if other_from and number >= other_from:
             response["document"]["workspace_id"] = "00000000-0000-4000-8000-000000000000"
-        response["document"].update(step.get("after", {}))
+        response["document"].update(script.get(str(number), {}).get("after", {}))
         return response
 
+    def adopt(request):
+        adopts.append(1)
+        number = len(adopts)
+        answer = scripted(request, script.get(str(number), {}))
+        return answer if answer is not None else adopted(real_adopt(request), number)
+
+    def stage(request):
+        adopts.append(1)
+        number = len(adopts)
+        answer = scripted(request, script.get(str(number), {}))
+        if answer is not None:
+            return answer
+        response = real_stage(request)
+        delivery_of[response["token"]] = number
+        return response
+
+    def adopt_staged(request):
+        return adopted(real_adopt_staged(request), delivery_of.get(request.header.get("token"), 0))
+
     _transfer_session.OPS["adopt"] = adopt
+    _transfer_session.OPS["stage"] = stage
+    _transfer_session.OPS["adopt_staged"] = adopt_staged
 sys.argv = ["httk", *argv]
 runpy.run_module("httk.core.cli", run_name="__main__", alter_sys=True)
 '''
@@ -821,11 +846,24 @@ def ssh(tmp_path: Path, remote: Remote) -> tuple[Path, Workspace, str, Workspace
 
 
 def adopts(requests: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
-    return [header for op, header in requests if op == "adopt"]
+    """The headers of the deliveries: ``stage`` requests (plan §7.10; ``adopt`` ones from a far side without it)."""
+
+    return [header for op, header in requests if op in ("adopt", "stage")]
 
 
 def ops(requests: list[tuple[str, dict[str, Any]]]) -> list[str]:
     return [op for op, _ in requests]
+
+
+def pushed(requests: list[tuple[str, dict[str, Any]]]) -> list[str]:
+    """The ops without the ``adopt_staged`` requests, whose place among the stages depends on when each staged segment
+    matured (plan §7.10): :func:`adoptions` counts them."""
+
+    return [op for op, _ in requests if op != "adopt_staged"]
+
+
+def adoptions(requests: list[tuple[str, dict[str, Any]]]) -> int:
+    return sum(1 for op, _ in requests if op == "adopt_staged")
 
 
 def statuses_by_id(capsys: pytest.CaptureFixture[str]) -> dict[str, dict[str, Any]]:
@@ -853,8 +891,8 @@ def test_a_push_is_one_connection_and_one_start_whatever_its_segments(
         # No adapter call at all: one session asks for the workflows (installed nowhere: nothing to install), then
         # carries every segment, each its own request and landing.
         assert calls == []
-        assert ops(requests) == ["workflows", *["adopt"] * segments]
-        assert len({header["token"] for header in adopts(requests)}) == segments
+        # Staged, each adopted with its own adopt_staged (plan §7.10).
+        assert pushed(requests) == ["workflows", *["stage"] * segments] and adoptions(requests) == segments
         assert {header["workspace"] for header in adopts(requests)} == {far_name}
         commands = remote.commands()[before:]
         measured.append((len(commands), starts(commands)))
@@ -911,7 +949,7 @@ def test_workflows_are_installed_and_built_before_the_first_segment_in_the_one_s
     (outcome,) = outcomes(capsys)["transfers"]
     assert shipped(outcome) == {GIT_ID: "installed", "local:caller": "installed"}
     # Asked, installed and built, and only then adopted: the job can start as soon as it arrives.
-    assert calls == [] and ops(requests) == ["workflows", "install", "adopt"]
+    assert calls == [] and pushed(requests) == ["workflows", "install", "stage"] and adoptions(requests) == 1
     assert sorted(requests[0][1]["ids"]) == sorted([GIT_ID, "local:caller"])
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (1, 1)
@@ -926,7 +964,7 @@ def test_workflows_are_installed_and_built_before_the_first_segment_in_the_one_s
     assert run(project, "--json", "--job", job_id, near_name, f"cluster:{other_name}") == 0
     (outcome,) = outcomes(capsys)["transfers"]
     assert shipped(outcome) == {GIT_ID: "present", "local:caller": "present"}
-    assert ops(requests) == ["workflows", "install", "adopt"] and requests[1][1]["also_build"] == [GIT_ID]
+    assert pushed(requests) == ["workflows", "install", "stage"] and requests[1][1]["also_build"] == [GIT_ID]
     commands = remote.commands()[before:]
     assert (len(commands), starts(commands)) == (1, 1)
     assert _store.closure(other, "local:caller", check_builds=True).ok
@@ -948,7 +986,7 @@ def test_a_failing_build_is_reported_and_the_push_goes_on(
     (callee,) = [entry for entry in outcome["workflows"] if entry["id"] == GIT_ID]
     assert callee["status"] == "unbuilt"
     assert f"httk workflow build --workspace cluster:{far_name} {GIT_ID}" in callee["reason"]
-    assert ops(requests) == ["workflows", "install", "adopt"]
+    assert pushed(requests) == ["workflows", "install", "stage"] and adoptions(requests) == 1
 
 
 def test_a_session_failing_in_the_workflow_step_adopts_nothing(
@@ -1052,7 +1090,7 @@ def test_a_failed_commit_is_retried_in_its_segment_and_later_segments_fsync_dire
     captured = capsys.readouterr()
     assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 6
     assert [header.get("sync") for header in adopts(requests)] == [None, "fsync", "fsync", "fsync"]
-    assert len({header["token"] for header in adopts(requests)}) == 4
+    assert len({header["token"] for op, header in requests if op == "adopt_staged"}) == 3  # the refused stage: none
     assert captured.err.count("could not make the delivery durable") == 1
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (1, 1)
@@ -1239,13 +1277,13 @@ def offending(monkeypatch: pytest.MonkeyPatch, positions: list[int]) -> list[str
     real = transfer_cli._segments
     named: list[str] = []
 
-    def segments(holds: list[_moving.Hold]) -> list[list[_moving.Hold]]:
+    def segments(holds: list[_moving.Hold], **options: Any) -> list[list[_moving.Hold]]:
         if not named:
             for position in positions:
                 (job,) = Path(holds[position].path).glob("jobs/**/job.json")
                 os.mkfifo(job.parent / "pipe")  # among the job's own files, which a take-back accepts
                 named.append(holds[position].transfer_id)
-        return real(holds)
+        return real(holds, **options)
 
     monkeypatch.setattr(transfer_cli, "_segments", segments)
     return named
@@ -1337,12 +1375,12 @@ def test_a_sync_failed_refusal_naming_a_bundle_is_retried_and_never_resent_witho
     plan = jobs(near, 2)
     calls: list[bool] = []
 
-    def session_adopt(session: Any, src: Any, dst: Any, arguments: Any, holds: Any, token: str, fsync: bool) -> Any:
+    def session_stage(session: Any, src: Any, dst: Any, arguments: Any, holds: Any, size: int, fsync: bool) -> Any:
         calls.append(fsync)  # a stub answer, both times: a failed commit that also names a bundle
         refusal = {"bundles": [], "workspace_id": far.workspace_id, "refused": "syncfs failed", "sync_failed": True}
         return {**refusal, "bundle": holds[0].transfer_id}, ""
 
-    monkeypatch.setattr(transfer_cli, "_session_adopt", session_adopt)
+    monkeypatch.setattr(transfer_cli, "_session_stage", session_stage)  # a push stages its segments (plan §7.10)
     assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
     # Retried once with fsync; the second failed commit is the answer for the whole segment, never one bundle's.
     assert calls == [False, True]
@@ -1430,6 +1468,8 @@ def test_a_far_side_dying_in_a_segment_keeps_it_and_the_later_ones_held_for_resu
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     project, near, near_name, far, far_name = ssh
+    # Each staged segment matures at once, so it is adopted before the next is staged (plan §7.10).
+    far.set_policy({"visibility_deadline_seconds": 0})
     monkeypatch.setattr(transfer_cli, "_SEGMENT_BUNDLES", 2)
     monkeypatch.setenv("HTTK_TEST_EXIT_AFTER_ADOPT", "2")
     requests = recorded_requests(monkeypatch)
@@ -1442,7 +1482,7 @@ def test_a_far_side_dying_in_a_segment_keeps_it_and_the_later_ones_held_for_resu
         assert "whether the jobs arrived is unknown" in outcome["message"]
     assert all("not delivered, since the transfer session stopped" in outcome["message"] for outcome in transfers[4:])
     # Nothing is sent after the stop, no install either.
-    assert ops(requests) == ["workflows", "adopt", "adopt"]
+    assert ops(requests) == ["workflows", "stage", "adopt_staged", "stage", "adopt_staged"]
     # The first segment was released at once; the others stay held.
     assert sorted(outgoing(near)) == sorted(outcome["transfer_id"] for outcome in transfers[2:])
     monkeypatch.delenv("HTTK_TEST_EXIT_AFTER_ADOPT")
@@ -1595,18 +1635,20 @@ def test_an_installation_claimed_for_an_aborted_upload_stops_the_push_before_any
     assert f"httk job transfer --resume {near.root} cluster:{far_name}" in outcome["message"]
     assert set(shipped(outcome).values()) == {"failed"}
     assert all("aborted workflow upload as installed" in entry["reason"] for entry in outcome["workflows"])
-    assert "adopt" not in ops(requests) and find(far, job_id) is None and len(outgoing(near)) == 1
+    assert not {"adopt", "stage"} & set(ops(requests)) and find(far, job_id) is None and len(outgoing(near)) == 1
 
 
 def test_the_installed_workflows_are_reported_when_every_segment_is_refused(
     ssh: tuple[Path, Workspace, str, Workspace, str],
-    refusing: list[Workspace],  # noqa: F811 (the fixture)
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     project, near, near_name, far, far_name = ssh
     job_id = workflow_job(near, workflows(near, tmp_path), state="ready")
-    refuse(refusing, far)  # no landing can be made: every segment is refused
+    # Every segment refused as a whole (a staged landing is an owner scratch, which the workflows' install needs too:
+    # the refusal is scripted rather than made by an unwritable landing).
+    scripted(monkeypatch, {1: {"refuse": {"workspace_id": far.workspace_id}}})
     assert run(project, "--json", "--job", job_id, near_name, f"cluster:{far_name}") == 1
     captured = capsys.readouterr()
     (outcome,) = json.loads(captured.out)["transfers"]

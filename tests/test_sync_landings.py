@@ -451,7 +451,8 @@ def other_device(monkeypatch: pytest.MonkeyPatch, workspace: Workspace) -> None:
             return SimpleNamespace(st_dev=info.st_dev + 1)
         return info
 
-    monkeypatch.setattr(transfer_cli, "os", SimpleNamespace(stat=stat))
+    # A copied stage measures its holds' bytes (plan §7.10): the listing stays the real one.
+    monkeypatch.setattr(transfer_cli, "os", SimpleNamespace(stat=stat, scandir=os.scandir))
 
 
 def test_holds_on_another_filesystem_are_copied_and_synced_before_their_first_adoption(

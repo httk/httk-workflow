@@ -13,6 +13,12 @@ its terminal. From the request until just before its response, a ticker thread s
 escaping an op (or a response that cannot be sent) is fatal: it is answered ``{"ok": false, "fatal": true}`` and the
 process exits at once, so whatever the op held is released by process death and recoverable as usual.
 
+A push's segments may be staged (``stage``: received, committed and the first scan of their settle taken) and
+adopted later on the same connection (``adopt_staged``, one token a request, in staging order; plan
+WORKFLOW_TRANSFER_SESSION §7.10). Tokens are connection-local; a ``bye`` (before it answers) or the end of the input
+abandons the stages whose adoption never began (their landings discarded); after a fatal op, or when the process
+ends otherwise, they are left to recovery, which discards them.
+
 Accepted limitation: the far side has no read bound. A client that vanishes without closing the connection (a
 half-open TCP connection) leaves it waiting for input until the transport notices (ssh's keepalives) and ends it.
 """
@@ -31,11 +37,11 @@ import threading
 import traceback
 from collections.abc import Buffer, Callable, Iterator, Mapping
 from pathlib import Path
-from typing import IO, Any, BinaryIO, Self, cast
+from typing import IO, TYPE_CHECKING, Any, BinaryIO, NamedTuple, Self, cast
 
 from httk.core.cli import CLIContext
 
-from .. import _frames
+from .. import _frames, _fs
 from .._frames import (
     PROGRESS,
     REQUEST,
@@ -48,6 +54,9 @@ from .._frames import (
 from ..adapters import TRANSFER_SESSION_FORMAT, TRANSFER_SESSION_FORMAT_VERSION
 from ..errors import StreamAborted, TransferProtocolError
 from ._common import _ERRORS, _leaf, _local_root, _modifiable
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .._moving import Stage
 
 __all__ = [
     "OPS",
@@ -200,8 +209,10 @@ def _echo(request: Request) -> Mapping[str, Any]:
 
 
 def _bye(request: Request) -> Mapping[str, Any]:
-    """Answer, after which the session ends."""
+    """Abandon the session's stages whose adoption never began (their landings discarded), then answer, after which
+    the session ends."""
 
+    _abandon(request.session)
     return {}
 
 
@@ -308,6 +319,159 @@ def _adopt(request: Request) -> Mapping[str, Any]:
     if "refused" in document:
         raise Refused(str(document["refused"]), **members)
     return members
+
+
+#: The most segments one session keeps staged and not yet adopted (plan WORKFLOW_TRANSFER_SESSION §7.10, 1a), ...
+_STAGES = 8
+#: ... and the most landed regular-file bytes they hold (each staged segment's actual landed bytes), the incoming
+#: segment's declaration included: a segment beyond either is refused before its data is used (``capacity``). A single
+#: bundle larger than this is staged only when nothing else is, and refuses every later stage until it is adopted.
+_STAGED_BYTES = 32 << 30
+
+
+class _Staged(NamedTuple):
+    """A staged segment of this session, by its token: the stage, the workspace and the transfer ids it is bound to,
+    and the regular-file bytes that landed."""
+
+    stage: "Stage"
+    root: Path
+    transfer_ids: tuple[str, ...]
+    size: int
+
+
+def _stages(request: Request) -> dict[str, _Staged]:
+    """The session's staged segments not yet adopted, by token, in staging order."""
+
+    return cast(dict[str, _Staged], request.session.setdefault("stages", {}))
+
+
+def _stage(request: Request) -> Mapping[str, Any]:
+    """Receive and commit the bundles the upload carries and take the first scan of their settle, for a later
+    ``adopt_staged`` (:func:`~httk.workflow.workflow_cli._job.stage_stream`; plan WORKFLOW_TRANSFER_SESSION §7.10).
+
+    Header: ``workspace``, ``sync`` (``"fsync"`` or absent), ``transfer_ids`` (the bundles the upload carries, each
+    once, none staged already in this session) and ``bytes`` (their landed regular-file bytes). A header that breaks
+    a rule, or a segment beyond the session's capacity (:data:`_STAGES` stages, :data:`_STAGED_BYTES` bytes counting
+    the incoming declaration and the staged segments' actual landed bytes; ``capacity: true``; beyond the bytes,
+    only a single bundle with nothing staged is admitted), is refused before the upload is used. The stage then
+    records its actual landed regular-file bytes (hard-link copies counted), so the session's staged bytes exceed
+    the cap by at most one segment. The answer is a ``token`` (connection-local, bound to
+    the workspace and *transfer_ids*), the ``transfer_ids``, the ``workspace_id``, the landed ``bytes`` and ``matures_in``
+    (advisory seconds until its deadline has run), with the captured ``stderr``. A refused stream is answered as
+    ``adopt`` answers it (``document``, ``returncode``, ``stderr``); anything failing after the commit is fatal, and
+    so is an upload carrying other bundles than *transfer_ids*.
+    """
+
+    header = request.header
+    workspace = _text(header, "workspace", required=True)
+    assert workspace is not None
+    sync = header.get("sync")
+    if sync not in (None, "fsync"):
+        raise Refused(f"stage takes sync fsync or none, not {sync!r}")
+    transfer_ids = _texts(header, "transfer_ids")
+    if not transfer_ids or len(set(transfer_ids)) != len(transfer_ids):
+        raise Refused("stage needs transfer_ids, each once")
+    if not all(_TRANSFER_ID.fullmatch(transfer_id) for transfer_id in transfer_ids):
+        raise Refused("stage needs transfer_ids, each a transfer id")
+    size = header.get("bytes")
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        raise Refused("stage needs bytes as a nonnegative integer")
+    upload = request.upload
+    if upload is None:
+        raise Refused("stage needs an upload")
+    stages = _stages(request)
+    if staged := sorted(set(transfer_ids) & {key for entry in stages.values() for key in entry.transfer_ids}):
+        raise Refused(f"already staged in this session and not adopted: {', '.join(staged)}")
+    held = sum(entry.size for entry in stages.values())
+    if stages and (len(stages) >= _STAGES or held + size > _STAGED_BYTES):
+        raise Refused(
+            f"this session holds {len(stages)} staged segment(s) of {held} byte(s): adopt one first", capacity=True
+        )
+    if size > _STAGED_BYTES and len(transfer_ids) > 1:
+        # Only a single bundle larger than the cap (never split) is staged beyond it, alone.
+        raise Refused(f"{size} byte(s) of {len(transfer_ids)} bundles exceed a session's staged bytes", capacity=True)
+    from ._job import stage_stream
+    from ._transfer import _measure
+
+    context = CLIContext("httk", Path.cwd())
+    with _captured() as stderr:
+        document, stage = stage_stream(
+            lambda: _modifiable(_workspace_arguments(workspace), context, action="adopt jobs into it"),
+            upload,
+            force_fsync=sync == "fsync",
+            finish=upload.finish,
+            progress=request.progress,
+        )
+    if stage is None:
+        raise Refused(str(document["refused"]), document=document, returncode=2, stderr=stderr.getvalue())
+    if document["bundles"] != sorted(transfer_ids):
+        # After the commit: fatal, its owner left for recovery (which discards the landing).
+        raise RuntimeError(f"the upload carried the bundles {document['bundles']}, not those its header named")
+    # Admitted by the declared bytes; later admissions count what actually landed (hard-link copies included).
+    landed = sum(_measure(bundle)[0] for bundle in stage.bundles)
+    token = _fs.fresh_token()
+    stages[token] = _Staged(stage, stage.workspace.root.resolve(), tuple(transfer_ids), landed)
+    return {
+        "token": token,
+        "transfer_ids": transfer_ids,
+        "workspace_id": document["workspace_id"],
+        "bytes": landed,
+        "matures_in": stage.remaining(),
+        "stderr": stderr.getvalue(),
+    }
+
+
+def _adopt_staged(request: Request) -> Mapping[str, Any]:
+    """Adopt one staged segment once its visibility deadline has run, waiting out what is left of it
+    (:func:`~httk.workflow.workflow_cli._job.adopt_stage`; plan WORKFLOW_TRANSFER_SESSION §7.10).
+
+    Header: ``workspace``, ``token`` and ``transfer_ids``, which must name the session's oldest staged segment and
+    what it was staged with; anything else (an unknown or consumed token, another workspace or other ids, another
+    stage first, a workspace sealed since) is refused before anything is touched, and the stage stays. The token is
+    consumed once accepted:
+    the response is ``adopt``'s (``document``, ``returncode``, ``stderr``), and an error from then on is fatal.
+    """
+
+    header = request.header
+    workspace_name = _text(header, "workspace", required=True)
+    token = _text(header, "token", required=True)
+    assert workspace_name is not None and token is not None
+    transfer_ids = _texts(header, "transfer_ids")
+    if request.upload is not None:
+        raise Refused("adopt_staged takes no upload")
+    stages = _stages(request)
+    entry = stages.get(token)
+    if entry is None:
+        raise Refused("no stage of this session has this token (unknown, or adopted already); nothing was adopted")
+    if token != next(iter(stages)):
+        raise Refused("stages are adopted in the order they were staged; nothing was adopted")
+    if tuple(transfer_ids) != entry.transfer_ids:
+        raise Refused("the stage was made of other transfer ids; nothing was adopted")
+    context = CLIContext("httk", Path.cwd())
+    try:
+        # Still modifiable: a workspace sealed since the stage adopts nothing (the stage stays).
+        root = _modifiable(_workspace_arguments(workspace_name), context, action="adopt jobs into it").root
+    except _ERRORS as exc:
+        raise Refused(f"{exc}; nothing was adopted") from None
+    if Path(root).resolve() != entry.root:
+        raise Refused("the stage was made in another workspace; nothing was adopted")
+    from ._job import adopt_stage
+
+    del stages[token]  # consumed: from here on, an error is fatal
+    with _captured() as stderr:
+        document, returncode = adopt_stage(entry.stage, progress=request.progress)
+    return {"document": document, "returncode": returncode, "stderr": stderr.getvalue()}
+
+
+def _abandon(state: dict[str, Any]) -> None:
+    """Abandon the session's stages whose adoption never began (the end of its input, a ``bye``): each landing
+    discarded, each owner closed. One that cannot be is left for recovery."""
+
+    for entry in cast(dict[str, _Staged], state.pop("stages", {})).values():
+        try:
+            entry.stage.abandon()
+        except Exception:  # its owner stays registered: recovery discards the landing once this process ended
+            traceback.print_exc(file=sys.stderr)
 
 
 def _install(request: Request) -> Mapping[str, Any]:
@@ -1120,6 +1284,8 @@ OPS: dict[str, Op] = {
     "echo": _echo,
     "bye": _bye,
     "adopt": _adopt,
+    "stage": _stage,
+    "adopt_staged": _adopt_staged,
     "install": _install,
     "workflows": _workflows,
     "select": _select,
@@ -1233,8 +1399,9 @@ def serve(requests: IO[bytes], responses: IO[bytes], *, ops: Mapping[str, Op] | 
         return _FAILED
     reader = FrameReader(requests)
     frames = FrameWriter(responses.write, responses.flush)
-    state: dict[str, Any] = {}  # the connection's: a pull's selection
+    state: dict[str, Any] = {}  # the connection's: a pull's selection, a push's stages
     last_id = 0
+    fatal = False
     try:
         while (frame := reader.read_frame()) is not None:
             if frame.kind != REQUEST:
@@ -1257,6 +1424,7 @@ def serve(requests: IO[bytes], responses: IO[bytes], *, ops: Mapping[str, Op] | 
                         frames.send_json(RESPONSE, frame.id, response)
                 except (Exception, SystemExit) as exc:
                     # Fail-stop: the op may have changed anything; ending the process releases what it held.
+                    fatal = True
                     ticker.stop()
                     traceback.print_exc(file=sys.stderr)
                     error = f"{type(exc).__name__}: {exc}"
@@ -1273,6 +1441,9 @@ def serve(requests: IO[bytes], responses: IO[bytes], *, ops: Mapping[str, Op] | 
     except OSError as exc:  # the output is gone
         print(f"transfer session: {exc}", file=sys.stderr)
         return _FAILED
+    finally:
+        if not fatal:
+            _abandon(state)  # stages whose adoption never began; after a fatal op, recovery's
     return 0
 
 

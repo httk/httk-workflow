@@ -156,7 +156,8 @@ everyone on it:
 - a push is delivered once more, the same bundles to a fresh landing at the
   destination, where every file is synchronized as it is written (which
   another user's error cannot fail). Over a push's transfer session this is one
-  more request on it, per segment, and every later segment of the session is
+  more request on it, per segment (the segment is staged once more, before
+  anything of it is adopted), and every later segment of the session is
   then synchronized file by file at once; without a session it costs one more
   connection and one more remote `httk` start, only when it happens. A
   push from a remote workspace (remote to remote) delivers its relayed local

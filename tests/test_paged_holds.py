@@ -8,6 +8,7 @@ each pair keeps across pages, the stops, the workflow attempts and the counts ar
 
 import json
 import shutil
+import sys
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -22,7 +23,21 @@ from httk.workflow._state import Release
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
-from test_job_transfer import adapter_calls, jobs, outgoing, recorded_requests, registered, run, selected, starts
+from test_job_transfer import (
+    adapter_calls,
+    adopted_or_abandoned,
+    agrees_with_state,
+    at_once,
+    jobs,
+    outgoing,
+    recorded_requests,
+    registered,
+    requests_in_order,
+    run,
+    same_requests,
+    selected,
+    starts,
+)
 from test_moving import WORKFLOW, assert_in, find, io_workers, parent_link, place, single, tree  # noqa: F401
 from test_session_pull import PATCHED_PULL, opened
 from test_session_push import adopts, local_project, ops
@@ -56,14 +71,14 @@ if argv[:2] == ["workflow", "transfer-session"]:
         _transfer_session.OPS[nth_name] = exit_on_nth
     exit_workspace = os.environ.get("HTTK_TEST_EXIT_ADOPT_WORKSPACE")
     if exit_workspace:
-        real_adopt_op = _transfer_session.OPS["adopt"]
+        for delivery in ("adopt", "stage"):
 
-        def adopt_or_exit(request):
-            if request.header.get("workspace") == exit_workspace:
-                os._exit(3)
-            return real_adopt_op(request)
+            def delivery_or_exit(request, real=_transfer_session.OPS[delivery]):
+                if request.header.get("workspace") == exit_workspace:
+                    os._exit(3)
+                return real(request)
 
-        _transfer_session.OPS["adopt"] = adopt_or_exit
+            _transfer_session.OPS[delivery] = delivery_or_exit
     if os.environ.get("HTTK_TEST_DECIDE_FAILS_ONCE"):
         real_decide = far_transfer._Selection._decide
         decided = []
@@ -140,6 +155,33 @@ if argv[:2] == ["workflow", "transfer-session"]:
 """
 PATCHED_PAGED = PATCHED_PULL.replace('sys.argv = ["httk", *argv]\n', PAGED_PATCHES + 'sys.argv = ["httk", *argv]\n')
 assert PATCHED_PAGED != PATCHED_PULL
+
+
+#: The tests skipped with a positive visibility deadline, and why (by design; see each).
+AT_ONCE_ONLY: dict[str, str] = {
+    "test_keep_between_pages_refuses_a_parent_whose_child_left_an_away_copy": (
+        "with a positive deadline the child's page may still be staged (a hold, not an away copy) when the parent's "
+        "page is held, so whether the parent is refused depends on the schedule (documented in workflow_cli.md)"
+    ),
+}
+#: The visibility deadline of the workspaces the running test registers (see :func:`_visibility_deadline`).
+DEADLINE = 0.0
+
+
+@pytest.fixture(autouse=True, params=[0, 0.05], ids=["D0", "D0.05"])
+def _visibility_deadline(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> float:
+    """Every test of this module twice: with a zero visibility deadline (each staged segment is adopted before the
+    next is staged or the next page held, as before the pipelined settle of plan §7.10), and with a positive one
+    (staged segments wait while later ones are copied). A test whose assertions are a request order of the first
+    kind only is named in :data:`AT_ONCE_ONLY` and skipped with the positive deadline. Request orders are compared
+    with :func:`same_requests`, and what a stop gives up with :func:`adopted_or_abandoned`, both by :data:`DEADLINE`."""
+
+    deadline = float(request.param)
+    if deadline and request.node.originalname in AT_ONCE_ONLY:
+        pytest.skip(AT_ONCE_ONLY[request.node.originalname])
+    monkeypatch.setattr(sys.modules[__name__], "registered", at_once(registered, deadline))
+    monkeypatch.setattr(sys.modules[__name__], "DEADLINE", deadline)
+    return deadline
 
 
 def patched_paged(tmp_path: Path, remote: Remote) -> None:
@@ -652,7 +694,8 @@ def test_a_push_keeps_one_session_and_one_pin_across_pages(
     assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
     assert [outcome["status"] for outcome in json.loads(capsys.readouterr().out)["transfers"]] == ["adopted"] * 4
     # The workflows asked about once (the jobs' workflow is installed nowhere), then one adoption a page.
-    assert ops(requests) == ["workflows", *["adopt"] * 4]
+    assert same_requests(ops(requests), ["workflows", *["stage", "adopt_staged"] * 4], DEADLINE)
+    assert requests_in_order(requests)
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (1, 1)
     # Another workspace answering the second page's adoption stops the pair: no third hold is made.
@@ -661,10 +704,15 @@ def test_a_push_keeps_one_session_and_one_pin_across_pages(
     plan = jobs(near, 3)
     assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
     document = json.loads(capsys.readouterr().out)
-    assert [outcome["status"] for outcome in document["transfers"]] == ["adopted", "failed"]
+    statuses = [outcome["status"] for outcome in document["transfers"]]
     (error,) = document["errors"]
-    assert "stopped" in error and "1 selected job(s) were not attempted" in error
-    assert f"--resume {near.root} cluster:{far_name}" in error
+    assert "stopped" in error and f"--resume {near.root} cluster:{far_name}" in error
+    if DEADLINE:
+        # The third page may be held and staged before the second's adoption answers: given up, held.
+        assert statuses[0] == "adopted" and statuses[1:] in (["failed"], ["failed", "failed"])
+        assert len(outgoing(near)) == len(statuses) - 1
+        return
+    assert statuses == ["adopted", "failed"] and "1 selected job(s) were not attempted" in error
     assert len(adopts(requests)) == 2 and len(outgoing(near)) == 1
     assert find(near, plan[2][0]["id"]).state == "succeeded"  # type: ignore[union-attr]
 
@@ -714,12 +762,12 @@ def test_a_local_to_local_stop_holds_nothing_more(
     family(source, "zzz/p", {"c1": ("succeeded", "aaa/c1")})
     plan = jobs(source, 3)
     paged(monkeypatch, 1)
-    real = transfer_cli._deliver
+    real = transfer_cli._other_filesystem
 
     def failing(*arguments: Any, **options: Any) -> Any:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(transfer_cli, "_deliver", failing)
+    monkeypatch.setattr(transfer_cli, "_other_filesystem", failing)  # the chunk's stage fails (plan §7.10)
     assert run(tmp_path, "--json", "-q", "--state", "succeeded", source_name, target_name) == 1
     captured = capsys.readouterr()
     document = json.loads(captured.out)
@@ -732,7 +780,7 @@ def test_a_local_to_local_stop_holds_nothing_more(
     # The first page's hold stays for --resume; no hold exists for the pages after the stop.
     assert outgoing(source) == [outcome["transfer_id"]]
     assert sum(find(source, mapping["id"]) is not None for mapping, _, _ in plan) == 2
-    monkeypatch.setattr(transfer_cli, "_deliver", real)
+    monkeypatch.setattr(transfer_cli, "_other_filesystem", real)
     assert run(tmp_path, "--json", "-q", "--resume", source_name, target_name) == 0
     assert [o["status"] for o in json.loads(capsys.readouterr().out)["transfers"]] == ["adopted"]
 
@@ -749,14 +797,14 @@ def test_a_stop_of_one_resume_destination_leaves_the_other_driven(
         assert run(tmp_path, "--hold", "--job", str(mapping["id"]), source_name, destination) == 0
     capsys.readouterr()
     paged(monkeypatch, 1)
-    real = transfer_cli._deliver
+    real = transfer_cli._other_filesystem
 
-    def failing(src: Any, dst: Any, *arguments: Any) -> Any:
-        if dst.workspace.root == first.root:
-            raise OSError(28, "No space left on device")
-        return real(src, dst, *arguments)
+    def failing(holds: Any, dst: Workspace) -> Any:
+        if dst.root == first.root:
+            raise OSError(28, "No space left on device")  # the chunk's stage fails (plan §7.10)
+        return real(holds, dst)
 
-    monkeypatch.setattr(transfer_cli, "_deliver", failing)
+    monkeypatch.setattr(transfer_cli, "_other_filesystem", failing)
     assert run(tmp_path, "--json", "-q", "--resume", source_name) == 1
     document = json.loads(capsys.readouterr().out)
     by_destination: dict[str, list[str]] = {}
@@ -783,7 +831,8 @@ def test_a_pull_keeps_one_session_and_its_counts_across_pages(
     assert run(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 0
     assert [outcome["status"] for outcome in json.loads(capsys.readouterr().out)["transfers"]] == ["adopted"] * 4
     assert calls == []
-    assert ops(requests) == ["select", "holds_page", *["hold_page", "send", "release"] * 4]
+    assert same_requests(ops(requests), ["select", "holds_page", *["hold_page", "send", "release"] * 4], DEADLINE)
+    assert requests_in_order(requests)
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (1, 1)
     assert_in(near, plan)
@@ -801,17 +850,20 @@ def test_a_lost_hold_page_answer_stops_with_resume_and_resume_adopts(
     plan = jobs(far, 3)
     assert run(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
     document = json.loads(capsys.readouterr().out)
-    assert [outcome["status"] for outcome in document["transfers"]] == ["adopted"]
+    # The first page adopted, or, still staged when the session failed (a positive deadline), given up and held.
+    (first,) = document["transfers"]
+    assert adopted_or_abandoned(first, DEADLINE) and agrees_with_state(first, far, near)
     (error,) = document["errors"]
     assert "may have held stay held" in error and "nothing was held" not in error
     # The count is the last answered page's: the lost page's job may be held.
     assert (
         f"--resume cluster:{far_name} {near.root}" in error and "at most 2 selected job(s) were not attempted" in error
     )
-    assert len(outgoing(far)) == 1  # the lost page's hold
+    left = 1 if first["status"] == "adopted" else 2
+    assert len(outgoing(far)) == left  # the lost page's hold (and the given-up stage's)
     monkeypatch.delenv("HTTK_TEST_LOSE_HOLD_PAGE")
     assert run(project, "--json", "-q", "--resume", f"cluster:{far_name}", near_name) == 0
-    assert [o["status"] for o in json.loads(capsys.readouterr().out)["transfers"]] == ["adopted"]
+    assert [o["status"] for o in json.loads(capsys.readouterr().out)["transfers"]] == ["adopted"] * left
     assert outgoing(far) == [] and sum(find(near, mapping["id"]) is not None for mapping, _, _ in plan) == 2
 
 
@@ -833,15 +885,18 @@ def test_a_source_session_failure_stops_every_pair_of_that_source(
     requests = recorded_requests(monkeypatch)
     assert run(project, "--json", "-q", "--resume", f"cluster:{far_name}") == 1
     document = json.loads(capsys.readouterr().out)
-    statuses = sorted(outcome["status"] for outcome in document["transfers"])
-    assert statuses == ["adopted", "adopted", "failed", "failed"]
+    # The first destination's adopted (or, staged when SRC died with a positive deadline, given up, held).
+    done = sorted(adopted_or_abandoned(outcome, DEADLINE) for outcome in document["transfers"])
+    assert done == [False, False, True, True]
     stopped = sorted(error for error in document["errors"] if "stopped" in error)
     assert len(stopped) == 2 and all("--resume" in error for error in stopped)
     assert {root for root in (str(near.root), str(other.root)) if any(root in error for error in stopped)} == {
         str(near.root),
         str(other.root),
     }
-    assert ops(requests) == ["holds_page", "send", "release", "send"] and len(outgoing(far)) == 2
+    adopted = sum(outcome["status"] == "adopted" for outcome in document["transfers"])
+    expected = ["holds_page", "send", "release", "send"] if adopted else ["holds_page", "send", "send"]
+    assert same_requests(ops(requests), expected, DEADLINE) and len(outgoing(far)) == 4 - adopted
 
 
 # -- oversized answers ----------------------------------------------------------------------------------------------
@@ -972,7 +1027,7 @@ def test_local_workflows_are_installed_and_built_once_before_the_first_page_s_ad
     caller = workflows(source, tmp_path)
     made = [workflow_job(source, caller) for _ in range(3)]
     events: list[str] = []
-    real_install, real_build, real_deliver = _store.install_copy, _store.build, transfer_cli._deliver
+    real_install, real_build, real_adopt = _store.install_copy, _store.build, transfer_cli._adopt_local_stage
 
     def install_copy(*arguments: Any, **options: Any) -> Any:
         events.append("install")
@@ -982,13 +1037,13 @@ def test_local_workflows_are_installed_and_built_once_before_the_first_page_s_ad
         events.append("build")
         return real_build(*arguments, **options)
 
-    def deliver(*arguments: Any, **options: Any) -> Any:
-        events.append("adopt")
-        return real_deliver(*arguments, **options)
+    def adopt(*arguments: Any, **options: Any) -> Any:
+        events.append("adopt")  # a page's stage adopted (plan §7.10)
+        return real_adopt(*arguments, **options)
 
     monkeypatch.setattr(_store, "install_copy", install_copy)
     monkeypatch.setattr(_store, "build", build)
-    monkeypatch.setattr(transfer_cli, "_deliver", deliver)
+    monkeypatch.setattr(transfer_cli, "_adopt_local_stage", adopt)
     paged(monkeypatch, 1)
     assert (
         run(
@@ -1042,7 +1097,8 @@ def test_a_push_installs_its_workflows_once_before_the_first_page_s_adoption(
     argv = [item for job_id in made for item in ("--job", job_id)]
     assert run(project, "--json", "-q", *argv, near_name, f"cluster:{far_name}") == 0
     transfers = json.loads(capsys.readouterr().out)["transfers"]
-    assert ops(requests) == ["workflows", "install", "adopt", "adopt", "adopt"]
+    assert same_requests(ops(requests), ["workflows", "install", *["stage", "adopt_staged"] * 3], DEADLINE)
+    assert requests_in_order(requests)
     assert all(shipped(outcome) == {GIT_ID: "installed", "local:caller": "installed"} for outcome in transfers)
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (1, 1)
@@ -1394,11 +1450,11 @@ def test_a_session_failure_in_a_later_page_s_workflows_keeps_the_report(
     assert run(project, *argv) == 1
     document = json.loads(capsys.readouterr().out)
     page_one, page_two = document["transfers"]
-    assert page_one["status"] == "adopted" and page_one["workflows"][0]["status"] == "missing"
+    assert adopted_or_abandoned(page_one, DEADLINE) and page_one["workflows"][0]["status"] == "missing"
     assert page_two["status"] == "failed" and "--resume" in page_two["message"] and "workflows" not in page_two
     (error,) = document["errors"]
     assert "stopped" in error and "1 selected job(s) were not attempted" in error
-    assert len(outgoing(near)) == 1 and find(near, third) is not None
+    assert len(outgoing(near)) == (1 if page_one["status"] == "adopted" else 2) and find(near, third) is not None
 
 
 def test_an_error_between_pages_keeps_the_report_of_the_pages_driven(
@@ -1431,10 +1487,12 @@ def test_an_error_between_pages_keeps_the_report_of_the_pages_driven(
     monkeypatch.setattr(transfer_cli._Selection, "next_page", next_page)
     assert run(tmp_path, "--json", "-q", *selected(plan), source_name, target_name) == 1
     document = json.loads(capsys.readouterr().out)
-    assert [outcome["status"] for outcome in document["transfers"]] == ["adopted"]
+    (first,) = document["transfers"]
+    assert adopted_or_abandoned(first, DEADLINE)
     (error,) = document["errors"]
     assert "No space left on device" in error and "1 selected job(s) were not attempted" in error
-    assert find(source, plan[1][0]["id"]) is not None and outgoing(source) == []
+    assert find(source, plan[1][0]["id"]) is not None
+    assert outgoing(source) == ([] if first["status"] == "adopted" else [first["transfer_id"]])
 
 
 def test_errors_of_holding_count_against_a_page(
@@ -1625,7 +1683,7 @@ def test_the_count_not_attempted_leaves_out_what_moved_with_an_earlier_tree(
     def failing(*arguments: Any, **options: Any) -> Any:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(transfer_cli, "_deliver", failing)
+    monkeypatch.setattr(transfer_cli, "_other_filesystem", failing)  # a local chunk fails to stage (plan §7.10)
     assert run(tmp_path, "--json", "-q", "--state", "succeeded", "--tree", source_name, target_name) == 1
     (error,) = json.loads(capsys.readouterr().out)["errors"]
     assert "1 selected job(s) were not attempted" in error  # the loose job; the child went with its root
@@ -1905,7 +1963,7 @@ def test_a_selection_whose_listing_was_never_taken_was_not_attempted(
     def failing(*arguments: Any, **options: Any) -> Any:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(transfer_cli, "_deliver", failing)
+    monkeypatch.setattr(transfer_cli, "_other_filesystem", failing)  # a local chunk fails to stage (plan §7.10)
     assert run(tmp_path, "--json", "-q", "--state", "succeeded", source_name, target_name) == 1
     (error,) = json.loads(capsys.readouterr().out)["errors"]
     assert "the selection was not attempted" in error and "selected job(s)" not in error
@@ -1984,7 +2042,7 @@ def test_an_error_escaping_a_page_s_drive_reports_its_holds(
 ) -> None:
     # The drive of page 2 raises: page 1 is reported, page 2's hold too (held unless adopted), exit 1.
     source, source_name = registered(tmp_path, "a")
-    _target, target_name = registered(tmp_path, "b")
+    target, target_name = registered(tmp_path, "b")
     plan = jobs(source, 2)
     paged(monkeypatch, 1)
     real = transfer_cli._drive
@@ -2000,7 +2058,8 @@ def test_an_error_escaping_a_page_s_drive_reports_its_holds(
     assert run(tmp_path, "--json", "-q", *selected(plan), source_name, target_name) == 1
     document = json.loads(capsys.readouterr().out)
     first, second = document["transfers"]
-    assert first["status"] == "adopted" and second["status"] == "failed"
+    assert adopted_or_abandoned(first, DEADLINE) and second["status"] == "failed"
+    assert agrees_with_state(first, source, target) and agrees_with_state(second, source, target)
     assert "the drive broke" in second["message"] and "unless it was adopted" in second["message"]
     (error,) = document["errors"]
     assert "stopped: the drive broke" in error
@@ -2054,7 +2113,7 @@ def test_a_local_stop_in_the_earlier_holds_names_those_not_yet_listed(
     def failing(*arguments: Any, **options: Any) -> Any:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(transfer_cli, "_deliver", failing)
+    monkeypatch.setattr(transfer_cli, "_other_filesystem", failing)  # a local chunk fails to stage (plan §7.10)
     assert run(tmp_path, "--json", "-q", "--resume", source_name, target_name) == 1
     (error,) = json.loads(capsys.readouterr().out)["errors"]
     assert "the holds not yet listed stay held" in error and len(outgoing(source)) == 3

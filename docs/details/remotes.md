@@ -259,7 +259,9 @@ through a temporary directory here (the default temporary location, `TMPDIR`
 when set), removed once what it holds is settled: one fetch of about 16 GiB from
 a source with a session (never splitting a bundle, so possibly more), 256
 bundles of any size from one without, the whole batch for a destination
-without a session, and the workflow store entries separately. With a selection,
+without a session, and the workflow store entries separately. What one fetch
+brings is delivered to a destination's session in the segments of a push (so
+no staged segment is larger than one, except a single bundle). With a selection,
 the destination's session opens before the source holds anything, so an empty
 selection still connects to it. A remote
 source never takes a hold back: a refusal, an unknown outcome or a failure of
@@ -272,9 +274,18 @@ reported and the jobs wait, the push goes on), and only then travels in
 segments, so that each segment can start as soon as it is adopted. A segment
 closes at 256 bundles, 16 GiB of file data or 16,384 archive members, whichever
 comes first (a hold larger than that is a segment of its own; a hold is never
-split). Each segment is its own request, with its own archive, landing,
+split). Each segment is its own delivery, with its own archive, landing,
 synchronization, adoption and answer, and its adopted holds are released at
-once, so a failure late in a large push costs only the segments it reached. A
+once after its adoption, so a failure late in a large push costs only the segments it reached.
+A segment is *staged* first (the `stage` request: received, synchronized and its
+jobs looked for once) and adopted with an `adopt_staged` request once the
+destination's visibility deadline has passed since, while later segments are
+copied. At most 8 staged segments of about 32 GiB in all wait; while those
+slots do not fill before the oldest one's deadline passes, a long push waits
+about one deadline in all rather than one a segment (see *Staged segments* in
+{doc}`workflow_cli`). A stop gives up the staged segments not yet adopted: the
+destination discards them, and their holds stay for `--resume` (they were
+sent, so they are never taken back). A
 push therefore costs one connection and one remote start in every case. A
 failed synchronization of a segment's landing is retried once, as for any push,
 and after that every later segment of the session is synchronized file by file
@@ -282,7 +293,9 @@ at once. When the far side refuses one bundle's member, only that bundle is
 refused (taken back when this run held it) and the rest of its segment is
 delivered once more without it; when it refuses a whole segment (an unknown or
 sealed workspace, a full quota, or, conservatively, a member it cannot attribute
-to a bundle), nothing more is sent and the jobs this run held are taken back.
+to a bundle), nothing more is sent: this run's holds in that segment and in the
+segments never sent are taken back, an earlier run's stay held, and the
+segments staged before it (sent, not yet adopted) stay held too.
 Before the first segment, a session that fails while the workflows are installed
 has adopted nothing: the holds stay for `httk job transfer --resume`. An answer that cannot be read, a far side that dies, or a
 segment answered by another workspace than the first stops the push there: that
@@ -303,8 +316,11 @@ closes each fetch once 16 GiB of file data or 16,384 archive members went (a
 hold is never split), so a segment may take several fetches, each of what is
 left of it.
 Each fetch lands in its own scratch directory here, is checked and synchronized
-before anything of it is adopted, and the holds it adopted are released on the
-source at once. A failed synchronization of a landing is fetched once more,
+before anything of it is adopted, and is adopted once the visibility deadline has
+passed since its jobs were first looked for, while later fetches go on (one
+fetch is reserved before it is asked for; a fetch never splits a bundle, so one
+large bundle can take the staged bytes beyond their 32 GiB until it is
+adopted); the holds it adopted are released on the source right after. A failed synchronization of a landing is fetched once more,
 with every file synchronized as it is written, as every later fetch of the
 session then is. A hold the source cannot send (another actor released it, or
 a file of it was replaced or changed size while it was read) fails alone and the
@@ -347,7 +363,7 @@ the far side sends nothing and takes no data for that long, or when neither its
 reported progress nor any data moves for that long outside a filesystem
 synchronization (a landing's first `syncfs`, the end of its extraction with the
 fsyncs of its directories, its commit), the wait of the destination's
-visibility deadline before adopting, or a build. A landing's synchronization
+visibility deadline before adopting (what is left of it for a staged segment), or a build. A landing's synchronization
 covers the whole end of its extraction, however it ends (the writes still
 running, the directory times and fsyncs, or the discard of a refused landing):
 a far side hung there, still reporting its progress, is caught only once it
@@ -356,6 +372,13 @@ the bound is at least 30 seconds whatever is configured. Time in which this side
 offers nothing (a slow reader of a download, a slow source of an upload) is not
 held against the far side. This side holds at most 64 MiB of what the far side
 sent before it stops reading, and no single response document may be larger.
+
+Staged segments belong to their session: their tokens mean nothing on another
+connection, and a `bye` (before the far side answers it) or the end of its
+input discards those whose adoption had not begun; a far side that ends
+otherwise leaves them to recovery. A connection that stays half open keeps them, and their
+owners, until the transport notices (an accepted limitation, as for a request in
+flight); a far side that dies leaves them to recovery, which discards them.
 
 A failed or closed session kills the far side together with everything it
 started. A session opened from a terminal, so that ssh can prompt, is the

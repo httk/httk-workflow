@@ -986,7 +986,7 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(
     commands = remote.commands()
     (session,) = commands
     assert session.startswith("httk workflow transfer-session")
-    assert [header["workspace"] for op, header in requests if op == "adopt"] == ["station"]
+    assert [header["workspace"] for op, header in requests if op == "stage"] == ["station"]
 
 
 def test_probe_remote_workspace_refuses_an_older_remote_with_the_upgrade(tmp_path: Path) -> None:

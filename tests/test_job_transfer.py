@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,72 @@ def registered(root: Path, label: str) -> tuple[Workspace, str]:
     workspace = Workspace(root / label, durable=False)
     workspace.set_policy({"visibility_deadline_seconds": 0.05})
     return workspace, name
+
+
+def at_once(
+    make: Callable[[Path, str], tuple[Workspace, str]], deadline: float = 0
+) -> Callable[[Path, str], tuple[Workspace, str]]:
+    """*make* (:func:`registered`), its workspaces given the visibility *deadline*: with zero, a staged segment matures
+    at once, so it is adopted before the next is staged or the next page held, as before the pipelined settle (plan
+    §7.10); with more, staged segments wait while later ones are copied."""
+
+    def registered_at_once(root: Path, label: str) -> tuple[Workspace, str]:
+        workspace, name = make(root, label)
+        workspace.set_policy({"visibility_deadline_seconds": deadline})
+        return workspace, name
+
+    return registered_at_once
+
+
+def same_requests(actual: list[str], expected: list[str], deadline: float) -> bool:
+    """Whether the requests *actual* are *expected*: in that order with a zero visibility *deadline* (each staged
+    segment adopted and released before the next request), as a multiset with a positive one (a staged segment's
+    adoption and release come after later requests, by design: plan §7.10)."""
+
+    return actual == expected if not deadline else sorted(actual) == sorted(expected)
+
+
+def requests_in_order(requests: list[tuple[str, dict[str, Any]]]) -> bool:
+    """Two partial orders of a transfer's session requests that hold whatever the visibility deadline: every
+    ``workflows`` and ``install`` request comes before the first delivery (``stage`` or ``adopt``), and each
+    ``release`` names only transfer ids an earlier adoption carried (``adopt_staged``; for a pull, whose adoptions are
+    local, an earlier ``send``)."""
+
+    ops = [op for op, _ in requests]
+    deliveries = [index for index, op in enumerate(ops) if op in ("stage", "adopt")]
+    if deliveries and any(index > deliveries[0] for index, op in enumerate(ops) if op in ("workflows", "install")):
+        return False
+    remote = "adopt_staged" in ops
+    carried: set[str] = set()
+    for op, header in requests:
+        if op == "adopt_staged" or (op == "send" and not remote and header.get("kind") == "holds"):
+            carried.update(header["transfer_ids"] if op == "adopt_staged" else header["names"])
+        elif op == "release" and not set(header["transfer_ids"]) <= carried:
+            return False
+    return True
+
+
+def adopted_or_abandoned(outcome: dict[str, Any], deadline: float) -> bool:
+    """Whether *outcome* is ``adopted``, or, with a positive visibility *deadline*, a staged segment the stop gave up
+    (held, never taken back: plan §7.10), which a zero deadline adopts before the stop."""
+
+    abandoned = outcome["status"] == "failed" and "not adopted, since the transfer stopped" in outcome["message"]
+    return outcome["status"] == "adopted" or (bool(deadline) and abandoned)
+
+
+def agrees_with_state(outcome: dict[str, Any], src: Workspace, dst: Workspace) -> bool:
+    """Whether *outcome* tells the truth about local *src* and *dst*: an ``adopted`` hold's jobs are in *dst* and (when
+    it was released) the hold is gone from *src*; any other's jobs are not in *dst* and its hold stays in *src*."""
+
+    ids = [member.split("--")[-1] for member in outcome["members"]]
+    in_dst = all(_kernel.locate(dst, job_id, placement_hint=None, exhaustive=True) is not None for job_id in ids)
+    held = outcome["transfer_id"] in outgoing(src)
+    if outcome["status"] == "adopted":
+        return in_dst and held == ("the hold was not released" in outcome.get("message", ""))
+    return (
+        not any(_kernel.locate(dst, job_id, placement_hint=None, exhaustive=True) is not None for job_id in ids)
+        and held
+    )
 
 
 def run(cwd: Path, *argv: str) -> int:
@@ -251,7 +318,7 @@ def test_a_crash_after_the_hold_is_resumed(
         raise Crash
 
     with monkeypatch.context() as patch, pytest.raises(Crash):
-        patch.setattr(transfer_cli, "_deliver", crash)
+        patch.setattr(transfer_cli, "_stage_local", crash)
         run(tmp_path, "--tree", "--job", str(plan[0][0]["id"]), source_name, target_name)
     assert len(outgoing(source)) == 1 and find(target, plan[0][0]["id"]) is None
     # Without DST, --resume drives every hold to the destination it records.
@@ -272,7 +339,7 @@ def test_an_ordinary_run_re_drives_holds_for_its_destination(
     first, _, _ = single(source)
     second = place(source, {**first, "id": str(uuid.uuid4())}, "paused")
     with monkeypatch.context() as patch, pytest.raises(Crash):
-        patch.setattr(transfer_cli, "_deliver", lambda *_arguments: (_ for _ in ()).throw(Crash()))
+        patch.setattr(transfer_cli, "_stage_local", lambda *_arguments: (_ for _ in ()).throw(Crash()))
         run(tmp_path, "--job", str(first["id"]), source_name, target_name)
     assert run(tmp_path, "--json", "--job", second.job_id, source_name, target_name) == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted", "adopted"]
@@ -320,7 +387,7 @@ def test_a_hold_adopts_only_into_the_workspace_it_records(tmp_path: Path, capsys
     # A transfer records the destination's own id, and its holds go there.
     second = place(source, {**mapping, "id": str(uuid.uuid4())}, state, priority)
     with pytest.MonkeyPatch.context() as patch, pytest.raises(Crash):
-        patch.setattr(transfer_cli, "_deliver", lambda *_arguments: (_ for _ in ()).throw(Crash()))
+        patch.setattr(transfer_cli, "_stage_local", lambda *_arguments: (_ for _ in ()).throw(Crash()))
         run(tmp_path, "--job", second.job_id, source_name, target_name)
     (hold,) = _moving.held(source)
     assert hold.destination_workspace_id == target.workspace_id
@@ -435,8 +502,9 @@ def test_local_to_remote_and_back(project: Path, tmp_path: Path, capsys: pytest.
     assert outcome["missing_workflows"] == ["demo--0123456789abcdef"]
     assert_in(far, plan)
     assert outgoing(near) == []
-    # The pushed copy was taken in by adoption: nothing is left in incoming.
-    assert list((far.control / "transfers" / "incoming").iterdir()) == []
+    # The pushed copy was taken in by adoption: nothing is left in incoming (a staged push lands in its stage's
+    # scratch, plan §7.10) or in the scratch.
+    assert incoming(far) == [] and not list((far.control / "tmp").iterdir())
 
     assert run(project, "--json", "--tree", "--job", root_id, f"cluster:{far_name}", near_name) == 0
     (outcome,) = outcomes(capsys)["transfers"]
@@ -460,7 +528,7 @@ def test_a_refused_push_leaves_no_copy_at_the_remote_destination(
     assert hold.destination_workspace_id is None  # a push holds before it knows the destination's id
     for _ in range(2):  # each --resume pushes a copy again, and each refused copy goes
         assert run(project, "--resume", near_name, f"cluster:{far_name}") == 1
-        assert list((far.control / "transfers" / "incoming").iterdir()) == []
+        assert incoming(far) == [] and not list((far.control / "tmp").iterdir())
     assert outgoing(near) == [hold.transfer_id]
 
 
@@ -547,7 +615,7 @@ def test_a_job_crosses_the_ssh_adapter(tmp_path: Path, remote: Remote, capsys, m
     # The push and the pull are one transfer session each: their requests name the workspace as the far side
     # registered it, and no other remote command runs.
     assert len(commands) == 2 and all(item.startswith("httk workflow transfer-session") for item in commands)
-    assert [header["workspace"] for op, header in requests if op == "adopt"] == [far_name]
+    assert [header["workspace"] for op, header in requests if op == "stage"] == [far_name]
     assert {header["workspace"] for op, header in requests if op in ("hold", "send", "release")} == {far_name}
 
 
@@ -646,7 +714,9 @@ def selected(plan: list[tuple[dict[str, Any], str, int]]) -> list[str]:
 
 
 def incoming(workspace: Workspace) -> list[Path]:
-    return list((workspace.control / "transfers" / "incoming").iterdir())
+    # A staged push lands in its stage's owner scratch, never creating transfers/incoming/ (plan §7.10).
+    directory = workspace.control / "transfers" / "incoming"
+    return list(directory.iterdir()) if directory.exists() else []
 
 
 def test_local_to_remote_over_ssh_makes_one_call_whatever_the_number_of_jobs(
@@ -1334,14 +1404,13 @@ def test_state_moves_a_parent_and_its_detached_child_in_either_order(
     context = CLIContext("httk", tmp_path)
     assert command(["job", "detach", "--workspace", source_name, str(family["c1"]["id"])], context) == 0
     parent_key = make_job_key(str(family["parent"]["id"]), "parent")
-    deliver = transfer_cli._deliver
+    stage = transfer_cli._stage_local  # local → local stages its chunks (plan §7.10)
 
-    def ordered(src: Any, dst: Any, holds: list[_moving.Hold], *rest: Any) -> dict[str, dict[str, Any]]:
+    def ordered(settled: Any, holds: list[_moving.Hold]) -> None:
         # Holds are adopted in transfer id order (random); parent first used to refuse the detached child.
-        holds = sorted(holds, key=lambda hold: (parent_key in hold.members) != parent_first)
-        return deliver(src, dst, holds, *rest)
+        stage(settled, sorted(holds, key=lambda hold: (parent_key in hold.members) != parent_first))
 
-    monkeypatch.setattr(transfer_cli, "_deliver", ordered)
+    monkeypatch.setattr(transfer_cli, "_stage_local", ordered)
     capsys.readouterr()
     assert run(tmp_path, "--json", "--state", "succeeded", source_name, target_name) == 0
     document = outcomes(capsys)

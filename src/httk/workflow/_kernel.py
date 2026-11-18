@@ -59,6 +59,7 @@ __all__ = [
     "TERMINAL_STATES",
     "UNOWNED_STATES",
     "ExchangeClaim",
+    "FirstScan",
     "JobHeader",
     "JobName",
     "JobRef",
@@ -94,6 +95,8 @@ __all__ = [
     "recoverable_owners",
     "register_owner",
     "register_reconciler",
+    "scan_final",
+    "scan_first",
     "submit",
     "sweep_unrecorded_shm",
     "take",
@@ -1515,6 +1518,100 @@ def _scan(
     return found
 
 
+class FirstScan(NamedTuple):
+    """The first scan of a settled lookup (rule I6), which :func:`scan_final` completes once its deadline has passed.
+
+    :param wanted: The job UUIDs looked for.
+    :param placements: The placements listed in each unowned state (with *include_owned* and *exhaustive*, the
+        search's coverage).
+    :param include_owned: Whether each ``owned/<owner-id>/`` was listed.
+    :param exhaustive: Whether every placement was walked.
+    :param found: The references the first scan found, by job UUID.
+    :param deadline: The :func:`time.monotonic` time from which the final scan may start: the end of the first scan
+        plus the workspace's visibility deadline.
+    :param final: The first scan was a final one already (a deadline of zero): nothing is scanned again.
+    """
+
+    wanted: frozenset[str]
+    placements: tuple[PurePosixPath, ...]
+    include_owned: bool
+    exhaustive: bool
+    found: Mapping[str, JobRef]
+    deadline: float
+    final: bool
+
+    def remaining(self) -> float:
+        """Return the seconds left until the final scan may start (zero once the deadline has passed)."""
+
+        return 0.0 if self.final else max(0.0, self.deadline - time.monotonic())
+
+
+def _first_scan(
+    workspace: KernelWorkspace,
+    wanted: set[str],
+    placements: Sequence[PurePosixPath],
+    *,
+    include_owned: bool,
+    settle: bool,
+    exhaustive: bool = False,
+    cache: ListingCache | None = None,
+) -> FirstScan:
+    # The deadline runs from the end of the first scan: a move made during it is visible to the final one.
+    final = settle and workspace.visibility_deadline <= 0
+    found = _scan(workspace, wanted, placements, include_owned, exhaustive, cache or ListingCache(), final=final)
+    deadline = time.monotonic() + workspace.visibility_deadline
+    return FirstScan(frozenset(wanted), tuple(placements), include_owned, exhaustive, found, deadline, final)
+
+
+def scan_first(
+    workspace: KernelWorkspace,
+    job_ids: Sequence[str],
+    *,
+    placements: Sequence[PurePosixPath],
+    include_owned: bool = True,
+) -> FirstScan:
+    """Take the first scan of a settled lookup of many jobs; :func:`scan_final` completes it after its deadline.
+
+    Together they are :func:`locate_many` with ``settle=True`` and ``poll=False`` (jobs expected absent), split so
+    that the wait between them can be spent elsewhere.
+
+    :param workspace: The workspace.
+    :param job_ids: The job UUIDs.
+    :param placements: The placements to list in each unowned state.
+    :param include_owned: Also list each ``owned/<owner-id>/``.
+    :return: The first scan, with what it found and its deadline.
+    """
+
+    wanted = {canonical_uuid(job_id, "job_id") for job_id in job_ids}
+    normalized = sorted({normalize_placement(item) for item in placements}, key=lambda item: item.parts)
+    return _first_scan(workspace, wanted, normalized, include_owned=include_owned, settle=True)
+
+
+def scan_final(workspace: KernelWorkspace, first: FirstScan) -> dict[str, JobRef]:
+    """Complete the settled lookup *first* began: wait until its deadline, then list the jobs it missed once more,
+    in a final scan (``owned/`` before and after the unowned states, fresh listings).
+
+    Observations accumulate: a job the first scan found counts as found, even when the final scan would not see it
+    (it moved since; a fresh lookup re-settles such a miss, see :func:`httk.workflow._moving._presence`).
+
+    :param workspace: The workspace.
+    :param first: The first scan (:func:`scan_first`).
+    :return: The references either scan found, by job UUID (a later observation replaces an earlier one).
+    """
+
+    found = dict(first.found)
+    missing = first.wanted - found.keys()
+    if first.final or not missing:
+        return found
+    while (remaining := first.deadline - time.monotonic()) > 0:
+        _pause(remaining)
+    scan = _scan(
+        workspace, set(missing), first.placements, first.include_owned, first.exhaustive, ListingCache(), final=True
+    )
+    found |= scan
+    return found
+
+
 def _settled(
     workspace: KernelWorkspace,
     wanted: set[str],
@@ -1528,14 +1625,16 @@ def _settled(
 ) -> dict[str, JobRef]:
     # I6: absence is concluded only from a listing started after the visibility deadline (the final scan). Polling
     # backs off from _SETTLE_STEP to _SETTLE_CAP; without polling, the misses wait out the deadline once.
-    # The deadline runs from the end of the first scan: a move made during it is visible to the final one.
-    final = settle and workspace.visibility_deadline <= 0
-    found = _scan(workspace, wanted, placements, include_owned, exhaustive, cache or ListingCache(), final=final)
-    deadline = time.monotonic() + workspace.visibility_deadline
+    first = _first_scan(
+        workspace, wanted, placements, include_owned=include_owned, settle=settle, exhaustive=exhaustive, cache=cache
+    )
+    if settle and not poll:
+        return scan_final(workspace, first)
+    found, deadline, final = dict(first.found), first.deadline, first.final
     step = _SETTLE_STEP
     while settle and not final and (missing := wanted - found.keys()):
         if (remaining := deadline - time.monotonic()) > 0:
-            _pause(min(step, remaining) if poll else remaining)
+            _pause(min(step, remaining))
             step = min(2 * step, _SETTLE_CAP)
         final = time.monotonic() >= deadline
         found |= _scan(workspace, missing, placements, include_owned, exhaustive, ListingCache(), final=final)

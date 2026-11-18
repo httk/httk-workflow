@@ -10,6 +10,7 @@ import errno
 import io
 import json
 import os
+import sys
 import tarfile
 import uuid
 from pathlib import Path
@@ -29,6 +30,8 @@ from httk.workflow.workflow_cli import command
 from test_deliver import hold_jobs, outgoing_dir
 from test_job_transfer import (
     adapter_calls,
+    adopted_or_abandoned,
+    at_once,
     away_of,
     everyday,
     jobs,
@@ -36,7 +39,9 @@ from test_job_transfer import (
     outgoing,
     recorded_requests,
     registered,
+    requests_in_order,
     run,
+    same_requests,
     selected,
     single,
     starts,
@@ -276,6 +281,28 @@ assert PATCHED_PULL != PATCHED_HTTK
 PULL_OPS = {"holds_page", "select", "hold_page", "send", "release"}
 #: The requests that open a pull of a selection: the selection, the earlier holds' listing (none), its one page.
 PAGE = ["select", "holds_page", "hold_page"]
+
+
+#: The tests skipped with a positive visibility deadline, and why (by design; see each).
+AT_ONCE_ONLY: dict[str, str] = {}
+#: The visibility deadline of the workspaces the running test registers (see :func:`_visibility_deadline`).
+DEADLINE = 0.0
+
+
+@pytest.fixture(autouse=True, params=[0, 0.05], ids=["D0", "D0.05"])
+def _visibility_deadline(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> float:
+    """Every test of this module twice: with a zero visibility deadline (each staged segment is adopted before the
+    next is staged or the next page held, as before the pipelined settle of plan §7.10), and with a positive one
+    (staged segments wait while later ones are copied). A test whose assertions are a request order of the first
+    kind only is named in :data:`AT_ONCE_ONLY` and skipped with the positive deadline. Request orders are compared
+    with :func:`same_requests`, and what a stop gives up with :func:`adopted_or_abandoned`, both by :data:`DEADLINE`."""
+
+    deadline = float(request.param)
+    if deadline and request.node.originalname in AT_ONCE_ONLY:
+        pytest.skip(AT_ONCE_ONLY[request.node.originalname])
+    monkeypatch.setattr(sys.modules[__name__], "registered", at_once(registered, deadline))
+    monkeypatch.setattr(sys.modules[__name__], "DEADLINE", deadline)
+    return deadline
 
 
 def patched_pull(tmp_path: Path, remote: Remote) -> None:
@@ -719,7 +746,8 @@ def test_a_pull_is_one_connection_and_one_start_whatever_its_segments(
         assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * count
         # No adapter call at all: one session holds, then carries each segment and releases it right after it.
         assert calls == []
-        assert ops(requests) == [*PAGE, *["send", "release"] * segments]
+        assert same_requests(ops(requests), [*PAGE, *["send", "release"] * segments], DEADLINE)
+        assert requests_in_order(requests)
         assert all(header["kind"] == "holds" and header["workspace"] == far_name for header in sends(requests))
         commands = remote.commands()[before:]
         measured.append((len(commands), starts(commands)))
@@ -875,7 +903,8 @@ def test_a_send_carries_a_prefix_and_the_rest_of_its_segment_follows(
     assert asked[0][1:] == asked[1] and asked[1][1:] == asked[2] and asked[3][1:] == asked[4]
     assert sorted(names[0] for names in asked) == ids
     assert {header["limit_bytes"] for header in sends(requests)} == {1}
-    assert ops(requests) == [*PAGE, *["send", "release"] * 5]
+    assert same_requests(ops(requests), [*PAGE, *["send", "release"] * 5], DEADLINE)
+    assert requests_in_order(requests)
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (1, 1)
     assert_in(near, plan)
@@ -933,7 +962,8 @@ def test_a_failed_commit_is_fetched_once_more_with_an_fsync_of_every_file_and_la
     captured = capsys.readouterr()
     assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 4
     assert fsyncs == [False, True, True]
-    assert ops(requests) == [*PAGE, "send", "send", "release", "send", "release"]
+    assert same_requests(ops(requests), [*PAGE, "send", "send", "release", "send", "release"], DEADLINE)
+    assert requests_in_order(requests)
     assert captured.err.count("again, with an fsync of every file") == 1
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (1, 1)
@@ -986,21 +1016,28 @@ def test_a_far_side_dying_in_a_segment_keeps_it_and_the_later_ones_held_and_resu
     transfers = outcomes(capsys)["transfers"]
     first = sends(requests)[0]["names"]
     by_id = {outcome["transfer_id"]: outcome for outcome in transfers}
-    assert [by_id[name]["status"] for name in first] == ["adopted"] * 2
+    # The first segment adopted (or, still staged when SRC died with a positive deadline, given up and held).
+    assert all(adopted_or_abandoned(by_id[name], DEADLINE) for name in first)
+    adopted = [name for name in first if by_id[name]["status"] == "adopted"]
+    assert len(adopted) in (0, 2) and (adopted or DEADLINE)
     rest = [outcome for outcome in transfers if outcome["transfer_id"] not in first]
     assert [outcome["status"] for outcome in rest] == ["failed"] * 4
     assert all(f"--resume cluster:{far_name} {near.root}" in outcome["message"] for outcome in rest)
-    assert ops(requests) == [*PAGE, "send", "release", "send"]
-    assert sum(find(near, mapping["id"]) is not None for mapping, _, _ in plan) == 2
-    assert sorted(outgoing(far)) == sorted(outcome["transfer_id"] for outcome in rest)
+    expected = [*PAGE, "send", "release", "send"] if adopted else [*PAGE, "send", "send"]
+    assert same_requests(ops(requests), expected, DEADLINE)
+    assert requests_in_order(requests)
+    assert sum(find(near, mapping["id"]) is not None for mapping, _, _ in plan) == len(adopted)
+    assert sorted(outgoing(far)) == sorted(key for key, outcome in by_id.items() if key not in adopted)
     assert landing_scratches(near) == []
     # --resume lists the holds over a new session (one connection, one start) and delivers them.
     monkeypatch.delenv("HTTK_TEST_EXIT_ON_SEND")
     requests.clear()
     before = len(remote.commands())
     assert run(project, "--json", "--resume", f"cluster:{far_name}", near_name) == 0
-    assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 4
-    assert ops(requests) == ["holds_page", "send", "release", "send", "release"]
+    assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * (6 - len(adopted))
+    segments = 3 - len(adopted) // 2
+    assert same_requests(ops(requests), ["holds_page", *["send", "release"] * segments], DEADLINE)
+    assert requests_in_order(requests)
     commands = remote.commands()[before:]
     assert (len(commands), starts(commands)) == (1, 1)
     assert_in(near, plan)
@@ -1026,7 +1063,9 @@ def test_the_holds_an_earlier_run_left_are_driven_first_then_the_new_ones(
     # Plan §7.8: the selection checked, a page of the earlier holds bound for this destination driven, then the
     # selection's page.
     ops_ = ["select", "holds_page", "send", "release", "hold_page", "send", "release"]
-    assert ops(requests) == ops_ and [len(header["names"]) for header in sends(requests)] == [2, 1]
+    assert same_requests(ops(requests), ops_, DEADLINE)
+    assert requests_in_order(requests)
+    assert [len(header["names"]) for header in sends(requests)] == [2, 1]
     assert_in(near, [*earlier, *later])
     assert outgoing(far) == []
 
@@ -1085,12 +1124,16 @@ def test_a_session_failing_in_a_release_stops_the_pull(
     assert run(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
     by_id = {outcome["transfer_id"]: outcome for outcome in outcomes(capsys)["transfers"]}
     first = sends(requests)[0]["names"]
-    assert ops(requests) == [*PAGE, "send", "release"]
+    # Nothing more is fetched (or, staged already with a positive deadline, adopted) after the failed release.
+    assert ops(requests)[-1] == "release" and ops(requests).count("release") == 1
+    sent = ops(requests)
+    assert sent[: len(PAGE)] == PAGE and set(sent[len(PAGE) : -1]) == {"send"} and 1 <= sent.count("send") <= 2
     for name in first:
         assert by_id[name]["status"] == "adopted" and "the hold was not released" in by_id[name]["message"]
     rest = [outcome for name, outcome in by_id.items() if name not in first]
     assert [outcome["status"] for outcome in rest] == ["failed"] * 2
-    assert all("not delivered" in outcome["message"] for outcome in rest)
+    later = ("not delivered", "not adopted, since the transfer stopped") if DEADLINE else ("not delivered",)
+    assert all(any(said in outcome["message"] for said in later) for outcome in rest)
     assert sum(find(near, mapping["id"]) is not None for mapping, _, _ in plan) == 2
     assert len(outgoing(far)) == 4
 
@@ -1200,7 +1243,8 @@ def test_file_heavy_bundles_travel_in_requests_closed_at_the_member_limit(
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 2
     asked = sends(requests)
     assert [len(header["names"]) for header in asked] == [2, 1] and {h["limit_members"] for h in asked} == {5}
-    assert ops(requests) == [*PAGE, "send", "release", "send", "release"]
+    assert same_requests(ops(requests), [*PAGE, "send", "release", "send", "release"], DEADLINE)
+    assert requests_in_order(requests)
     assert_in(near, plan)
 
 
@@ -1350,7 +1394,8 @@ def test_a_mixed_destination_resume_syncs_every_later_landing_file_by_file_after
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 2
     # The first destination's landing again with an fsync of every file, and the other destination's directly.
     assert fsyncs == [False, True, True]
-    assert ops(requests) == ["holds_page", "send", "send", "release", "send", "release"]
+    assert same_requests(ops(requests), ["holds_page", "send", "send", "release", "send", "release"], DEADLINE)
+    assert requests_in_order(requests)
     assert_in(near, plans[near_name])
     assert_in(other, plans[other_name])
 

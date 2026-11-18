@@ -42,20 +42,26 @@ def ssh_pair(tmp_path: Path, remote: Remote) -> tuple[Path, Workspace, str, Work
 
 @pytest.fixture
 def refusing() -> Iterator[list[Workspace]]:
-    """Make the listed workspaces' ``transfers/incoming`` unwritable, so that a delivery there is refused before
-    anything is adopted (no landing can be made); restored afterwards."""
+    """Make the listed workspaces' ``transfers/incoming`` and ``tmp`` unwritable, so that a delivery there is refused
+    before anything is adopted (no landing can be made: a staged push lands in an owner scratch of ``tmp``, plan
+    §7.10); restored afterwards."""
 
     workspaces: list[Workspace] = []
     yield workspaces
     for workspace in workspaces:
-        (workspace.control / "transfers" / "incoming").chmod(0o755)
+        unrefuse(workspace)
 
 
 def refuse(refusing: list[Workspace], workspace: Workspace) -> None:
-    landing = workspace.control / "transfers" / "incoming"
-    landing.mkdir(parents=True, exist_ok=True)
-    landing.chmod(0o555)
+    for landing in (workspace.control / "transfers" / "incoming", workspace.control / "tmp"):
+        landing.mkdir(parents=True, exist_ok=True)
+        landing.chmod(0o555)
     refusing.append(workspace)
+
+
+def unrefuse(workspace: Workspace) -> None:
+    for landing in (workspace.control / "transfers" / "incoming", workspace.control / "tmp"):
+        landing.chmod(0o755)
 
 
 def adopted_unreadably(
@@ -122,7 +128,7 @@ def test_a_refused_redelivery_never_takes_back_a_hold_an_earlier_run_may_have_de
     assert sorted(outgoing(near)) == held
     assert_in(far, plan)
     # Once DST takes deliveries again, --resume finds them already adopted and releases the holds.
-    refusing.pop().control.joinpath("transfers", "incoming").chmod(0o755)
+    unrefuse(refusing.pop())
     assert run(project, "--json", "-q", "--resume", near_name, f"cluster:{far_name}") == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["already_adopted"] * 2
     assert outgoing(near) == [] and all(find(near, mapping["id"]) is None for mapping, _, _ in plan)

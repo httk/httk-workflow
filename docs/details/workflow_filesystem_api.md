@@ -923,13 +923,24 @@ what it needs first (an eject's `eject.json`).
 
 | Purpose | Holds | Reconciler |
 | --- | --- | --- |
-| `trash`, `build`, `landing`, `release`, `claim` | entries being removed, store installations, pulled landings, released holds, exchange-index staging | discard (`DISCARDABLE_PURPOSES`) |
+| `trash`, `build`, `landing`, `release`, `claim` | entries being removed, store installations, pulled, copied or staged landings (`landing/outgoing/<transfer id>`), released holds, exchange-index staging | discard (`DISCARDABLE_PURPOSES`) |
 | `submit` | a payload being submitted, complete once named `job/` | submit `job/` to `ready`; without it, discard |
 | `eject`, `hold` | a bundle being built and delivered, and `eject.json` once delivery starts | roll forward or back (§Moving jobs) |
 | `adopt`, `adopt-untrusted` | a bundle being adopted; the trust is in the purpose | resume adoption (§Moving jobs) |
 | `quarantine` | an entry won for quarantine | finish the move into `quarantine/` |
 
 There is no age-based collection of scratch: ownership decides.
+
+A staged segment of a transfer (plan WORKFLOW_TRANSFER_SESSION §7.10) is the
+one exception to an owner per step: its receiver owner (`_moving.Stage`) lives
+from the segment's reception until its adoption ends or the stage is given up,
+across requests (at most 8 such owners a session or transfer pair). Until its
+adoption begins it holds only its `landing` scratch, whose
+`landing/outgoing/<transfer id>` copies are discarded by its close or by
+recovery, never adopted unasked; once its adoption began, each bundle taken
+into an `adopt` scratch is reconciled as above. A local same-filesystem stage
+holds no scratch: its bundles are the original holds in SRC's
+`transfers/outgoing/`, which stay there until adoption takes them.
 
 ### Self-healing, clean exit and fail-stop
 
@@ -1975,7 +1986,10 @@ untrusted bundle and to nothing for a trusted one.
    move; a refusal moves it back). Across filesystems DST adopts by copy. To a
    remote DST the bundle is pushed to DST's
    `transfers/incoming/<transfer-id>.<t>` and adopted there by a remote
-   `job adopt`; from a remote SRC it is pulled into a `landing` scratch.
+   `job adopt`, or, over a transfer session that stages segments, into the
+   `landing` scratch of the segment's stage, adopted by a later `adopt_staged`
+   request; from a remote SRC it is pulled into a `landing` scratch (staged
+   there the same way when the pull uses a transfer session).
 3. **Release.** Only after DST adopted (or reported "already adopted") does
    SRC discard the hold (`take` into a `release` scratch, then discard); a hold
    already gone is fine.

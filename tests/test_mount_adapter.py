@@ -519,7 +519,7 @@ def test_a_job_reaches_a_mount_workspace_and_runs_there(
     # remote adoption.
     (session,) = mount.commands()
     assert session.startswith("httk workflow transfer-session")
-    assert [header["workspace"] for op, header in requests if op == "adopt"] == ["station"]
+    assert [header["workspace"] for op, header in requests if op == "stage"] == ["station"]
 
 
 # 9. refusal still holds with three kinds -------------------------------------
