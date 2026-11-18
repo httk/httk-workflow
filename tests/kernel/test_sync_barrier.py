@@ -608,8 +608,11 @@ def test_a_durable_extraction_fsyncs_every_file_on_its_writing_descriptor_and_di
     first_directory = min(index for index, (kind, _) in enumerate(tracker.events) if kind == "dir")
     assert last_write < first_directory
     assert synced_directories[-1] == os.stat(tmp_path).st_ino
-    deeper = os.stat(tmp_path / "implicit" / "deeper").st_ino
-    assert synced_directories.index(deeper) < synced_directories.index(os.stat(tmp_path / "implicit").st_ino)
+    if workers == 1:
+        # Deepest first in sequence; pooled (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a item 2) the directories below
+        # the target run in any order, all of them finished before the target's, which the line above pins.
+        deeper = os.stat(tmp_path / "implicit" / "deeper").st_ino
+        assert synced_directories.index(deeper) < synced_directories.index(os.stat(tmp_path / "implicit").st_ino)
     # A directory member's time is restored before the directory is fsynced, so the fsync makes it durable too.
     for name in ("job", "job/sub", "job/empty"):
         inode = os.stat(tmp_path / name).st_ino

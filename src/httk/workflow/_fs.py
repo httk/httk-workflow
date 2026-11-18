@@ -30,7 +30,7 @@ from functools import cache, partial
 from pathlib import Path, PurePosixPath
 from typing import IO, Literal, Protocol, Self
 
-from httk.workflow._pool import Feed
+from httk.workflow._pool import Feed, run_ordered
 from httk.workflow.errors import FormatError, WorkflowError
 
 __all__ = [
@@ -377,10 +377,20 @@ def _fsync_parent(target: Loc) -> None:
         os.close(descriptor)
 
 
+def _same_parent(src: Loc, dst: Loc) -> bool:
+    # Whether one fsync covers both parents: the same anchored directory (an anchored location's parent is its
+    # descriptor, named by the same "at" and equal parent names below it), or two plain locations whose parents are
+    # lexically equal paths. Anything else (one anchored, one plain; other descriptors) counts as two directories.
+    if src.at is not None or dst.at is not None:
+        return src.at is not None and src.at == dst.at and src.path.parent == dst.path.parent
+    return src.path.parent == dst.path.parent
+
+
 def _fsync_parents(src: Loc, dst: Loc) -> None:
-    # Durable mode: both directories whose entries a move changed.
+    # Durable mode: both directories whose entries a move changed, once when they are the same one.
     _fsync_parent(src)
-    _fsync_parent(dst)
+    if not _same_parent(src, dst):
+        _fsync_parent(dst)
 
 
 def make_dirs(path: Path, *, durable: bool, mode: int = 0o777) -> None:
@@ -1575,11 +1585,59 @@ def _restore_directory_times(landing: _Landing) -> None:
             pass
 
 
-def _fsync_directories(landing: _Landing) -> None:
+def _open_below(anchor: int, parts: Sequence[str]) -> int:
+    # A descriptor of its own on the directory *parts* below *anchor*, each component opened O_DIRECTORY|O_NOFOLLOW
+    # relative to the previous one (never through a cache shared with another thread); the caller closes it.
+    descriptor = anchor
+    try:
+        for name in parts:
+            child = os.open(name, _DIR_FLAGS, dir_fd=descriptor)
+            if descriptor != anchor:
+                os.close(descriptor)
+            descriptor = child
+    except BaseException:
+        if descriptor != anchor:
+            os.close(descriptor)
+        raise
+    return os.dup(anchor) if descriptor == anchor else descriptor
+
+
+def _fsync_children(anchor: int, task: tuple[_Parts, tuple[str, ...]]) -> None:
+    # One pooled task: fsync the directories *names* in the directory *parts* below *anchor*, through descriptors of
+    # the task's own: the parent's chain opened once, then each child O_DIRECTORY|O_NOFOLLOW relative to it.
+    parts, names = task
+    parent = _open_below(anchor, parts)
+    try:
+        for name in names:
+            child = os.open(name, _DIR_FLAGS, dir_fd=parent)
+            try:
+                os.fsync(child)
+            finally:
+                os.close(child)
+    finally:
+        os.close(parent)
+
+
+def _fsync_directories(landing: _Landing, workers: int = 1) -> None:
     # A durable extraction, after every member and worker and the times: each directory the stream created or
-    # wrote into, deepest first, then the target. Unlike the times, a failure here is fatal.
-    for parts in sorted((landing.resolved | set(landing.directories)) - {()}, key=len, reverse=True):
-        os.fsync(landing.directory(tarfile.TarInfo("/".join(parts)), parts, create=False))
+    # wrote into, deepest first, then the target. Unlike the times, a failure here is fatal. With more than one
+    # worker the directories are fsynced by up to *workers* threads, one task per parent directory (deepest first),
+    # each through anchored O_NOFOLLOW descriptors of its own (the landing's descriptor cache stays this thread's); a
+    # failure stops the pool and waits for the running fsyncs before it is raised, and the target goes last, once
+    # all of them finished.
+    directories = sorted((landing.resolved | set(landing.directories)) - {()}, key=len, reverse=True)
+    if workers > 1:
+        children: dict[_Parts, list[str]] = {}
+        for parts in directories:
+            children.setdefault(parts[:-1], []).append(parts[-1])
+        run_ordered(
+            partial(_fsync_children, landing.root),
+            [(parts, tuple(names)) for parts, names in children.items()],
+            workers,
+        )
+    else:
+        for parts in directories:
+            os.fsync(landing.directory(tarfile.TarInfo("/".join(parts)), parts, create=False))
     os.fsync(landing.root)
 
 
@@ -1836,8 +1894,11 @@ def extract_tar(
         sequential extraction reports.
     :param durable: Fsync every regular file on the descriptor that wrote it, before closing it (in this thread or
         the worker that wrote it), and after the last member and the directory times every directory the stream
-        created or wrote into, deepest first, then *target*: the strategy ``fsync`` of a :class:`Barrier`. A
-        failed fsync is an ``OSError`` like any other write error.
+        created or wrote into, deepest first, then *target*: the strategy ``fsync`` of a :class:`Barrier`. With
+        more than one of *workers* those directories are fsynced by up to that many threads, each through anchored
+        ``O_NOFOLLOW`` descriptors of its own, once every write and time restore has finished, and *target* last,
+        after all of them; a failure waits for the running ones before it is raised. A failed fsync is an
+        ``OSError`` like any other write error.
     :param top_level: A set that a successful extraction adds the first component of every member name to (after
         the normalization above; a member naming *target* itself adds none): what this stream put in *target*,
         as opposed to what was there before.
@@ -1889,7 +1950,7 @@ def extract_tar(
                 raise tarfile.ReadError("the stream ended before its end-of-archive marker")
         _restore_directory_times(landing)
         if durable:
-            _fsync_directories(landing)
+            _fsync_directories(landing, workers if rename is None else 1)
     finally:
         landing.close()
     if top_level is not None:
@@ -2213,18 +2274,21 @@ def resolve_sync(path: Path, setting: object) -> tuple[SyncStrategy, str]:
     return "syncfs", f"syncfs ({kind}, {kernel})"
 
 
-def _prime(descriptor: int, device: int) -> bool:
-    # One syncfs on a fresh descriptor: whether syncfs works on the filesystem (recorded by st_dev). Any other
-    # error is logged and ignored: nothing of the landing is written yet, so it is not ours.
+def _prime(descriptor: int, device: int) -> Literal["clean", "failed", "unsupported"]:
+    # One syncfs on a fresh descriptor, which also tells whether syncfs works on the filesystem (recorded by
+    # st_dev): "clean" when it succeeded, "unsupported" when it is not there or not allowed. Any other error
+    # ("failed") is logged and ignored: nothing of the landing is written yet, so it is not ours.
     try:
         _syncfs(descriptor)
     except OSError as exc:
         if exc.errno in _SYNCFS_UNSUPPORTED:
             _syncfs_works[device] = False
-            return False
+            return "unsupported"
         _LOGGER.warning("the sync barrier's first syncfs failed before anything was landed (ignored): %s", exc)
+        _syncfs_works[device] = True
+        return "failed"
     _syncfs_works[device] = True
-    return True
+    return "clean"
 
 
 def _probe_syncfs(path: Path) -> bool:
@@ -2232,12 +2296,16 @@ def _probe_syncfs(path: Path) -> bool:
 
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        return _prime(descriptor, os.fstat(descriptor).st_dev)
+        return _prime(descriptor, os.fstat(descriptor).st_dev) != "unsupported"
     finally:
         os.close(descriptor)
 
 
-def fsync_landing(anchor: int, *, label: str = "") -> int:
+def _unreadable(error: int | None, where: str, why: str | None) -> SyncUnreadable:
+    return SyncUnreadable(error, f"cannot read {where} to sync it to disk: {why}")
+
+
+def fsync_landing(anchor: int, *, label: str = "", workers: int = 1) -> int:
     """Fsync a landed tree after the fact: every regular file, then every directory bottom-up, then *anchor*.
 
     Each directory is opened ``O_DIRECTORY|O_NOFOLLOW`` relative to its parent's descriptor and each file through
@@ -2245,17 +2313,24 @@ def fsync_landing(anchor: int, *, label: str = "") -> int:
     opener than the writer misses a writeback error already reported to someone else or lost when the inode was
     evicted (the accepted limit of the strategy ``fsync`` for a landing another process wrote).
 
+    With more than one of *workers*, the tree is listed first (in this thread, with the same checks), then its
+    files and directories are fsynced by up to that many threads, each task through anchored ``O_NOFOLLOW``
+    descriptors of its own, at most 64 files a task, a directory's own fsync in the task of its last chunk, after
+    that chunk's files (not necessarily after its other chunks'); *anchor* goes last, once all of them finished. The
+    first failure stops the pool, waits for the running fsyncs and is raised.
+
     :param anchor: The directory descriptor of the landing (left open).
     :param label: The landing's path, for messages.
+    :param workers: The most fsyncs running at once.
     :return: How many regular files were fsynced.
     :raises SyncUnreadable: When an entry cannot be listed or opened, or a directory lies deeper than 256 levels
         (which bounds the descriptors the walk keeps open).
     :raises SyncFailed: When an fsync reports an error.
     """
 
-    def unreadable(error: int | None, where: str, why: str | None) -> SyncUnreadable:
-        return SyncUnreadable(error, f"cannot read {where} to sync it to disk: {why}")
-
+    if workers > 1:
+        return _fsync_landing_pooled(anchor, label, workers)
+    unreadable = _unreadable
     count = 0
     try:
         listing = sorted(os.listdir(anchor))
@@ -2312,6 +2387,100 @@ def fsync_landing(anchor: int, *, label: str = "") -> int:
     return count
 
 
+#: What the ``ignore`` warning adds for a transfer landing's barrier that did not prime (not for a tree written before
+#: its barrier, whose own files' errors are the point of its commit).
+_UNPRIMED = "; the barrier did not prime, so the error may predate the landing"
+#: The most regular files one pooled task of a late walk fsyncs.
+_WALK_CHUNK = 64
+
+
+def _fsync_task(anchor: int, label: str, task: tuple[_Parts, tuple[str, ...], bool]) -> None:
+    # One pooled task of a late walk: fsync the files *names* of the directory *parts* below *anchor* (and with
+    # *last* the directory itself, after them), through descriptors of the task's own.
+    parts, names, last = task
+    where = PurePosixPath(*parts)
+    try:
+        directory = _open_below(anchor, parts)
+    except OSError as exc:
+        raise _unreadable(exc.errno, f"{label}/{where}", exc.strerror) from exc
+    try:
+        for name in names:
+            try:
+                descriptor = os.open(name, _SOURCE_FLAGS, dir_fd=directory)
+            except OSError as exc:
+                raise _unreadable(exc.errno, f"{label}/{where / name}", exc.strerror) from exc
+            try:
+                os.fsync(descriptor)
+            except OSError as exc:
+                raise SyncFailed(exc.errno, f"cannot sync {label}/{where / name} to disk: {exc.strerror}") from exc
+            finally:
+                os.close(descriptor)
+        if last:
+            try:
+                os.fsync(directory)
+            except OSError as exc:
+                raise SyncFailed(exc.errno, f"cannot sync {label}/{where} to disk: {exc.strerror}") from exc
+    finally:
+        os.close(directory)
+
+
+def _fsync_landing_pooled(anchor: int, label: str, workers: int) -> int:
+    # fsync_landing with a pool: list the tree here (bottom-up, as the serial walk), then fsync it in tasks.
+    try:
+        listing = sorted(os.listdir(anchor))
+    except OSError as exc:
+        raise _unreadable(exc.errno, label, exc.strerror) from exc
+    tasks: list[tuple[_Parts, tuple[str, ...], bool]] = []
+    count = 0
+    # Each directory open for its listing below the anchor: its descriptor, components, names left and files.
+    pending: list[tuple[int, _Parts, list[str], list[str]]] = [(anchor, (), listing, [])]
+    try:
+        while pending:
+            directory, parts, names, files = pending[-1]
+            if not names:
+                pending.pop()
+                if directory != anchor:
+                    os.close(directory)
+                count += len(files)
+                chunks = [tuple(files[start : start + _WALK_CHUNK]) for start in range(0, len(files), _WALK_CHUNK)]
+                if parts:
+                    chunks = chunks or [()]
+                    tasks += [(parts, chunk, index == len(chunks) - 1) for index, chunk in enumerate(chunks)]
+                else:
+                    tasks += [(parts, chunk, False) for chunk in chunks]  # the anchor itself goes last, here
+                continue
+            name = names.pop()
+            path = PurePosixPath(*parts, name)
+            try:
+                mode = os.lstat(name, dir_fd=directory).st_mode
+                if stat.S_ISDIR(mode):
+                    if len(path.parts) > _LANDING_DEPTH:
+                        raise _unreadable(errno.ELOOP, f"{label}/{path}", f"deeper than {_LANDING_DEPTH} levels")
+                    child = os.open(name, _DIR_FLAGS, dir_fd=directory)
+                    try:
+                        listed = sorted(os.listdir(child))
+                    except BaseException:
+                        os.close(child)
+                        raise
+                    pending.append((child, (*parts, name), listed, []))
+                elif stat.S_ISREG(mode):
+                    files.append(name)
+            except SyncFailed:
+                raise
+            except OSError as exc:
+                raise _unreadable(exc.errno, f"{label}/{path}", exc.strerror) from exc
+    finally:
+        for directory, _parts, _names, _files in pending:
+            if directory != anchor:
+                os.close(directory)
+    run_ordered(partial(_fsync_task, anchor, label), tasks, workers)
+    try:
+        os.fsync(anchor)
+    except OSError as exc:
+        raise SyncFailed(exc.errno, f"cannot sync {label}/. to disk: {exc.strerror}") from exc
+    return count
+
+
 class Barrier:
     """Make everything landed below *anchor* durable once, before any of it is published (plan §8.1).
 
@@ -2322,21 +2491,32 @@ class Barrier:
     so any writeback error since the open, ours or not, fails it: an error is never attributed, the landing is
     not published. Under ``fsync``, a caller whose writes fsync themselves (:attr:`fsync_inline`) passes
     *inline*, and the commit has nothing left to do but say so; otherwise it fsyncs the landing after the fact
-    (:func:`fsync_landing`). Leaving without a commit syncs nothing. A running ``syncfs`` cannot be interrupted.
+    (:func:`fsync_landing`, with up to *workers* threads). Leaving without a commit syncs nothing. A running
+    ``syncfs`` cannot be interrupted.
+
+    The landings of one transfer (a transfer session's, a pull's, a local transfer's copies) pass the transfer's
+    one *primed_devices* set: only the first barrier on a filesystem primes, and a prime that completed without an
+    error records the filesystem's ``st_dev`` there, so the later barriers on it open their descriptor without a
+    prime (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a). Their descriptor samples the filesystem's error state at the
+    open (0, or an error already seen), so any error recorded after the open fails their commit, and an error from
+    before it can only fail a commit falsely: the transfers' retry with inline fsync takes that. Such an unprimed
+    barrier fails on an unsupported ``syncfs`` at its commit exactly as a primed one does.
 
     Trees written before the barrier could be entered (operators' bundles unpacked by scp or tar) take *prime*
-    false (:func:`sync_written`): no prime consumes a writeback error of their files, so the commit's ``syncfs``
-    reports one that nobody has seen yet (best effort: one already reported to someone else, or lost with an
-    evicted inode, is not), and also any unseen one of someone else on that filesystem; where ``syncfs`` turns
-    out not to be supported, the commit walks its *tree* instead.
+    false and *written* true (:func:`sync_written`): no prime consumes a writeback error of their files, so the
+    commit's ``syncfs`` reports one that nobody has seen yet (best effort: one already reported to someone else, or
+    lost with an evicted inode, is not), and also any unseen one of someone else on that filesystem; where
+    ``syncfs`` turns out not to be supported, the commit walks its *tree* instead (only with *written*).
 
     With *errors* ``ignore`` (``io.sync_errors``), a writeback error that the commit's ``syncfs`` reports is
     trusted rather than raised: ``syncfs`` is called once more on the same descriptor (another full flush of the
     filesystem), a warning says whether it completed without reporting a further error (which does not prove that
-    the pages whose writeback failed reached the disk), and the commit returns, so the landing is published.
-    Nothing else is ignored: a ``syncfs`` that is not supported (``ENOSYS``, ``EPERM``, ``EINVAL``) fails a primed
-    commit and falls back to the walk at a no-prime one, as under ``fail``; the prime, the walk and inline fsync of
-    strategy ``fsync`` behave as under ``fail``.
+    the pages whose writeback failed reached the disk) and, for a transfer landing's barrier that did not prime (not
+    a *written* one), that the error may
+    predate the landing, and the commit returns, so the landing is published. Nothing else is ignored: a
+    ``syncfs`` that is not supported (``ENOSYS``, ``EPERM``, ``EINVAL``) fails the commit, except that it falls
+    back to the walk with *written*, as under ``fail``; the prime, the walk and inline fsync of strategy ``fsync``
+    behave as under ``fail``.
 
     :param anchor: The landing directory, which the caller has created durably.
     :param setting: The ``io.sync`` value, read fresh by the caller.
@@ -2344,8 +2524,14 @@ class Barrier:
     :param inline: The caller writes every file of the landing with fsync on its writing descriptor when
         :attr:`fsync_inline` is true (an extraction or a copy), rather than another process writing it.
     :param quiet: Print no progress line.
-    :param prime: Prime the barrier at entry; false only for a tree written before it was entered.
-    :raises ValueError: When *errors* is neither ``fail`` nor ``ignore``.
+    :param prime: Prime the barrier at entry (unless *primed_devices* records its filesystem); false only for a
+        tree written before it was entered.
+    :param written: The tree was written before the barrier was entered: a commit whose ``syncfs`` turns out not to
+        be supported walks the tree instead of failing. Only without *prime*.
+    :param primed_devices: The ``st_dev`` of each filesystem a barrier of the same transfer primed without an error,
+        updated in place; ``None`` (the default) primes every barrier.
+    :param workers: The most fsyncs a late walk runs at once (``io.workers``).
+    :raises ValueError: When *errors* is neither ``fail`` nor ``ignore``, or *written* comes with *prime*.
     """
 
     def __init__(
@@ -2357,17 +2543,28 @@ class Barrier:
         inline: bool = False,
         quiet: bool = False,
         prime: bool = True,
+        written: bool = False,
+        primed_devices: set[int] | None = None,
+        workers: int = 1,
     ) -> None:
         if errors not in SYNC_ERRORS:
             raise ValueError(f"io.sync_errors is fail or ignore, not {errors!r}")
+        if written and prime:
+            # A prime would consume the unseen writeback error of the tree's own files.
+            raise ValueError("a tree written before its barrier is never primed")
         self.anchor = anchor
         self.setting = setting
         self.errors: SyncErrors = errors
         self.inline = inline
         self.quiet = quiet
         self.prime = prime
+        self.written = written
+        self.primed_devices = primed_devices
+        self.workers = workers
         self.strategy: SyncStrategy = "fsync"
         self.reason = ""
+        #: Whether this barrier primed at its entry.
+        self.primed = False
         self._descriptor: int | None = None
 
     @property
@@ -2380,14 +2577,18 @@ class Barrier:
         self.strategy, self.reason = resolve_sync(self.anchor, self.setting)
         self._descriptor = os.open(self.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
-            if (
-                self.strategy == "syncfs"
-                and self.prime
-                and not _prime(self._descriptor, os.fstat(self._descriptor).st_dev)
-            ):
-                if self.setting == "syncfs":
-                    _LOGGER.warning("io.sync is syncfs, but syncfs is not supported here: using fsync")
-                self.strategy, self.reason = "fsync", "fsync (syncfs is not supported on this filesystem here)"
+            if self.strategy == "syncfs" and self.prime:
+                device = os.fstat(self._descriptor).st_dev
+                if self.primed_devices is None or device not in self.primed_devices:
+                    primed = _prime(self._descriptor, device)
+                    if primed == "unsupported":
+                        if self.setting == "syncfs":
+                            _LOGGER.warning("io.sync is syncfs, but syncfs is not supported here: using fsync")
+                        self.strategy, self.reason = "fsync", "fsync (syncfs is not supported on this filesystem here)"
+                    else:
+                        self.primed = True
+                        if primed == "clean" and self.primed_devices is not None:
+                            self.primed_devices.add(device)
         except BaseException:
             self._close()
             raise
@@ -2413,8 +2614,9 @@ class Barrier:
 
         A barrier may commit several times, one landing below *anchor* after another, each before its own
         publication: every ``syncfs`` on the one descriptor reports a writeback error recorded since the previous
-        one (or since the prime), so each commit covers what was written since the last, and a failed one fails
-        only what it was to publish. Under ``fsync`` the walk covers *tree*, that landing alone.
+        one (or since the prime, or the open of a barrier that did not prime), so each commit covers what was
+        written since the last, and a failed one fails only what it was to publish. Under ``fsync`` the walk covers
+        *tree*, that landing alone.
 
         Unless *quiet*, a progress line naming the strategy goes to standard error: ``syncing N landed file(s) to
         disk (syncfs: lustre, Linux 5.14)`` before a ``syncfs`` or a walk, and ``made N landed file(s) durable
@@ -2447,8 +2649,9 @@ class Barrier:
         try:
             _syncfs(self._descriptor)
         except OSError as exc:
-            if not self.prime and exc.errno in _SYNCFS_UNSUPPORTED:
-                # No prime probed it: syncfs does not work here, so the tree is walked instead.
+            if self.written and exc.errno in _SYNCFS_UNSUPPORTED:
+                # A tree written before the barrier, which no prime probed: syncfs does not work here, so the tree
+                # is walked instead. An unprimed transfer barrier fails here as a primed one does.
                 _syncfs_works[os.fstat(self._descriptor).st_dev] = False
                 self.strategy, self.reason = "fsync", "fsync (syncfs is not supported on this filesystem here)"
                 self._walk(tree)
@@ -2471,18 +2674,20 @@ class Barrier:
         except OSError as again:
             _LOGGER.warning(
                 "the sync barrier (%s) of %s reported a writeback error, which io.sync_errors=ignore trusts, and a "
-                "second syncfs failed too, so the flush may be incomplete (first %s, then %s)",
+                "second syncfs failed too, so the flush may be incomplete%s (first %s, then %s)",
                 self.reason,
                 self.anchor,
+                _UNPRIMED if not self.primed and not self.written else "",
                 error,
                 again,
             )
             return
         _LOGGER.warning(
             "the sync barrier (%s) of %s reported a writeback error, which io.sync_errors=ignore trusts "
-            "(a second flush reported no further error): %s",
+            "(a second flush reported no further error)%s: %s",
             self.reason,
             self.anchor,
+            _UNPRIMED if not self.primed and not self.written else "",
             error,
         )
 
@@ -2492,7 +2697,7 @@ class Barrier:
         label = str(self.anchor if tree is None else tree.path if isinstance(tree, Loc) else tree)
         try:
             if tree is None:
-                fsync_landing(self._descriptor, label=label)
+                fsync_landing(self._descriptor, label=label, workers=self.workers)
                 return
             try:
                 if isinstance(tree, Loc):
@@ -2502,7 +2707,7 @@ class Barrier:
             except OSError as exc:
                 raise SyncUnreadable(exc.errno, f"cannot read {label} to sync it to disk: {exc.strerror}") from exc
             try:
-                fsync_landing(descriptor, label=label)
+                fsync_landing(descriptor, label=label, workers=self.workers)
             finally:
                 os.close(descriptor)
         except SyncFailed as exc:
@@ -2511,7 +2716,7 @@ class Barrier:
 
 
 def sync_written(
-    anchor: Path, trees: Sequence[Path | Loc], setting: object, *, errors: SyncErrors = "fail"
+    anchor: Path, trees: Sequence[Path | Loc], setting: object, *, errors: SyncErrors = "fail", workers: int = 1
 ) -> list[Path | Loc]:
     """Make trees that were written before httk ran (operators' bundles or payloads) durable, together.
 
@@ -2528,6 +2733,7 @@ def sync_written(
     :param trees: The trees: absolute paths, or anchored locations (a trusted name below a directory descriptor).
     :param setting: The ``io.sync`` value, read fresh by the caller.
     :param errors: The ``io.sync_errors`` value, read with *setting*.
+    :param workers: The most fsyncs a walk runs at once (``io.workers``).
     :return: The trees synced (those on *anchor*'s filesystem).
     :raises SyncFailed: When the ``syncfs`` or a walk fails (:class:`SyncUnreadable` when a walk cannot read an
         entry).
@@ -2547,7 +2753,7 @@ def sync_written(
             synced.append(tree)
     if not synced:
         return synced
-    with Barrier(anchor, setting, errors=errors, quiet=True, prime=False) as barrier:
+    with Barrier(anchor, setting, errors=errors, quiet=True, prime=False, written=True, workers=workers) as barrier:
         pending = synced
         if barrier.strategy == "syncfs":
             # One syncfs for every tree; where it turns out not to be supported, the first tree is walked instead.

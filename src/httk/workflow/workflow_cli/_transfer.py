@@ -1586,15 +1586,29 @@ def _deliver_call(
 
 
 def _sync_barrier(
-    workspace: Workspace, anchor: Path, arguments: argparse.Namespace, *, inline: bool
+    workspace: Workspace,
+    anchor: Path,
+    arguments: argparse.Namespace,
+    *,
+    inline: bool,
+    primed_devices: set[int] | None = None,
 ) -> contextlib.AbstractContextManager[_fs.Barrier | None]:
-    """The sync barrier of a landing in *workspace* (``io.sync`` and ``io.sync_errors`` read afresh); none in a
-    non-durable workspace."""
+    """The sync barrier of a landing in *workspace* (``io.sync`` and ``io.sync_errors`` read afresh, a late walk with
+    its ``io.workers``); none in a non-durable workspace. With *primed_devices* (the transfer's) it primes only the
+    first landing on a filesystem; without, it always primes (an adapter pull's, and its retry's fresh one)."""
 
     if not workspace.durable:
         return contextlib.nullcontext(None)
     setting, errors = workspace.io_sync_policy()
-    return _fs.Barrier(anchor, setting, errors=errors, inline=inline, quiet=arguments.quiet)
+    return _fs.Barrier(
+        anchor,
+        setting,
+        errors=errors,
+        inline=inline,
+        quiet=arguments.quiet,
+        primed_devices=primed_devices,
+        workers=workspace.io_workers,
+    )
 
 
 def _other_filesystem(holds: list[_moving.Hold], dst: Workspace) -> bool:
@@ -1613,6 +1627,7 @@ def _land_copies(
     holds: list[_moving.Hold],
     scratch: Path,
     arguments: argparse.Namespace,
+    primed_devices: set[int] | None = None,
 ) -> list[Path]:
     """Copy every hold into the landing *scratch* of *workspace*, durably before any of it is adopted.
 
@@ -1625,6 +1640,7 @@ def _land_copies(
     :param holds: The chunk's holds, in a local source workspace.
     :param scratch: The owner's landing scratch.
     :param arguments: The command's arguments (``--quiet``).
+    :param primed_devices: The transfer's filesystems primed already: only the first landing on one primes.
     :return: The copies, in the order of *holds*.
     """
 
@@ -1641,7 +1657,7 @@ def _land_copies(
         )
 
     try:
-        with _sync_barrier(workspace, scratch, arguments, inline=True) as barrier:
+        with _sync_barrier(workspace, scratch, arguments, inline=True, primed_devices=primed_devices) as barrier:
             copy_all(barrier is not None and barrier.fsync_inline)
             if barrier is not None:
                 barrier.commit(len(holds), unit="bundle")
@@ -1777,7 +1793,7 @@ def _stage_local(settled: "_Deliveries", holds: list[_moving.Hold]) -> None:
             sources = [Path(hold.path) for hold in holds]
         else:
             stage.landing = stage.owner.scratch("landing")
-            sources = _land_copies(workspace, stage.owner, holds, stage.landing, arguments)
+            sources = _land_copies(workspace, stage.owner, holds, stage.landing, arguments, pair.primed_devices)
         stage.commit(sources)
         # Queued inside the guard: from here on an interrupt reaches the stage through the pair's queue.
         pending = _PendingStage(
@@ -1805,7 +1821,9 @@ def _adopt_local_stage(settled: "_Deliveries", stage: _moving.Stage, holds: list
     :func:`_adopt_local` for each bundle), recording each hold's adoption entry in *settled*; the stage closes
     either way. A failed adoption fails the holds (some may be adopted: ``--resume`` reports those already
     adopted), and with *stop* stops the pair. A DST that cannot be modified any more (sealed since the stage) adopts
-    nothing: the stage is given up (an original hold stays where it is), its holds stay held and the pair stops.
+    nothing: the stage is given up (an original hold stays where it is), its holds stay held and the pair stops. A
+    stage that cannot be closed after its adoption keeps its adoption entries, says so in a ``warning:`` line and
+    stops the pair (its owner is left for recovery), as a far side's session admits no further stage then.
 
     :param settled: The deliveries of the stage's batch.
     :param stage: The committed stage.
@@ -1848,16 +1866,25 @@ def _adopt_local_stage(settled: "_Deliveries", stage: _moving.Stage, holds: list
     except (KeyboardInterrupt, SystemExit) as exc:
         stage.owner.__exit__(type(exc), exc, exc.__traceback__)  # quiescent jobs go back, the owner closes
         raise
+    unclosed: Exception | None = None
     try:
         stage.close()  # what is left in its landing was never taken
     except _ERRORS as exc:
-        failure = failure or exc  # its owner is left for recovery
+        unclosed = exc  # its owner is left for recovery
     if failure is not None:
         settled.fail(holds, str(failure))
         if stop:
             settled.stopped = settled.stopped or f"{dst.locator}: {failure}"
         return False
     settled.entries.update(zip(ids, adopted, strict=True))
+    if unclosed is not None:
+        # The adoption stands (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a); as a far side's session then admits no
+        # further stage, nothing more is staged for this pair.
+        print(
+            f"warning: an adopted stage in {dst.locator} could not be closed (left for recovery): {unclosed}",
+            file=sys.stderr,
+        )
+        settled.stopped = settled.stopped or f"{dst.locator}: an adopted stage could not be closed: {unclosed}"
     return True
 
 
@@ -2854,6 +2881,11 @@ class _Capacity(Exception):
     """DST refused a ``stage`` request at its capacity, before it used the upload: adopt a staged segment first."""
 
 
+class _Unclosed(Exception):
+    """DST refused a ``stage`` request, before it used the upload, because an adopted stage of the session could not be
+    closed: it stages nothing more on this session (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a)."""
+
+
 def _session_stage(
     session: TransferSession,
     src: _End,
@@ -2876,6 +2908,7 @@ def _session_stage(
     :param fsync: Ask for ``--sync fsync``.
     :return: The stage (or refusal) document and the far side's standard error.
     :raises _Capacity: When DST refused it for its capacity (nothing of it used).
+    :raises _Unclosed: When DST stages nothing more on this session (nothing of it used).
     :raises RuntimeError: When the answer is unusable or the session failed: the outcome is unknown (DST may hold
         the segment staged; it never adopts it unasked).
     """
@@ -2887,6 +2920,8 @@ def _session_stage(
     response, aborted = _upload_holds(session, "stage", header, holds, src, dst, arguments)
     if response.get("ok") is False and response.get("capacity") is True and "document" not in response:
         raise _Capacity(str(response.get("error")))
+    if response.get("ok") is False and response.get("unclosed") is True and "document" not in response:
+        raise _Unclosed(str(response.get("error")))
     if response.get("ok") is not True:
         return _checked_upload(response, aborted, ids, src, dst, arguments), str(response.get("stderr", ""))
     token, matures, landed = response.get("token"), response.get("matures_in"), response.get("bytes")
@@ -3380,6 +3415,15 @@ def _push_segment(
                 break
             _adopt_oldest(pair)  # DST counts otherwise: one adopted, the segment goes once more
             continue
+        except _Unclosed as exc:
+            # Refused before its data was used: known not delivered, and the pair stops (holds kept for --resume).
+            settled.fail(
+                holds,
+                f"not delivered: {dst.locator} stages nothing more on this transfer session ({exc}); deliver it "
+                f"with `httk job transfer --resume {src.locator} {dst.locator}`",
+            )
+            settled.stopped = f"{dst.locator}: an adopted stage there could not be closed"
+            break
         except _ERRORS as exc:
             settled.fail(holds, str(exc))
             settled.stopped = str(exc).split(";", 1)[0]
@@ -3485,7 +3529,14 @@ def _receive_part(
             return
         # The terminal is validated (stream.finish) before the commit, and the commit precedes the answer.
         received[:] = _landing.receive_tar(
-            workspace, landing, stream, barrier=True, force_fsync=fsync, finish=stream.finish, quiet=arguments.quiet
+            workspace,
+            landing,
+            stream,
+            barrier=True,
+            force_fsync=fsync,
+            finish=stream.finish,
+            quiet=arguments.quiet,
+            primed_devices=settled.pair.primed_devices,
         )
 
     cause: BaseException | None = None
@@ -3994,10 +4045,16 @@ class _Pair:
     and the workflow attempts.
 
     :param dst: The destination end.
+    :param primed_devices: The transfer's set of filesystems a landing barrier primed already (its
+        ``_Transfer``'s, shared by its pairs); a fresh one by default.
     """
 
-    def __init__(self, dst: _End) -> None:
+    def __init__(self, dst: _End, primed_devices: set[int] | None = None) -> None:
         self.dst = dst
+        #: The ``st_dev`` of each filesystem a landing barrier of the transfer primed without an error: this side's
+        #: pull landings and local landing copies prime only the first landing on a filesystem (plan
+        #: WORKFLOW_TRANSFER_SESSION §7.11, T6a).
+        self.primed_devices: set[int] = set() if primed_devices is None else primed_devices
         #: ``"page"``: each page is driven before the next is held (a local DST, a push's or a pull's transfer
         #: session); ``"adapter"``: its holds are gathered and driven once, as before sessions; ``None`` until the
         #: pair's first use.
@@ -5150,6 +5207,8 @@ class _Transfer:
         self.src, self.dst, self.ends = src, dst, ends
         self.context, self.arguments, self.sessions, self.source = context, arguments, sessions, source
         self.pairs: dict[str, _Pair] = {}
+        #: The filesystems a landing barrier of this transfer primed without an error (see :class:`_Pair`).
+        self.primed_devices: set[int] = set()
         #: The outcomes and errors, spooled as each becomes final.
         self.report = _Spool() if report is None else report
         self._unreachable: dict[str, str] = {}
@@ -5165,7 +5224,9 @@ class _Transfer:
         :return: The pair.
         """
 
-        return self.pairs.setdefault(dst.locator, _Pair(dst))
+        if (pair := self.pairs.get(dst.locator)) is None:
+            pair = self.pairs[dst.locator] = _Pair(dst, self.primed_devices)
+        return pair
 
     def route(self, holds: list[_moving.Hold]) -> list[tuple[_Pair, list[_moving.Hold]]]:
         """Group *holds* by the destination each records, each group with its pair; a hold that records none, or

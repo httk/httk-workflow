@@ -1111,13 +1111,13 @@ def test_a_barrier_without_a_prime_walks_its_tree_where_syncfs_is_not_supported(
     (tree / "sub").mkdir(parents=True)
     (tree / "sub" / "file").write_text("x", encoding="utf-8")
     events = Events(monkeypatch, syncfs_failures=[errno.EPERM])
-    with _fs.Barrier(tree, "syncfs", quiet=True, prime=False) as barrier:
+    with _fs.Barrier(tree, "syncfs", quiet=True, prime=False, written=True) as barrier:
         barrier.commit()
         assert barrier.strategy == "fsync"
     assert events.details("walk") == [1] and (str(tree / "sub" / "file"), False) in events.fsynced
     # Recorded for the filesystem: the next barrier there resolves to fsync without calling syncfs.
     assert _fs._syncfs_works[os.stat(tree).st_dev] is False
-    with _fs.Barrier(tree, "syncfs", quiet=True, prime=False) as barrier:
+    with _fs.Barrier(tree, "syncfs", quiet=True, prime=False, written=True) as barrier:
         assert barrier.strategy == "fsync"
     assert events.kinds().count("syncfs") == 1
 

@@ -270,7 +270,18 @@ def test_ignore_never_ignores_an_unsupported_syncfs(
     ):
         barrier.commit()
     assert len(calls.descriptors) == 2
-    # A no-prime barrier keeps its unsupported fallback: the tree is walked instead (and nothing is trusted).
+    # An unprimed barrier of a transfer (its filesystem primed already) fails exactly so too (T6a item 1).
+    device = os.stat(tmp_path).st_dev
+    calls = Syncfs(monkeypatch, [error])
+    with (
+        _fs.Barrier(tmp_path, "syncfs", errors="ignore", quiet=True, primed_devices={device}) as barrier,
+        pytest.raises(_fs.SyncFailed),
+    ):
+        assert not barrier.primed and barrier.strategy == "syncfs"
+        barrier.commit()
+    assert len(calls.descriptors) == 1
+    # A tree written before its barrier (written: no prime) keeps its unsupported fallback: the tree is walked
+    # instead (and nothing is trusted).
     walked: list[int] = []
     real = _fs.fsync_landing
 
@@ -280,7 +291,7 @@ def test_ignore_never_ignores_an_unsupported_syncfs(
 
     monkeypatch.setattr(_fs, "fsync_landing", walk)
     calls = Syncfs(monkeypatch, [error])
-    with _fs.Barrier(tmp_path, "syncfs", errors="ignore", quiet=True, prime=False) as barrier:
+    with _fs.Barrier(tmp_path, "syncfs", errors="ignore", quiet=True, prime=False, written=True) as barrier:
         barrier.commit()
         assert barrier.strategy == "fsync"
     assert len(calls.descriptors) == 1 and len(walked) == 1

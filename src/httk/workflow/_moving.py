@@ -746,7 +746,10 @@ def _eject(
         _fs.write_file(_fs.loc(scratch / _DELIVERY), delivery.encode(), durable=workspace.durable)
         if _deliver(workspace, bundle, target, token, manifest.transfer_id):
             _leave_index(owner, exchange)
-            owner.discard_scratch(scratch)
+            # A hold's scratch keeps only eject.json now, unless its delivery copied (across filesystems), which
+            # leaves the original bundle in it: only then is its discard durable, as an eject's always is. A
+            # scratch that comes back without the bundle is rolled forward.
+            owner.discard_scratch(scratch, durable=not hold or _fs.exists(_fs.loc(bundle)))
             return report, manifest
         problem = f"{target} is occupied"
     except Exception as exc:
@@ -940,7 +943,7 @@ def sync_operator_bundles(workspace: "Workspace", bundles: Sequence[Path | _fs.L
         return
     try:
         setting, errors = workspace.io_sync_policy()
-        _fs.sync_written(workspace.control, bundles, setting, errors=errors)
+        _fs.sync_written(workspace.control, bundles, setting, errors=errors, workers=workspace.io_workers)
     except _fs.SyncUnreadable as exc:
         # Nothing reported a write error: the entry is to be made readable, the files are as they were.
         raise _fs.SyncUnreadable(exc.errno, f"not taken: {exc.strerror}") from exc
@@ -1456,7 +1459,8 @@ def _finish(
             kept = kept.updated(recovered=None)
             _fs.write_file(_fs.loc(directory / "state.json"), encode_state(kept), durable=durable)
         published.append(_kernel.submit(workspace, owner, directory, state=member.state, priority=member.priority))
-    owner.discard_scratch(scratch)
+    # Every member is published: a scratch that comes back after a crash is an empty skeleton (reconcile_adopt).
+    owner.discard_scratch(scratch, durable=False)
     # An embedded workflow travels in its job's workflow/; its fixed calls are among the bound workflows.
     missing = {
         workflow
@@ -1566,6 +1570,9 @@ def adopt(
         _fs.copy_tree(src.path, partial, durable=durable, limits=_fs.DEFAULT_LIMITS if untrusted else None)
         # Complete only once renamed: the reconciler discards a scratch without the bundle.
         _fs.move_owned(_fs.loc(partial), _fs.loc(scratch / name), durable=durable)
+        # Emptied: removed, so that a skeleton this adoption leaves is recognized; the plan's durable write that
+        # follows persists the removal.
+        _fs.remove_empty_dir(_fs.loc(scratch / _PARTIAL))
         _LOGGER.warning("copied %s from another filesystem; the source stays in place", src.path)
     else:
         if scratch is None:
@@ -1582,8 +1589,124 @@ def adopt(
     return result
 
 
+#: The files an ``adopt`` scratch's bundle keeps once its members are published: its manifest, and the temporary of
+#: an interrupted write of it (a rekey rewrites it).
+_BUNDLE_METADATA = re.compile(r"bundle\.json|\.bundle\.json\.[a-z2-7]{16}\.tmp")
+#: The deepest directory the walk of an empty skeleton descends into, below the bundle's ``jobs/``.
+_SKELETON_DEPTH = 256
+#: How the walk of an empty skeleton opens each directory: relative to its parent's descriptor, never following.
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _member_name(name: str) -> bool:
+    """Whether *name* is a job key (a member directory's name, old or rekeyed): no placement component is one."""
+
+    try:
+        parse_job_key(name)
+    except FormatError:
+        return False
+    return True
+
+
+def _empty_skeleton(scratch: Path) -> bool:
+    """Whether a walk of the ``adopt`` scratch proves it an empty skeleton: an adoption whose members were all
+    published, whose non-durable discard a crash undid, in part or whole (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a).
+
+    The walk must find nothing but directories and the metadata files: in the scratch, the adoption's records
+    (``source.json``, ``plan.json``, ``rekey.json``, ``replaces.json``, their write temporaries) as regular files and
+    at most one other entry, the bundle, a directory; in the bundle, ``bundle.json`` (or its write temporary) and
+    ``jobs/``, below which only directories, none a member (named by a job key, old or rekeyed, which no placement
+    component is), at most 256 levels deep. No ``.partial`` entry (an isolation or a copy across filesystems),
+    nothing that cannot be listed, examined or opened, and no more than ``DEFAULT_LIMITS.entries`` entries in all
+    (each directory listed incrementally, the walk stopped as soon as one more would pass the bound).
+    Every directory is opened ``O_DIRECTORY|O_NOFOLLOW`` relative to its parent's descriptor and listed from it.
+    Which metadata is missing proves nothing either way. Only for a tree no other party can change: a trusted
+    adoption's, or an untrusted one's own isolated copy (:func:`reconcile_adopt`).
+
+    :param scratch: The scratch.
+    :return: ``True`` only when the walk proves it.
+    """
+
+    budget = _fs.DEFAULT_LIMITS.entries
+    # Each directory open below the scratch: its descriptor, its role, its depth and the names left to examine.
+    pending: list[tuple[int, str, int, list[str]]] = []
+
+    def opened(parent: int | None, name: str | Path, role: str, depth: int) -> bool:
+        # Lists the directory from its descriptor, counting against the budget as it goes: one beyond it stops the
+        # listing at once (no proof), so no listing larger than the budget is ever held.
+        nonlocal budget
+        descriptor = os.open(name, _DIR_FLAGS, dir_fd=parent)
+        names: list[str] = []
+        pending.append((descriptor, role, depth, names))
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                budget -= 1
+                if budget < 0:
+                    return False
+                names.append(entry.name)
+        return True
+
+    try:
+        if not opened(None, scratch, "scratch", 0):
+            return False
+        bundles = 0
+        while pending:
+            descriptor, role, depth, names = pending[-1]
+            if not names:
+                pending.pop()
+                os.close(descriptor)
+                continue
+            name = names.pop()
+            mode = os.lstat(name, dir_fd=descriptor).st_mode
+            if role == "scratch":
+                if name == _PARTIAL:
+                    return False
+                if name in RESERVED_NAMES or _RECORD_TEMPORARY.fullmatch(name):
+                    if not stat.S_ISREG(mode):
+                        return False
+                    continue
+                bundles += 1
+                if bundles > 1 or not stat.S_ISDIR(mode) or not opened(descriptor, name, "bundle", 0):
+                    return False
+            elif role == "bundle":
+                if _BUNDLE_METADATA.fullmatch(name):
+                    if not stat.S_ISREG(mode):
+                        return False
+                    continue
+                if name != "jobs" or not stat.S_ISDIR(mode) or not opened(descriptor, name, "jobs", 1):
+                    return False
+            else:
+                if not stat.S_ISDIR(mode) or _member_name(name) or depth >= _SKELETON_DEPTH:
+                    return False
+                if not opened(descriptor, name, "jobs", depth + 1):
+                    return False
+    except OSError:
+        return False  # an entry that cannot be examined, or a directory replaced by something else
+    finally:
+        for descriptor, _role, _depth, _names in pending:
+            os.close(descriptor)
+    return True
+
+
+def _isolated_copy(workspace: "Workspace", scratch: Path) -> bool:
+    """Whether an ``adopt-untrusted`` scratch records that its bundle is the adopter's own isolated copy: its plan
+    was written (after the isolation), or ``source.json`` says it is isolated. Missing records prove nothing."""
+
+    try:
+        if (found := _fs.lstat(_fs.loc(scratch / _PLAN))) is not None and stat.S_ISREG(found.st_mode):
+            return True
+        return _fs.exists(_fs.loc(scratch / _SOURCE)) and _read_record(workspace, scratch, untrusted=True).isolated
+    except (OSError, ValueError, KeyError, WorkflowError):
+        return False
+
+
 def reconcile_adopt(owner: Owner, scratch: Path) -> bool:
     """The ``adopt`` scratch reconciler: resume adoption from validation (see the module docstring).
+
+    A scratch that a walk proves an empty skeleton (:func:`_empty_skeleton`: every member published, its records
+    and directories left by a non-durable discard that a crash undid) is discarded, for an untrusted adoption only
+    once its records say the bundle is its own isolated copy; every other state, with or without its records,
+    resumes as before (an untrusted one without them is rejected).
 
     :param owner: The owner the scratch is named after.
     :param scratch: ``tmp/<owner-id>.adopt.<token>/`` or ``tmp/<owner-id>.adopt-untrusted.<token>/``.
@@ -1592,6 +1715,9 @@ def reconcile_adopt(owner: Owner, scratch: Path) -> bool:
 
     workspace = cast("Workspace", owner.workspace)
     untrusted = scratch.name.split(".")[1] == _ADOPT[True]
+    # An untrusted bundle not yet isolated is the client's, which may still change it under the walk: never proof.
+    if (not untrusted or _isolated_copy(workspace, scratch)) and _empty_skeleton(scratch):
+        return True
     entries = [
         name
         for name in _kernel.list_names(scratch)
@@ -1814,7 +1940,8 @@ def release_hold(
                 durable=workspace.durable,
             )
         _keep_away(owner, scratch / transfer_id, destination_workspace_id)
-    owner.discard_scratch(scratch)
+    # Taken and done with: a scratch that comes back is discardable (release) or republishes nothing (release-keep).
+    owner.discard_scratch(scratch, durable=False)
     return True
 
 

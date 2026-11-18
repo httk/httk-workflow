@@ -712,6 +712,10 @@ class Owner:
         self._building: dict[Path, int] = {}
         self._retired_while_building: set[Path] = set()
         self._trash: Path | None = None
+        # tmp/ has an entry change not yet made durable: a non-durable discard's rename out of it, or the trash's own
+        # rename whose fsync has not succeeded yet. Cleared only by a successful fsync of tmp/; close seals it
+        # before owner.json goes (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a).
+        self._unsealed = False
         self._flights = 0
 
     def __enter__(self) -> Self:
@@ -803,6 +807,26 @@ class Owner:
         _fs.make_dirs(path, durable=durable, mode=0o700)
         return path
 
+    def creation_scratch(self, purpose: str) -> Path:
+        """Create a scratch directory as :meth:`scratch` does, but leave its entry in ``tmp/`` to the caller's sync.
+
+        Only for job creation, whose batch commit makes ``tmp/`` durable (a ``syncfs``, or one ``fsync`` of
+        ``tmp/`` under the strategy ``fsync``) before anything in the scratch is named complete (plan
+        WORKFLOW_TRANSFER_SESSION §7.11, T6a): until then a crash loses only a copy. Never for a scratch that
+        receives the only copy of something (a job's moved inputs, a moved payload): those use :meth:`scratch`.
+
+        :param purpose: ``[a-z][a-z0-9-]*``; it selects the reconciler (§5.4).
+        :return: The new directory.
+        :raises ValueError: For a malformed purpose.
+        """
+
+        if not _PURPOSE.fullmatch(purpose):
+            raise ValueError(f"not a scratch purpose: {purpose!r}")
+        path = _tmp(self.workspace) / f"{self.owner_id}.{purpose}.{_fs.fresh_token()}"
+        _fs.make_dirs(path.parent, durable=self.workspace.durable)
+        _fs.make_dirs(path, durable=False, mode=0o700)
+        return path
+
     def launch_dir(self, attempt_id: str, n: str) -> Path:
         """Create ``owners/<owner-id>/launches/<attempt>.<n>/`` for one launch's records.
 
@@ -829,10 +853,15 @@ class Owner:
 
         self.discard_tree(self._launch_path(attempt_id, n))
 
-    def discard_scratch(self, path: Path) -> None:
+    def discard_scratch(self, path: Path, *, durable: bool = True) -> None:
         """Discard one of this owner's own scratch directories; an absent one is already discarded.
 
         :param path: ``tmp/<owner-id>.<purpose>.<token>/`` of this owner.
+        :param durable: Make its move out of ``tmp/`` durable (in a durable workspace). Without, a crash may bring
+            the scratch back, possibly partly removed, for its reconciler or hygiene: only for the scratch of a step
+            that completed (a hold's delivery, an adoption's publication, a release's take; plan
+            WORKFLOW_TRANSFER_SESSION §7.11, T6a). :meth:`close` seals such moves with its trash's durable discard
+            before the owner record goes.
         :raises ValueError: When *path* is not a scratch directory of this owner.
         """
 
@@ -840,7 +869,7 @@ class Owner:
         if parts is None or parts[1] != self.owner_id or path.parent != _tmp(self.workspace):
             raise ValueError(f"{path} is not a scratch directory of owner {self.owner_id}")
         if _fs.exists(_fs.loc(path)):
-            self.discard_tree(path)
+            self.discard_tree(path, durable=durable)
 
     def holds(self, ref: JobRef) -> bool:
         """Whether this process holds a handle for *ref*, as opposed to a job left in ``owned/<owner-id>/``.
@@ -924,6 +953,14 @@ class Owner:
             trash = self._trash
         if trash is not None:
             reconcile_scratch(self, trash)
+        with self._lock:
+            unsealed = self._unsealed
+        if unsealed and workspace.durable:
+            # A non-durable move out of tmp/ that no fsync of tmp/ has sealed yet (an earlier close failed after the
+            # trash's rename, say): sealed here, whether or not the moved entry still exists.
+            _seal_tmp(workspace)
+            with self._lock:
+                self._unsealed = False
         if not kept and not list_names(launches):
             _fs.remove_file(_fs.loc(self.path / "owner.json"), durable=workspace.durable)
             _fs.remove_file(_fs.loc(self.path / "heartbeat.json"), durable=workspace.durable)
@@ -936,7 +973,7 @@ class Owner:
             raise ValueError(f"launch n must be '0' or 32 lowercase hex digits: {n!r}")
         return self.path / "launches" / f"{attempt_id}.{n}"
 
-    def discard_tree(self, path: Path | _fs.Loc) -> None:
+    def discard_tree(self, path: Path | _fs.Loc, *, durable: bool = True) -> None:
         """Remove a directory tree only this owner can move, through its trash scratch.
 
         The tree is moved into this owner's ``trash`` scratch first, so a crash mid-removal leaves an owner-named
@@ -944,6 +981,8 @@ class Owner:
         files use :func:`httk.workflow._fs.remove_file`.
 
         :param path: The tree, such as an entry inside one of this owner's scratch directories.
+        :param durable: Make the move into the trash durable (in a durable workspace); see :meth:`discard_scratch`. A
+            move that is not durable leaves ``tmp/`` to be sealed by :meth:`close` before the owner record goes.
         """
 
         target = path if isinstance(path, _fs.Loc) else _fs.loc(path)
@@ -963,7 +1002,16 @@ class Owner:
                     self._trash = trash_dir
         else:
             trash_dir = trash
-        _fs.discard(target, trash_dir=trash_dir, durable=self.workspace.durable)
+        durable = self.workspace.durable and durable
+        if self.workspace.durable and (itself or not durable):
+            # Unsealed from the rename on: the trash's own rename is sealed only once its fsync of tmp/ succeeded.
+            with self._lock:
+                self._unsealed = True
+        _fs.discard(target, trash_dir=trash_dir, durable=durable)
+        if itself and durable:
+            # That fsync of tmp/ also sealed every earlier non-durable move out of it.
+            with self._lock:
+                self._unsealed = False
 
 
 def _owned_refs(directory: Path, owner_id: str) -> list[JobRef]:
@@ -1870,7 +1918,9 @@ def recover(workspace: KernelWorkspace, owner: Owner, dead_owner_id: str) -> Rec
     """Return a tombstoned owner's jobs to their ``from`` states and take over its scratch (§5.4).
 
     Concurrent recoverers are safe: every move is contested and every removal
-    is an ``rmdir`` or the removal of a private copy. ``dead.json`` stays.
+    is an ``rmdir`` or the removal of a private copy. ``dead.json`` stays. In a
+    durable workspace ``tmp/`` is fsynced before the dead owner's record goes:
+    it may have died between a rename out of ``tmp/`` and the fsync sealing it.
 
     :param workspace: The workspace.
     :param owner: The recovering owner.
@@ -1905,6 +1955,10 @@ def recover(workspace: KernelWorkspace, owner: Owner, dead_owner_id: str) -> Rec
         if not _fs.remove_empty_dir(_fs.loc(owned_dir)) and _fs.exists(_fs.loc(owned_dir)):
             continue
         _fs.remove_empty_dir(_fs.loc(launches))
+        if workspace.durable:
+            # The dead owner may have died between a rename out of tmp/ (its trash's, or a non-durable discard) and
+            # the fsync that seals it, leaving no scratch here to take: tmp/ is sealed before its record goes.
+            _seal_tmp(workspace)
         _fs.remove_file(_fs.loc(dead_dir / "owner.json"), durable=workspace.durable)
         _fs.remove_file(_fs.loc(dead_dir / "heartbeat.json"), durable=workspace.durable)
         # Write temporaries of a writer that died (the owner, or a prober attesting) go too; dead.json stays.
@@ -1979,6 +2033,19 @@ def _dead_scratch(workspace: KernelWorkspace, dead_owner_id: str) -> list[str]:
         for name in list_names(_tmp(workspace))
         if (parts := _SCRATCH.fullmatch(name)) and parts[1] == dead_owner_id
     ]
+
+
+def _seal_tmp(workspace: KernelWorkspace) -> None:
+    """Fsync the control ``tmp/``, making every rename into or out of it durable; nothing when it does not exist."""
+
+    try:
+        descriptor = _fs.open_dir(_tmp(workspace))
+    except FileNotFoundError:
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _take_scratch(owner: Owner, dead_owner_id: str, taken: list[Path], kept: list[Path]) -> None:

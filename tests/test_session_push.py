@@ -1445,7 +1445,11 @@ def test_another_workspace_answering_a_later_segment_stops_the_push(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    project, near, near_name, _far, far_name = ssh
+    project, near, near_name, far, far_name = ssh
+    # Each staged segment matures at once, so it is adopted before the next is staged (plan §7.10): with a positive
+    # deadline the third segment may be staged before the second's adoption stops the push (a race that pooled
+    # directory fsyncs, T6a, made faster staging expose).
+    far.set_policy({"visibility_deadline_seconds": 0})
     monkeypatch.setattr(transfer_cli, "_SEGMENT_BUNDLES", 2)
     monkeypatch.setenv("HTTK_TEST_OTHER_ID_FROM_ADOPT", "2")
     requests = recorded_requests(monkeypatch)
@@ -1459,6 +1463,34 @@ def test_another_workspace_answering_a_later_segment_stops_the_push(
         assert f"httk job transfer --resume {near.root} cluster:{far_name}" in outcome["message"]
     assert len(adopts(requests)) == 2
     assert sorted(outgoing(near)) == sorted(outcome["transfer_id"] for outcome in transfers[2:])
+
+
+def test_another_workspace_answering_with_later_segments_staged_keeps_every_hold(
+    ssh: tuple[Path, Workspace, str, Workspace, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The positive-deadline variant of the test above: the later segments may be staged before the first adoption
+    # answers another workspace; they are abandoned, never adopted, and every hold stays held (sent, so never taken
+    # back).
+    project, near, near_name, far, far_name = ssh
+    far.set_policy({"visibility_deadline_seconds": 2})
+    monkeypatch.setattr(transfer_cli, "_SEGMENT_BUNDLES", 2)
+    monkeypatch.setenv("HTTK_TEST_OTHER_ID_FROM_ADOPT", "1")
+    requests = recorded_requests(monkeypatch)
+    plan = jobs(near, 6)
+    assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
+    transfers = outcomes(capsys)["transfers"]
+    assert [outcome["status"] for outcome in transfers] == ["failed"] * 6
+    assert all("not the expected workspace" in outcome["message"] for outcome in transfers[:2])
+    assert all("--resume" in outcome["message"] for outcome in transfers[2:])
+    # One adoption (the first segment's, answered by another workspace); the others were never adopted there.
+    assert len([op for op, _ in requests if op == "adopt_staged"]) == 1
+    assert len([op for op, _ in requests if op == "stage"]) >= 2  # at least one stage abandoned unadopted
+    assert [find(far, mapping["id"]) is not None for mapping, _, _ in plan] == [True] * 2 + [False] * 4
+    # Every hold kept on SRC, none taken back.
+    assert sorted(outgoing(near)) == sorted(outcome["transfer_id"] for outcome in transfers)
+    assert all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
 
 
 def test_a_far_side_dying_in_a_segment_keeps_it_and_the_later_ones_held_for_resume(

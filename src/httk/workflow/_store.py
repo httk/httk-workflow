@@ -581,7 +581,8 @@ def _sync_barrier(workspace: KernelWorkspace, tree: Path) -> AbstractContextMana
 
     Entered before the first byte of *tree* is written and committed (:func:`_commit`) before *tree* is renamed into
     ``workflows/``: one ``syncfs`` per published tree, or, under ``fsync``, the copies fsynced as they are written
-    and a walk of *tree* (its directories, and anything written without an inline fsync). No progress line.
+    and a walk of *tree* (its directories, and anything written without an inline fsync) with up to the workspace's
+    ``io.workers`` threads. No progress line.
 
     The store always fails on a writeback error, whatever ``io.sync_errors`` says: a package with lost pages would
     run for every later job, and an installation is rare and cheap to redo.
@@ -591,8 +592,11 @@ def _sync_barrier(workspace: KernelWorkspace, tree: Path) -> AbstractContextMana
         return nullcontext(None)
     from httk.workflow.workspace import Workspace
 
-    setting = workspace.io_sync() if isinstance(workspace, Workspace) else "auto"
-    return _fs.Barrier(tree, setting, errors="fail", quiet=True)
+    if isinstance(workspace, Workspace):
+        setting, workers = workspace.io_sync(), workspace.io_workers
+    else:
+        setting, workers = "auto", 1
+    return _fs.Barrier(tree, setting, errors="fail", quiet=True, workers=workers)
 
 
 def _commit(barrier: _fs.Barrier | None, what: str) -> None:

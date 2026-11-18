@@ -1797,8 +1797,11 @@ def new_jobs(
         started = 0.0
 
         def stage(item: JobItem, moves: list[_InputMove]) -> _Staged:
-            # One job built in its own submit scratch's build/, which is named job/ only once committed.
-            scratch = owner.scratch(_SUBMIT)
+            # One job built in its own submit scratch's build/, which is named job/ only once committed. Its entry in
+            # tmp/ is made durable by the batch's commit, unless it moves inputs: those receive the only copy of a
+            # file, so their scratch is durable from the start.
+            moving = bool(item.get("move_inputs"))  # what _build_payload moves (move_inputs below)
+            scratch = owner.scratch(_SUBMIT) if moving else owner.creation_scratch(_SUBMIT)
             staging = scratch / "build"
             staging.mkdir()
             job = _build_payload(
@@ -1819,7 +1822,7 @@ def new_jobs(
                 calls=bindings,
                 durable=barrier is not None and barrier.fsync_inline,
             )
-            return _Staged(job, scratch, moves)
+            return _Staged(job, scratch, moves, created=not moving)
 
         def publish(cause: Exception | None = None) -> Generator[ScaffoldedJob, None, None]:
             # Close the batch: one commit, then each job renamed to job/ and submitted in order, and yielded. A
@@ -1836,6 +1839,7 @@ def new_jobs(
                 submitted=submitted,
                 rerun=_RERUN_SKIP,
                 cause=cause,
+                created=[staged.scratch for staged in pending if staged.created],
             )
             reserved.clear()
             while pending:
@@ -2108,6 +2112,7 @@ def _submit_copies(
                     submitted=submitted,
                     rerun="submit only the payloads not reported as submitted",
                     stopped=stopped,
+                    created=[scratch for _, (scratch, _, _) in staged],
                 )
             except _fs.SyncFailed as exc:
                 failed = exc
@@ -2147,7 +2152,7 @@ def _submit_copies(
         try:
             path = Path(source).expanduser()
             job = _checked_payload(workspace, path, None)
-            scratch = owner.scratch(_SUBMIT)
+            scratch = owner.creation_scratch(_SUBMIT)  # a copy: its tmp/ entry is synced by the batch's commit
             entries.append((source, (scratch, _copy_payload(path, scratch, None, durable=durable), job)))
         except errors as exc:
             entries.append((source, exc))
@@ -2163,12 +2168,15 @@ class _Staged:
     :param moves: The inputs it moved out of other jobs, whose descriptors stay open until it is published or its
         moves are undone (emptied then).
     :param ref: The published reference, once it is.
+    :param created: Its scratch was made by :meth:`~httk.workflow._kernel.Owner.creation_scratch`: the batch's
+        commit makes its entry in ``tmp/`` durable.
     """
 
     job: JobDefinition
     scratch: Path
     moves: list[_InputMove]
     ref: _kernel.JobRef | None = None
+    created: bool = False
 
 
 def _release(moves: list[_InputMove]) -> None:
@@ -2219,8 +2227,13 @@ def _commit_batch(
     rerun: str,
     cause: BaseException | None = None,
     stopped: str = "",
+    created: Sequence[Path] = (),
 ) -> None:
     """Commit a command's barrier once for a batch staged in *trees* (under ``fsync``, a walk of each one).
+
+    Scratches made by :meth:`~httk.workflow._kernel.Owner.creation_scratch` (*created*) have entries in ``tmp/``
+    that nothing synced yet: a ``syncfs`` covers them, and under ``fsync`` their parent directory is fsynced once
+    after the walks (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a), before any of them is named ``job/``.
 
     :param barrier: The command's barrier, or ``None`` (nothing to do).
     :param trees: The submit scratches of the batch, in order.
@@ -2230,6 +2243,7 @@ def _commit_batch(
     :param rerun: How to create the members not submitted, when some were.
     :param cause: The error the batch was closed for, which a failure is chained to.
     :param stopped: What ends a failure's message.
+    :param created: The scratches of *trees* whose entries in their parent are not durable yet.
     :raises httk.workflow._fs.SyncFailed: When the commit fails: none of the batch is submitted.
     """
 
@@ -2243,6 +2257,10 @@ def _commit_batch(
     try:
         for tree, syncing in walked:
             barrier.commit(tree=tree)
+        if barrier.strategy == "fsync":
+            syncing = ""
+            for parent in sorted({scratch.parent for scratch in created}):
+                _fsync_directory(parent)
     except _fs.SyncFailed as exc:
         if len(names) == 1:
             what, them = f"the {noun} {names[0]} was", "it"
@@ -2265,6 +2283,19 @@ def _commit_batch(
         raise failed from (exc if cause is None else cause)
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Fsync *directory* (the control ``tmp/``), so its new entries are durable; a failure is a ``SyncFailed``."""
+
+    try:
+        descriptor = _fs.open_dir(directory)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise _fs.SyncFailed(exc.errno, f"cannot sync {directory} to disk: {exc.strerror}") from exc
+
+
 def _sync_barrier(
     workspace: Workspace, anchor: Path, *, inline: bool = False
 ) -> AbstractContextManager[_fs.Barrier | None]:
@@ -2281,7 +2312,7 @@ def _sync_barrier(
     if not workspace.durable:
         return nullcontext(None)
     setting, errors = workspace.io_sync_policy()
-    return _fs.Barrier(anchor, setting, errors=errors, inline=inline, quiet=True)
+    return _fs.Barrier(anchor, setting, errors=errors, inline=inline, quiet=True, workers=workspace.io_workers)
 
 
 def _command_barrier(workspace: Workspace, *, inline: bool = False) -> AbstractContextManager[_fs.Barrier | None]:

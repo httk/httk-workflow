@@ -317,6 +317,7 @@ def _adopt(request: Request) -> Mapping[str, Any]:
             built_for=built_for,
             finish=upload.finish,
             progress=request.progress,
+            primed_devices=_primed(request),
         )
     members = {"document": document, "returncode": returncode, "stderr": stderr.getvalue()}
     if "refused" in document:
@@ -348,6 +349,21 @@ def _stages(request: Request) -> dict[str, _Staged]:
     return cast(dict[str, _Staged], request.session.setdefault("stages", {}))
 
 
+def _primed(request: Request) -> set[int]:
+    """The ``st_dev`` of each filesystem a landing barrier of this connection primed without an error: only the
+    first landing on a filesystem primes (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a; see
+    :class:`~httk.workflow._fs.Barrier`)."""
+
+    return cast(set[int], request.session.setdefault("primed", set()))
+
+
+def _unclosed(state: dict[str, Any]) -> list["Stage"]:
+    """The adopted stages of this connection that could not be closed: after the first, no stage is admitted, and
+    each gets one more attempt at the end of the session (:func:`_abandon`)."""
+
+    return cast(list["Stage"], state.setdefault("unclosed", []))
+
+
 def _stage(request: Request) -> Mapping[str, Any]:
     """Receive and commit the bundles the upload carries and take the first scan of their settle, for a later
     ``adopt_staged`` (:func:`~httk.workflow.workflow_cli._job.stage_stream`; plan WORKFLOW_TRANSFER_SESSION §7.10).
@@ -362,7 +378,9 @@ def _stage(request: Request) -> Mapping[str, Any]:
     the workspace and *transfer_ids*), the ``transfer_ids``, the ``workspace_id``, the landed ``bytes`` and ``matures_in``
     (advisory seconds until its deadline has run), with the captured ``stderr``. A refused stream is answered as
     ``adopt`` answers it (``document``, ``returncode``, ``stderr``); anything failing after the commit is fatal, and
-    so is an upload carrying other bundles than *transfer_ids*.
+    so is an upload carrying other bundles than *transfer_ids*. Once an adopted stage of the session could not be
+    closed (:func:`_adopt_staged`), every later ``stage`` is refused before its upload is used, with ``unclosed:
+    true`` (not ``capacity``): the client stops staging on this connection, the segment's holds kept.
     """
 
     header = request.header
@@ -382,6 +400,13 @@ def _stage(request: Request) -> Mapping[str, Any]:
     upload = request.upload
     if upload is None:
         raise Refused("stage needs an upload")
+    if _unclosed(request.session):
+        # Not a capacity refusal: the client stops staging on this connection (its holds stay held).
+        raise Refused(
+            "an adopted stage of this session could not be closed, so this session stages nothing more and nothing of "
+            "this segment was used",
+            unclosed=True,
+        )
     stages = _stages(request)
     if staged := sorted(set(transfer_ids) & {key for entry in stages.values() for key in entry.transfer_ids}):
         raise Refused(f"already staged in this session and not adopted: {', '.join(staged)}")
@@ -404,6 +429,7 @@ def _stage(request: Request) -> Mapping[str, Any]:
             force_fsync=sync == "fsync",
             finish=upload.finish,
             progress=request.progress,
+            primed_devices=_primed(request),
         )
     if stage is None:
         raise Refused(str(document["refused"]), document=document, returncode=2, stderr=stderr.getvalue())
@@ -432,7 +458,10 @@ def _adopt_staged(request: Request) -> Mapping[str, Any]:
     what it was staged with; anything else (an unknown or consumed token, another workspace or other ids, another
     stage first, a workspace sealed since) is refused before anything is touched, and the stage stays. The token is
     consumed once accepted:
-    the response is ``adopt``'s (``document``, ``returncode``, ``stderr``), and an error from then on is fatal.
+    the response is ``adopt``'s (``document``, ``returncode``, ``stderr``), and an error from then on is fatal,
+    except one closing the stage after its adoption: that one is reported in ``stderr`` (a ``warning:`` line), the
+    validated adoption is answered, no later ``stage`` is admitted, and one final attempt to close it runs at the
+    ``bye`` or the end of the input (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a).
     """
 
     header = request.header
@@ -462,18 +491,27 @@ def _adopt_staged(request: Request) -> Mapping[str, Any]:
 
     del stages[token]  # consumed: from here on, an error is fatal
     with _captured() as stderr, _kernel.listing_progress(request.advance):
-        document, returncode = adopt_stage(entry.stage, progress=request.progress)
+        # Closed inside the request (its ticker and capture): a close error is reported in stderr, never fatal.
+        document, returncode, unclosed = adopt_stage(entry.stage, progress=request.progress)
+    if unclosed is not None:
+        _unclosed(request.session).append(entry.stage)  # no later stage is admitted; closed once more at the end
     return {"document": document, "returncode": returncode, "stderr": stderr.getvalue()}
 
 
 def _abandon(state: dict[str, Any]) -> None:
     """Abandon the session's stages whose adoption never began (the end of its input, a ``bye``): each landing
-    discarded, each owner closed. One that cannot be is left for recovery."""
+    discarded, each owner closed; and make one final attempt to close each adopted stage whose close failed. One
+    that cannot be is left for recovery."""
 
     for entry in cast(dict[str, _Staged], state.pop("stages", {})).values():
         try:
             entry.stage.abandon()
         except Exception:  # its owner stays registered: recovery discards the landing once this process ended
+            traceback.print_exc(file=sys.stderr)
+    for stage in state.pop("unclosed", []):
+        try:
+            stage.close()
+        except Exception:  # its owner stays registered: recovery reconciles it once this process ended
             traceback.print_exc(file=sys.stderr)
 
 

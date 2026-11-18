@@ -2029,6 +2029,7 @@ def adopt_stream(
     progress: _landing.Progress | None = None,
     move: bool = False,
     json_output: bool = True,
+    primed_devices: set[int] | None = None,
 ) -> tuple[dict[str, object], int]:
     """Receive a tar stream of bundles into one landing and adopt every bundle it carried: ``job adopt --json
     --stdin-tar``, which the transfer session's ``adopt`` op shares.
@@ -2056,6 +2057,8 @@ def adopt_stream(
         then ``adopt`` with the bundles adopted.
     :param move: ``--move``: discard a bundle that adoption copied once it is adopted.
     :param json_output: Return the documents (``--json``); without it a refusal raises.
+    :param primed_devices: The transfer session's filesystems primed already (see
+        :func:`~httk.workflow._landing.receive_tar`); ``None`` primes the landing's barrier.
     :return: The ``job adopt --json`` document and the exit status: 0 when every bundle was adopted (or already
         was), 1 when one was not, 2 for a refused stream.
     :raises ValueError: Without *json_output*, for a refused stream.
@@ -2067,7 +2070,13 @@ def adopt_stream(
     try:
         workspace = resolve()
         landing, bundles = _receive_bundles(
-            workspace, token, stream, force_fsync=force_fsync, finish=finish, progress=progress
+            workspace,
+            token,
+            stream,
+            force_fsync=force_fsync,
+            finish=finish,
+            progress=progress,
+            primed_devices=primed_devices,
         )
         sources = [landing / name for name in bundles]
         owner = stack.enter_context(
@@ -2138,6 +2147,7 @@ def stage_stream(
     force_fsync: bool = False,
     finish: Callable[[], object] | None = None,
     progress: _landing.Progress | None = None,
+    primed_devices: set[int] | None = None,
 ) -> tuple[dict[str, object], _moving.Stage | None]:
     """Stage a tar stream of bundles for a later adoption (plan WORKFLOW_TRANSFER_SESSION §7.10, 1a): the
     transfer session's ``stage`` op.
@@ -2155,6 +2165,8 @@ def stage_stream(
     :param finish: Called once the stream is extracted, before its commit (see
         :func:`~httk.workflow._landing.receive_tar`).
     :param progress: Told the phases of :func:`~httk.workflow._landing.receive_tar`, then ``settle``.
+    :param primed_devices: The transfer session's filesystems primed already (see
+        :func:`~httk.workflow._landing.receive_tar`).
     :return: ``({"bundles": names, "workspace_id"}, stage)``, the names the stream carried sorted; or the refusal
         document and ``None``.
     """
@@ -2169,7 +2181,14 @@ def stage_stream(
         stage.landing = stage.owner.scratch("landing")
         landing = stage.landing / "outgoing"
         bundles = _landing.receive_tar(
-            workspace, landing, stream, barrier=True, force_fsync=force_fsync, finish=finish, progress=progress
+            workspace,
+            landing,
+            stream,
+            barrier=True,
+            force_fsync=force_fsync,
+            finish=finish,
+            progress=progress,
+            primed_devices=primed_devices,
         )
     except _ERRORS as exc:
         if stage is not None:
@@ -2181,17 +2200,24 @@ def stage_stream(
     return {"bundles": bundles, "workspace_id": workspace.workspace_id}, stage
 
 
-def adopt_stage(stage: _moving.Stage, *, progress: _landing.Progress | None = None) -> tuple[dict[str, object], int]:
+def adopt_stage(
+    stage: _moving.Stage, *, progress: _landing.Progress | None = None
+) -> tuple[dict[str, object], int, Exception | None]:
     """Adopt a committed stage (:func:`stage_stream`) once its visibility deadline has run: the transfer session's
     ``adopt_staged`` op.
 
     It waits out what is left of the deadline (``settle``), takes the final scan and adopts every bundle as
     :func:`adopt_stream` does (a bundle bound for another workspace refused and discarded), then closes the stage.
-    An error escapes (the far side fails; its adoption is left to recovery).
+    An error of the adoption escapes (the far side fails; its adoption is left to recovery). An error closing the
+    stage after its adoption (its landing's discard, its owner's close) does not change the adoption: it is
+    returned, with a ``warning:`` line on standard error, and the stage is left for one more attempt to close it
+    (:meth:`~httk.workflow._moving.Stage.close`), then for recovery (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a);
+    except that a lost owner (:class:`~httk.workflow._kernel.OwnerLost`) stays fatal.
 
     :param stage: The committed stage.
     :param progress: Told ``settle``, then ``adopt`` with the bundles adopted.
-    :return: The ``job adopt --json`` document (``bundles``, ``workspace_id``) and its exit status.
+    :return: The ``job adopt --json`` document (``bundles``, ``workspace_id``), its exit status, and the error that
+        closing the stage met, if any.
     """
 
     workspace = stage.workspace
@@ -2209,8 +2235,16 @@ def adopt_stage(stage: _moving.Stage, *, progress: _landing.Progress | None = No
         json_output=True,
         progress=progress,
     )
-    stage.close()
-    return {"bundles": entries, "workspace_id": workspace.workspace_id}, _adoption_status(entries)
+    failure: Exception | None = None
+    try:
+        stage.close()
+    except _kernel.OwnerLost:  # OwnerDeclaredDead included
+        raise  # fail-stop: this owner is no longer this process's
+    except _ERRORS as exc:
+        # The adoption is complete: what is left is cleanup, which recovery can do.
+        print(f"warning: the stage could not be closed after its adoption (left for cleanup): {exc}", file=sys.stderr)
+        failure = exc
+    return {"bundles": entries, "workspace_id": workspace.workspace_id}, _adoption_status(entries), failure
 
 
 def _adoption_status(entries: Sequence[Mapping[str, object]]) -> int:
@@ -2300,6 +2334,7 @@ def _receive_bundles(
     force_fsync: bool = False,
     finish: Callable[[], object] | None = None,
     progress: _landing.Progress | None = None,
+    primed_devices: set[int] | None = None,
 ) -> tuple[Path, list[str]]:
     """Extract the tar *stream* into ``transfers/incoming/<token>/`` (a fresh token by default).
 
@@ -2309,6 +2344,7 @@ def _receive_bundles(
     :param force_fsync: ``--sync fsync``: fsync every landed file as it is written, whatever ``io.sync`` says.
     :param finish: See :func:`~httk.workflow._landing.receive_tar`.
     :param progress: See :func:`~httk.workflow._landing.receive_tar`.
+    :param primed_devices: See :func:`~httk.workflow._landing.receive_tar`.
     :return: The landing, and the names of the bundles the stream carried, sorted (a reused landing's other entries
         are named in one ``warning:`` line on standard error, before anything is committed).
     :raises ValueError: For a malformed token or stream, or a refused member (:class:`_CommitFailed` when the
@@ -2329,6 +2365,7 @@ def _receive_bundles(
         finish=finish,
         progress=progress,
         on_leftovers=partial(_warn_leftovers, landing),
+        primed_devices=primed_devices,
     )
     return landing, bundles
 

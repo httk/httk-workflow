@@ -882,7 +882,12 @@ kinds of failure differ:
   on an unknown outcome.
 
 After a retried `syncfs` failure every later segment of the session is
-synchronized file by file at once. When the session fails while the workflows
+synchronized file by file at once. Under `syncfs` only the first landing of a
+session (and of a pull, or of a local transfer's copies) on a filesystem primes
+its sync barrier with a `syncfs` of its own; the later ones only commit. A
+writeback error recorded on that filesystem before such a landing began can
+then fail its commit too, which is answered as any failed `syncfs` is (the
+segment delivered once more with every file synchronized as it is written). When the session fails while the workflows
 are installed, before the first segment, nothing has been adopted and every
 hold stays held.
 
@@ -941,7 +946,14 @@ holds of the refused segment and of the segments never sent, and an earlier
 run's holds stay held in either case. A refusal of `adopt_staged` itself
 (nothing adopted) and a `stage` answered by another workspace (nothing adopted
 either) keep their holds and stop as well; a lost answer to `adopt_staged` is
-an unknown outcome of that segment. A source session that fails while a
+an unknown outcome of that segment. A staged segment whose adoption completed
+but whose stage could not be cleaned up afterwards (its landing discarded, its
+owner closed) is still reported adopted, with a `warning:` line; DST then
+stages nothing more on that session (the next segment's `stage` is refused
+before anything of it is used, so that segment is reported not delivered and
+the pair stops, every later hold kept for `--resume`), and DST tries that
+cleanup once more when the session ends, leaving it to recovery if it fails
+again. A local DST's stage does the same. A source session that fails while a
 relayed segment's holds are released stops at once: nothing more is adopted.
 When the far side ends a session (a `bye`, which it answers only after
 discarding them, or the end of its input), its staged segments whose adoption
