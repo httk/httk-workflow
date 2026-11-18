@@ -90,14 +90,22 @@ class Request:
     :param header: The decoded request document (``op`` and the op's own members).
     :param upload: The request's upload stream, when it announced one.
     :param frames: The writer of the response direction.
+    :param session: The state the session's requests share (a pull's selection), one mapping per connection.
     """
 
     def __init__(
-        self, request_id: int, header: Mapping[str, Any], upload: StreamReader | None, frames: FrameWriter
+        self,
+        request_id: int,
+        header: Mapping[str, Any],
+        upload: StreamReader | None,
+        frames: FrameWriter,
+        session: dict[str, Any] | None = None,
     ) -> None:
         self.id = request_id
         self.header = header
         self.upload = upload
+        #: The state the session's requests share, kept for the connection.
+        self.session: dict[str, Any] = {} if session is None else session
         self._frames = frames
         self._download: StreamWriter | None = None
         self._lock = threading.Lock()
@@ -384,27 +392,163 @@ def _workflows(request: Request) -> Mapping[str, Any]:
     raise Refused(error, stderr=stderr.getvalue())
 
 
-#: The most holds one answer of ``hold`` (the selected roots and the earlier holds that may be bound for the
-#: destination) or ``holds`` may list: each JSON answer is one frame of at most 64 MiB, some 600 bytes a hold. Until
-#: holds are paged, a larger one is refused with ``too_large`` before anything changes, and the client takes the
-#: adapter operations instead.
-_SESSION_HOLDS_MAX = 50_000
+#: The encoded bytes a whole answer of ``hold_page`` or ``holds_page`` carries at most: a hold (or error) that does not
+#: fit goes in the next answer; a first hold that does not fit the answer even with nothing else in it is named by id
+#: only (``oversized``).
+_ANSWER_BUDGET = 16 << 20
+#: The most characters of a request's captured standard error such an answer carries: its end, marked.
+_STDERR_TAIL = 64 << 10
+#: The most bytes one error takes in such an answer, as encoded: its start, marked.
+_ERROR_LIMIT = 4 << 10
+#: The diagnostics of an answer that gave way to its items.
+_GIVEN_WAY = "[diagnostics left out: they did not fit the answer]\n"
+
+#: An item of an answer: a hold (``"hold"``, the hold) or an error (``"error"``, its text).
+type _Item = tuple[str, Any]
 
 
-def _hold(request: Request) -> Mapping[str, Any]:
-    """Hold the selected jobs for a transfer to the recorded destination: ``job transfer --hold --json [--job JOB
-    ...] [--state STATE ...] [--step STEP ...] [--placement PREFIX] [--tree] [--destination-id ID] WS DESTINATION``
-    (:func:`~httk.workflow.workflow_cli._transfer.hold_selected`).
+def _measure(item: object) -> int:
+    """The encoded size of one hold (or error, or any document) in an answer."""
 
-    Header: ``workspace``, ``jobs`` (selectors), ``state``, ``step`` (lists), ``placement``, ``tree``,
-    ``destination`` (the locator each hold records) and ``destination_id``. The response is that command's document
-    (``holds``, ``held_before``, ``errors``) with its captured ``stderr`` (its notes). Progress: ``list`` while the
-    selection is resolved, ``hold`` with the selected roots handled, then ``list`` with the holds read for
-    ``held_before``. When the selected roots and the workspace's holds together exceed :data:`_SESSION_HOLDS_MAX`,
-    the request is refused with ``too_large`` before anything is held. An error before the command's owner is
-    registered refuses the request; one from then on is fatal.
+    as_mapping = getattr(item, "as_mapping", None)
+    return len(_frames.json_payload({"item": item if as_mapping is None else as_mapping()}))
+
+
+def _doc_size(document: Mapping[str, Any]) -> int:
+    """The encoded size of one hold's document as an item of an answer's ``holds`` list."""
+
+    return len(_frames.json_payload(document))
+
+
+def _tail(text: str) -> str:
+    """The end of a request's captured standard error, at most :data:`_STDERR_TAIL` characters, marked when cut."""
+
+    if len(text) <= _STDERR_TAIL:
+        return text
+    cut = len(text) - _STDERR_TAIL
+    return f"[{cut} characters of diagnostics left out]\n{text[cut:]}"
+
+
+def _cut(error: str, limit: int = _ERROR_LIMIT) -> str:
+    """The start of one error whose JSON string, as an answer encodes it (``\\`` and non-ASCII escaped), takes at
+    most *limit* bytes, marked when cut (the mark is reserved within *limit*; a *limit* smaller than the mark leaves
+    the mark alone).
+
+    :param error: The error.
+    :param limit: The most encoded bytes, quotes included.
+    :return: The error, or its marked start.
     """
 
+    if len(json.dumps(error)) <= limit:
+        return error
+    room = limit - len(json.dumps(f" [{len(error)} characters left out]"))  # the widest mark
+    size = 2  # the quotes
+    end = 0
+    for character in error:
+        width = len(json.dumps(character)) - 2
+        if size + width > room:
+            break
+        size += width
+        end += 1
+    return f"{error[:end]} [{len(error) - end} characters left out]"
+
+
+def _encoded(answer: Mapping[str, Any]) -> int:
+    """The encoded size of a whole answer, as the serve loop sends it (``ok`` included)."""
+
+    return len(_frames.json_payload({"ok": True, **answer}))
+
+
+def _fit(answer: dict[str, Any], items: list[_Item], optional: tuple[str, ...] = ("note", "stderr")) -> list[_Item]:
+    """Put as many of *items*, in order, into ``answer["holds"]`` and ``answer["errors"]`` as the whole encoded answer
+    (``ok`` and every other member included) carries within :data:`_ANSWER_BUDGET`: the items that did not fit, for
+    the next answer.
+
+    The first item always goes: a hold that does not fit the answer as it is sent with nothing else taken (its
+    *optional* members given way: no note, the diagnostics replaced by a marker) goes by id only (``transfer_id``,
+    ``member_count``, ``oversized``), and an error that does not fit is cut to what does. Every other hold goes as
+    ``transfer status --json`` lists it, each error cut to :data:`_ERROR_LIMIT` characters. The optional members come
+    back, the note first, as far as they fit beside the items taken; the whole answer is then measured again, and
+    what still does not fit (but the first item) is left for the next answer too.
+
+    :param answer: The answer's other members; ``holds`` (and ``errors``, with error items or an ``errors`` member)
+        are set.
+    :param items: The items to answer, in order.
+    :param optional: The members that give way to the items.
+    :return: The items left for the next answer.
+    """
+
+    with_errors = "errors" in answer or any(kind == "error" for kind, _ in items)
+    saved = {key: answer[key] for key in optional if answer.get(key)}
+    for key in saved:
+        answer[key] = _GIVEN_WAY if key == "stderr" else None
+    holds: list[Any] = []
+    errors: list[str] = []
+    answer["holds"] = holds
+    if with_errors:
+        answer["errors"] = errors
+    total = _encoded(answer)
+    taken: list[str] = []
+    for kind, item in items:
+        target: list[Any] = holds if kind == "hold" else errors
+        comma = 1 if target else 0
+        if kind == "hold":
+            entry: Any = item.as_mapping()
+            size = _doc_size(entry)
+            if not taken and total + size > _ANSWER_BUDGET:
+                entry = {"transfer_id": item.transfer_id, "member_count": len(item.members), "oversized": True}
+                size = _doc_size(entry)
+        else:
+            entry = _cut(item)
+            size = len(json.dumps(entry))
+            if not taken and total + size > _ANSWER_BUDGET:
+                entry = _cut(item, _ANSWER_BUDGET - total)  # the first error goes, cut to what fits (and its mark)
+                size = len(json.dumps(entry))
+        if taken and total + comma + size > _ANSWER_BUDGET:
+            break
+        target.append(entry)
+        taken.append(kind)
+        total += comma + size
+    for key in ("note", "stderr"):
+        if key in saved:
+            answer[key] = saved[key]
+            if _encoded(answer) > _ANSWER_BUDGET:
+                answer[key] = _GIVEN_WAY if key == "stderr" else None
+    while len(taken) > 1 and _encoded(answer) > _ANSWER_BUDGET:
+        (holds if taken.pop() == "hold" else errors).pop()  # the whole answer, as the serve loop encodes it
+    if taken == ["error"] and (over := _encoded(answer) - _ANSWER_BUDGET) > 0:
+        # A sole error, cut once more to what the answer leaves it.
+        errors[0] = _cut(items[0][1], len(json.dumps(errors[0])) - over)
+    return items[len(taken) :]
+
+
+def _limit(header: Mapping[str, Any], key: str, maximum: int) -> int:
+    """The positive integer *key* of *header*, clamped to *maximum* (*maximum* when absent)."""
+
+    value = header.get(key, maximum)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise Refused(f"{header.get('op')} needs {key} as a positive integer")
+    return min(value, maximum)
+
+
+def _select(request: Request) -> Mapping[str, Any]:
+    """Select the jobs a pull holds page by page (plan §7.8, step 0): check the selection and resolve its ``--job``
+    selectors, kept for the connection's ``hold_page`` requests
+    (:class:`~httk.workflow.workflow_cli._transfer._Selection`); the listing of ``state``/``step`` is taken at the
+    first ``hold_page``, after the client drove the holds an earlier run left.
+
+    Header: ``workspace``, ``jobs`` (selectors), ``state``, ``step`` (lists), ``placement``, ``tree``,
+    ``destination`` (the locator each hold records) and ``destination_id``, as ``job transfer --hold`` takes them.
+    Nothing is held. A bad request or selector refuses it with nothing changed and clears an earlier selection;
+    otherwise the selection replaces an earlier one. While holds of the current selection are made but not reported
+    yet, it is refused with nothing changed. The response counts the ``candidates`` named by ``jobs``.
+    Progress: ``list`` with the selectors resolved.
+    """
+
+    if any(kind == "hold" for kind, _ in request.session.get("carried", [])):
+        raise Refused("select: holds of the current selection are not reported yet; ask hold_page for them first")
+    for key in ("selection", "carried", "finished", "answered"):
+        request.session.pop(key, None)
     header = request.header
     workspace_name = _text(header, "workspace", required=True)
     destination = _text(header, "destination", required=True)
@@ -413,15 +557,15 @@ def _hold(request: Request) -> Mapping[str, Any]:
     placement = _text(header, "placement")
     tree = _flag(header, "tree")
     if request.upload is not None:
-        raise Refused("hold takes no upload")
+        raise Refused("select takes no upload")
     if not (jobs or states or steps):
-        raise Refused("hold needs jobs, state or step")
+        raise Refused("select needs jobs, state or step")
     from ..models import canonical_uuid, normalize_placement
     from ._common import _step_name
-    from ._transfer import _MOVABLE_STATES, hold_document, hold_selected
+    from ._transfer import _MOVABLE_STATES, _Selection
 
     if unknown := sorted(set(states) - set(_MOVABLE_STATES)):
-        raise Refused(f"hold selects from the states {', '.join(_MOVABLE_STATES)}, not {', '.join(unknown)}")
+        raise Refused(f"select takes the states {', '.join(_MOVABLE_STATES)}, not {', '.join(unknown)}")
     try:
         steps = [_step_name(step) for step in steps]
         destination_id = header.get("destination_id")
@@ -433,103 +577,185 @@ def _hold(request: Request) -> Mapping[str, Any]:
             if not normalize_placement(placement).parts:
                 raise ValueError("placement needs a placement prefix")
     except (argparse.ArgumentTypeError, *_ERRORS) as exc:
-        raise Refused(f"hold: {exc}") from None
-    selection = argparse.Namespace(jobs=jobs, state=states, step=steps or None, placement=placement, tree=tree)
+        raise Refused(f"select: {exc}") from None
+    arguments = argparse.Namespace(jobs=jobs, state=states, step=steps or None, placement=placement, tree=tree)
     context = CLIContext("httk", Path.cwd())
+    with _captured() as stderr:
+        try:
+            workspace = _modifiable(_workspace_arguments(workspace_name), context, action="hold jobs in it")
+            selection = _Selection(
+                workspace,
+                context.cwd,
+                arguments,
+                locator=destination,
+                destination_id=destination_id,
+                workflows=True,
+                tell=request.progress,
+            )
+        except _ERRORS as exc:  # nothing held
+            raise Refused(str(exc), stderr=_tail(stderr.getvalue())) from None
+    request.session["selection"] = selection
+    return {"candidates": selection.candidates, "stderr": _tail(stderr.getvalue())}
+
+
+def _hold_page(request: Request) -> Mapping[str, Any]:
+    """Hold the next page of the connection's selection (``select``) and answer it (plan §7.8).
+
+    Header: ``limit_candidates`` (looked at), ``limit_holds`` (attempted) and ``limit_members`` (job keys), each
+    clamped to this side's maxima; a page also closes at 256 errors and near :data:`_ANSWER_BUDGET`. The first
+    request takes the selection's listing (step 2). The response carries ``holds`` (as ``transfer status --json``
+    lists them, with their workflows) and ``errors`` (each cut to :data:`_ERROR_LIMIT` characters), the whole answer
+    within :data:`_ANSWER_BUDGET` (see :func:`_fit`): what does not fit goes first in the next answer, which holds
+    nothing new; ``changed`` (listed jobs left out as changed since the listing), ``remaining`` (selected jobs no page
+    attempted yet, those that moved with an earlier hold not counted), ``consumed`` (the candidates, attempts and
+    items this side finished with, cumulative: it grows with every answer that is not ``done``), ``carried`` (the
+    jobs of the holds made but not reported yet), ``done``, ``note`` (with ``done``: the jobs left to move with their
+    root, or ``null``) and the end of the captured ``stderr`` (jobs left out by ``--step``). Without a selection it
+    is refused, nothing changed; after ``done`` (which frees the selection) it answers ``done`` with no holds.
+    Progress: ``list`` with the candidates looked at, then ``hold`` with the attempts made. An error before the
+    page's owner is registered refuses it with the selection unchanged; one from then on is fatal.
+    """
+
+    from ._transfer import _PAGE_ERRORS, _PAGE_HOLDS, _PAGE_MEMBERS, _PAGE_SCANNED
+
+    header = request.header
+    if request.upload is not None:
+        raise Refused("hold_page takes no upload")
+    limits = {
+        "scanned": _limit(header, "limit_candidates", _PAGE_SCANNED),
+        "holds": _limit(header, "limit_holds", _PAGE_HOLDS),
+        "members": _limit(header, "limit_members", _PAGE_MEMBERS),
+    }
+    state = request.session
+    if state.get("finished"):
+        return {
+            "holds": [],
+            "errors": [],
+            "changed": 0,
+            "remaining": 0,
+            "consumed": state.get("consumed", 0),
+            "carried": 0,
+            "done": True,
+            "note": None,
+            "stderr": "",
+        }
+    selection = state.get("selection")
+    if selection is None:
+        raise Refused("hold_page needs a selection: select first")
+    carried: list[_Item] = state.get("carried", [])
     begun = False
 
     def progress(phase: str, count: int | None) -> None:
         nonlocal begun
-        begun = begun or phase == "hold"  # told right before the command's owner is registered
+        begun = begun or phase == "hold"  # told right before the page's owner is registered
         request.progress(phase, count)
 
-    def fits(roots: int) -> None:
-        # Every hold of the workspace may be bound for the destination: counted by name, without reading any.
-        earlier = _held_count(workspace)
-        if roots + earlier > _SESSION_HOLDS_MAX:
-            raise _Unanswerable(
-                f"{roots} selected job(s) and {earlier} earlier hold(s) are more than one answer carries "
-                f"({_SESSION_HOLDS_MAX}); nothing was held"
-            )
-
-    errors: list[str] = []
+    items: list[_Item] = []
+    changed = 0
     with _captured() as stderr:
         try:
-            workspace = _modifiable(_workspace_arguments(workspace_name), context, action="hold jobs in it")
-            holds = hold_selected(
-                workspace,
-                context,
-                selection,
-                errors,
-                locator=destination,
-                destination_id=destination_id,
-                workflows=True,
-                progress=progress,
-                before_holding=fits,
-            )
-        except _Unanswerable as exc:
-            error, too_large = str(exc), True
+            if not carried:  # else what an earlier answer could not carry goes first, and nothing new is held
+                selection.snapshot(tell=progress)
+                page = selection.next_page(
+                    errors=_PAGE_ERRORS, measure=_measure, budget=_ANSWER_BUDGET, tell=progress, **limits
+                )
+                items = [*(("error", error) for error in page.errors), *(("hold", hold) for hold in page.holds)]
+                changed = page.changed
         except _ERRORS as exc:
             if begun:
                 raise  # the owner may be registered and a hold made, left for recovery: fail-stop
-            error, too_large = str(exc), False
-        else:
-            document = hold_document(workspace, holds, destination, errors, progress=request.progress)
-            return {**document, "stderr": stderr.getvalue()}
-    if too_large:
-        raise Refused(error, too_large=True, stderr=stderr.getvalue())
-    raise Refused(error, stderr=stderr.getvalue())
+            raise Refused(str(exc), stderr=_tail(stderr.getvalue())) from None
+    exhausted = selection.done
+    queue = [*carried, *items]
+    note = selection.note() if exhausted else None
+    answer: dict[str, Any] = {
+        "errors": [],
+        "changed": changed,
+        "remaining": selection.remaining(),
+        "consumed": selection.consumed + state.get("answered", 0) + len(queue),  # its widest, for the fit
+        "carried": sum(len(item.members) for kind, item in queue if kind == "hold"),  # its widest, for the fit
+        "done": False,
+        "note": note,
+        "stderr": _tail(stderr.getvalue()),
+    }
+    state["carried"] = rest = _fit(answer, queue)
+    answered = state["answered"] = state.get("answered", 0) + len(queue) - len(rest)
+    state["consumed"] = answer["consumed"] = selection.consumed + answered
+    answer["carried"] = sum(len(item.members) for kind, item in rest if kind == "hold")
+    if exhausted and not rest and answer["note"] == note:
+        answer["done"] = True
+        for key in ("selection", "carried", "answered"):
+            state.pop(key, None)  # the snapshot is freed
+        state["finished"] = True
+    else:
+        answer["note"] = None  # a note that gave way goes with the next answer
+    return answer
 
 
-class _Unanswerable(Exception):
-    """An answer would exceed one frame: refused with ``too_large`` before anything changed."""
+def _holds_page(request: Request) -> Mapping[str, Any]:
+    """Report a page of the workspace's holds (read only; plan §7.8): a stateless cursor over the live listing of
+    ``transfers/outgoing/``.
 
-
-def _holds(request: Request) -> Mapping[str, Any]:
-    """Report the workspace's holds: ``transfer status --json WS`` (read only).
-
-    Header: ``workspace``. The response carries that command's ``document``; an unknown workspace refuses the
-    request, and so does (with ``too_large``) a document of more than :data:`_SESSION_HOLDS_MAX` holds or one that
-    would not fit one frame. Progress: ``list`` with the holds read.
+    Header: ``workspace``, ``destination`` (the locator the holds record; ``null`` for every hold), ``after`` (the
+    transfer id the page follows, ``null`` for the first) and ``limit_holds``, ``limit_members`` (clamped). The
+    names after ``after`` are read in order, at most 4096 a request (a name bound elsewhere or gone since the
+    listing is passed over), until the page has its holds, job keys or :data:`_ANSWER_BUDGET`. The response carries
+    ``holds`` (as ``transfer status --json`` lists them, with their workflows; the whole answer within
+    :data:`_ANSWER_BUDGET`, see :func:`_fit`), ``next``: the ``after`` of the next page (the name before the first
+    hold not answered), ``null`` when the listing is exhausted, and the end of the captured ``stderr``. Progress:
+    ``list`` with the holds read.
     """
 
-    workspace_name = _text(request.header, "workspace", required=True)
+    from .. import _moving
+    from ..workspace import Workspace
+    from ._transfer import _PAGE_HOLDS, _PAGE_MEMBERS, _PAGE_SCANNED
+
+    header = request.header
+    workspace_name = _text(header, "workspace", required=True)
+    destination = _text(header, "destination")
+    after = header.get("after")
     assert workspace_name is not None
     if request.upload is not None:
-        raise Refused("holds takes no upload")
-    from ..workspace import Workspace
-    from ._transfer import status_document
-
+        raise Refused("holds_page takes no upload")
+    if after is not None and not (isinstance(after, str) and _TRANSFER_ID.fullmatch(after)):
+        raise Refused("holds_page needs after as a transfer id or null")
+    limit_holds = _limit(header, "limit_holds", _PAGE_HOLDS)
+    limit_members = _limit(header, "limit_members", _PAGE_MEMBERS)
     context = CLIContext("httk", Path.cwd())
+    #: The holds read, each with the index of its name.
+    holds: list[tuple[int, Any]] = []
+    following: str | None = None
     with _captured() as stderr:
         try:
             workspace = Workspace(_local_root(_workspace_arguments(workspace_name), context, action="list its holds"))
-            count = _held_count(workspace)  # counted by name first: nothing is read for an answer that cannot go
-            if count > _SESSION_HOLDS_MAX:
-                raise Refused(f"{count} holds are more than one answer carries ({_SESSION_HOLDS_MAX})", too_large=True)
-            document = status_document(workspace, progress=request.progress)
+            names = [name for name in _moving.held_names(workspace) if after is None or name > after]
+            members = size = 0
+            request.progress("list", 0)
+            for index, name in enumerate(names):
+                if index >= _PAGE_SCANNED or len(holds) >= limit_holds or members >= limit_members:
+                    following = names[index - 1]
+                    break
+                if size >= _ANSWER_BUDGET:
+                    following = names[index - 1]
+                    break
+                hold = _moving.held_one(workspace, name, workflows=True)
+                request.advance()
+                if hold is None or destination not in (None, hold.destination_locator):
+                    continue
+                holds.append((index, hold))
+                members += len(hold.members)
+                size += _measure(hold)
         except _ERRORS as exc:  # read only: nothing changed
-            raise Refused(str(exc), stderr=stderr.getvalue()) from None
-    response = {"document": document, "stderr": stderr.getvalue()}
-    # The whole answer, as the serve loop will encode it (the reserved ok included).
-    size = len(_frames.json_payload({"ok": True, **response}))
-    if size > _frames.JSON_LIMIT:
-        raise Refused(
-            f"the {len(document['holds'])} holds ({size} bytes) are more than one answer carries", too_large=True
-        )
-    return response
-
-
-def _held_count(workspace: Any) -> int:
-    """How many holds *workspace* has, counted by name in ``transfers/outgoing/`` (nothing read).
-
-    :param workspace: The workspace.
-    :return: The count.
-    """
-
-    from .. import _kernel, _moving
-
-    return sum(1 for name in _kernel.list_names(_moving._outgoing(workspace)) if _TRANSFER_ID.fullmatch(name))
+            raise Refused(str(exc), stderr=_tail(stderr.getvalue())) from None
+    answer: dict[str, Any] = {"next": "0" * 32, "stderr": _tail(stderr.getvalue())}  # a cursor's size, for the fit
+    rest = _fit(answer, [("hold", hold) for _, hold in holds], optional=("stderr",))
+    if rest:
+        # The next page starts at the first hold this answer did not carry; the first hold always goes.
+        first = holds[len(holds) - len(rest)][0]
+        assert first > 0 and len(rest) < len(holds), "an answer of holds_page carries its first hold"
+        following = names[first - 1]
+    answer["next"] = following
+    return answer
 
 
 #: A held bundle's name: its transfer id.
@@ -896,8 +1122,9 @@ OPS: dict[str, Op] = {
     "adopt": _adopt,
     "install": _install,
     "workflows": _workflows,
-    "hold": _hold,
-    "holds": _holds,
+    "select": _select,
+    "hold_page": _hold_page,
+    "holds_page": _holds_page,
     "send": _send,
     "release": _release,
 }
@@ -1006,6 +1233,7 @@ def serve(requests: IO[bytes], responses: IO[bytes], *, ops: Mapping[str, Op] | 
         return _FAILED
     reader = FrameReader(requests)
     frames = FrameWriter(responses.write, responses.flush)
+    state: dict[str, Any] = {}  # the connection's: a pull's selection
     last_id = 0
     try:
         while (frame := reader.read_frame()) is not None:
@@ -1016,7 +1244,7 @@ def serve(requests: IO[bytes], responses: IO[bytes], *, ops: Mapping[str, Op] | 
             last_id = frame.id
             assert frame.document is not None
             upload = StreamReader(reader.read_frame, frame.id) if frame.document.get("upload") is True else None
-            request = Request(frame.id, frame.document, upload, frames)
+            request = Request(frame.id, frame.document, upload, frames, state)
             ticker = _Ticker(request, frames)
             with ticker:
                 try:

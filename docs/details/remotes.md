@@ -244,15 +244,20 @@ A transfer session is one connection and one far-side `httk` start, the hidden
 `httk workflow transfer-session`, started through the adapter `session`
 operation (as the monitor's session is), that carries typed requests and their
 data in binary frames. A push from a local workspace to a remote one opens one
-at its first delivery, a pull from a remote workspace to a local one at its
-first request to the source (the hold, or the listing of the holds for
-`--resume`); either closes it at the end of the command. Remote-to-remote
+before it drives or makes its first hold (one that cannot open holds nothing),
+a pull from a remote
+workspace to a local one at its first request to the source (the check of its
+selection, or for `--resume` the listing of its holds); either closes it at the
+end of the command,
+whatever the number of pages it holds (see *Paged holds* in
+{doc}`workflow_cli`). Remote-to-remote
 transfers do not use one yet.
 
-Over the session a push first asks the destination which of the workflows its
-jobs need it lacks or has unbuilt, installs and builds those (once a command; a
-failure is reported and the jobs wait, the push goes on), and only then travels
-in segments, so that each segment can start as soon as it is adopted. A segment
+A push holds and delivers its jobs a page at a time. Over the session it first
+asks the destination which of the workflows a page's jobs need it lacks or has
+unbuilt, installs and builds those (once a command per workflow; a failure is
+reported and the jobs wait, the push goes on), and only then travels in
+segments, so that each segment can start as soon as it is adopted. A segment
 closes at 256 bundles, 16 GiB of file data or 16,384 archive members, whichever
 comes first (a hold larger than that is a segment of its own; a hold is never
 split). Each segment is its own request, with its own archive, landing,
@@ -273,11 +278,15 @@ segment's holds and every later one's stay held, and running the transfer again
 (or `httk job transfer --resume`) finishes it, reporting what had arrived as
 already adopted.
 
-Over the session a pull holds the selected jobs with one request (its answer
-also lists the holds an earlier run left bound for this destination, which go
-along), fetches the store entries of the workflows the jobs need that this
-workspace lacks with one more and installs them here, all before the first
-adoption, and then fetches the holds in segments of 256 bundles. The source
+Over the session a pull first has the source check and resolve its selection
+(a selector naming no job stops it before anything is driven), then drives the
+holds an earlier run left bound for this destination, listed a page at a time,
+then has the source list the selection once and hold it a page at a time, each
+page driven before the next is asked for, so no answer grows with the
+selection (each answer is held to 16 MiB). For a page it fetches the store
+entries of the workflows the jobs need that this workspace lacks (once a
+command per workflow) and installs and builds them here, all before the page's
+first adoption, and then fetches the page's holds in segments of 256 bundles. The source
 closes each fetch once 16 GiB of file data or 16,384 archive members went (a
 hold is never split), so a segment may take several fetches, each of what is
 left of it.
@@ -289,22 +298,26 @@ session then is. A hold the source cannot send (another actor released it, or
 a file of it was replaced or changed size while it was read) fails alone and the
 rest of its segment is fetched once more without it. A source that dies or
 answers something else, or a refusal naming no hold (a full quota here, say),
-stops the pull: nothing of that fetch was adopted, and its holds and every
-later one stay held there for `httk job transfer --resume`, which lists them
-over a new session. A failed release leaves the jobs here with their holds on
+stops the pull: nothing of that fetch was adopted, its holds and every later one
+stay held there, and no later page is held; `httk job transfer --resume` lists
+the holds over a new session and drives them (run the transfer again to select
+what was never held). A hold too large to describe in one answer (16 MiB) fails
+alone with the remedy `transfer_session=off`. A failed release leaves the jobs here with their holds on
 the source, reported with the remedy.
 
 Opening a session checks the far side before anything is changed: its hello
 must name the expected format version and every request the caller needs, and
 a round trip of all 256 byte values must come back intact. When any of that
-fails (an older far-side `httk` without the command, an executor that mangles
-binary data), the push says so and falls back to one adapter `deliver` per
+fails (an older far-side `httk` without the command, or one whose session lacks
+a request the caller needs, such as a pull's paged holds; an executor that
+mangles binary data), the push says so and falls back to one adapter `deliver` per
 delivery as before sessions (a pull to its adapter hold, copy and release
 calls), at the cost of one extra connection and start per command (the refused
 session; this is not remembered between commands). A `mount-daemon` remote,
 which has no session, and a remote with `transfer_session=off` take that path
-at once, without a word or a start. Any other failure to open the session fails
-the deliveries, and the jobs stay held for `--resume` (a pull holds nothing). A
+at once, without a word or a start. Any other failure to open the session stops
+that destination: the holds an earlier run left stay held for `--resume`, and
+nothing new is held (a pull holds nothing). A
 refused or broken
 ssh connection (ssh's own exit status 255) is never a fallback. Set
 `transfer_session=off` on a remote to skip the session and its check (the

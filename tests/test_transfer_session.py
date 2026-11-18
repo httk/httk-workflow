@@ -405,8 +405,8 @@ def test_ssh_status_255_is_a_connection_failure_at_every_stage_and_only_for_ssh(
 
 def test_a_missing_needed_op_is_unsupported(tmp_path: Path, remote: Remote) -> None:
     bundle = fake_remote(_project(tmp_path), template="local")
-    with pytest.raises(SessionUnsupported, match="lacks the ops select"):
-        TransferSession(bundle, needs=["select", "adopt", "echo"], timeout=60).open()
+    with pytest.raises(SessionUnsupported, match="lacks the ops frobnicate"):
+        TransferSession(bundle, needs=["frobnicate", "adopt", "echo"], timeout=60).open()
 
 
 def test_no_hello_another_format_or_another_version_is_unsupported(tmp_path: Path) -> None:
@@ -950,7 +950,7 @@ class _Peer:
 
 def test_serve_says_hello_and_ends_cleanly_between_requests() -> None:
     peer = _Peer(dict(OPS))
-    ops = ["adopt", "bye", "echo", "hold", "holds", "install", "release", "send", "workflows"]
+    ops = ["adopt", "bye", "echo", "hold_page", "holds_page", "install", "release", "select", "send", "workflows"]
     assert peer.hello == {"format": TRANSFER_SESSION_FORMAT, "format_version": 1, "ops": ops}
     peer.writer.send_json(REQUEST, 1, {"op": "nope"})
     assert peer.answer() == {"ok": False, "error": "unknown op 'nope'"}

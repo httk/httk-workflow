@@ -171,8 +171,9 @@ everyone on it:
   is; without a session it is one more adapter fetch under a fresh `syncfs`
   synchronization. Either way it happens only when needed. If that fails too,
   a pull over a session stops there (that segment and every later one stay
-  held at the source), and a pull without one fails that chunk; their jobs
-  stay held at the source, and `job transfer --resume` delivers them again.
+  held at the source, and no later page of the selection is held), and a pull
+  without one fails that chunk; their jobs stay held at the source, and `job
+  transfer --resume` delivers them again.
 
 A failure is not retried otherwise. A destination (or, for a pull, this
 workspace) on `io.sync fsync`, whose per-file errors are exact, fails at once:

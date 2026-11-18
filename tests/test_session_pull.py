@@ -1,8 +1,9 @@
-"""A pull over one transfer session (plan WORKFLOW_TRANSFER_SESSION §7, T2).
+"""A pull over one transfer session (plan WORKFLOW_TRANSFER_SESSION §7, T2; paged holds since T3, §7.8).
 
-The far side's ``hold``, ``holds``, ``send`` and ``release`` ops (the documents of ``job transfer --hold --json``,
-``transfer status --json`` and ``job transfer --release``, and the download of held bundles and store entries, over a
-real session), and the client's pull: one connection and one start, segment by segment, with per-segment outcomes.
+The far side's ``select``, ``hold_page``, ``holds_page``, ``send`` and ``release`` ops (the holds of ``job transfer
+--hold``, the listing of ``transfer status --json``, ``job transfer --release``, and the download of held bundles and
+store entries, over a real session), and the client's pull: one connection and one start, segment by segment, with
+per-segment outcomes. The paging rules themselves are tested in ``test_paged_holds``.
 """
 
 import errno
@@ -136,10 +137,15 @@ if argv[:2] == ["workflow", "transfer-session"]:
 
         _transfer_session.OPS["release"] = partial
     if os.environ.get("HTTK_TEST_T1B_OPS"):
-        for op in ("hold", "holds", "send", "release"):
+        for op in ("holds_page", "select", "hold_page", "send", "release"):
             del _transfer_session.OPS[op]
-    if os.environ.get("HTTK_TEST_HOLDS_MAX"):
-        _transfer_session._SESSION_HOLDS_MAX = int(os.environ["HTTK_TEST_HOLDS_MAX"])
+    if os.environ.get("HTTK_TEST_T2_OPS"):
+        # A T2 far side: hold-everything-first ops in place of the paged ones.
+        for op in ("holds_page", "select", "hold_page"):
+            del _transfer_session.OPS[op]
+        _transfer_session.OPS["hold"] = _transfer_session.OPS["holds"] = lambda request: {}
+    if os.environ.get("HTTK_TEST_ANSWER_BUDGET"):
+        _transfer_session._ANSWER_BUDGET = int(os.environ["HTTK_TEST_ANSWER_BUDGET"])
     if os.environ.get("HTTK_TEST_SLOW_MANIFEST"):
         real_read_manifest = pulled.read_manifest
 
@@ -217,22 +223,6 @@ if argv[:2] == ["workflow", "transfer-session"]:
         _frames.StreamWriter.close = broken_abort
     if os.environ.get("HTTK_TEST_JSON_LIMIT"):
         _frames.JSON_LIMIT = int(os.environ["HTTK_TEST_JSON_LIMIT"])
-    if os.environ.get("HTTK_TEST_NOISE"):
-        from httk.workflow.workflow_cli import _transfer as noisy
-
-        real_status_document = noisy.status_document
-
-        def noisy_status_document(*arguments, **options):
-            print("\U0001f600" * int(os.environ["HTTK_TEST_NOISE"]), file=sys.stderr)
-            return real_status_document(*arguments, **options)
-
-        noisy.status_document = noisy_status_document
-    if os.environ.get("HTTK_TEST_NO_MANIFEST_READS"):
-
-        def no_read(*arguments, **options):
-            raise RuntimeError("a manifest was read")
-
-        pulled.read_manifest = no_read
     grow = os.environ.get("HTTK_TEST_GROW_ON_SEND")
     if grow:
         real_readinto = _transfer_session._Reading.readinto
@@ -282,6 +272,12 @@ PATCHED_PULL = PATCHED_HTTK.replace('sys.argv = ["httk", *argv]\n', PULL_PATCHES
 assert PATCHED_PULL != PATCHED_HTTK
 
 
+#: The ops a pull needs of its source's transfer session.
+PULL_OPS = {"holds_page", "select", "hold_page", "send", "release"}
+#: The requests that open a pull of a selection: the selection, the earlier holds' listing (none), its one page.
+PAGE = ["select", "holds_page", "hold_page"]
+
+
 def patched_pull(tmp_path: Path, remote: Remote) -> None:
     """Make the stand-in cluster's ``httk`` (the ``local`` adapter's too) :data:`PATCHED_PULL`."""
 
@@ -291,7 +287,7 @@ def patched_pull(tmp_path: Path, remote: Remote) -> None:
 
 
 def opened(bundle: Path) -> TransferSession:
-    session = TransferSession(bundle, needs={"hold", "holds", "send", "release"}, timeout=60)
+    session = TransferSession(bundle, needs=PULL_OPS, timeout=60)
     session.open()
     return session
 
@@ -337,20 +333,31 @@ def landed_bytes(path: Path) -> int:
 def test_the_hello_lists_the_pull_ops(tmp_path: Path, remote: Remote) -> None:
     _, bundle = local_project(tmp_path)
     with opened(bundle) as session:
-        assert {"hold", "holds", "send", "release"} <= session.ops
+        assert PULL_OPS <= session.ops and not {"hold", "holds"} & session.ops
 
 
-def test_the_hold_op_answers_what_job_transfer_hold_json_prints(
+def hold_pages(session: TransferSession, **limits: int) -> list[dict[str, Any]]:
+    """Every ``hold_page`` answer of the session's selection, until ``done``."""
+
+    pages = []
+    while True:
+        page = session.request("hold_page", {f"limit_{key}": value for key, value in limits.items()})
+        assert page["ok"] is True, page
+        pages.append(page)
+        if page["done"]:
+            return pages
+
+
+def test_select_and_hold_page_hold_what_job_transfer_hold_holds(
     tmp_path: Path, remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _, bundle = local_project(tmp_path)
     far, far_name = registered(tmp_path, "far")
     destination, destination_id = "near:somewhere", str(uuid.uuid4())
-    # A hold already bound for the destination, and one bound elsewhere: only the first is held_before.
+    # A hold already bound for the destination: select and hold_page never list it (holds_page does).
     with _moving_owner(far) as owner:
-        earlier, elsewhere = (
-            _moving.hold(far, owner, _claim(far, owner, single(far)[0]["id"]), tree=True, destination_locator=locator)
-            for locator in (destination, "other:place")
+        earlier = _moving.hold(
+            far, owner, _claim(far, owner, single(far)[0]["id"]), tree=True, destination_locator=destination
         )
     family = tree(far)
     loose = [single(far) for _ in range(2)]
@@ -365,28 +372,38 @@ def test_the_hold_op_answers_what_job_transfer_hold_json_prints(
         "destination_id": destination_id,
     }
     with opened(bundle) as session:
-        response = session.request("hold", header)
-    assert response["ok"] is True, response
-    holds = [_moving.Hold.from_mapping(hold) for hold in response["holds"]]
-    held_ids = {member for hold in holds for member in hold.members}
-    # The two named jobs, then every succeeded root: the family's succeeded child moves only with its root (paused).
+        assert session.request("hold_page", {})["ok"] is False  # no selection yet: refused, nothing changed
+        selected_ = session.request("select", header)
+        # The named jobs: the listing comes with the first page.
+        assert selected_["ok"] is True and selected_["candidates"] == 2, selected_
+        assert outgoing(far) == [earlier.transfer_id]  # nothing held by the selection
+        pages = hold_pages(session, holds=1, candidates=1)
+        after = session.request("hold_page", {})
+    holds = [_moving.Hold.from_mapping(hold) for page in pages for hold in page["holds"]]
+    # The two named jobs, one a page; the family's succeeded child moves only with its root (paused): the note.
+    assert [len(page["holds"]) for page in pages] == [1, 1, 0]
+    assert [page["remaining"] for page in pages] == [2, 1, 0]
     assert all(find(far, mapping["id"]) is None for mapping, _, _ in loose)
     assert find(far, family[1][0]["id"]) is not None
     assert {hold.destination_locator for hold in holds} == {destination}
     assert {hold.destination_workspace_id for hold in holds} == {destination_id}
-    assert all(hold.workflows is not None for hold in holds) and len(held_ids) == len(holds)
-    assert [hold["transfer_id"] for hold in response["held_before"]] == [earlier.transfer_id]
-    assert elsewhere.transfer_id not in {hold["transfer_id"] for hold in response["held_before"]}
-    assert response["errors"] == []
-    assert "move only with their root" in response["stderr"]
-    # The command line prints the same document for the same selection (nothing left to hold but held_before).
-    argv = ["--hold", "--json", "--destination-id", destination_id, "--state", "succeeded", "--tree"]
-    assert run(tmp_path, *argv, far_name, destination) == 0
-    printed = outcomes(capsys)
-    assert printed["holds"] == [] and printed["errors"] == []
-    assert sorted(hold["transfer_id"] for hold in printed["held_before"]) == sorted(
-        [earlier.transfer_id, *(hold.transfer_id for hold in holds)]
+    assert all(hold.workflows is not None for hold in holds) and earlier.transfer_id not in {
+        h.transfer_id for h in holds
+    }
+    assert all(page["errors"] == [] and page["changed"] == 0 for page in pages)
+    assert [page["note"] for page in pages[:-1]] == [None, None]
+    assert (
+        pages[-1]["note"] == f"1 selected job(s) have a parent in {far.root} and move only with their root "
+        "(detach them to move them alone)"
     )
+    assert after["ok"] is True and after["done"] is True and after["holds"] == []
+    # The command line holds the same for the same selection, all at once.
+    plan = [single(far) for _ in range(2)]
+    argv = ["--hold", "--json", "--destination-id", destination_id, *selected(plan), "--state", "succeeded", "--tree"]
+    assert run(tmp_path, *argv, far_name, destination) == 0
+    captured = capsys.readouterr()
+    assert [len(hold["members"]) for hold in json.loads(captured.out)["holds"]] == [1, 1]
+    assert pages[-1]["note"] in captured.err
 
 
 @pytest.mark.parametrize(
@@ -402,7 +419,7 @@ def test_the_hold_op_answers_what_job_transfer_hold_json_prints(
     ],
     ids=["workspace", "state", "selection", "step", "destination-id", "placement", "unknown-job"],
 )
-def test_the_hold_op_refuses_a_bad_request_and_holds_nothing(
+def test_select_refuses_a_bad_request_holds_nothing_and_clears_the_selection(
     tmp_path: Path, remote: Remote, change: dict[str, Any]
 ) -> None:
     _, bundle = local_project(tmp_path)
@@ -410,9 +427,14 @@ def test_the_hold_op_refuses_a_bad_request_and_holds_nothing(
     mapping, _, _ = single(far)
     header = {"workspace": far_name, "jobs": [str(mapping["id"])], "state": ["succeeded"], "destination": "x:y"}
     with opened(bundle) as session:
-        response = session.request("hold", {**header, **change})
+        assert session.request("select", header)["ok"] is True
+        response = session.request("select", {**header, **change})
         assert response["ok"] is False and "fatal" not in response
         assert session.is_open  # a refusal, not a failed session
+        # The earlier selection went with the refusal: nothing to hold.
+        assert session.request("hold_page", {})["ok"] is False
+        bad = session.request("hold_page", {"limit_holds": 0})
+        assert bad["ok"] is False and "positive integer" in bad["error"]
     assert find(far, mapping["id"]) is not None and _moving.held(far) == []
 
 
@@ -436,8 +458,9 @@ def test_a_slow_hold_and_release_report_their_progress_and_are_no_stall(
     session._limit = 3.0
     _watch_progress(monkeypatch, phases)
     with session:
-        response = session.request("hold", header)
-        assert response["ok"] is True and len(response["holds"]) == 5, response
+        assert session.request("select", header)["ok"] is True
+        response = session.request("hold_page", {})
+        assert response["ok"] is True and len(response["holds"]) == 5 and response["done"] is True, response
         ids = [hold["transfer_id"] for hold in response["holds"]]
         released = session.request("release", {"workspace": far_name, "transfer_ids": ids})
         assert released["ok"] is True and released["released"] == ids, released
@@ -449,26 +472,42 @@ def test_a_slow_hold_and_release_report_their_progress_and_are_no_stall(
             assert len(set(counts)) >= 3, (name, counts)
 
 
-def test_the_holds_op_answers_transfer_status_json(
+def test_holds_page_lists_what_transfer_status_json_lists_a_page_at_a_time(
     tmp_path: Path, remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _, bundle = local_project(tmp_path)
     far, far_name = registered(tmp_path, "far")
-    holds, _ = hold_jobs(far, 2)
+    holds, _ = hold_jobs(far, 3)
+    with _moving_owner(far) as owner:
+        elsewhere = _moving.hold(
+            far, owner, _claim(far, owner, single(far)[0]["id"]), tree=True, destination_locator="x:y"
+        )
+    pages: list[dict[str, Any]] = []
     with opened(bundle) as session:
-        response = session.request("holds", {"workspace": far_name})
-        refused = session.request("holds", {"workspace": "no-such-workspace"})
-    assert response["ok"] is True and refused["ok"] is False
-    document = response["document"]
+        after = None
+        while True:
+            page = session.request("holds_page", {"workspace": far_name, "after": after, "limit_holds": 2})
+            assert page["ok"] is True, page
+            pages.append(page)
+            if (after := page["next"]) is None:
+                break
+        bound = session.request("holds_page", {"workspace": far_name, "destination": "x:y"})
+        refused = session.request("holds_page", {"workspace": "no-such-workspace"})
+        malformed = session.request("holds_page", {"workspace": far_name, "after": "../x"})
+    assert refused["ok"] is False and malformed["ok"] is False
+    assert [len(page["holds"]) for page in pages] == [2, 2]
+    assert [hold["transfer_id"] for hold in bound["holds"]] == [elsewhere.transfer_id] and bound["next"] is None
+    listed = [hold for page in pages for hold in page["holds"]]
     from httk.workflow.workflow_cli import transfer_command
 
     assert transfer_command(["status", "--json", far_name], CLIContext("httk", tmp_path)) == 0
     printed = json.loads(capsys.readouterr().out)
-    for listed in (document, printed):
-        for hold in listed["holds"]:
-            hold.pop("age_seconds")
-    assert document == printed
-    assert sorted(hold["transfer_id"] for hold in document["holds"]) == sorted(hold.transfer_id for hold in holds)
+    for hold in [*listed, *printed["holds"]]:
+        hold.pop("age_seconds")
+    assert listed == printed["holds"]
+    assert sorted(hold["transfer_id"] for hold in listed) == sorted(
+        [elsewhere.transfer_id, *(h.transfer_id for h in holds)]
+    )
 
 
 def test_send_carries_whole_bundles_in_order_up_to_the_byte_limit(tmp_path: Path, remote: Remote) -> None:
@@ -680,7 +719,7 @@ def test_a_pull_is_one_connection_and_one_start_whatever_its_segments(
         assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * count
         # No adapter call at all: one session holds, then carries each segment and releases it right after it.
         assert calls == []
-        assert ops(requests) == ["hold", *["send", "release"] * segments]
+        assert ops(requests) == [*PAGE, *["send", "release"] * segments]
         assert all(header["kind"] == "holds" and header["workspace"] == far_name for header in sends(requests))
         commands = remote.commands()[before:]
         measured.append((len(commands), starts(commands)))
@@ -704,7 +743,7 @@ def test_workflows_arrive_before_the_first_adoption_in_the_one_start(
     assert run(project, "--json", "--job", job_id, f"cluster:{far_name}", near_name) == 0
     (outcome,) = outcomes(capsys)["transfers"]
     assert shipped(outcome) == {GIT_ID: "installed", "local:caller": "installed"}
-    assert calls == [] and ops(requests) == ["hold", "send", "send", "release"]
+    assert calls == [] and ops(requests) == [*PAGE, "send", "send", "release"]
     store, held = sends(requests)
     assert store["kind"] == "store" and held["kind"] == "holds" and "limit_bytes" not in store
     commands = remote.commands()
@@ -734,7 +773,7 @@ def test_an_older_far_side_costs_one_refused_start_then_the_adapter_path(
     assert outgoing(far) == []
 
 
-def test_a_selection_is_one_hold_request_carrying_every_selector(
+def test_a_selection_is_one_select_request_carrying_every_selector(
     ssh: tuple[Path, Workspace, str, Workspace, str],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -745,8 +784,8 @@ def test_a_selection_is_one_hold_request_carrying_every_selector(
     argv = ["--json", "--tree", "--state", "succeeded", "--step", "start", "--placement", "proj"]
     assert run(project, *argv, *selected(plan[:1]), f"cluster:{far_name}", near_name) == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 2
-    (hold,) = [header for op, header in requests if op == "hold"]
-    assert hold == {
+    (select,) = [header for op, header in requests if op == "select"]
+    assert select == {
         "workspace": far_name,
         "jobs": [str(plan[0][0]["id"])],
         "state": ["succeeded"],
@@ -806,7 +845,7 @@ def test_a_download_aborted_after_its_whole_archive_adopts_nothing_and_leaves_no
     assert [outcome["status"] for outcome in transfers] == ["failed"] * 4
     assert all("--resume" in outcome["message"] for outcome in transfers)
     assert any("aborted the download" in outcome["message"] for outcome in transfers)
-    assert ops(requests) == ["hold", "send"]  # a far side out of step is asked nothing more
+    assert ops(requests) == [*PAGE, "send"]  # a far side out of step is asked nothing more
     assert all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
     assert len(outgoing(far)) == 4 and landing_scratches(near) == []
     monkeypatch.delenv("HTTK_TEST_ABORT_DOWNLOAD")
@@ -836,7 +875,7 @@ def test_a_send_carries_a_prefix_and_the_rest_of_its_segment_follows(
     assert asked[0][1:] == asked[1] and asked[1][1:] == asked[2] and asked[3][1:] == asked[4]
     assert sorted(names[0] for names in asked) == ids
     assert {header["limit_bytes"] for header in sends(requests)} == {1}
-    assert ops(requests) == ["hold", *["send", "release"] * 5]
+    assert ops(requests) == [*PAGE, *["send", "release"] * 5]
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (1, 1)
     assert_in(near, plan)
@@ -872,7 +911,7 @@ def test_a_hold_gone_before_or_while_it_is_sent_fails_alone_and_the_rest_arrive(
     assert second["names"] == [name for name in first["names"] if name != gone]  # the rest, once more
     assert by_id[gone]["status"] == "failed" and "could not send it" in by_id[gone]["message"]
     assert [by_id[name]["status"] for name in second["names"]] == ["adopted"] * 2
-    assert ops(requests) == ["hold", "send", "send", "release"]
+    assert ops(requests) == [*PAGE, "send", "send", "release"]
     assert sum(find(near, mapping["id"]) is not None for mapping, _, _ in plan) == 2
     assert landing_scratches(near) == []
 
@@ -894,7 +933,7 @@ def test_a_failed_commit_is_fetched_once_more_with_an_fsync_of_every_file_and_la
     captured = capsys.readouterr()
     assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 4
     assert fsyncs == [False, True, True]
-    assert ops(requests) == ["hold", "send", "send", "release", "send", "release"]
+    assert ops(requests) == [*PAGE, "send", "send", "release", "send", "release"]
     assert captured.err.count("again, with an fsync of every file") == 1
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (1, 1)
@@ -923,7 +962,7 @@ def test_a_second_failure_after_the_fsync_refetch_stops_the_pull_and_resume_adop
     assert "not delivered, since the transfer session stopped" in by_id[later]["message"]
     assert all("--resume" in outcome["message"] for outcome in by_id.values())
     # The second segment was never asked for.
-    assert fsyncs == [False, True] and ops(requests) == ["hold", "send", "send"]
+    assert fsyncs == [False, True] and ops(requests) == [*PAGE, "send", "send"]
     assert all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
     assert len(outgoing(far)) == 2 and landing_scratches(near) == []
     monkeypatch.setattr(_landing, "receive_tar", _REAL_RECEIVE)
@@ -951,7 +990,7 @@ def test_a_far_side_dying_in_a_segment_keeps_it_and_the_later_ones_held_and_resu
     rest = [outcome for outcome in transfers if outcome["transfer_id"] not in first]
     assert [outcome["status"] for outcome in rest] == ["failed"] * 4
     assert all(f"--resume cluster:{far_name} {near.root}" in outcome["message"] for outcome in rest)
-    assert ops(requests) == ["hold", "send", "release", "send"]
+    assert ops(requests) == [*PAGE, "send", "release", "send"]
     assert sum(find(near, mapping["id"]) is not None for mapping, _, _ in plan) == 2
     assert sorted(outgoing(far)) == sorted(outcome["transfer_id"] for outcome in rest)
     assert landing_scratches(near) == []
@@ -961,14 +1000,14 @@ def test_a_far_side_dying_in_a_segment_keeps_it_and_the_later_ones_held_and_resu
     before = len(remote.commands())
     assert run(project, "--json", "--resume", f"cluster:{far_name}", near_name) == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 4
-    assert ops(requests) == ["holds", "send", "release", "send", "release"]
+    assert ops(requests) == ["holds_page", "send", "release", "send", "release"]
     commands = remote.commands()[before:]
     assert (len(commands), starts(commands)) == (1, 1)
     assert_in(near, plan)
     assert outgoing(far) == []
 
 
-def test_the_holds_an_earlier_run_left_are_driven_with_the_new_ones_from_held_before(
+def test_the_holds_an_earlier_run_left_are_driven_first_then_the_new_ones(
     ssh: tuple[Path, Workspace, str, Workspace, str],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -984,8 +1023,10 @@ def test_the_holds_an_earlier_run_left_are_driven_with_the_new_ones_from_held_be
     later = jobs(far, 1)
     assert run(project, "--json", *selected(later), f"cluster:{far_name}", near_name) == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 3
-    # The hold's answer listed the earlier holds bound for this destination: no holds request.
-    assert ops(requests) == ["hold", "send", "release"] and len(sends(requests)[0]["names"]) == 3
+    # Plan §7.8: the selection checked, a page of the earlier holds bound for this destination driven, then the
+    # selection's page.
+    ops_ = ["select", "holds_page", "send", "release", "hold_page", "send", "release"]
+    assert ops(requests) == ops_ and [len(header["names"]) for header in sends(requests)] == [2, 1]
     assert_in(near, [*earlier, *later])
     assert outgoing(far) == []
 
@@ -1003,7 +1044,7 @@ def test_a_wrong_answer_to_a_send_adopts_nothing_and_stops(
     transfers = outcomes(capsys)["transfers"]
     assert [outcome["status"] for outcome in transfers] == ["failed"] * 2
     assert all("not the prefix of them that arrived" in outcome["message"] for outcome in transfers)
-    assert ops(requests) == ["hold", "send"]
+    assert ops(requests) == [*PAGE, "send"]
     assert all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
     assert len(outgoing(far)) == 2 and landing_scratches(near) == []
 
@@ -1044,7 +1085,7 @@ def test_a_session_failing_in_a_release_stops_the_pull(
     assert run(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
     by_id = {outcome["transfer_id"]: outcome for outcome in outcomes(capsys)["transfers"]}
     first = sends(requests)[0]["names"]
-    assert ops(requests) == ["hold", "send", "release"]
+    assert ops(requests) == [*PAGE, "send", "release"]
     for name in first:
         assert by_id[name]["status"] == "adopted" and "the hold was not released" in by_id[name]["message"]
     rest = [outcome for name, outcome in by_id.items() if name not in first]
@@ -1084,7 +1125,7 @@ def test_a_session_that_cannot_open_or_fails_in_the_hold_drives_nothing(
     failure: str,
 ) -> None:
     project, near, near_name, far, far_name = ssh
-    monkeypatch.setenv(*(("HTTK_FAKE_SSH_REFUSE", "1") if failure == "open" else ("HTTK_TEST_EXIT_ON_OP", "hold")))
+    monkeypatch.setenv(*(("HTTK_FAKE_SSH_REFUSE", "1") if failure == "open" else ("HTTK_TEST_EXIT_ON_OP", "hold_page")))
     calls = adapter_calls(monkeypatch)
     plan = jobs(far, 2)
     assert run(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
@@ -1093,6 +1134,9 @@ def test_a_session_that_cannot_open_or_fails_in_the_hold_drives_nothing(
     (error,) = document["errors"]
     expected = "did not open" if failure == "open" else f"--resume cluster:{far_name} {near.root}"
     assert expected in error
+    if failure == "hold":
+        # The page's answer was lost after the hold may have been made: never "nothing was held".
+        assert "nothing was held" not in error and "may have held stay held" in error
     assert calls == [] and len(remote.commands()) == 1  # never a second login
     assert all(find(far, mapping["id"]) is not None for mapping, _, _ in plan)
 
@@ -1118,7 +1162,7 @@ def test_a_file_that_grows_or_is_replaced_while_it_is_sent_is_never_adopted(
     expected = {"grow": "grew", "grow-after-check": "changed size", "replace": "replaced or changed size"}[change]
     assert expected in outcome["message"]
     assert "stays held" in outcome["message"]
-    assert ops(requests) == ["hold", "send"]  # nothing adopted, so nothing released
+    assert ops(requests) == [*PAGE, "send"]  # nothing adopted, so nothing released
     assert find(near, plan[0][0]["id"]) is None and landing_scratches(near) == []
     assert outgoing(far) == [outcome["transfer_id"]]
 
@@ -1156,15 +1200,15 @@ def test_file_heavy_bundles_travel_in_requests_closed_at_the_member_limit(
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 2
     asked = sends(requests)
     assert [len(header["names"]) for header in asked] == [2, 1] and {h["limit_members"] for h in asked} == {5}
-    assert ops(requests) == ["hold", "send", "release", "send", "release"]
+    assert ops(requests) == [*PAGE, "send", "release", "send", "release"]
     assert_in(near, plan)
 
 
 def test_slow_listings_of_holds_report_their_progress_and_are_no_stall(
     tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Each hold's manifest takes 0.8 seconds to read against a bound of 4 seconds: the listing of the holds (and the
-    # held_before listing of a hold) takes longer than the bound, but its count moves with every hold read.
+    # Each hold's manifest takes 0.8 seconds to read against a bound of 4 seconds: a page of the holds takes longer
+    # than the bound, but its count moves with every hold read.
     _, bundle = local_project(tmp_path)
     patched_pull(tmp_path, remote)
     monkeypatch.setattr(_frames, "TICK", 0.1)
@@ -1180,10 +1224,11 @@ def test_slow_listings_of_holds_report_their_progress_and_are_no_stall(
     session._limit = 4.0
     _watch_progress(monkeypatch, phases)
     with session:
-        listed = session.request("holds", {"workspace": far_name})
-        assert listed["ok"] is True and len(listed["document"]["holds"]) == 7, listed
-        held = session.request("hold", {"workspace": far_name, "jobs": [str(mapping["id"])], "destination": "x:y"})
-        assert held["ok"] is True and len(held["held_before"]) == 7, held
+        listed = session.request("holds_page", {"workspace": far_name})
+        assert listed["ok"] is True and len(listed["holds"]) == 7, listed
+        assert session.request("select", {"workspace": far_name, "jobs": [str(mapping["id"])], "destination": "x:y"})[
+            "ok"
+        ]
     counts = [count for phase, count in phases if phase == "list" and count is not None]
     assert len(set(counts)) >= 4
 
@@ -1203,7 +1248,8 @@ def test_a_slow_resolution_of_named_jobs_reports_its_progress_and_is_no_stall(
     session._limit = 2.0
     with session:
         header = {"workspace": far_name, "jobs": [str(mapping["id"]) for mapping, _, _ in plan], "destination": "x:y"}
-        response = session.request("hold", header)
+        assert session.request("select", header)["ok"] is True
+        response = session.request("hold_page", {})
     assert response["ok"] is True and len(response["holds"]) == 5, response
 
 
@@ -1228,54 +1274,6 @@ def test_a_slow_read_of_one_large_file_reports_its_progress_and_is_no_stall(
     assert response["ok"] is True and response["sent"] == [holds[0].transfer_id]
 
 
-@pytest.mark.parametrize("resume", [False, True], ids=["pull", "resume"])
-def test_an_answer_too_large_for_one_frame_takes_the_adapter_path_for_the_command(
-    ssh: tuple[Path, Workspace, str, Workspace, str],
-    remote: Remote,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    resume: bool,
-) -> None:
-    project, near, near_name, far, far_name = ssh
-    plan = jobs(far, 3)
-    if resume:
-        monkeypatch.setenv("HTTK_TEST_EXIT_ON_SEND", "1")  # leaves the three held
-        assert run(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
-        capsys.readouterr()
-        monkeypatch.delenv("HTTK_TEST_EXIT_ON_SEND")
-    monkeypatch.setenv("HTTK_TEST_HOLDS_MAX", "2")
-    calls = adapter_calls(monkeypatch)
-    before = len(remote.commands())
-    argv = ["--resume"] if resume else selected(plan)
-    assert run(project, "--json", *argv, f"cluster:{far_name}", near_name) == 0
-    captured = capsys.readouterr()
-    assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 3
-    assert "more than one answer carries" in captured.err and "using the adapter operations" in captured.err
-    # The refused session, then the adapter path: the hold (or the listing) call, the pull, the release call.
-    assert calls == ["transfer status" if resume else "job transfer", "pull", "job transfer"]
-    commands = remote.commands()[before:]
-    assert (len(commands), starts(commands)) == (4, 3)
-    assert_in(near, plan)
-    assert outgoing(far) == []
-
-
-def test_the_hold_op_refuses_a_selection_too_large_before_holding_anything(
-    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _, bundle = local_project(tmp_path)
-    patched_pull(tmp_path, remote)
-    far, far_name = registered(tmp_path, "far")
-    hold_jobs(far, 1)  # an earlier hold counts too
-    plan = [single(far) for _ in range(2)]
-    header = {"workspace": far_name, "jobs": [str(mapping["id"]) for mapping, _, _ in plan], "destination": "x:y"}
-    monkeypatch.setenv("HTTK_TEST_HOLDS_MAX", "2")
-    with opened(bundle) as session:
-        response = session.request("hold", header)
-        assert response["ok"] is False and response["too_large"] is True, response
-        assert session.request("holds", {"workspace": far_name})["ok"] is True  # 1 hold: it fits
-    assert all(find(far, mapping["id"]) is not None for mapping, _, _ in plan) and len(_moving.held(far)) == 1
-
-
 @pytest.mark.parametrize("op", ["hold", "release"])
 def test_an_error_from_the_owner_s_registration_on_is_fatal(
     tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, op: str
@@ -1292,6 +1290,10 @@ def test_an_error_from_the_owner_s_registration_on_is_fatal(
     )
     monkeypatch.setenv("HTTK_TEST_OWNER_FAILS", "1")
     session = opened(bundle)
+    if op == "hold":
+        # The selection registers no owner; its page does.
+        assert session.request("select", header)["ok"] is True
+        op, header = "hold_page", {}
     with pytest.raises(SessionFailed, match="registration failed") as failed:
         session.request(op, header)
     session.close()
@@ -1348,7 +1350,7 @@ def test_a_mixed_destination_resume_syncs_every_later_landing_file_by_file_after
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 2
     # The first destination's landing again with an fsync of every file, and the other destination's directly.
     assert fsyncs == [False, True, True]
-    assert ops(requests) == ["holds", "send", "send", "release", "send", "release"]
+    assert ops(requests) == ["holds_page", "send", "send", "release", "send", "release"]
     assert_in(near, plans[near_name])
     assert_in(other, plans[other_name])
 
@@ -1411,7 +1413,7 @@ def test_a_refusal_here_naming_no_hold_stops_the_pull(
     assert len(stopped) == 2 and "refused in" in refused["message"] and "Disk quota exceeded" in refused["message"]
     assert all("Disk quota exceeded" in outcome["message"] for outcome in stopped)  # the reason it stopped
     assert all("--resume" in outcome["message"] for outcome in transfers)
-    assert ops(requests) == ["hold", "send"]
+    assert ops(requests) == [*PAGE, "send"]
     assert len(outgoing(far)) == 3 and landing_scratches(near) == []
 
 
@@ -1428,7 +1430,7 @@ def test_sent_naming_fewer_holds_than_arrived_adopts_nothing(
     transfers = outcomes(capsys)["transfers"]
     assert [outcome["status"] for outcome in transfers] == ["failed"] * 2
     assert all("not the prefix of them that arrived" in outcome["message"] for outcome in transfers)
-    assert ops(requests) == ["hold", "send"]
+    assert ops(requests) == [*PAGE, "send"]
     assert all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
     assert len(outgoing(far)) == 2 and landing_scratches(near) == []
 
@@ -1479,10 +1481,34 @@ def test_a_far_side_serving_only_the_push_ops_falls_back_for_a_pull(
     assert run(project, "--json", *selected(plan), f"cluster:{far_name}", near_name) == 0
     captured = capsys.readouterr()
     assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 2
-    assert "lacks the ops hold, holds, release, send" in captured.err
+    assert "lacks the ops hold_page, holds_page, release, select, send" in captured.err
     assert calls == ["job transfer", "pull", "job transfer"]
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (4, 3)
+
+
+def test_a_t2_far_side_without_paged_holds_takes_the_adapter_path(
+    ssh: tuple[Path, Workspace, str, Workspace, str],
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A far side serving T2's hold and holds but not select, hold_page and holds_page: SessionUnsupported at open,
+    # then the adapter path for the whole command (no T2 client remains to use those ops).
+    project, near, near_name, far, far_name = ssh
+    monkeypatch.setenv("HTTK_TEST_T2_OPS", "1")
+    calls = adapter_calls(monkeypatch)
+    requests = recorded_requests(monkeypatch)
+    plan = jobs(far, 2)
+    assert run(project, "--json", *selected(plan), f"cluster:{far_name}", near_name) == 0
+    captured = capsys.readouterr()
+    assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 2
+    assert "changed" not in json.loads(captured.out)  # hold-everything-first: nothing paged
+    assert "lacks the ops hold_page, holds_page, select" in captured.err
+    assert calls == ["job transfer", "pull", "job transfer"] and requests == []
+    commands = remote.commands()
+    assert (len(commands), starts(commands)) == (4, 3)
+    assert_in(near, plan)
 
 
 def test_a_remote_source_keeps_its_copies_through_the_session_s_release(
@@ -1558,7 +1584,7 @@ def test_the_sync_settings_of_a_session_pull(
     statuses = [outcome["status"] for outcome in outcomes(capsys)["transfers"]]
     if failure == "unsupported-ignore":
         assert code == 1 and statuses == ["failed"] * 2 and fsyncs == [False]
-        assert ops(requests) == ["hold", "send"] and len(outgoing(far)) == 2
+        assert ops(requests) == [*PAGE, "send"] and len(outgoing(far)) == 2
         assert all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
     else:
         assert code == 0 and statuses == ["adopted"] * 2
@@ -1587,7 +1613,7 @@ def test_a_symlink_that_changes_its_type_while_it_is_sent_is_never_adopted(
     (outcome,) = outcomes(capsys)["transfers"]
     assert outcome["status"] == "failed" and "changed its type while it was sent" in outcome["message"]
     assert "could not be sent whole" in outcome["message"] and "stays held" in outcome["message"]
-    assert ops(requests) == ["hold", "send"]
+    assert ops(requests) == [*PAGE, "send"]
     assert find(near, plan[0][0]["id"]) is None and landing_scratches(near) == []
     assert outgoing(far) == [outcome["transfer_id"]]
 
@@ -1634,30 +1660,6 @@ def test_an_abort_that_cannot_be_written_is_fatal(
     assert "_SendFailed" in failed.value.response["error"] and "abort" in failed.value.response["error"]
 
 
-def test_the_holds_answer_is_measured_whole_and_counted_before_anything_is_read(
-    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _, bundle = local_project(tmp_path)
-    patched_pull(tmp_path, remote)
-    far, far_name = registered(tmp_path, "far")
-    hold_jobs(far, 2)
-    monkeypatch.setenv("HTTK_TEST_JSON_LIMIT", "200000")
-    for noise, fits in ((20000, False), (2000, True)):
-        # 20,000 characters of diagnostics that each take 12 bytes once escaped: 240,000 bytes, beyond the limit.
-        monkeypatch.setenv("HTTK_TEST_NOISE", str(noise))
-        with opened(bundle) as session:
-            response = session.request("holds", {"workspace": far_name})
-        assert response["ok"] is fits, response.get("error")
-        assert fits or response["too_large"] is True
-    # Over the count, refused before any manifest is read (reading one would be fatal here).
-    monkeypatch.delenv("HTTK_TEST_NOISE")
-    monkeypatch.setenv("HTTK_TEST_HOLDS_MAX", "1")
-    monkeypatch.setenv("HTTK_TEST_NO_MANIFEST_READS", "1")
-    with opened(bundle) as session:
-        response = session.request("holds", {"workspace": far_name})
-    assert response["ok"] is False and response["too_large"] is True and "fatal" not in response
-
-
 def test_a_landing_that_cannot_be_made_stops_the_pull_before_its_request(
     ssh: tuple[Path, Workspace, str, Workspace, str],
     monkeypatch: pytest.MonkeyPatch,
@@ -1683,29 +1685,8 @@ def test_a_landing_that_cannot_be_made_stops_the_pull_before_its_request(
     assert all("--resume" in outcome["message"] for outcome in transfers)
     assert sum("no landing could be made" in outcome["message"] for outcome in transfers) == 3
     assert sum("not delivered, since the transfer session stopped" in o["message"] for o in transfers) == 2
-    assert ops(requests) == ["hold"]  # no segment asked for, nothing released
+    assert ops(requests) == PAGE  # no segment asked for, nothing released
     assert len(outgoing(far)) == 3 and all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
-
-
-def test_a_too_large_listing_that_is_not_the_first_request_is_no_fallback(
-    ssh: tuple[Path, Workspace, str, Workspace, str],
-    remote: Remote,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    project, _near, near_name, far, far_name = ssh
-    hold_jobs(far, 1)  # one hold there: more than a listing may carry with the cap at 0
-    monkeypatch.setenv("HTTK_TEST_HOLDS_MAX", "0")
-    calls = adapter_calls(monkeypatch)
-    requests = recorded_requests(monkeypatch)
-    # A job that is not there: the hold is refused (not as too large), then the listing of the holds is.
-    missing = str(uuid.UUID(int=12345))
-    code = run(project, "--json", "-q", "--job", missing, f"cluster:{far_name}", near_name)
-    captured = capsys.readouterr()
-    assert code != 0 and "transfer status failed" in captured.err and "more than one answer carries" in captured.err
-    assert "using the adapter operations" not in captured.err
-    assert ops(requests) == ["hold", "holds"] and calls == []
-    assert len(remote.commands()) == 1  # the one session: no second login
 
 
 # -- helpers ----------------------------------------------------------------------------------------------------------

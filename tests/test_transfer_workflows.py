@@ -186,12 +186,13 @@ def test_an_older_source_ships_nothing_and_says_so(
     source, source_name = registered(tmp_path, "a")
     target, target_name = registered(tmp_path, "b")
     caller = workflows(source, tmp_path)
-    real = transfer_cli._holds
+    real = transfer_cli._drive
 
-    def older(*arguments: Any, **options: Any) -> list[_moving.Hold]:  # a transfer status without workflows
-        return [dataclasses.replace(hold, workflows=None) for hold in real(*arguments, **options)]
+    def older(src: Any, dst: Any, holds: list[_moving.Hold], *arguments: Any, **options: Any) -> Any:
+        # Holds reported without workflows, as an older source reports them.
+        return real(src, dst, [dataclasses.replace(hold, workflows=None) for hold in holds], *arguments, **options)
 
-    monkeypatch.setattr(transfer_cli, "_holds", older)
+    monkeypatch.setattr(transfer_cli, "_drive", older)
     assert run(tmp_path, "--json", "--job", job(source, caller), source_name, target_name) == 0
     captured = capsys.readouterr()
     assert f"warning: {source.root} reported no usable workflows for its holds" in captured.err
@@ -244,9 +245,10 @@ def test_local_to_remote_and_pull_back_ship_through_the_adapter(
     assert run(project, "--json", "--job", job_id, f"cluster:{far_name}", home_name) == 0
     (outcome,) = outcomes(capsys)["transfers"]
     assert shipped(outcome) == {GIT_ID: "installed", "local:caller": "installed"}
-    # One transfer session to SRC carries the hold, the store entries (before the adoption), the bundles and the
-    # release: no adapter call.
-    assert calls == [] and [op for op, _ in requests] == ["hold", "send", "send", "release"]
+    # One transfer session to SRC carries the selection, the listing of its earlier holds, its one page of holds, the
+    # store entries (before the adoption), the bundles and the release: no adapter call.
+    ops = ["select", "holds_page", "hold_page", "send", "send", "release"]
+    assert calls == [] and [op for op, _ in requests] == ops
     assert [header["kind"] for op, header in requests if op == "send"] == ["store", "holds"]
     assert not list((home.control / "tmp").iterdir())
     assert _store.lookup(home, GIT_ID).record["source"] == f"transfer from cluster:{far_name}"  # type: ignore[union-attr]

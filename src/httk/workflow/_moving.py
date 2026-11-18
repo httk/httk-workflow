@@ -63,7 +63,7 @@ import os
 import re
 import stat
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -120,6 +120,8 @@ __all__ = [
     "destination_problem",
     "eject",
     "held",
+    "held_names",
+    "held_one",
     "hold",
     "reconcile_adopt",
     "reconcile_eject",
@@ -1518,7 +1520,8 @@ def hold(
     :param destination_locator: The transfer's destination, recorded in ``bundle.json`` for resumption.
     :param destination_workspace_id: The destination workspace's id, recorded in ``bundle.json``, so that a
         resumption adopts only into that workspace.
-    :param workflows: Also report the workflows its members need (:attr:`Hold.workflows`).
+    :param workflows: Also report the workflows its members need (:attr:`Hold.workflows`); when they cannot be
+        resolved the hold, published already, reports none (``None``) and a warning is logged.
     :return: The hold.
     :raises Busy: As :func:`eject`, which also gives the other failures and their outcome: *root*'s handle is
         retired whatever happens.
@@ -1534,7 +1537,12 @@ def hold(
         locator=destination_locator,
         destination_workspace_id=destination_workspace_id,
     )
-    needed = _needed_workflows(workspace, report.destination, manifest) if workflows else None
+    needed = None
+    if workflows:
+        try:
+            needed = _needed_workflows(workspace, report.destination, manifest)
+        except Exception as exc:  # the hold is published: it is reported, without its workflows, whatever this is
+            _LOGGER.warning("the workflows of hold %s could not be resolved: %s", manifest.transfer_id, exc)
     return Hold.from_manifest(report.destination, manifest, needed)
 
 
@@ -1565,26 +1573,47 @@ def _needed_workflows(
     return tuple(entry if entry[2] is not None else (entry[0], None, None) for _, entry in sorted(needed.items()))
 
 
-def held(workspace: "Workspace", *, workflows: bool = False, on_read: Callable[[], object] | None = None) -> list[Hold]:
+def held(workspace: "Workspace", *, workflows: bool = False) -> list[Hold]:
     """List the held bundles.
 
     :param workspace: The workspace.
     :param workflows: Also report the workflows each hold's members need (:attr:`Hold.workflows`), read from
         their ``job.json`` and ``state.json`` and resolved in this workspace's store.
-    :param on_read: Called after each hold is read (a long listing's progress).
     :return: The holds, by transfer id.
     """
 
-    outgoing = _outgoing(workspace)
     holds = []
-    for name in _kernel.list_names(outgoing):
-        if _TRANSFER_ID.fullmatch(name) and (read := read_manifest(outgoing / name / "bundle.json")) is not None:
-            bundle = outgoing / name
-            needed = _needed_workflows(workspace, bundle, read[1]) if workflows else None
-            holds.append(Hold.from_manifest(bundle, read[1], needed))
-        if on_read is not None:
-            on_read()
+    for name in _kernel.list_names(_outgoing(workspace)):
+        if (found := held_one(workspace, name, workflows=workflows)) is not None:
+            holds.append(found)
     return holds
+
+
+def held_names(workspace: _kernel.KernelWorkspace) -> list[str]:
+    """List the transfer ids of the held bundles by name, sorted, reading none of them.
+
+    :param workspace: The workspace.
+    :return: The transfer ids.
+    """
+
+    return [name for name in _kernel.list_names(_outgoing(workspace)) if _TRANSFER_ID.fullmatch(name)]
+
+
+def held_one(workspace: "Workspace", name: str, *, workflows: bool = False) -> Hold | None:
+    """Read one held bundle, ``transfers/outgoing/<name>/``.
+
+    :param workspace: The workspace.
+    :param name: Its transfer id.
+    :param workflows: Also report the workflows its members need (see :func:`held`).
+    :return: The hold, or ``None`` when *name* is no transfer id or the hold is gone.
+    :raises httk.workflow._bundles.BundleError: For a malformed manifest.
+    """
+
+    bundle = _outgoing(workspace) / name
+    if not _TRANSFER_ID.fullmatch(name) or (read := read_manifest(bundle / "bundle.json")) is None:
+        return None
+    needed = _needed_workflows(workspace, bundle, read[1]) if workflows else None
+    return Hold.from_manifest(bundle, read[1], needed)
 
 
 def release_hold(

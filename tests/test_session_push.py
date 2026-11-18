@@ -1023,13 +1023,17 @@ def test_other_failures_to_open_the_session_never_fall_back(
     calls = adapter_calls(monkeypatch)
     plan = jobs(near, 2)
     assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
-    transfers = outcomes(capsys)["transfers"]
-    assert [outcome["status"] for outcome in transfers] == ["failed"] * 2
+    document = outcomes(capsys)
+    # Plan §7.8: the session opens before the first hold, so one that cannot open leaves nothing held.
+    assert document["transfers"] == []
+    (error,) = document["errors"]
     reason = "ssh connection failed" if failure == "ssh 255" else "auto or off"
-    assert all("transfer session did not open" in o["message"] and reason in o["message"] for o in transfers)
+    assert "transfer session did not open" in error and reason in error
+    assert "2 selected job(s) were not attempted" in error and "--resume" in error
     assert calls == []  # no deliver: no second login
     assert len(remote.commands()) == (1 if failure == "ssh 255" else 0)
-    assert len(outgoing(near)) == 2 and all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
+    assert outgoing(near) == [] and all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
+    assert_in(near, plan)
 
 
 def test_a_failed_commit_is_retried_in_its_segment_and_later_segments_fsync_directly(
@@ -1170,7 +1174,7 @@ def test_quiet_silences_the_segment_announcements(
     assert len([line for line in lines if line.startswith("delivering")]) == 2
 
 
-def test_a_refused_segment_stops_the_push_and_takes_back_only_this_run_s_holds(
+def test_a_refused_earlier_segment_stops_the_push_before_any_new_hold(
     ssh: tuple[Path, Workspace, str, Workspace, str],
     refusing: list[Workspace],  # noqa: F811 (the fixture)
     remote: Remote,
@@ -1194,13 +1198,15 @@ def test_a_refused_segment_stops_the_push_and_takes_back_only_this_run_s_holds(
     requests = recorded_requests(monkeypatch)
     before = len(remote.commands())
     assert run(project, "--json", "-q", *selected(new), near_name, f"cluster:{far_name}") == 1
-    by_status: dict[str, list[dict[str, Any]]] = {}
-    for outcome in outcomes(capsys)["transfers"]:
-        by_status.setdefault(outcome["status"], []).append(outcome)
-    assert sorted(by_status) == ["failed", "not_moved"] and len(by_status["not_moved"]) == 2
-    assert sorted(outcome["transfer_id"] for outcome in by_status["failed"]) == held
-    assert_kept_held(by_status["failed"], near, far, far_name)
-    # The new holds were never sent: the refusal of the whole destination took them back.
+    document = outcomes(capsys)
+    transfers = document["transfers"]
+    assert [outcome["status"] for outcome in transfers] == ["failed"] * 2
+    assert sorted(outcome["transfer_id"] for outcome in transfers) == held
+    assert_kept_held(transfers, near, far, far_name)
+    # Plan §7.8: the earlier holds are driven first, and the refusal of the whole destination stops the pair before
+    # any new hold is made (T1b held them first and took them back).
+    (error,) = document["errors"]
+    assert "stopped" in error and "2 selected job(s) were not attempted" in error
     assert len(adopts(requests)) == 1
     commands = remote.commands()[before:]
     assert (len(commands), starts(commands)) == (1, 1)

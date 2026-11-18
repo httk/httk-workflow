@@ -10,6 +10,7 @@ release the hold keeping the moved jobs in SRC as ``away`` copies, which a later
 
 import argparse
 import contextlib
+import enum
 import json
 import os
 import re
@@ -19,14 +20,15 @@ import sys
 import tarfile
 import tempfile
 import time
-from collections.abc import Callable, Collection, Iterator, Sequence
+import uuid
+from collections.abc import Callable, Collection, Container, Iterator, Sequence
 from contextlib import redirect_stdout
 from copy import copy
 from dataclasses import dataclass, replace
 from functools import partial
 from io import StringIO
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, cast
+from typing import Any, BinaryIO, NamedTuple, cast
 
 from httk.core.cli import CLIContext
 
@@ -651,6 +653,45 @@ def eject_once(
     root = _kernel.claim(workspace, owner, ref)
     if root is None:
         return f"{ref.job_key} moved before it could be claimed"
+    return _eject_claimed(
+        workspace,
+        owner,
+        root,
+        destination,
+        tree=tree,
+        locator=locator,
+        destination_workspace_id=destination_workspace_id,
+        owner_key=owner_key,
+        workflows=workflows,
+    )
+
+
+def _eject_claimed(
+    workspace: Workspace,
+    owner: _kernel.Owner,
+    root: _kernel.OwnedJob,
+    destination: Path | None,
+    *,
+    tree: bool,
+    locator: str | None = None,
+    destination_workspace_id: str | None = None,
+    owner_key: str | None = None,
+    workflows: bool = False,
+) -> _moving.EjectReport | _moving.Hold | str:
+    """Eject or hold the claimed *root*, as :func:`eject_once` does once it won the claim.
+
+    :param workspace: The workspace.
+    :param owner: The ejecting owner.
+    :param root: The claimed job.
+    :param destination: Where the bundle goes; ``None`` holds it in ``transfers/outgoing/``.
+    :param tree: Move the job's descendants too.
+    :param locator: The transfer destination a hold records.
+    :param destination_workspace_id: The destination workspace's id a hold records.
+    :param owner_key: The optional key that may control the adopted root through the workspace daemon.
+    :param workflows: Have a hold report the workflows its members need.
+    :return: The report (the hold, when held), or why it cannot move now.
+    """
+
     try:
         if destination is not None:
             return _moving.eject(workspace, owner, root, destination=destination, tree=tree, owner_key=owner_key)
@@ -682,48 +723,40 @@ def adopt_document(report: _moving.AdoptReport) -> dict[str, object]:
 
 
 def _holds(
-    src: _End,
-    context: CLIContext,
-    arguments: argparse.Namespace,
-    *,
-    workflows: bool = True,
-    source: "_SourceSession | None" = None,
+    src: _End, context: CLIContext, arguments: argparse.Namespace, *, workflows: bool = True
 ) -> list[_moving.Hold]:
-    """The holds of *src*; a local *src* reports their workflows only with *workflows*. A remote *src* answers
-    ``transfer status --json``, with one ``holds`` request on the pull's transfer session (*source*) when it serves
-    one."""
+    """The holds of *src*, all at once; a local *src* reports their workflows only with *workflows*, a remote one
+    answers ``transfer status --json``."""
 
     if src.workspace is not None:
         return _moving.held(src.workspace, workflows=workflows)
-    session = None if source is None else source.get()
-    document: Any = None
-    if session is not None:
-        assert source is not None
-        first = source.first_request()
-        response = session.request("holds", {"workspace": src.plain})
-        if response.get("ok") is not True and response.get("too_large") is True and first:
-            # Nothing was changed: the whole command takes the adapter operations.
-            source.fall_back(f"transfer status on {src.locator}: {response.get('error')}")
-            session = None
-        elif response.get("ok") is not True:
-            raise RuntimeError(f"transfer status failed on {src.locator}: {response.get('error')}")
-        else:
-            document = response.get("document")
-    if session is None:
-        code, out, err = _remote(src, context, arguments, [*REMOTE_TRANSFER_STATUS_COMMAND, "--json", src.plain])
-        if code:
-            raise RuntimeError(f"transfer status failed on {src.locator}: {err.strip()}")
-        document = json.loads(out)
+    code, out, err = _remote(src, context, arguments, [*REMOTE_TRANSFER_STATUS_COMMAND, "--json", src.plain])
+    if code:
+        raise RuntimeError(f"transfer status failed on {src.locator}: {err.strip()}")
+    document = json.loads(out)
     if not isinstance(document, dict) or not isinstance(document.get("holds"), list):
         raise ValueError(f"{src.locator} returned an invalid transfer status")
     return [_moving.Hold.from_mapping(hold) for hold in document["holds"]]
 
 
-def _parent_here(
-    ref: _kernel.JobRef, present: set[str], *, step: bool
-) -> tuple[bool, str | None, str | None, str | None]:
-    """Return whether *ref* moves only with its root, (with *step*) its step or why that is unknown, and the job
-    id of its ``job.json`` parent (``None`` without one, or when ``job.json`` is unreadable).
+class _Parentage(NamedTuple):
+    """What :func:`_parent_here` read of a job."""
+
+    #: It moves only with its root: a non-detached child of a job present here.
+    deferred: bool
+    #: Its step (when asked for).
+    step: str | None
+    #: Why its step is unknown (when asked for).
+    damage: str | None
+    #: The job id of its ``job.json`` parent; ``None`` without one, or when ``job.json`` is unreadable.
+    parent: str | None
+    #: Its ``job.json`` (or, when its step was asked for, its ``state.json``) could not be read.
+    unreadable: bool
+
+
+def _parent_here(ref: _kernel.JobRef, present: Container[str], *, step: bool) -> _Parentage:
+    """Return whether *ref* moves only with its root, (with *step*) its step or why that is unknown, the job id of
+    its ``job.json`` parent, and whether a document could not be read.
 
     A job moves only in its root's tree when it is a non-detached child of a job
     in *present*. ``state.json`` is read only for such a child or for the step.
@@ -731,15 +764,24 @@ def _parent_here(
 
     job, job_error = read_job(ref)
     if job is None:
-        return False, None, f"{ref.job_key}: {job_error}" if step else None, None
+        return _Parentage(False, None, f"{ref.job_key}: {job_error}" if step else None, None, True)
     parent = None if job.parent is None else str(job.parent.get("job_id"))
     child = parent is not None and parent in present
     if not (child or step):
-        return False, None, None, parent
+        return _Parentage(False, None, None, parent, False)
     doc, state_error = read_state(ref)
     if step and state_error is not None:
-        return False, None, f"{ref.job_key}: its step is unknown: {state_error}", parent
-    return child and (doc is None or doc.detached is None), current_step(job, doc) if step else None, None, parent
+        return _Parentage(False, None, f"{ref.job_key}: its step is unknown: {state_error}", parent, True)
+    deferred = child and (doc is None or doc.detached is None)
+    return _Parentage(deferred, current_step(job, doc) if step else None, None, parent, False)
+
+
+def _deferred_note(left: int, workspace: Workspace, tree: bool) -> str:
+    """The note on the *left* selected jobs that move only with their root."""
+
+    return f"{left} selected job(s) have a parent in {workspace.root} and move only with their root " + (
+        "(detach them to move them alone)" if tree else "(use --tree, or detach them)"
+    )
 
 
 def hold_selected(
@@ -751,15 +793,13 @@ def hold_selected(
     locator: str,
     destination_id: str | None,
     workflows: bool,
-    progress: Callable[[str, int | None], object] | None = None,
-    before_holding: Callable[[int], object] | None = None,
 ) -> list[_moving.Hold]:
-    """Hold every job the selection of *arguments* names in the local *workspace* for a transfer to *locator*.
+    """Hold every job the selection of *arguments* names in the local *workspace* for a transfer to *locator*, all
+    of them before anything is driven (``job transfer --hold``; a transfer holds page by page, :class:`_Selection`).
 
     The selection is ``jobs``, ``state``, ``step``, ``placement`` and ``tree`` as ``job transfer`` parses them; a
     job that cannot move is an error appended to *errors*. Notes (a job left out by ``--step``, children that move
-    only with their root) go to standard error. ``job transfer`` on a local SRC, ``job transfer --hold`` and the
-    transfer session's ``hold`` op share this.
+    only with their root) go to standard error.
 
     :param workspace: The source workspace.
     :param context: The CLI invocation (``--job`` selectors resolve against its working directory).
@@ -768,46 +808,23 @@ def hold_selected(
     :param locator: The destination each hold records.
     :param destination_id: The destination workspace's id each hold records, if known.
     :param workflows: Have each hold report the workflows its members need.
-    :param progress: Told ``list`` with the selectors resolved and jobs looked at while the selection is resolved,
-        then, right before the command's owner is registered (from when on anything may have changed), ``hold`` with
-        the selected roots handled so far (held or not).
-    :param before_holding: Told how many roots were selected once the selection is resolved, before the owner is
-        registered; it may raise to hold nothing.
     :return: The holds made, in the order they were made.
     """
 
-    tell = progress or (lambda _phase, _count: None)
     holds: list[_moving.Hold] = []
-    looked = 0
-
-    def look() -> None:
-        nonlocal looked
-        looked += 1
-        tell("list", looked)
-
-    def selectors() -> Iterator[str]:
-        for selector in arguments.jobs:
-            yield selector
-            look()  # resolved by the time the next one is asked for
-
-    tell("list", looked)
     require_cli_modifiable(workspace)
-    refs = resolve_job_selectors(workspace, context.cwd, selectors())
+    refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
     steps = None if arguments.step is None else frozenset(arguments.step)
     if steps is not None:
         named, refs = refs, []
         for ref in named:
-            look()
-            _, step, damage, _ = _parent_here(ref, set(), step=True)
-            if damage is not None:
-                errors.append(damage)
-            elif step in steps:
+            found = _parent_here(ref, set(), step=True)
+            if found.damage is not None:
+                errors.append(found.damage)
+            elif found.step in steps:
                 refs.append(ref)
             else:
-                print(
-                    f"{ref.job_key} is at step {step}, not --step {', '.join(sorted(steps))}: left out",
-                    file=sys.stderr,
-                )
+                print(_left_out(ref, found.step, steps), file=sys.stderr)
     children: list[_kernel.JobRef] = []
     # Held one by one: the --job selectors, then (concurrently, unless a listed root has its parent here, whose
     # hold looks at that parent's children) the listed roots.
@@ -816,29 +833,21 @@ def hold_selected(
         seen = {ref.job_id for ref in refs}
         # Listed in full first: holding moves jobs out of the directories the listing walks.
         states = arguments.state or _MOVABLE_STATES
-        listed = []
-        for ref in iter_jobs(workspace, states, placement_prefix=arguments.placement):
-            look()
-            listed.append(ref)
-        present = set()
-        for ref in iter_jobs(workspace):
-            look()
-            present.add(ref.job_id)
+        listed = list(iter_jobs(workspace, states, placement_prefix=arguments.placement))
+        present = {ref.job_id for ref in iter_jobs(workspace)}
         for ref in listed:
             if ref.job_id not in seen:
-                look()
                 seen.add(ref.job_id)
-                parent_here, step, damage, parent = _parent_here(ref, present, step=steps is not None)
-                if damage is not None:
-                    errors.append(damage)
+                found = _parent_here(ref, present, step=steps is not None)
+                if found.damage is not None:
+                    errors.append(found.damage)
                     continue
-                if steps is not None and step not in steps:
+                if steps is not None and found.step not in steps:
                     continue
                 # A child whose parent is here moves only in its root's tree, never on its own.
-                (children if parent_here else refs).append(ref)
-                sequential = sequential or (not parent_here and parent in present)
+                (children if found.deferred else refs).append(ref)
+                sequential = sequential or (not found.deferred and found.parent in present)
     moving: set[str] = set()
-    handled = 0
 
     def hold_one(ref: _kernel.JobRef) -> _moving.Hold | str:
         try:
@@ -858,19 +867,13 @@ def hold_selected(
         return outcome
 
     def record(_index: int, outcome: _moving.Hold | str) -> None:
-        nonlocal handled
         if isinstance(outcome, str):
             errors.append(outcome)
         else:
             holds.append(outcome)
             moving.update(outcome.members)
-        handled += 1
-        tell("hold", handled)
 
-    if before_holding is not None:
-        before_holding(len(refs))
     workers = workspace.io_workers
-    tell("hold", handled)  # before the owner's registration, which may leave state behind
     with _owner(workspace, "job transfer") as owner:
         for index, ref in enumerate(refs):
             if index == explicit and not sequential and workers > 1:
@@ -882,12 +885,508 @@ def hold_selected(
                 continue  # it went with an earlier selected tree
             record(index, hold_one(ref))
     if left := sum(ref.job_key not in moving for ref in children):
-        print(
-            f"{left} selected job(s) have a parent in {workspace.root} and move only with their root "
-            + ("(detach them to move them alone)" if arguments.tree else "(use --tree, or detach them)"),
-            file=sys.stderr,
-        )
+        print(_deferred_note(left, workspace, arguments.tree), file=sys.stderr)
     return holds
+
+
+def _left_out(ref: _kernel.JobRef, step: str | None, steps: frozenset[str]) -> str:
+    """The note on a ``--job`` selection left out by ``--step``."""
+
+    return f"{ref.job_key} is at step {step}, not --step {', '.join(sorted(steps))}: left out"
+
+
+#: A page of a paged selection (plan §7.8) is decided before anything of it is held: it closes after this many
+#: candidates to attempt (each makes at most one hold), ...
+_PAGE_HOLDS = 256
+#: ... this many errors, ...
+_PAGE_ERRORS = 256
+#: ... or this many candidates scanned; while it is held, it stops once its holds carry this many job keys (checked
+#: between sub-batches of ``io.workers`` roots, so it may overshoot by one sub-batch; a tree is never split).
+_PAGE_SCANNED = 4096
+_PAGE_MEMBERS = 16384
+
+
+class _Ids(Container[str]):
+    """A set of job UUIDs kept as 16-byte values (a snapshot's)."""
+
+    __slots__ = ("_ids",)
+
+    def __init__(self) -> None:
+        self._ids: set[bytes] = set()
+
+    def add(self, job_id: str) -> None:
+        """Add *job_id*.
+
+        :param job_id: A job UUID.
+        """
+
+        self._ids.add(uuid.UUID(job_id).bytes)
+
+    def __contains__(self, job_id: object) -> bool:
+        try:
+            return uuid.UUID(str(job_id)).bytes in self._ids
+        except ValueError:
+            return False
+
+
+class _Attempt(NamedTuple):
+    """A candidate a page decided to hold."""
+
+    ref: _kernel.JobRef
+    #: Named by ``--job`` (held one at a time, in order; re-located once when it moved).
+    explicit: bool
+    #: Its hold looks at another selected job's children (a listed root whose parent is here): held one at a time.
+    serial: bool
+    #: Re-located already.
+    relocated: bool = False
+
+
+class _NotHeld(enum.Enum):
+    """Why an attempt made no hold and is no error."""
+
+    #: A listed job that changed since the listing (its claim missed): counted.
+    CHANGED = "changed"
+    #: A re-located ``--job`` job no longer at a ``--step`` step: left out with its line.
+    LEFT_OUT = "left out"
+
+
+@dataclass(frozen=True)
+class _Page:
+    """One page of a :class:`_Selection`, held."""
+
+    #: The holds made, in order.
+    holds: list[_moving.Hold]
+    #: The page's errors.
+    errors: list[str]
+    #: Listed jobs left out because they changed since the listing.
+    changed: int
+    #: Nothing of the selection is left.
+    done: bool
+
+
+def _key_id(job_key: str) -> bytes:
+    """The job UUID a job key ends with, as 16 bytes."""
+
+    return uuid.UUID(job_key[-36:]).bytes
+
+
+class _Selection:
+    """The selection of one transfer from a local SRC, held page by page (plan §7.8).
+
+    Constructing it resolves and validates the ``--job`` selectors (step 0: a bad one raises, before anything is
+    held); :meth:`snapshot` then takes the ``--state``/``--placement`` listing and the ids present in SRC once
+    (step 2); :meth:`next_page` decides and holds the next page (step 3), and :meth:`note` is the note on the jobs
+    left to move with their root once the last page is held. Per candidate, in order (the ``--job`` refs first): a
+    job that went with an earlier hold of this selection (:attr:`moving`) is passed over unread; a listed one whose
+    documents are gone (or whose claim misses) changed since the listing and is counted, a ``--job`` one is re-located
+    by id once (and its step read again); the parent rule and ``--step`` apply as :func:`hold_selected` applies them.
+
+    :param workspace: The source workspace.
+    :param cwd: The directory ``--job`` selectors resolve against.
+    :param arguments: The selection: ``jobs``, ``state``, ``step``, ``placement`` and ``tree``.
+    :param locator: The destination each hold records.
+    :param destination_id: The destination workspace's id each hold records, if known.
+    :param workflows: Have each hold report the workflows its members need.
+    :param tell: Told ``list`` with the selectors resolved and jobs looked at, and ``hold`` with the attempts of a
+        page made, from right before the page's owner is registered (from when on anything may have changed).
+    :raises ValueError: For a selector that names no job (or the other errors of resolving one).
+    """
+
+    def __init__(
+        self,
+        workspace: Workspace,
+        cwd: Path,
+        arguments: argparse.Namespace,
+        *,
+        locator: str,
+        destination_id: str | None,
+        workflows: bool,
+        tell: Callable[[str, int | None], object] | None = None,
+    ) -> None:
+        self.workspace = workspace
+        self._locator, self._destination_id, self._workflows = locator, destination_id, workflows
+        self._tell = tell or (lambda _phase, _count: None)
+        self._looked = 0
+        self._tell("list", 0)
+        require_cli_modifiable(workspace)
+        self._explicit = resolve_job_selectors(workspace, cwd, self._resolving(arguments.jobs))
+        self._steps = None if arguments.step is None else frozenset(arguments.step)
+        self._listing = bool(arguments.state or (self._steps is not None and not arguments.jobs))
+        self._states = tuple(arguments.state or _MOVABLE_STATES)
+        self._placement: str | None = arguments.placement
+        self._tree = bool(arguments.tree)
+        #: The snapshot: each listed job as ``(state, placement, name)``; taken once (``_snapshot``).
+        self._listed: list[tuple[str, str, str]] = []
+        self._present = _Ids()
+        self._snapshot = not self._listing
+        self._cursor = 0
+        #: Decided candidates a page's limits left for the next one.
+        self._pending: list[_Attempt] = []
+        #: The job keys this selection's holds took.
+        self.moving: set[str] = set()
+        self._deferred: set[str] = set()
+        #: The ids of the candidates no page looked at yet, and those of them that moved with an earlier hold.
+        self._unconsumed = {uuid.UUID(ref.job_id).bytes for ref in self._explicit}
+        self._ahead: set[bytes] = set()
+        #: The attempts made (held, failed or left out), cumulative.
+        self._attempted = 0
+
+    def _look(self) -> None:
+        self._looked += 1
+        self._tell("list", self._looked)
+
+    def _resolving(self, selectors: Sequence[str]) -> Iterator[str]:
+        for selector in selectors:
+            yield selector
+            self._look()  # resolved by the time the next one is asked for
+
+    @property
+    def candidates(self) -> int:
+        """How many candidates the selection has: the ``--job`` refs and the listed jobs."""
+
+        return len(self._explicit) + len(self._listed)
+
+    @property
+    def snapshotted(self) -> bool:
+        """Whether the listing was taken (or the selection needs none)."""
+
+        return self._snapshot
+
+    @property
+    def consumed(self) -> int:
+        """The candidates looked at and the attempts made or retired (gone with an earlier tree) so far: it grows with
+        every page that is not empty."""
+
+        return self._cursor + self._attempted
+
+    @property
+    def done(self) -> bool:
+        """Whether no candidate is left."""
+
+        return self._snapshot and not self._pending and self._cursor >= self.candidates
+
+    def snapshot(self, tell: Callable[[str, int | None], object] | None = None) -> None:
+        """Take the listing of the selected states (under the placement) and the ids of every job present in SRC
+        (``owned/`` and ``away/`` included) once (step 2), de-duplicated against the ``--job`` refs; a later call does
+        nothing. Nothing is taken when this raises.
+
+        :param tell: Told the progress instead of the selection's own *tell* from now on.
+        """
+
+        if tell is not None:
+            self._tell = tell
+        if self._snapshot:
+            return
+        seen = _Ids()
+        for ref in self._explicit:
+            seen.add(ref.job_id)
+        listed: list[tuple[str, str, str]] = []
+        ids: set[bytes] = set()
+        for ref in iter_jobs(self.workspace, self._states, placement_prefix=self._placement):
+            self._look()
+            if ref.job_id not in seen:
+                seen.add(ref.job_id)
+                listed.append((sys.intern(ref.state), sys.intern(str(ref.placement)), ref.path.name))
+                ids.add(uuid.UUID(ref.job_id).bytes)
+        present = _Ids()
+        for ref in iter_jobs(self.workspace):
+            self._look()
+            present.add(ref.job_id)
+        self._listed, self._present, self._snapshot = listed, present, True
+        self._unconsumed |= ids
+
+    def remaining(self) -> int:
+        """How many selected jobs no page attempted yet, those that moved with an earlier hold not counted.
+
+        :return: The count.
+        """
+
+        pending = sum(attempt.ref.job_key not in self.moving for attempt in self._pending)
+        return self.candidates - self._cursor - len(self._ahead) + pending
+
+    def note(self) -> str | None:
+        """The note on the selected jobs that move only with their root (and were not moved with it).
+
+        :return: The note, or ``None`` when there are none.
+        """
+
+        left = len(self._deferred - self.moving)
+        return _deferred_note(left, self.workspace, self._tree) if left else None
+
+    def _candidate(self, index: int) -> tuple[_kernel.JobRef, bool]:
+        if index < len(self._explicit):
+            return self._explicit[index], True
+        state, placement, name = self._listed[index - len(self._explicit)]
+        where = PurePosixPath(placement)
+        return _kernel.JobRef.from_path(self.workspace.jobs / state / where / name, state=state, placement=where), False
+
+    def _relocate(self, ref: _kernel.JobRef) -> _kernel.JobRef | None:
+        """Find a ``--job`` ref that moved, by id at its placement (``owned/`` included): unowned elsewhere, or
+        ``None``."""
+
+        found = _kernel.locate(self.workspace, ref.job_id, placement_hint=ref.placement)
+        return found if found is not None and found.state != _kernel.OWNED and found.path != ref.path else None
+
+    def _decide(
+        self, ref: _kernel.JobRef, explicit: bool, deferred: list[str], changed: list[str], *, relocated: bool = False
+    ) -> _Attempt | str | None:
+        """Decide one candidate: an attempt, an error, or ``None`` (left out: by ``--step``, as a child that moves only
+        with its root, or as changed since the listing, which *changed* records)."""
+
+        steps = self._steps
+        if explicit and steps is None:
+            return _Attempt(ref, True, True, relocated)
+        found = _parent_here(ref, frozenset() if explicit else self._present, step=steps is not None)
+        if found.unreadable and _gone(ref.path):
+            if not explicit:
+                changed.append(ref.job_key)
+                return None
+            if not relocated and (moved := self._relocate(ref)) is not None:
+                return self._decide(moved, True, deferred, changed, relocated=True)
+            return f"{ref.job_key} moved before it could be claimed"
+        if found.damage is not None:
+            return found.damage
+        if steps is not None and found.step not in steps:
+            if explicit:
+                print(_left_out(ref, found.step, steps), file=sys.stderr)
+            return None
+        if explicit:
+            return _Attempt(ref, True, True, relocated)
+        if found.deferred:
+            # A child whose parent is here moves only in its root's tree, never on its own.
+            deferred.append(ref.job_key)
+            return None
+        return _Attempt(ref, False, found.parent is not None and found.parent in self._present)
+
+    def _recheck(self, ref: _kernel.JobRef) -> str | _NotHeld | None:
+        """Check a ``--job`` ref re-located at its claim as it was decided (its ``--step``; never the parent rule): an
+        error, :attr:`_NotHeld.LEFT_OUT`, or ``None`` to claim it."""
+
+        if self._steps is None:
+            return None
+        found = _parent_here(ref, frozenset(), step=True)
+        if found.unreadable and _gone(ref.path):
+            return f"{ref.job_key} moved before it could be claimed"
+        if found.damage is not None:
+            return found.damage
+        if found.step not in self._steps:
+            print(_left_out(ref, found.step, self._steps), file=sys.stderr)
+            return _NotHeld.LEFT_OUT
+        return None
+
+    def next_page(
+        self,
+        *,
+        holds: int | None,
+        errors: int | None,
+        scanned: int | None,
+        members: int | None,
+        measure: Callable[[_moving.Hold | str], int] | None = None,
+        budget: int | None = None,
+        tell: Callable[[str, int | None], object] | None = None,
+    ) -> _Page:
+        """Decide the next page, then hold it under one owner, closed before this returns.
+
+        The page closes after *holds* candidates to attempt (the attempts an earlier page left count first), *errors*
+        errors or *scanned* candidates looked at (``None``: no such limit); the attempts are then made in order: the
+        ``--job`` refs one at a time, the listed roots pooled over ``io.workers`` unless one of them has its parent
+        here. Once the page has *errors* errors (deciding and holding together), its holds carry *members* job keys, or
+        its errors and holds measure *budget* (each as *measure* says), checked between attempts (between sub-batches
+        of ``io.workers`` roots when pooled), the rest of its attempts are left for the next page.
+
+        :param holds: The most candidates attempted.
+        :param errors: The most errors.
+        :param scanned: The most candidates looked at.
+        :param members: The job keys at which holding stops.
+        :param measure: The size of a hold or an error in the page's answer.
+        :param budget: The size at which holding stops.
+        :param tell: Told the page's progress instead of the selection's own *tell*.
+        :return: The page.
+        """
+
+        tell = tell or self._tell
+        self.snapshot()  # taken already (step 2), or now: a page never runs without its listing
+        if self.done:
+            return _Page([], [], 0, True)
+        found: list[str] = []
+        changed: list[str] = []
+        deferred: list[str] = []
+        consumed: list[bytes] = []
+        carried = self._pending if holds is None else self._pending[:holds]
+        later = self._pending[len(carried) :]
+        batch = list(carried)
+        cursor, looked = self._cursor, 0
+        while (
+            not later
+            and cursor < self.candidates
+            and (holds is None or len(batch) < holds)
+            and (errors is None or len(found) < errors)
+            and (scanned is None or looked < scanned)
+        ):
+            ref, explicit = self._candidate(cursor)
+            cursor += 1
+            looked += 1
+            consumed.append(uuid.UUID(ref.job_id).bytes)
+            tell("list", looked)
+            if ref.job_key in self.moving:
+                continue  # it went with an earlier hold: nothing read
+            decided = self._decide(ref, explicit, deferred, changed)
+            if isinstance(decided, _Attempt):
+                batch.append(decided)
+            elif decided is not None:
+                found.append(decided)
+        tell("hold", 0)
+        # Committed before the owner's registration, from when on anything may have changed.
+        self._cursor, self._pending = cursor, later
+        self._deferred.update(deferred)
+        for job_id in consumed:
+            if job_id in self._ahead:
+                self._ahead.discard(job_id)
+            else:
+                self._unconsumed.discard(job_id)
+        made: list[_moving.Hold] = []
+        size = 0 if measure is None else sum(measure(error) for error in found)
+        held = handled = missed = 0
+
+        def full() -> bool:
+            return (
+                (members is not None and held >= members)
+                or (budget is not None and size >= budget)
+                or (errors is not None and len(found) >= errors)
+            )
+
+        def hold_one(attempt: _Attempt) -> _moving.Hold | str | _NotHeld:
+            ref = attempt.ref
+            try:
+                root = _kernel.claim(self.workspace, owner, ref)
+                relocate = root is None and attempt.explicit and not attempt.relocated
+                if relocate and (moved := self._relocate(ref)) is not None:
+                    ref = moved
+                    if (rechecked := self._recheck(ref)) is not None:
+                        return rechecked
+                    root = _kernel.claim(self.workspace, owner, ref)
+                if root is None:
+                    # A listed job that changed since the listing is left out, counted; a --job one is an error.
+                    return f"{ref.job_key} moved before it could be claimed" if attempt.explicit else _NotHeld.CHANGED
+                outcome = _eject_claimed(
+                    self.workspace,
+                    owner,
+                    root,
+                    None,
+                    tree=self._tree,
+                    locator=self._locator,
+                    destination_workspace_id=self._destination_id,
+                    workflows=self._workflows,
+                )
+            except _ERRORS as exc:
+                return f"{ref.job_key}: {exc}"
+            assert not isinstance(outcome, _moving.EjectReport)
+            return outcome
+
+        def record(_index: int, outcome: _moving.Hold | str | _NotHeld) -> None:
+            nonlocal handled, held, size, missed
+            if outcome is _NotHeld.CHANGED:
+                missed += 1
+            elif isinstance(outcome, str):
+                found.append(outcome)
+                size += 0 if measure is None else measure(outcome)
+            elif isinstance(outcome, _moving.Hold):
+                made.append(outcome)
+                self.moving.update(outcome.members)
+                for key in outcome.members:
+                    if (job_id := _key_id(key)) in self._unconsumed:
+                        self._unconsumed.discard(job_id)
+                        self._ahead.add(job_id)
+                held += len(outcome.members)
+                size += 0 if measure is None else measure(outcome)
+            handled += 1
+            self._attempted += 1
+            tell("hold", handled)
+
+        named = [attempt for attempt in batch if attempt.explicit]
+        listed = [attempt for attempt in batch if not attempt.explicit]
+        workers = self.workspace.io_workers
+        pooled = workers > 1 and not any(attempt.serial for attempt in listed)
+        step = workers if pooled else 1
+        leftover: list[_Attempt] = []
+        if not batch:
+            return _Page([], found, len(changed), self.done)  # nothing to attempt: no owner
+        try:
+            registered = _owner(self.workspace, "job transfer")
+        except BaseException:
+            self._pending = [*batch, *self._pending]  # nothing attempted: left for a later page
+            raise
+        with registered as owner:
+            for index, attempt in enumerate(named):
+                if full():
+                    leftover = [*named[index:], *listed]
+                    break
+                if attempt.ref.job_key not in self.moving:
+                    record(index, hold_one(attempt))
+                else:
+                    self._attempted += 1  # it went with an earlier selected tree: retired, nothing claimed
+            else:
+                start = 0
+                while start < len(listed):
+                    if full():
+                        leftover = listed[start:]
+                        break
+                    # No more attempts at once than errors the page may still take: the rest stays for later.
+                    width = step if errors is None else max(min(step, errors - len(found)), 1)
+                    batch_attempts, start = listed[start : start + width], start + width
+                    # Pooled: disjoint trees, since no listed root has a parent here, so none is in another's tree.
+                    run = [attempt for attempt in batch_attempts if attempt.ref.job_key not in self.moving]
+                    self._attempted += len(batch_attempts) - len(run)  # retired: they went with an earlier tree
+                    if pooled:
+                        run_batch(owner, hold_one, run, workers, emit=record)
+                        continue
+                    for attempt in run:
+                        if attempt.ref.job_key not in self.moving:
+                            record(0, hold_one(attempt))
+                        else:
+                            self._attempted += 1
+        self._pending = [*leftover, *self._pending]
+        return _Page(made, found, len(changed) + missed, self.done)
+
+
+def _gone(path: Path) -> bool:
+    """Whether *path* no longer exists (a job that moved since it was listed)."""
+
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _held_pages(
+    workspace: Workspace, names: list[str], destination: str | None, *, workflows: bool
+) -> Iterator[tuple[list[_moving.Hold], bool]]:
+    """The holds of a local SRC among *names* (its transfer ids, listed once) bound for *destination* (every one
+    when ``None``), a page at a time, each read when its page is (a name gone since the listing is passed over).
+
+    :param workspace: The source workspace.
+    :param names: The transfer ids, in order.
+    :param destination: The destination locator, or ``None``.
+    :param workflows: Report the workflows each hold's members need.
+    :yields: The pages, none of them empty, each with whether names are left after it.
+    """
+
+    index = 0
+    while index < len(names):
+        page: list[_moving.Hold] = []
+        members = looked = 0
+        while index < len(names) and len(page) < _PAGE_HOLDS and members < _PAGE_MEMBERS and looked < _PAGE_SCANNED:
+            hold = _moving.held_one(workspace, names[index], workflows=workflows)
+            index += 1
+            looked += 1
+            if hold is not None and destination in (None, hold.destination_locator):
+                page.append(hold)
+                members += len(hold.members)
+        if page:
+            yield page, index < len(names)
 
 
 def hold_document(
@@ -895,9 +1394,8 @@ def hold_document(
     holds: list[_moving.Hold],
     locator: str,
     errors: list[str],
-    progress: Callable[[str, int | None], object] | None = None,
 ) -> dict[str, Any]:
-    """Return the document ``job transfer --hold --json`` prints (and the transfer session's ``hold`` op answers).
+    """Return the document ``job transfer --hold --json`` prints.
 
     Besides the new *holds* and the *errors*, it lists the other holds of *workspace* already bound for *locator*
     (``held_before``), so that a client needs no ``transfer status`` call; their workflows are resolved for these
@@ -907,22 +1405,12 @@ def hold_document(
     :param holds: The holds just made.
     :param locator: The destination they record.
     :param errors: The errors of the hold.
-    :param progress: Told ``list`` with the holds read so far (the listing, then the workflows of the earlier ones).
     :return: ``{"holds", "held_before", "errors"}``.
     """
 
-    tell = progress or (lambda _phase, _count: None)
-    read_count = 0
-
-    def one() -> None:
-        nonlocal read_count
-        read_count += 1
-        tell("list", read_count)
-
-    tell("list", read_count)
     new = {hold.transfer_id for hold in holds}
     before = []
-    for hold in _moving.held(workspace, on_read=one):
+    for hold in _moving.held(workspace):
         if hold.destination_locator != locator or hold.transfer_id in new:
             continue
         try:
@@ -931,7 +1419,6 @@ def hold_document(
             read = None  # changed since it was listed: reported without workflows, as by an older SRC
         needed = None if read is None else _moving._needed_workflows(workspace, Path(hold.path), read[1])
         before.append(replace(hold, workflows=needed).as_mapping())
-        one()
     return {"holds": [hold.as_mapping() for hold in holds], "held_before": before, "errors": errors}
 
 
@@ -941,17 +1428,12 @@ def _hold_jobs(
     context: CLIContext,
     arguments: argparse.Namespace,
     errors: list[str],
-    source: "_SourceSession | None" = None,
 ) -> tuple[list[_moving.Hold], list[_moving.Hold] | None]:
-    """Step 1: hold every selected job on *src*, recording *dst* and its id when known; a job that cannot move is
-    an error.
+    """Step 1 of hold-everything-first (``job transfer --hold``, and a remote *src* on the adapter path): hold every
+    selected job on *src*, recording *dst* and its id when known; a job that cannot move is an error.
 
     The result is the new holds, and for a remote *src* the other holds it reported bound for *dst*
-    (``held_before``), or ``None`` (a local *src*, or a hold call that printed no document). A remote *src* is held
-    over the pull's transfer session (*source*) when it serves one: one ``hold`` request for the whole selection.
-    When that session cannot open (other than by not being served) or fails during the hold, the result is no holds
-    and an empty ``held_before``, so that nothing is driven: nothing was held, or what was is left held there for
-    ``--resume``.
+    (``held_before``), or ``None`` (a local *src*, or a hold call that printed no document).
     """
 
     if src.workspace is not None:
@@ -962,27 +1444,9 @@ def _hold_jobs(
             errors,
             locator=dst.locator,
             destination_id=dst.workspace_id,
-            # Only --hold prints the holds; a transfer drives them from the source's listing.
             workflows=arguments.hold,
         )
         return held, None
-    for selector in arguments.jobs:
-        try:
-            canonical_uuid(selector, "JOB")
-        except (WorkflowError, ValueError) as exc:
-            raise ValueError(f"a remote source requires canonical job ids: {selector!r}") from exc
-    try:
-        session = None if source is None else source.get()
-    except _ERRORS as exc:
-        errors.append(f"{src.locator}: the transfer session did not open: {exc}; nothing was held")
-        return [], []
-    if session is not None:
-        assert source is not None
-        source.first_request()
-        try:
-            return _hold_over_session(session, src, dst, arguments, errors)
-        except _TooLarge as exc:
-            source.fall_back(str(exc))  # nothing was held: the adapter's hold call holds the selection
     holds: list[_moving.Hold] = []
     before: list[_moving.Hold] | None = []
     argv = [*REMOTE_JOB_TRANSFER_COMMAND, "--hold", "--json", *(["--tree"] if arguments.tree else [])]
@@ -1029,65 +1493,6 @@ def _hold_jobs(
         before = None if before is None or earlier is None else [*before, *earlier]
         errors.extend(str(error) for error in document["errors"])
         sys.stderr.write(err)  # the far side's notes, such as children left with their root
-    return holds, before
-
-
-class _TooLarge(RuntimeError):
-    """SRC refused a pull's first request because its answer would not fit one frame (``too_large``): nothing was
-    changed, and the command takes the adapter operations instead."""
-
-
-def _hold_over_session(
-    session: TransferSession, src: _End, dst: _End, arguments: argparse.Namespace, errors: list[str]
-) -> tuple[list[_moving.Hold], list[_moving.Hold] | None]:
-    """Hold the selection on a remote *src* with one ``hold`` request on the pull's *session*: what
-    :func:`_hold_jobs` returns, its document read as the adapter path reads ``job transfer --hold --json``.
-
-    :param session: The pull's transfer session.
-    :param src: The remote source end.
-    :param dst: The destination end.
-    :param arguments: The selection.
-    :param errors: Takes the errors.
-    :return: The new holds and ``held_before`` (see :func:`_hold_jobs`).
-    :raises _TooLarge: When SRC refused the hold as too large for one answer, holding nothing.
-    """
-
-    header: dict[str, Any] = {
-        "workspace": src.plain,
-        "jobs": list(arguments.jobs),
-        "state": list(arguments.state),
-        "step": list(arguments.step or []),
-        "placement": arguments.placement,
-        "tree": bool(arguments.tree),
-        "destination": dst.locator,
-        "destination_id": dst.workspace_id,
-    }
-    try:
-        response = session.request("hold", header)
-    except SessionFailed as exc:
-        # Never reconnected: whatever the far side held stays held there.
-        errors.append(
-            f"job transfer --hold on {src.locator} failed: the transfer session failed: {exc}; the jobs it may have "
-            f"held stay held there: `httk job transfer --resume {src.locator} {dst.locator}` drives them"
-        )
-        return [], []
-    sys.stderr.write(str(response.get("stderr", "")))  # the far side's notes, such as children left with their root
-    if response.get("ok") is not True and response.get("too_large") is True:
-        raise _TooLarge(f"job transfer --hold on {src.locator}: {response.get('error')}")
-    if response.get("ok") is not True:
-        # Refused before anything was held: the pass over the source's holds still re-drives the earlier ones.
-        errors.append(f"job transfer --hold on {src.locator} was refused: {response.get('error')}")
-        return [], None
-    try:
-        if not all(isinstance(response.get(key), list) for key in ("holds", "errors")):
-            raise ValueError("no hold document")
-        holds = [_moving.Hold.from_mapping(hold) for hold in response["holds"]]
-        reported = response.get("held_before")
-        before = [_moving.Hold.from_mapping(hold) for hold in reported] if isinstance(reported, list) else None
-    except (ValueError, TypeError):
-        errors.append(f"job transfer --hold on {src.locator} answered no hold document")
-        return [], None
-    errors.extend(str(error) for error in response["errors"])
     return holds, before
 
 
@@ -2014,8 +2419,8 @@ def _segments(
 
 #: The ops a push needs of its destination's transfer session, ...
 _PUSH_OPS = frozenset({"adopt", "install", "workflows"})
-#: ... and a pull of its source's.
-_PULL_OPS = frozenset({"hold", "holds", "send", "release"})
+#: ... and a pull of its source's (paged holds: a far side without them takes the adapter operations).
+_PULL_OPS = frozenset({"holds_page", "select", "hold_page", "send", "release"})
 
 
 def _push_session(
@@ -2034,13 +2439,10 @@ def _push_session(
     The session is opened with this process's terminal when it has one, so that ssh can prompt.
     """
 
+    if _session_disabled(end, context):
+        return None
     assert end.binding is not None
     target = resolve_remote(end.binding.remote, project=context.cwd)
-    if (
-        remote_settings(target.bundle).get("transfer_session") == "off"
-        or read_metadata(target.bundle).get("kind") == "mount-daemon"
-    ):
-        return None
     session = sessions.enter_context(TransferSession(target.bundle, needs=needs, timeout=arguments.adapter_timeout))
     try:
         session.open(interactive=sys.stdin.isatty())
@@ -2051,9 +2453,21 @@ def _push_session(
     return session
 
 
+def _session_disabled(end: _End, context: CLIContext) -> bool:
+    """Whether the remote *end* takes the adapter operations without being asked: its setting ``transfer_session``
+    is ``off``, or it is a ``mount-daemon`` remote."""
+
+    assert end.binding is not None
+    target = resolve_remote(end.binding.remote, project=context.cwd)
+    return (
+        remote_settings(target.bundle).get("transfer_session") == "off"
+        or read_metadata(target.bundle).get("kind") == "mount-daemon"
+    )
+
+
 class _SourceSession:
-    """The transfer session of a pull from a remote SRC: opened at the command's first request to SRC (the hold, or
-    the listing of its holds for ``--resume``), closed with the command's other sessions.
+    """The transfer session of a pull from a remote SRC: opened at the command's first request to SRC, closed with
+    the command's other sessions.
 
     :param src: The remote source end.
     :param context: The CLI invocation.
@@ -2065,37 +2479,12 @@ class _SourceSession:
         self, src: _End, context: CLIContext, arguments: argparse.Namespace, sessions: contextlib.ExitStack
     ) -> None:
         self._open = partial(_push_session, src, context, arguments, sessions, _PULL_OPS)
-        self._src = src
-        self._arguments = arguments
         self._opened = False
         self._session: TransferSession | None = None
         self._failure: str | None = None
-        self._asked = False
         #: A landing's sync commit failed in this session: every later fetch of it, for any destination, goes with an
         #: fsync of every file.
         self.fsync = False
-
-    def first_request(self) -> bool:
-        """Return whether no request was made on the session yet (true once), so that a ``too_large`` refusal of the
-        command's first request to SRC can still fall back.
-
-        :return: Whether this is the first request.
-        """
-
-        first, self._asked = not self._asked, True
-        return first
-
-    def fall_back(self, reason: str) -> None:
-        """Close the session and take the adapter operations for the rest of the command (one more login), saying
-        why in one line.
-
-        :param reason: Why the session's answer cannot carry the command.
-        """
-
-        _say(self._arguments, f"{reason}; using the adapter operations for this command")
-        if self._session is not None:
-            self._session.close()
-        self._session = None
 
     def get(self) -> TransferSession | None:
         """Return the session, opening it at the first call; ``None`` when SRC takes the adapter operations.
@@ -2682,6 +3071,50 @@ def _fail_offenders(settled: _Deliveries, holds: list[_moving.Hold], reason: str
             settled.fail([hold], reason)
 
 
+class _Pair:
+    """One (SRC, DST) pair of a command and what lives for the whole command, whatever the number of its pages
+    (plan §7.8): how it is driven, its transfer session, the pinned DST ``workspace_id``, the sticky fsync, the stop
+    and the workflow attempts.
+
+    :param dst: The destination end.
+    """
+
+    def __init__(self, dst: _End) -> None:
+        self.dst = dst
+        #: ``"page"``: each page is driven before the next is held (a local DST, a push's or a pull's transfer
+        #: session); ``"adapter"``: its holds are gathered and driven once, as before sessions; ``None`` until the
+        #: pair's first use.
+        self.mode: str | None = None
+        #: A push's transfer session to DST.
+        self.session: TransferSession | None = None
+        #: The ``workspace_id`` of the first answer, which every later delivery must report.
+        self.answered: str | None = None
+        #: The adopting workspace's id, for the releases' away copies.
+        self.destination_id: str | None = dst.workspace_id
+        #: A push's sync commit failed: every later segment goes with ``--sync fsync``.
+        self.fsync = False
+        #: Why the pair stopped: it holds and drives nothing more.
+        self.stopped: str | None = None
+        #: Holds of this pair a stop left undriven.
+        self.undriven = 0
+        #: The workflows attempted for the pair (installed and built, or failed), by id.
+        self.shipping: dict[str, dict[str, Any]] = {}
+        #: An adapter pair's holds, and those of them this run created.
+        self.held: list[_moving.Hold] = []
+        self.fresh: set[str] = set()
+
+
+def _unattempted(holds: list[_moving.Hold], attempted: Collection[str]) -> list[_moving.Hold]:
+    """*holds* with only the workflows not in *attempted* (a pair's workflow attempts)."""
+
+    return [
+        hold
+        if hold.workflows is None
+        else replace(hold, workflows=tuple(entry for entry in hold.workflows if entry[0] not in attempted))
+        for hold in holds
+    ]
+
+
 def _drive(
     src: _End,
     dst: _End,
@@ -2692,6 +3125,7 @@ def _drive(
     fresh: frozenset[str] = frozenset(),
     sessions: contextlib.ExitStack,
     source: "_SourceSession | None" = None,
+    pair: _Pair | None = None,
 ) -> list[dict[str, Any]]:
     """Copy, adopt and release a batch of holds bound for *dst*: one outcome per hold, in order.
 
@@ -2704,12 +3138,18 @@ def _drive(
     holds need are shipped to a local *dst* before the adoption, and to a remote one once after the deliveries,
     from what their adoptions reported.
 
-    From a local *src* to a remote *dst*, the deliveries go over one transfer session (opened at the first, closed
-    with *sessions*): the workflows first (:func:`_session_workflows`), then segment by segment
-    (:func:`_push_over_session`); a *dst* that serves no session gets one adapter ``deliver`` a delivery instead.
-    From a remote *src* to a local *dst*, the pull's transfer session to *src* (*source*, opened by the hold or the
-    listing of the holds) carries the workflows and then the holds, segment by segment (:func:`_pull_over_session`);
-    without one, the adapter's ``pull`` copies them a chunk at a time and ``invoke`` releases them.
+    From a local *src* to a remote *dst*, the deliveries go over the push's transfer session when there is one: the
+    workflows first (:func:`_session_workflows`), then segment by segment (:func:`_push_over_session`); a *dst* that
+    serves no session gets one adapter ``deliver`` a delivery instead. From a remote *src* to a local *dst*, the
+    pull's transfer session to *src* (*source*) carries the workflows and then the holds, segment by segment
+    (:func:`_pull_over_session`); without one, the adapter's ``pull`` copies them a chunk at a time and ``invoke``
+    releases them.
+
+    With *pair*, the batch is one page of a paged transfer (plan §7.8), or an adapter pair's gathered holds: the
+    pair's session, pinned ``workspace_id``, sticky fsync and workflow attempts carry over from its earlier pages
+    (only the workflows not attempted yet are installed and built, a local *dst*'s before the page's first
+    adoption), and a stop of this page (a session failure, an unknown outcome, a refusal naming no hold, another
+    ``workspace_id``, and from a local *src* to a local *dst* a chunk that could not be delivered) stops the pair.
 
     :param src: The end holding the jobs.
     :param dst: The destination every hold of the batch records.
@@ -2719,6 +3159,7 @@ def _drive(
     :param fresh: The transfer ids of the holds this run created in a local *src*.
     :param sessions: Closes the command's transfer sessions at its end.
     :param source: The command's transfer session to a remote *src* that a pull uses, if any.
+    :param pair: The pair whose page this is.
     :return: One outcome per hold, in the order of *holds*.
     """
 
@@ -2744,20 +3185,29 @@ def _drive(
             "httk-workflow); workflows were not shipped",
             file=sys.stderr,
         )
-    # A pull from a remote SRC over its transfer session (opened already, by the hold or the listing of the holds).
+    # A pull from a remote SRC over its transfer session (opened already, by the first request to SRC).
     pulling = source.get() if source is not None and src.workspace is None and dst.workspace is not None else None
+    # The workflows a pair attempted on an earlier page are not attempted again.
+    unattempted = ready if pair is None else _unattempted(ready, pair.shipping)
     shipping: dict[str, dict[str, Any]] = {}
+    # The session failed while the workflows were installed: none of this batch's counts as attempted.
+    unshipped = False
     # The holds whose workflows are shipped: a local DST's all, a remote DST's those of an adopting delivery.
     shipped_for = ready
     if workflows and dst.workspace is not None:
         # Once a batch, before the first adoption: a job adopted after its workflow can start at once.
-        shipping = _ship_workflows(src, dst, ready, context, arguments, session=pulling)
+        shipping = _ship_workflows(src, dst, unattempted, context, arguments, session=pulling)
+        unshipped = pulling is not None and not pulling.is_open
+        if pair is not None and not unshipped:
+            _build_shipped(dst, shipping, arguments)  # a page's adopted jobs are runnable at once
     entries: dict[str, dict[str, Any]] = {}
     destination_id = dst.workspace_id
     report: object = None
     by_id = {hold.transfer_id: hold for hold in ready}
     settled = _Deliveries(src, dst, outcomes, fresh, context, arguments)
     settled.session = pulling
+    if pair is not None:
+        settled.answered, settled.destination_id, settled.fsync = pair.answered, pair.destination_id, pair.fsync
     session: TransferSession | None = None
     if pulling is not None:
         assert source is not None
@@ -2765,10 +3215,16 @@ def _drive(
         entries = settled.entries
     elif dst.workspace is not None:
         for chunk in _chunks(list(by_id)):
+            if settled.stopped is not None:
+                message = f"not delivered, since the transfer stopped ({settled.stopped})"
+                entries.update({transfer_id: {"status": "failed", "message": message} for transfer_id in chunk})
+                continue
             try:
                 entries.update(_deliver(src, dst, [by_id[transfer_id] for transfer_id in chunk], context, arguments))
             except _ERRORS as exc:
                 entries.update({transfer_id: {"status": "failed", "message": str(exc)} for transfer_id in chunk})
+                if pair is not None and src.workspace is not None:
+                    settled.stopped = f"{dst.locator}: {exc}"  # nothing more is held for a DST that cannot take it
     elif ready:
         # The bundles travel in the stream, not on the command line; from a local SRC the holds that predate this
         # run are delivered apart from this run's, so that a refusal can take these back.
@@ -2779,7 +3235,9 @@ def _drive(
                 [hold for hold in ready if hold.transfer_id in fresh],
             ]
         deliveries = [delivery for delivery in deliveries if delivery]
-        if src.workspace is not None:
+        if src.workspace is not None and pair is not None:
+            session = pair.session  # opened (or found not served) before the pair's first hold
+        elif src.workspace is not None:
             try:
                 session = _push_session(dst, context, arguments, sessions)
             except _ERRORS as exc:
@@ -2793,7 +3251,8 @@ def _drive(
             # Before the first segment, so that each adopted segment can start at once.
             stepped = [hold for delivery in deliveries for hold in delivery]
             try:
-                shipping = _session_workflows(session, src, dst, stepped, context, arguments)
+                attempt = stepped if pair is None else _unattempted(stepped, pair.shipping)
+                shipping = _session_workflows(session, src, dst, attempt, context, arguments)
                 failure = None if session.is_open else "while installing the workflows"
             except SessionFailed as exc:
                 failure = str(exc)
@@ -2805,6 +3264,8 @@ def _drive(
                 for delivery in deliveries:
                     settled.fail(delivery, message)
                 deliveries = []
+                settled.stopped = f"{dst.locator}: the transfer session failed ({failure})"
+                unshipped = True
         if session is not None:
             _push_over_session(session, deliveries, settled)
         for delivery in deliveries if session is None else ():
@@ -2857,10 +3318,17 @@ def _drive(
             f"the jobs are in {dst.locator}, but the hold was not released: {reason}; "
             f"run `httk job transfer --resume` or {_release_remedy(arguments, transfer_id, destination_id, src, dst)}"
         )
-    if dst.workspace is not None:
+    if dst.workspace is not None and pair is None:
         _build_shipped(dst, shipping, arguments)
+    if pair is not None:
+        pair.answered, pair.destination_id, pair.fsync = settled.answered, settled.destination_id, settled.fsync
+        pair.stopped = pair.stopped or settled.stopped
+        if not unshipped:
+            pair.shipping.update(shipping)  # attempted, failures included: never attempted again for the pair
+        shipping = {**pair.shipping, **shipping}
     for hold in shipped_for:
-        if shipping and hold.workflows is not None:
+        # Reported only when every workflow of the hold was attempted (a failed session attempts none of the batch's).
+        if shipping and hold.workflows is not None and all(entry[0] in shipping for entry in hold.workflows):
             outcomes[hold.transfer_id]["workflows"] = [
                 {"id": workflow_id, **shipping[workflow_id]} for workflow_id, _, _ in hold.workflows
             ]
@@ -2882,6 +3350,7 @@ def _report(
     json_output: bool,
     source: str,
     empty: str = "no held transfers to drive",
+    changed: int | None = None,
 ) -> int:
     missing = sorted({workflow for outcome in outcomes for workflow in outcome.get("missing_workflows", ())})
     # One warning per id: a root the adoption names as missing is left to its line below.
@@ -2899,10 +3368,18 @@ def _report(
             print(f"warning: workflow {workflow_id} {entry['status']}: {entry['reason']}", file=sys.stderr)
     if missing:
         print(f"warning: these workflows are not installed, so their jobs wait: {', '.join(missing)}", file=sys.stderr)
+    if changed:
+        print(
+            f"{changed} selected job(s) changed since they were listed: left out; run again to select them",
+            file=sys.stderr,
+        )
     for error in errors:
         print(error, file=sys.stderr)
     if json_output:
-        print(json.dumps({"transfers": outcomes, "errors": errors}, indent=2, sort_keys=True))
+        document: dict[str, object] = {"transfers": outcomes, "errors": errors}
+        if changed is not None:
+            document["changed"] = changed  # a paged selection's
+        print(json.dumps(document, indent=2, sort_keys=True))
     else:
         if not outcomes and not errors:
             print(empty)
@@ -3034,85 +3511,658 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
             raise ValueError(f"SRC and DST are the same workspace: {src.locator}")
         ends[dst.locator] = dst
     errors: list[str] = []
-    known: list[_moving.Hold] | None = None
-    # The holds this run creates: only these may be taken back after a refusal (an earlier one may be adopted).
-    fresh: frozenset[str] = frozenset()
-    outcomes = []
+    outcomes: list[dict[str, Any]] = []
+    #: The listed jobs left out as changed since the listing, when the selection was paged.
+    changed: int | None = None
     # Each remote end's transfer session, closed at the end: a remote DST's of a push, a remote SRC's of a pull (a
     # remote-to-remote transfer still takes the adapter operations).
     with contextlib.ExitStack() as sessions:
-        pull = src.workspace is None and (dst is None or dst.workspace is not None)
-        source = _SourceSession(src, context, arguments, sessions) if pull else None
         if selected:
             assert dst is not None
             if dst.workspace is not None:
                 # Before anything is held: a destination that cannot take the jobs would only leave them held.
                 require_cli_modifiable(dst.workspace)
-            what = [f"{len(arguments.jobs)} job(s)"] if arguments.jobs else []
-            what += [f"every {state} job" for state in arguments.state]
-            at = f" at step {' or '.join(arguments.step)}" if arguments.step else ""
-            _say(arguments, f"holding {', '.join(what or ['every job'])}{at} on {src.locator}")
-            held, before = _hold_jobs(src, dst, context, arguments, errors, source)
-            fresh = frozenset(hold.transfer_id for hold in held)
-            if before is not None:
-                # A remote SRC listed the other holds bound for DST with the hold: no transfer status call.
-                known = sorted(
-                    {hold.transfer_id: hold for hold in [*before, *held]}.values(), key=lambda h: h.transfer_id
+            if src.workspace is None:
+                for selector in arguments.jobs:
+                    try:
+                        canonical_uuid(selector, "JOB")
+                    except (WorkflowError, ValueError) as exc:
+                        raise ValueError(f"a remote source requires canonical job ids: {selector!r}") from exc
+        if src.workspace is not None:
+            selection = None
+            if selected:
+                assert dst is not None
+                # Step 0: a bad selector stops the command here, before anything is held or driven.
+                selection = _Selection(
+                    src.workspace,
+                    context.cwd,
+                    arguments,
+                    locator=dst.locator,
+                    destination_id=dst.workspace_id,
+                    workflows=not arguments.no_workflows,
                 )
-        # Every run re-drives the holds bound for its destination (with --resume and no DST: every hold), each
-        # destination's holds as one batch.
-        batches: dict[str, list[_moving.Hold]] = {}
-        if known is None:
-            known = _holds(src, context, arguments, workflows=not arguments.no_workflows, source=source)
-        for hold in known:
-            locator = hold.destination_locator
-            if dst is not None and locator not in ends:
-                continue
-            if locator is None:
-                errors.append(f"{hold.transfer_id}: the hold records no destination; adopt or release it by hand")
-                continue
-            if locator not in ends:
-                try:
-                    ends[locator] = _end(locator, context, arguments)
-                except _ERRORS as exc:
-                    errors.append(f"{hold.transfer_id}: cannot reach its destination {locator}: {exc}")
-                    continue
-            batches.setdefault(locator, []).append(hold)
-        for locator, holds in batches.items():
-            outcomes.extend(
-                _drive(src, ends[locator], holds, context, arguments, fresh=fresh, sessions=sessions, source=source)
-            )
+            run = _Transfer(src, dst, ends, context, arguments, sessions)
+            changed = _transfer_local(run, selection)
+            outcomes, errors = run.outcomes, run.errors
+        else:
+            pull = dst is None or dst.workspace is not None
+            source = _SourceSession(src, context, arguments, sessions) if pull else None
+            try:
+                session = None if source is None else source.get()
+            except _ERRORS as exc:
+                if not selected:
+                    raise
+                errors.append(f"{src.locator}: the transfer session did not open: {exc}; nothing was held")
+            else:
+                if session is not None:
+                    run = _Transfer(src, dst, ends, context, arguments, sessions, source)
+                    changed = _transfer_pull(run, session, bool(selected))
+                    outcomes, errors = run.outcomes, run.errors
+                else:
+                    _transfer_adapter(src, dst, ends, context, arguments, sessions, errors, outcomes)
     if arguments.state or arguments.step:
         under = f" under {arguments.placement}" if arguments.placement is not None else ""
         which = f"{' or '.join(arguments.state)} " if arguments.state else ""
         at = f" at step {' or '.join(arguments.step)}" if arguments.step else ""
         empty = f"no {which}job{at} to move in {src.locator}{under}"
-        return _report(outcomes, errors, json_output=arguments.json, source=src.locator, empty=empty)
-    return _report(outcomes, errors, json_output=arguments.json, source=src.locator)
+        return _report(outcomes, errors, json_output=arguments.json, source=src.locator, empty=empty, changed=changed)
+    return _report(outcomes, errors, json_output=arguments.json, source=src.locator, changed=changed)
 
 
-def status_document(
-    workspace: Workspace, progress: Callable[[str, int | None], object] | None = None
-) -> dict[str, Any]:
-    """Return the document ``transfer status --json`` prints for a local *workspace* (and the transfer session's
-    ``holds`` op answers): every hold, with the workflows its members need.
+def _holding(arguments: argparse.Namespace, src: _End) -> None:
+    """Say what is being held on *src*."""
+
+    what = [f"{len(arguments.jobs)} job(s)"] if arguments.jobs else []
+    what += [f"every {state} job" for state in arguments.state]
+    at = f" at step {' or '.join(arguments.step)}" if arguments.step else ""
+    _say(arguments, f"holding {', '.join(what or ['every job'])}{at} on {src.locator}")
+
+
+def _transfer_adapter(
+    src: _End,
+    dst: _End | None,
+    ends: dict[str, _End],
+    context: CLIContext,
+    arguments: argparse.Namespace,
+    sessions: contextlib.ExitStack,
+    errors: list[str],
+    outcomes: list[dict[str, Any]],
+) -> None:
+    """A transfer from a remote SRC on the adapter path, hold-everything-first as before sessions: the selection held
+    with ``job transfer --hold`` there, then every hold bound for DST (with ``--resume`` and no DST: every hold)
+    driven, each destination's as one batch."""
+
+    known: list[_moving.Hold] | None = None
+    if arguments.jobs or arguments.state or arguments.step:
+        assert dst is not None
+        _holding(arguments, src)
+        held, before = _hold_jobs(src, dst, context, arguments, errors)
+        if before is not None:
+            # SRC listed the other holds bound for DST with the hold: no transfer status call.
+            known = sorted({hold.transfer_id: hold for hold in [*before, *held]}.values(), key=lambda h: h.transfer_id)
+    batches: dict[str, list[_moving.Hold]] = {}
+    if known is None:
+        known = _holds(src, context, arguments, workflows=not arguments.no_workflows)
+    for hold in known:
+        locator = hold.destination_locator
+        if dst is not None and locator not in ends:
+            continue
+        if locator is None:
+            errors.append(f"{hold.transfer_id}: the hold records no destination; adopt or release it by hand")
+            continue
+        if locator not in ends:
+            try:
+                ends[locator] = _end(locator, context, arguments)
+            except _ERRORS as exc:
+                errors.append(f"{hold.transfer_id}: cannot reach its destination {locator}: {exc}")
+                continue
+        batches.setdefault(locator, []).append(hold)
+    for locator, holds in batches.items():
+        outcomes.extend(_drive(src, ends[locator], holds, context, arguments, sessions=sessions))
+
+
+class _Transfer:
+    """One paged transfer (plan §7.8): a local SRC's (push, local → local), or a remote SRC's over its transfer
+    session (pull); its pairs of ends, outcomes and errors.
+
+    :param src: The source end.
+    :param dst: The destination end; ``None`` for ``--resume`` without DST (each hold goes where it records).
+    :param ends: The ends resolved so far, by locator.
+    :param context: The CLI invocation.
+    :param arguments: The command's arguments.
+    :param sessions: Closes the command's transfer sessions at its end.
+    :param source: A pull's transfer session to SRC.
+    """
+
+    def __init__(
+        self,
+        src: _End,
+        dst: _End | None,
+        ends: dict[str, _End],
+        context: CLIContext,
+        arguments: argparse.Namespace,
+        sessions: contextlib.ExitStack,
+        source: _SourceSession | None = None,
+    ) -> None:
+        self.src, self.dst, self.ends = src, dst, ends
+        self.context, self.arguments, self.sessions, self.source = context, arguments, sessions, source
+        self.pairs: dict[str, _Pair] = {}
+        self.outcomes: list[dict[str, Any]] = []
+        self.errors: list[str] = []
+        self._unreachable: dict[str, str] = {}
+        #: Why every pair stopped (SRC failed), when one did.
+        self.failure: str | None = None
+        #: Step 1 stopped before SRC's holds were all listed: those not listed stay held there.
+        self.unlisted = False
+
+    def pair(self, dst: _End) -> _Pair:
+        """Return the pair of *dst*, made at its first use.
+
+        :param dst: The destination end.
+        :return: The pair.
+        """
+
+        return self.pairs.setdefault(dst.locator, _Pair(dst))
+
+    def route(self, holds: list[_moving.Hold]) -> list[tuple[_Pair, list[_moving.Hold]]]:
+        """Group *holds* by the destination each records, each group with its pair; a hold that records none, or
+        one whose destination cannot be resolved, is an error.
+
+        :param holds: The holds, in order.
+        :return: The groups, in order of their first hold.
+        """
+
+        groups: dict[str, list[_moving.Hold]] = {}
+        for hold in holds:
+            locator = hold.destination_locator
+            if self.dst is not None and locator != self.dst.locator:
+                continue
+            if locator is None:
+                self.errors.append(f"{hold.transfer_id}: the hold records no destination; adopt or release it by hand")
+                continue
+            if locator not in self.ends and locator not in self._unreachable:
+                try:
+                    self.ends[locator] = _end(locator, self.context, self.arguments)
+                except _ERRORS as exc:
+                    self._unreachable[locator] = str(exc)
+            if locator in self._unreachable:
+                reason = self._unreachable[locator]
+                self.errors.append(f"{hold.transfer_id}: cannot reach its destination {locator}: {reason}")
+                continue
+            groups.setdefault(locator, []).append(hold)
+        return [(self.pair(self.ends[locator]), group) for locator, group in groups.items()]
+
+    def start(self, pair: _Pair) -> None:
+        """Decide how *pair* is driven, at its first use (before its first hold is made or driven): a push opens its
+        DST's transfer session here (one that cannot open stops the pair: nothing of it is held), or finds it not
+        served and gathers the pair's holds for the adapter operations; remote → remote takes those too."""
+
+        if pair.mode is not None:
+            return
+        pair.mode = "page"
+        if pair.dst.workspace is not None:
+            return
+        if self.src.workspace is None or _session_disabled(pair.dst, self.context):
+            # Remote → remote (T4), or a DST that serves no session by its setting: the adapter operations, as before
+            # sessions (nothing opened, nothing said).
+            pair.mode = "adapter"
+            return
+        try:
+            pair.session = _push_session(pair.dst, self.context, self.arguments, self.sessions)
+        except _ERRORS as exc:
+            pair.stopped = f"{pair.dst.locator}: the transfer session did not open: {exc}"
+            return
+        if pair.session is None:
+            pair.mode = "adapter"
+
+    def drive(self, pair: _Pair, holds: list[_moving.Hold], fresh: frozenset[str] = frozenset()) -> None:
+        """Drive one page of *pair* (an adapter pair's holds are gathered, driven once by :meth:`finish`). An error
+        escaping the drive stops the pair, the page's holds reported as left held unless adopted.
+
+        :param pair: The pair.
+        :param holds: The page's holds bound for it.
+        :param fresh: Those this run created.
+        """
+
+        self.start(pair)
+        if pair.stopped is not None:
+            self.outcomes += self._undriven(pair, holds)
+            return
+        if pair.mode == "adapter":
+            pair.held += holds
+            pair.fresh.update(fresh)
+            return
+        try:
+            self.outcomes += _drive(
+                self.src,
+                pair.dst,
+                holds,
+                self.context,
+                self.arguments,
+                fresh=fresh,
+                sessions=self.sessions,
+                source=self.source,
+                pair=pair,
+            )
+        except _ERRORS as exc:
+            pair.stopped = str(exc)
+            message = (
+                f"the transfer to {pair.dst.locator} failed while it was driven ({exc}); it stays held on "
+                f"{self.src.locator} unless it was adopted: `httk job transfer --resume {self.src.locator} "
+                f"{pair.dst.locator}` delivers or releases it"
+            )
+            self.outcomes += [self._outcome(pair, hold, message) for hold in holds]
+
+    def _outcome(self, pair: _Pair, hold: _moving.Hold, message: str) -> dict[str, Any]:
+        return {
+            "transfer_id": hold.transfer_id,
+            "members": list(hold.members),
+            "destination": pair.dst.locator,
+            "status": "failed",
+            "message": message,
+        }
+
+    def _undriven(self, pair: _Pair, holds: list[_moving.Hold]) -> list[dict[str, Any]]:
+        message = (
+            f"not delivered, since the transfer to {pair.dst.locator} stopped ({pair.stopped}); it stays held on "
+            f"{self.src.locator}"
+        )
+        return [self._outcome(pair, hold, message) for hold in holds]
+
+    def stop_all(self, reason: str) -> None:
+        """Stop every pair at once (SRC failed): nothing more is driven or held for any.
+
+        :param reason: Why.
+        """
+
+        self.failure = self.failure or reason
+        for pair in self.pairs.values():
+            pair.stopped = pair.stopped or reason
+        if self.dst is not None:
+            pair = self.pair(self.dst)
+            pair.stopped = pair.stopped or reason
+
+    def finish(self, selection: str | None = None) -> None:
+        """Drive each adapter pair's gathered holds once, as before sessions, and report every stopped pair: its
+        reason, what of the selection was not attempted (*selection*, for DST's pair) and the ``--resume`` that drives
+        what it left held; a failure of SRC that stopped no pair is reported on its own.
+
+        :param selection: What of the selection was not attempted, when there was one and DST's pair stopped.
+        """
+
+        src = self.src
+        unlisted = f"the holds not yet listed stay held on {src.locator}; " if self.unlisted else ""
+        for pair in self.pairs.values():
+            if pair.held and pair.stopped is None:
+                holds = sorted(pair.held, key=lambda hold: hold.transfer_id)
+                try:
+                    self.outcomes += _drive(
+                        src,
+                        pair.dst,
+                        holds,
+                        self.context,
+                        self.arguments,
+                        fresh=frozenset(pair.fresh),
+                        sessions=self.sessions,
+                        pair=pair,
+                    )
+                except _ERRORS as exc:
+                    pair.stopped = str(exc)
+                    message = f"the transfer failed ({exc}); it stays held on {src.locator} unless it was adopted"
+                    self.outcomes += [self._outcome(pair, hold, message) for hold in holds]
+            elif pair.held:
+                self.outcomes += self._undriven(pair, pair.held)
+            if pair.stopped is None:
+                continue
+            message = f"the transfer to {pair.dst.locator} stopped: {pair.stopped}; {unlisted}"
+            if selection is not None and self.dst is not None and pair.dst.locator == self.dst.locator:
+                message += f"{selection}; "
+            message += (
+                f"`httk job transfer --resume {src.locator} {pair.dst.locator}` drives the holds left on {src.locator}"
+            )
+            if selection is not None:
+                message += " (it does not select the rest: run the transfer again for that)"
+            self.errors.append(message)
+        if self.failure is not None and not self.pairs:
+            self.errors.append(
+                f"{self.failure}; the holds on {src.locator} stay held there: `httk job transfer --resume "
+                f"{src.locator}` drives them"
+            )
+
+
+def _not_attempted(count: int | None, *, bound: bool = False, carried: int = 0, src: str = "SRC") -> str:
+    """What of a selection a stop left unattempted: *count* jobs (at most, with *bound*); with no count, the whole
+    selection, or (with *bound*: a first page whose answer was lost) an unknown part of it; and the *carried* jobs
+    held on *src* but not reported yet."""
+
+    if count is None and bound:
+        text = "the selection may have been partly held; how much was attempted is not known"
+    elif count is None:
+        text = "the selection was not attempted"
+    else:
+        text = f"{'at most ' if bound else ''}{count} selected job(s) were not attempted"
+    return text + (f"; {carried} held job(s) not yet reported stay held on {src}" if carried else "")
+
+
+def _transfer_local(run: _Transfer, selection: "_Selection | None") -> int | None:
+    """A transfer from a local SRC, paged (plan §7.8): the holds left bound for DST (every hold for ``--resume``
+    without DST) driven first, a page at a time from one listing of their names (step 1); then, with a *selection*,
+    its snapshot (step 2) and its pages, each held and driven before the next is held, until it is exhausted or the
+    pair stops (step 3). A DST that serves no transfer session gets the selection held as before sessions
+    (:func:`hold_selected`), and every hold driven once. An error between pages stops the pair (reading SRC's
+    holds: every pair); the pages driven before are reported.
+
+    :param run: The transfer.
+    :param selection: The selection, resolved (step 0); ``None`` for ``--resume``.
+    :return: The listed jobs left out as changed since the listing; ``None`` without a selection or when it was held
+        as before sessions.
+    """
+
+    src, dst, arguments = run.src, run.dst, run.arguments
+    assert src.workspace is not None
+    # Listed once: a page drives exactly the holds made for it, never one of a later listing.
+    names = _moving.held_names(src.workspace)
+    destination = None if dst is None else dst.locator
+    pages = _held_pages(src.workspace, names, destination, workflows=not arguments.no_workflows)
+    try:
+        for earlier, more in pages:
+            for pair, holds in run.route(earlier):
+                run.drive(pair, holds)  # every hold of this step predates the run
+            if dst is not None and run.pair(dst).stopped is not None:
+                run.unlisted = more  # nothing more is listed for a stopped pair
+                break
+    except _ERRORS as exc:
+        run.stop_all(f"reading the holds on {src.locator} failed: {exc}")
+        run.unlisted = True
+    del names
+    if selection is None:
+        run.finish()
+        return None
+    assert dst is not None
+    pair = run.pair(dst)
+    changed: int | None = 0
+    try:
+        if pair.mode is None and dst.workspace is None and _session_disabled(dst, run.context):
+            run.start(pair)  # known without asking DST: held as before sessions, nothing listed twice
+        if pair.mode != "adapter" and pair.stopped is None:
+            selection.snapshot()  # not after a stop: nothing of the selection is attempted then
+            if pair.stopped is None and not selection.done:
+                run.start(pair)  # before the first hold: a push that cannot open its session holds nothing
+        if pair.stopped is None:
+            _holding(arguments, src)
+        if pair.stopped is None and pair.mode == "adapter":
+            # As before sessions: everything held first, delivered once.
+            held = hold_selected(
+                src.workspace,
+                run.context,
+                arguments,
+                run.errors,
+                locator=dst.locator,
+                destination_id=dst.workspace_id,
+                workflows=not arguments.no_workflows,
+            )
+            pair.held += held
+            pair.fresh.update(hold.transfer_id for hold in held)
+            changed = None
+        while changed is not None and pair.stopped is None and not selection.done:
+            page = selection.next_page(
+                holds=_PAGE_HOLDS, errors=_PAGE_ERRORS, scanned=_PAGE_SCANNED, members=_PAGE_MEMBERS
+            )
+            run.errors.extend(page.errors)
+            changed += page.changed
+            if page.holds:
+                run.drive(pair, page.holds, fresh=frozenset(hold.transfer_id for hold in page.holds))
+    except _ERRORS as exc:
+        pair.stopped = pair.stopped or str(exc)
+    if pair.mode == "adapter":
+        changed = None  # held as before sessions, or not at all
+    if changed is not None and pair.stopped is None and (note := selection.note()) is not None:
+        print(note, file=sys.stderr)
+    # Without its listing nothing was attempted: no count.
+    count = selection.remaining() if selection.snapshotted else None
+    run.finish(_not_attempted(count) if pair.stopped is not None else None)
+    return changed
+
+
+def _reported_holds(value: object) -> tuple[list[_moving.Hold], list[tuple[str, int]]]:
+    """The holds a page of a remote SRC reported, and those it named by id only (``oversized``: the transfer id and
+    member count); :class:`ValueError` (or :class:`TypeError`) for anything else."""
+
+    if not isinstance(value, list):
+        raise ValueError("no holds")
+    holds: list[_moving.Hold] = []
+    oversized: list[tuple[str, int]] = []
+    for item in value:
+        if isinstance(item, dict) and item.get("oversized") is True:
+            transfer_id, count = item.get("transfer_id"), item.get("member_count")
+            if not isinstance(transfer_id, str) or not _TRANSFER_ID.fullmatch(transfer_id):
+                raise ValueError(f"a malformed oversized hold: {item!r}")
+            if not isinstance(count, int) or isinstance(count, bool):
+                raise ValueError(f"a malformed oversized hold: {item!r}")
+            oversized.append((transfer_id, count))
+        else:
+            holds.append(_moving.Hold.from_mapping(item))
+    return holds, oversized
+
+
+def _transfer_pull(run: _Transfer, session: TransferSession, selected: bool) -> int | None:
+    """A transfer from a remote SRC over its transfer *session* (pull), paged (plan §7.8): with a selection, SRC
+    first checks and resolves it (``select``, step 0: a bad one drives nothing); the holds left on SRC bound for DST
+    (every hold for ``--resume`` without DST) are driven a page at a time (``holds_page``, step 1); then SRC takes
+    the selection's listing and holds it page by page (``hold_page``), each page driven before the next is asked for.
+    A failure of the session (or an answer that cannot be used) stops every pair at once.
+
+    :param run: The transfer.
+    :param session: The pull's open transfer session to SRC.
+    :param selected: Whether the command selects jobs (not ``--resume``).
+    :return: The listed jobs left out as changed since the listing; ``None`` without a selection.
+    """
+
+    src, dst, arguments = run.src, run.dst, run.arguments
+    if selected:
+        assert dst is not None
+        refusal, failed = _pull_select(run, session)
+        if refusal is not None:
+            run.errors.append(refusal)  # nothing changed: nothing held or driven
+            return None
+        if failed is not None:
+            run.stop_all(failed)
+            run.finish(_not_attempted(None))
+            return None
+    failed = None
+    after: str | None = None
+    try:
+        while True:
+            header: dict[str, Any] = {
+                "workspace": src.plain,
+                "destination": None if dst is None else dst.locator,
+                "after": after,
+                "limit_holds": _PAGE_HOLDS,
+                "limit_members": _PAGE_MEMBERS,
+            }
+            try:
+                response = session.request("holds_page", header)
+            except SessionFailed as exc:
+                failed = f"the transfer session to {src.locator} failed while listing its holds: {exc}"
+                break
+            if response.get("ok") is not True:
+                failed = f"transfer status failed on {src.locator}: {response.get('error')}"
+                break
+            try:
+                holds, oversized = _reported_holds(response.get("holds"))
+                following = response.get("next")
+                if following is not None and not (
+                    isinstance(following, str)
+                    and _TRANSFER_ID.fullmatch(following)
+                    and (after is None or following > after)
+                ):
+                    raise ValueError(f"a cursor that does not advance: {following!r}")
+            except (ValueError, TypeError, WorkflowError) as exc:
+                session.close()  # a far side that answers something else is not asked anything more
+                failed = f"{src.locator} answered a page of its holds unusably: {exc}"
+                break
+            _oversized(run, oversized)
+            for pair, group in run.route(holds):
+                run.drive(pair, group)  # every hold of this step predates the run
+                if not session.is_open:
+                    # Every pair stops at once: the groups not yet driven do nothing.
+                    run.stop_all(failed := f"the transfer session to {src.locator} failed")
+            if failed is not None or following is None:
+                break
+            after = following
+            if dst is not None and run.pair(dst).stopped is not None:
+                run.unlisted = True  # as a local SRC: nothing more is listed for a stopped pair
+                break
+    except _ERRORS as exc:
+        failed = f"listing the holds on {src.locator} failed: {exc}"
+    if failed is not None:
+        run.unlisted = True
+        run.stop_all(failed)
+    if not selected:
+        run.finish()
+        return None
+    assert dst is not None
+    pair = run.pair(dst)
+    if pair.stopped is not None:
+        run.finish(_not_attempted(None))
+        return 0
+    run.start(pair)
+    _holding(arguments, src)
+    left, bound, carried, changed, failed = _pull_pages(run, session, pair)
+    if failed is not None:
+        run.stop_all(failed)
+    stopped = _not_attempted(left, bound=bound, carried=carried, src=src.locator)
+    run.finish(stopped if pair.stopped is not None else None)
+    return changed
+
+
+def _pull_select(run: _Transfer, session: TransferSession) -> tuple[str | None, str | None]:
+    """Step 0 of a pull: ``select`` the selection on SRC, which checks and resolves it and holds nothing.
+
+    :param run: The transfer.
+    :param session: The pull's open transfer session to SRC.
+    :return: The refusal (nothing changed) or the session's failure, either ``None``.
+    """
+
+    src, dst, arguments = run.src, run.dst, run.arguments
+    assert dst is not None
+    header: dict[str, Any] = {
+        "workspace": src.plain,
+        "jobs": list(arguments.jobs),
+        "state": list(arguments.state),
+        "step": list(arguments.step or []),
+        "placement": arguments.placement,
+        "tree": bool(arguments.tree),
+        "destination": dst.locator,
+        "destination_id": dst.workspace_id,
+    }
+    try:
+        response = session.request("select", header)
+    except SessionFailed as exc:
+        return None, f"the transfer session to {src.locator} failed while selecting: {exc}"
+    sys.stderr.write(str(response.get("stderr", "")))
+    if response.get("ok") is not True:
+        return f"job transfer --hold on {src.locator} was refused: {response.get('error')}", None
+    return None, None
+
+
+def _pull_pages(run: _Transfer, session: TransferSession, pair: _Pair) -> tuple[int | None, bool, int, int, str | None]:
+    """Steps 2 and 3 of a pull: ``hold_page`` until the selection is done or the pair stops, each page driven before
+    the next is asked for. Every answer that is not ``done`` must have ``consumed`` more than the one before, or SRC
+    is taken as out of step: the session closes and the pair stops, as when it failed. A refusal of the first page
+    (SRC answered it, holding nothing) leaves the selection not attempted.
+
+    :param run: The transfer.
+    :param session: The pull's open transfer session to SRC.
+    :param pair: DST's pair.
+    :return: How many selected jobs SRC had not attempted at its last answer (``None`` before any), whether that is
+        an upper bound only (a later answer was lost: its page may have held some), the jobs SRC held but had not
+        reported at its last answer, the listed jobs left out as changed, and why SRC's session stopped, if it did.
+    """
+
+    src = run.src
+    left: int | None = None
+    carried = consumed = 0
+    changed = 0
+    limits = {"limit_candidates": _PAGE_SCANNED, "limit_holds": _PAGE_HOLDS, "limit_members": _PAGE_MEMBERS}
+    # A page may be held before its answer is lost: never "nothing was held".
+    lost = f"holding a page on {src.locator} failed, and the jobs it may have held stay held there"
+    while pair.stopped is None:
+        try:
+            response = session.request("hold_page", limits)
+        except SessionFailed as exc:
+            return left, True, carried, changed, f"{lost} (the transfer session failed: {exc})"
+        sys.stderr.write(str(response.get("stderr", "")))  # the far side's notes, such as jobs left out by --step
+        if response.get("ok") is not True and response.get("fatal") is not True and left is None:
+            # A refusal of the first page: SRC changed nothing (an error before the page's owner), held nothing.
+            return None, False, carried, changed, f"holding on {src.locator} was refused: {response.get('error')}"
+        if response.get("ok") is not True:
+            return left, True, carried, changed, f"{lost} ({response.get('error')})"
+        try:
+            holds, oversized = _reported_holds(response.get("holds"))
+            errors, page_changed, done = response.get("errors"), response.get("changed"), response.get("done")
+            remaining, note = response.get("remaining"), response.get("note")
+            counts = [page_changed, remaining, response.get("consumed"), response.get("carried")]
+            if not isinstance(errors, list) or not isinstance(done, bool):
+                raise ValueError("no hold page")
+            if not all(isinstance(count, int) and not isinstance(count, bool) for count in counts):
+                raise ValueError("no hold page")
+            if not (note is None or isinstance(note, str)):
+                raise ValueError("no hold page")
+            assert isinstance(page_changed, int) and isinstance(remaining, int)
+            previous, consumed, carried = consumed, int(response["consumed"]), int(response["carried"])
+            if not done and consumed <= previous:
+                raise ValueError(f"a page that made no progress (consumed {consumed} after {previous})")
+        except (ValueError, TypeError, WorkflowError) as exc:
+            session.close()  # a far side that answers something else is not asked anything more
+            return left, True, carried, changed, f"{lost} (an unusable answer: {exc})"
+        run.errors.extend(str(error) for error in errors)
+        changed += page_changed
+        left = remaining
+        _oversized(run, oversized)
+        if holds:
+            run.drive(pair, holds)
+        if not session.is_open:
+            return left, False, carried, changed, f"the transfer session to {src.locator} failed"
+        if done:
+            if note is not None and pair.stopped is None:
+                print(note, file=sys.stderr)
+            break
+    return left, False, carried, changed, None
+
+
+def _oversized(run: _Transfer, holds: list[tuple[str, int]]) -> None:
+    """Fail the holds a remote SRC named by id only, their documents too large for one answer: each stays held."""
+
+    src, dst = run.src, run.dst
+    for transfer_id, count in holds:
+        resume = f"`httk job transfer --resume {src.locator}{'' if dst is None else ' ' + dst.locator}`"
+        assert src.binding is not None
+        message = (
+            f"its {count} job(s) are too many for one answer of the transfer session; it stays held on {src.locator}: "
+            f"set `httk remote configure --set transfer_session=off {src.binding.remote}`, then {resume} drives it"
+        )
+        run.outcomes.append(
+            {
+                "transfer_id": transfer_id,
+                "members": [],
+                "destination": None if dst is None else dst.locator,
+                "status": "failed",
+                "message": message,
+            }
+        )
+
+
+def status_document(workspace: Workspace) -> dict[str, Any]:
+    """Return the document ``transfer status --json`` prints for a local *workspace*: every hold, with the workflows
+    its members need.
 
     :param workspace: The workspace.
-    :param progress: Told ``list`` with the holds read so far.
     :return: ``{"format", "format_version", "workspace", "holds"}``.
     """
 
-    tell = progress or (lambda _phase, _count: None)
-    read_count = 0
-
-    def one() -> None:
-        nonlocal read_count
-        read_count += 1
-        tell("list", read_count)
-
-    tell("list", read_count)
     now = time.time()
-    listed = [hold.as_mapping(now) for hold in _moving.held(workspace, workflows=True, on_read=one)]
+    listed = [hold.as_mapping(now) for hold in _moving.held(workspace, workflows=True)]
     return {"format": TRANSFER_STATUS_FORMAT, "format_version": 1, "workspace": str(workspace.root), "holds": listed}
 
 
@@ -3173,15 +4223,25 @@ A transfer holds the jobs on SRC (an eject into SRC's own
 neither workspace), copies the held bundle to DST, adopts it there into the
 states it left, and only then releases the hold. A bundle DST refuses (say,
 because one of its jobs is already there) stays held on SRC and is reported.
-The holds bound for one DST travel as one batch: one copy and one adoption
-call, however many jobs move. Progress goes to stderr unless -q is given.
+From a local SRC, and from a remote SRC over its transfer session, the
+selection is held page by page (up to 256 jobs a page), each page copied,
+adopted and released before the next is held, over one connection to a remote
+end however many pages there are; elsewhere (a remote end without a session,
+remote to remote) every job is held first and the holds travel as one batch.
+A listed job that changed since the listing is left out and counted
+(`changed` in --json), not an error. A failure that stops a destination (a
+failed session, an unknown outcome, a refusal naming no bundle) holds nothing
+more for it: the command exits 1, says how many selected jobs were not
+attempted, and names the --resume that drives what it left held; run the
+transfer again to select the rest. Progress goes to stderr unless -q is given.
 
-Workflows travel too: before adopting, the transfer installs in DST, under the
-same ids, the workflows the jobs need (each job's effective workflow and its
-calls) that DST lacks and SRC has, copying only their sources, and after the
-adoption builds those with [workflow.build] there. An installation DST already
-has is never replaced, even with another tree (reported). --no-workflows ships
-none.
+Workflows travel too: before adopting a page that needs one not yet attempted,
+the transfer installs in DST, under the same ids, the workflows the jobs need
+(each job's effective workflow and its calls) that DST lacks and SRC has,
+copying only their sources, and builds those with [workflow.build] there
+(without a session, a remote DST builds them after the adoption). An
+installation DST already has is never replaced, even with another tree
+(reported). --no-workflows ships none.
 
 Away copies: with --keep the release keeps each moved job in SRC as an inert
 copy in the state `away` (`job push` does so unless --no-keep), recording

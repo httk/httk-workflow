@@ -1369,9 +1369,10 @@ def test_state_selecting_nothing_says_so(tmp_path: Path, capsys: pytest.CaptureF
     assert capsys.readouterr().out == f"no succeeded or failed job to move in {source.root}\n"
 
 
-def test_a_listed_job_claimed_before_its_hold_is_one_error(
+def test_a_listed_job_claimed_before_its_hold_is_counted_as_changed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # Plan §7.8 (paged holds): a listed job that changed since the listing is a counted note, no longer an error.
     from httk.workflow import _kernel
     from v3_helpers import cli_owner
 
@@ -1389,9 +1390,12 @@ def test_a_listed_job_claimed_before_its_hold_is_one_error(
         return iter(listed)
 
     monkeypatch.setattr(transfer_cli, "iter_jobs", racing)
-    assert run(tmp_path, "--json", "-q", "--state", "ready", source_name, target_name) == 1
-    document = outcomes(capsys)
-    assert len(document["errors"]) == 1 and [outcome["status"] for outcome in document["transfers"]] == ["adopted"] * 2
+    assert run(tmp_path, "--json", "-q", "--state", "ready", source_name, target_name) == 0
+    captured = capsys.readouterr()
+    document = json.loads(captured.out)
+    assert document["errors"] == [] and document["changed"] == 1
+    assert [outcome["status"] for outcome in document["transfers"]] == ["adopted"] * 2
+    assert "1 selected job(s) changed since they were listed: left out; run again to select them" in captured.err
     assert sum(find(target, mapping["id"]) is not None for mapping, _, _ in plan) == 2
     assert outgoing(source) == []
     taken[0].give_back()
