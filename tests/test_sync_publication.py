@@ -15,14 +15,13 @@ import io
 import json
 import os
 import shutil
-import sys
 import tarfile
 import tempfile
 import threading
 from collections.abc import Iterator, Sequence
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from httk.core.cli import CLIContext
@@ -34,6 +33,7 @@ from httk.workflow._bundles import BundleError
 from httk.workflow.scaffold import new_job, new_jobs, submit_payload
 from httk.workflow.seals import read_job_releases
 from httk.workflow.workflow_cli import command
+from httk.workflow.workflow_cli._describe import install_copies
 from test_cli_job_eject_adopt import registered
 from test_job_creation import assert_nothing_left, install, raw_package, ready
 from test_moving import assert_in, find, single
@@ -815,22 +815,22 @@ def test_a_failed_install_copy_commit_installs_nothing(tmp_path: Path, monkeypat
     assert _store.list_installed(ws) == [] and list((ws.control / "tmp").iterdir()) == []
 
 
-def test_workflow_install_stdin_tar_syncs_the_store_copy_not_its_landing(
+def test_the_install_op_syncs_the_store_copy_not_its_landing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     source = Workspace.initialize(tmp_path / "source", durable=False, policy={"visibility_deadline_seconds": 0.05})
     entry = install(source, raw_package(tmp_path / "package"))
-    target, target_name = registered(tmp_path, "target")
+    target, _ = registered(tmp_path, "target")
     target.configure_settings({"io.sync": "syncfs"})
     data = io.BytesIO()
     with tarfile.open(fileobj=data, mode="w") as archive:
         for name in ("install.json", "package"):
             archive.add(entry.directory / name, arcname=f"{entry.directory.name}/{name}")
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data.getvalue())))
     events = Events(monkeypatch)
-    argv = ["install", "--json", "--stdin-tar", "--workspace", target_name]
-    assert command(argv, CLIContext("httk", tmp_path)) == 0
-    assert [row["status"] for row in json.loads(capsys.readouterr().out)["workflows"]] == ["installed"]
+    document, returncode = install_copies(Workspace(target.root), stream=io.BytesIO(data.getvalue()))
+    assert returncode == 0 and [row["status"] for row in cast(list[dict[str, Any]], document["workflows"])] == [
+        "installed"
+    ]
     # One barrier: the store copy's, none on the landing the stream was extracted into.
     ((barrier,),) = [events.barriers]
     assert barrier.anchor.name == "tree" and ".build." in barrier.anchor.parent.name
@@ -844,17 +844,16 @@ def test_a_store_copy_that_cannot_be_synced_is_failed_not_refused(
 ) -> None:
     source = Workspace.initialize(tmp_path / "source", durable=False, policy={"visibility_deadline_seconds": 0.05})
     entry = install(source, raw_package(tmp_path / "package"))
-    target, target_name = registered(tmp_path, "target")
+    target, _ = registered(tmp_path, "target")
     target.configure_settings({"io.sync": "syncfs"})
     data = io.BytesIO()
     with tarfile.open(fileobj=data, mode="w") as archive:
         for name in ("install.json", "package"):
             archive.add(entry.directory / name, arcname=f"{entry.directory.name}/{name}")
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data.getvalue())))
     Events(monkeypatch, syncfs_failures=[None, errno.EIO])
-    argv = ["install", "--json", "--stdin-tar", "--workspace", target_name]
-    assert command(argv, CLIContext("httk", tmp_path)) == 1
-    (row,) = json.loads(capsys.readouterr().out)["workflows"]
+    document, returncode = install_copies(Workspace(target.root), stream=io.BytesIO(data.getvalue()))
+    assert returncode == 1
+    (row,) = cast(list[dict[str, Any]], document["workflows"])
     assert row["status"] == "failed" and "was not published, nothing changed" in row["reason"]
     assert _store.list_installed(target) == []
 

@@ -1,12 +1,11 @@
-"""A push over one transfer session (plan WORKFLOW_TRANSFER_SESSION §7, T1b).
+"""A push over one transfer session (plan WORKFLOW_TRANSFER_SESSION §7, T1b; sessions required since T7, §7.12).
 
-The far side's ``adopt`` and ``install`` ops (the documents of ``job adopt --json --stdin-tar`` and ``workflow
-install --json``, over a real session), and the client's segmented push: segments, per-segment outcomes, the
-retry of a failed commit, workflow shipping on the same session, and the fallback to the adapter path.
+The far side's ``stage``, ``adopt_staged`` and ``install`` ops (over a real session), and the client's segmented
+push: segments, per-segment outcomes, the retry of a failed commit, workflow shipping on the same session, and the
+stop before anything is held when the far side's ``httk`` cannot serve the session.
 """
 
 import argparse
-import errno
 import io
 import json
 import logging
@@ -23,12 +22,17 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote
-from httk.workflow import Workspace, _frames, _fs, _landing, _moving, _store, registry
+from httk.workflow import Workspace, _frames, _landing, _moving, _store, registry
 from httk.workflow._frames import REQUEST, RESPONSE, FrameReader, encode_frame, encode_json
 from httk.workflow._state import read_state_unowned
-from httk.workflow.adapters import RequestAborted, SessionFailed, TransferSession
+from httk.workflow.adapters import (
+    TRANSFER_PROTOCOL,
+    TRANSFER_SESSION_FORMAT,
+    RequestAborted,
+    SessionFailed,
+    TransferSession,
+)
 from httk.workflow.projects import initialize_project
-from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import _transfer_session, command
 from test_deliver import hold_jobs, outgoing_dir, stream
@@ -44,7 +48,6 @@ from test_job_transfer import (
     starts,
 )
 from test_moving import assert_in, find, io_workers  # noqa: F401 (io_workers: fixture)
-from test_sync_errors_retry import Syncfs, leftover_landing
 from test_transfer_takeback import assert_kept_held, refuse, refusing  # noqa: F401 (refusing: fixture)
 from test_transfer_workflows import GIT_ID, _entries_tar, shipped, workflows
 from test_transfer_workflows import job as workflow_job
@@ -60,13 +63,15 @@ import time
 argv = sys.argv[1:]
 if argv[:2] == ["workflow", "transfer-session"]:
     if os.environ.get("HTTK_TEST_OLD_FAR_SIDE"):
-        print("httk: error: argument command: invalid choice: 'transfer-session'", file=sys.stderr)
+        print("httk workflow: error: argument GROUP: invalid choice: 'transfer-session' (choose from 'run', 'session')", file=sys.stderr)
         sys.exit(2)
     from httk.workflow import _frames, _fs, _moving
     from httk.workflow.workflow_cli import _job, _transfer_session
 
     if os.environ.get("HTTK_TEST_TICK"):
         _frames.TICK = float(os.environ["HTTK_TEST_TICK"])
+    if os.environ.get("HTTK_TEST_PROTOCOL"):  # an httk of another version: its hello and its check
+        _transfer_session.TRANSFER_PROTOCOL = int(os.environ["HTTK_TEST_PROTOCOL"])
     failing = {int(item) for item in os.environ.get("HTTK_TEST_FAIL_SYNCFS", "").split(",") if item}
     real_syncfs = _fs._syncfs
     calls = []
@@ -97,7 +102,7 @@ if argv[:2] == ["workflow", "transfer-session"]:
         real_make_dirs = _fs.make_dirs
 
         def make_dirs(path, **options):
-            if "incoming" in str(path):
+            if os.path.basename(str(path)) == "outgoing":  # the stage's landing in its owner scratch
                 time.sleep(float(os.environ["HTTK_TEST_DELAY_LANDING_DIRS"]))
             return real_make_dirs(path, **options)
 
@@ -130,11 +135,12 @@ if argv[:2] == ["workflow", "transfer-session"]:
             raise RuntimeError("the build machinery broke")
 
         _describe._build_reason = broken
-    if os.environ.get("HTTK_TEST_BUILT_FOR_OSERROR"):
+    if os.environ.get("HTTK_TEST_STATUS_OSERROR"):
+        # An OSError once the jobs are adopted, before the answer is made.
         def unreadable(*arguments):
-            raise OSError(errno.EIO, "the store could not be read")
+            raise OSError(errno.EIO, "the adoption's status could not be read")
 
-        _job._built_for = unreadable
+        _job._adoption_status = unreadable
     if os.environ.get("HTTK_TEST_CRASH_ADOPT"):
         def crash(*arguments, **options):
             raise KeyError("an unexpected failure inside the adoption")
@@ -145,14 +151,13 @@ if argv[:2] == ["workflow", "transfer-session"]:
             _transfer_session.OPS[op] = lambda request: os._exit(3)
     exit_after = int(os.environ.get("HTTK_TEST_EXIT_AFTER_ADOPT", "0"))
     other_from = int(os.environ.get("HTTK_TEST_OTHER_ID_FROM_ADOPT", "0"))
-    # Scripted answers by adopt request number: "refuse" (a refusal document with these members), "garble" (an
+    # Scripted answers by stage request number: "refuse" (a refusal document with these members), "garble" (an
     # answer that is no adoption document), "ok_refused" (a refusal answered ok), "after" (members changed in the
     # real answer's document).
     script = json.loads(os.environ.get("HTTK_TEST_SCRIPT", "{}"))
-    real_adopt = _transfer_session.OPS["adopt"]
     real_stage = _transfer_session.OPS["stage"]
     real_adopt_staged = _transfer_session.OPS["adopt_staged"]
-    # One count of deliveries: an adopt request, or a stage request (whose adoption is its adopt_staged).
+    # One count of deliveries: a stage request (whose adoption is its adopt_staged).
     adopts = []
     delivery_of = {}
 
@@ -176,12 +181,6 @@ if argv[:2] == ["workflow", "transfer-session"]:
         response["document"].update(script.get(str(number), {}).get("after", {}))
         return response
 
-    def adopt(request):
-        adopts.append(1)
-        number = len(adopts)
-        answer = scripted(request, script.get(str(number), {}))
-        return answer if answer is not None else adopted(real_adopt(request), number)
-
     def stage(request):
         adopts.append(1)
         number = len(adopts)
@@ -195,7 +194,6 @@ if argv[:2] == ["workflow", "transfer-session"]:
     def adopt_staged(request):
         return adopted(real_adopt_staged(request), delivery_of.get(request.header.get("token"), 0))
 
-    _transfer_session.OPS["adopt"] = adopt
     _transfer_session.OPS["stage"] = stage
     _transfer_session.OPS["adopt_staged"] = adopt_staged
 sys.argv = ["httk", *argv]
@@ -220,9 +218,34 @@ def local_project(tmp_path: Path, **settings: object) -> tuple[Path, Path]:
 
 
 def opened(bundle: Path) -> TransferSession:
-    session = TransferSession(bundle, needs={"adopt", "install"}, timeout=60)
+    session = TransferSession(bundle, timeout=60)
     session.open()
     return session
+
+
+def staged_adoption(
+    session: TransferSession,
+    workspace: str,
+    transfer_ids: list[str],
+    upload: Callable[[BinaryIO], None],
+    *,
+    sync: str | None = None,
+) -> dict[str, Any]:
+    """A push's delivery of one segment over *session*: its ``stage``, then, once staged, its ``adopt_staged``. The
+    result is the adoption's response (with both requests' standard error), or the stage's refusal.
+
+    :raises RequestAborted: When this side's upload failed (its response is the stage's answer).
+    """
+
+    header: dict[str, Any] = {"workspace": workspace, "transfer_ids": transfer_ids, "bytes": 0}
+    if sync is not None:
+        header["sync"] = sync
+    staged = session.request("stage", header, upload=upload)
+    if staged.get("ok") is not True:
+        return staged
+    request = {"workspace": workspace, "token": staged["token"], "transfer_ids": transfer_ids}
+    adopted = session.request("adopt_staged", request)
+    return {**adopted, "stderr": str(staged.get("stderr", "")) + str(adopted.get("stderr", ""))}
 
 
 def writer(data: bytes, *, then: BaseException | None = None) -> Callable[[BinaryIO], None]:
@@ -252,34 +275,23 @@ def normalized(document: dict[str, Any]) -> dict[str, Any]:
 # -- the far side: the adopt op ----------------------------------------------------------------------------------
 
 
-def test_the_adopt_op_answers_what_job_adopt_json_stdin_tar_prints(
-    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_stage_and_adopt_staged_answer_the_adoption_document(tmp_path: Path, remote: Remote) -> None:
     _, bundle = local_project(tmp_path)
     near, _ = registered(tmp_path, "near")
     far, far_name = registered(tmp_path, "far")
-    other, other_name = registered(tmp_path, "other")
     holds, plan = hold_jobs(near, 2)
-    data = stream(outgoing_dir(near), [hold.transfer_id for hold in holds])
-    header = {"workspace": far_name, "token": _fs.fresh_token(), "built_for": [GIT_ID]}
+    ids = [hold.transfer_id for hold in holds]
+    data = stream(outgoing_dir(near), ids)
     with opened(bundle) as session:
-        response = session.request("adopt", header, upload=writer(data))
+        response = staged_adoption(session, far_name, ids, writer(data))
     assert response["ok"] is True and response["returncode"] == 0
     document = response["document"]
     assert document["workspace_id"] == far.workspace_id
     assert [entry["status"] for entry in document["bundles"]] == ["adopted"] * 2
-    assert document["workflows"] == [{"id": GIT_ID, "status": "missing", "tree_sha256": None}]
-    # The far side's barrier line is in the request's captured standard error.
+    # The far side's barrier line is in the stage's captured standard error.
     assert " landed file(s) " in response["stderr"]
     assert all(find(far, mapping["id"]) is not None for mapping, _, _ in plan)
     assert landings(far) == []
-    # The command line, given the same stream, prints the same document.
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
-    argv = ["job", "adopt", "--json", "--stdin-tar", "--workspace", other_name, "--built-for", GIT_ID]
-    assert command(argv, CLIContext("httk", tmp_path)) == 0
-    printed = json.loads(capsys.readouterr().out)
-    assert printed["workspace_id"] == other.workspace_id
-    assert normalized(printed) == normalized(document)
 
 
 def test_an_aborted_complete_archive_is_refused_and_nothing_adopted(tmp_path: Path, remote: Remote) -> None:
@@ -287,18 +299,18 @@ def test_an_aborted_complete_archive_is_refused_and_nothing_adopted(tmp_path: Pa
     near, _ = registered(tmp_path, "near")
     far, far_name = registered(tmp_path, "far")
     holds, plan = hold_jobs(near, 2)
-    data = stream(outgoing_dir(near), [hold.transfer_id for hold in holds])
-    header = {"workspace": far_name, "token": _fs.fresh_token()}
+    ids = [hold.transfer_id for hold in holds]
+    data = stream(outgoing_dir(near), ids)
     with opened(bundle) as session:
         with pytest.raises(RequestAborted) as aborted:
-            session.request("adopt", header, upload=writer(data, then=OSError("the source went away")))
+            staged_adoption(session, far_name, ids, writer(data, then=OSError("the source went away")))
         response = aborted.value.response
         assert response["ok"] is False and response["returncode"] == 2
         document = response["document"]
         assert document["bundles"] == [] and "the source went away" in document["refused"]
         assert "bundle" not in document and "sync_failed" not in document and document["stream_aborted"] is True
         # The session goes on: the same stream, whole, is adopted.
-        response = session.request("adopt", {**header, "token": _fs.fresh_token()}, upload=writer(data))
+        response = staged_adoption(session, far_name, ids, writer(data))
         assert [entry["status"] for entry in response["document"]["bundles"]] == ["adopted"] * 2
     assert all(find(far, mapping["id"]) is not None for mapping, _, _ in plan)
     assert landings(far) == []
@@ -318,8 +330,10 @@ def test_an_input_ending_inside_the_upload_refuses_it_and_ends_the_far_side(
     )
     assert process.stdin is not None and process.stdout is not None
     hello = json.loads(process.stdout.readline())
-    assert {"adopt", "install"} <= set(hello["ops"])
-    header = {"op": "adopt", "upload": True, "workspace": far_name, "token": _fs.fresh_token()}
+    assert hello == {"format": TRANSFER_SESSION_FORMAT, "format_version": TRANSFER_PROTOCOL}
+    ids = [hold.transfer_id for hold in holds]
+    header = {"op": "stage", "upload": True, "protocol": TRANSFER_PROTOCOL, "workspace": far_name}
+    header.update(transfer_ids=ids, bytes=0)
     process.stdin.write(encode_json(REQUEST, 1, header))
     for offset in range(0, len(sent), _frames.DATA_LIMIT):
         process.stdin.write(encode_frame(_frames.DATA, 1, sent[offset : offset + _frames.DATA_LIMIT]))
@@ -338,9 +352,7 @@ def test_an_input_ending_inside_the_upload_refuses_it_and_ends_the_far_side(
     assert landings(far) == []
 
 
-def test_a_refused_member_names_its_bundle(
-    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_a_refused_member_names_its_bundle(tmp_path: Path, remote: Remote) -> None:
     _, bundle = local_project(tmp_path)
     near, _ = registered(tmp_path, "near")
     far, far_name = registered(tmp_path, "far")
@@ -348,21 +360,16 @@ def test_a_refused_member_names_its_bundle(
     bad = holds[1].transfer_id
     fifo = tarfile.TarInfo(f"{bad}/pipe")
     fifo.type = tarfile.FIFOTYPE
-    data = stream(outgoing_dir(near), [hold.transfer_id for hold in holds], [fifo])
+    ids = [hold.transfer_id for hold in holds]
+    data = stream(outgoing_dir(near), ids, [fifo])
     with opened(bundle) as session:
-        response = session.request("adopt", {"workspace": far_name, "token": _fs.fresh_token()}, upload=writer(data))
+        response = staged_adoption(session, far_name, ids, writer(data))
     assert response["ok"] is False and response["returncode"] == 2
     document = response["document"]
     assert document["bundle"] == bad and "is a special file" in document["refused"]
     assert "stream_aborted" not in document
     assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
     assert landings(far) == []
-    # The command line's document gains the member too.
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
-    assert (
-        command(["job", "adopt", "--json", "--stdin-tar", "--workspace", far_name], CLIContext("httk", tmp_path)) == 2
-    )
-    assert json.loads(capsys.readouterr().out)["bundle"] == bad
 
 
 @pytest.mark.parametrize(
@@ -391,27 +398,6 @@ def test_the_offending_bundle_is_the_first_component_of_the_refused_member(
     assert not landing.exists()
 
 
-def test_sync_fsync_needs_a_fresh_landing_over_the_session(tmp_path: Path, remote: Remote) -> None:
-    _, bundle = local_project(tmp_path)
-    near, _ = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    holds, plan = hold_jobs(near, 1)
-    data = stream(outgoing_dir(near), [holds[0].transfer_id])
-    token = _fs.fresh_token()
-    (far.control / "transfers" / "incoming" / token).mkdir(parents=True)
-    header = {"workspace": far_name, "token": token, "sync": "fsync"}
-    with opened(bundle) as session:
-        response = session.request("adopt", header, upload=writer(data))
-        assert response["ok"] is False and response["error"] == response["document"]["refused"]
-        document = response["document"]
-        assert "--sync fsync needs a fresh landing" in document["refused"]
-        assert "sync_failed" not in document and "bundle" not in document
-        # A malformed header is refused before anything is read.
-        response = session.request("adopt", {**header, "sync": "syncfs"}, upload=writer(data))
-        assert response == {"ok": False, "error": "adopt takes sync fsync or none, not 'syncfs'"}
-    assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
-
-
 def test_a_failed_commit_is_refused_as_sync_failed_and_a_fresh_fsync_landing_adopts(
     tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -422,14 +408,14 @@ def test_a_failed_commit_is_refused_as_sync_failed_and_a_fresh_fsync_landing_ado
     far, far_name = registered(tmp_path, "far")
     far.configure_settings({"io.sync": "syncfs"})
     holds, plan = hold_jobs(near, 2)
-    data = stream(outgoing_dir(near), [hold.transfer_id for hold in holds])
+    ids = [hold.transfer_id for hold in holds]
+    data = stream(outgoing_dir(near), ids)
     with opened(bundle) as session:
-        response = session.request("adopt", {"workspace": far_name, "token": _fs.fresh_token()}, upload=writer(data))
+        response = staged_adoption(session, far_name, ids, writer(data))
         assert response["ok"] is False and response["document"]["sync_failed"] is True
         assert response["returncode"] == 2 and "job adopt: refused the stream" in response["stderr"]
         assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
-        header = {"workspace": far_name, "token": _fs.fresh_token(), "sync": "fsync"}
-        response = session.request("adopt", header, upload=writer(data))
+        response = staged_adoption(session, far_name, ids, writer(data), sync="fsync")
     assert response["ok"] is True and [entry["status"] for entry in response["document"]["bundles"]] == ["adopted"] * 2
     assert all(find(far, mapping["id"]) is not None for mapping, _, _ in plan)
     assert landings(far) == []
@@ -444,14 +430,15 @@ def test_a_crash_inside_the_adoption_is_fatal_and_ends_the_far_side(
     near, _ = registered(tmp_path, "near")
     _, far_name = registered(tmp_path, "far")
     holds, _ = hold_jobs(near, 1)
-    data = stream(outgoing_dir(near), [holds[0].transfer_id])
+    ids = [holds[0].transfer_id]
+    data = stream(outgoing_dir(near), ids)
     session = opened(bundle)
     with pytest.raises(SessionFailed, match="an unexpected failure inside the adoption") as failed:
-        session.request("adopt", {"workspace": far_name, "token": _fs.fresh_token()}, upload=writer(data))
+        staged_adoption(session, far_name, ids, writer(data))
     assert failed.value.response is not None and failed.value.response["fatal"] is True
     assert session._status not in (None, 0)  # the far side exited
     with pytest.raises(SessionFailed):
-        session.request("adopt", {"workspace": far_name}, upload=writer(data))
+        staged_adoption(session, far_name, ids, writer(data))
     session.close()
 
 
@@ -546,11 +533,12 @@ def test_slow_steps_without_moving_data_report_their_phases_to_the_watchdog(
     far, far_name = registered(tmp_path, "far")
     far.configure_settings({"io.sync": "syncfs"})  # a prime, then a commit
     holds, plan = hold_jobs(near, 2)
-    data = stream(outgoing_dir(near), [hold.transfer_id for hold in holds])
+    ids = [hold.transfer_id for hold in holds]
+    data = stream(outgoing_dir(near), ids)
     session = opened(bundle)
     session._limit = 1.0
     with session:
-        response = session.request("adopt", {"workspace": far_name, "token": _fs.fresh_token()}, upload=writer(data))
+        response = staged_adoption(session, far_name, ids, writer(data))
     assert response["ok"] is True, response
     assert all(find(far, mapping["id"]) is not None for mapping, _, _ in plan)
 
@@ -567,18 +555,19 @@ def test_a_refused_member_s_slow_drain_and_discard_report_sync_and_the_refusal_a
     monkeypatch.setenv("HTTK_TEST_DELAYS", json.dumps({"_write_member": 2.0, "discard": 2.0}))
     far, far_name = registered(tmp_path, "far")
     far.configure_settings({"io.workers": 4})
-    directory = tarfile.TarInfo("x")
+    name = "a" * 32  # a transfer id, as a stage requires
+    directory = tarfile.TarInfo(name)
     directory.type = tarfile.DIRTYPE
-    slow = tarfile.TarInfo("x/slow")
+    slow = tarfile.TarInfo(f"{name}/slow")
     slow.size = 10
-    fifo = tarfile.TarInfo("x/pipe")
+    fifo = tarfile.TarInfo(f"{name}/pipe")
     fifo.type = tarfile.FIFOTYPE
     data = stream(tmp_path, [], [directory, slow, fifo])
     session = opened(bundle)
     session._limit = 1.0
     with session:
-        response = session.request("adopt", {"workspace": far_name, "token": _fs.fresh_token()}, upload=writer(data))
-    assert response["ok"] is False and response["document"]["bundle"] == "x"
+        response = staged_adoption(session, far_name, [name], writer(data))
+    assert response["ok"] is False and response["document"]["bundle"] == name
     assert "is a special file" in response["document"]["refused"]
     assert landings(far) == []
 
@@ -616,11 +605,12 @@ def test_the_upload_s_terminal_is_validated_before_the_landing_is_committed(
     near, _ = registered(tmp_path, "near")
     _, far_name = registered(tmp_path, "far")
     holds, _ = hold_jobs(near, 1)
-    data = stream(outgoing_dir(near), [holds[0].transfer_id])
+    ids = [holds[0].transfer_id]
+    data = stream(outgoing_dir(near), ids)
     with opened(bundle) as session:
-        response = session.request("adopt", {"workspace": far_name, "token": _fs.fresh_token()}, upload=writer(data))
+        response = staged_adoption(session, far_name, ids, writer(data))
     assert response["ok"] is True
-    # The opening echo's terminal, then the adoption's terminal, validated before its landing's commit.
+    # The opening echo's terminal, then the stage's terminal, validated before its landing's commit.
     assert order.read_text().splitlines() == ["terminal", "terminal", "commit"]
 
 
@@ -629,15 +619,15 @@ def test_an_error_after_the_adoption_began_is_fatal_even_when_it_is_an_oserror(
 ) -> None:
     _, bundle = local_project(tmp_path)
     patched_httk(tmp_path, remote)
-    monkeypatch.setenv("HTTK_TEST_BUILT_FOR_OSERROR", "1")
+    monkeypatch.setenv("HTTK_TEST_STATUS_OSERROR", "1")
     near, _ = registered(tmp_path, "near")
     far, far_name = registered(tmp_path, "far")
     holds, plan = hold_jobs(near, 1)
-    data = stream(outgoing_dir(near), [holds[0].transfer_id])
+    ids = [holds[0].transfer_id]
+    data = stream(outgoing_dir(near), ids)
     session = opened(bundle)
-    header = {"workspace": far_name, "token": _fs.fresh_token(), "built_for": [GIT_ID]}
-    with pytest.raises(SessionFailed, match="the store could not be read") as failed:
-        session.request("adopt", header, upload=writer(data))
+    with pytest.raises(SessionFailed, match="the adoption's status could not be read") as failed:
+        staged_adoption(session, far_name, ids, writer(data))
     assert failed.value.response is not None and failed.value.response["fatal"] is True
     session.close()
     # Adopted before the error: never claimed as a refusal.
@@ -657,10 +647,11 @@ def test_a_request_s_log_records_land_once_in_its_capture_and_nowhere_else(
     document["settings"]["io.sync_errors"] = "warn"  # read once by the landing's barrier, which warns
     path.write_text(json.dumps(document), encoding="utf-8")
     holds, _ = hold_jobs(near, 1)
-    data = stream(outgoing_dir(near), [holds[0].transfer_id])
+    ids = [holds[0].transfer_id]
+    data = stream(outgoing_dir(near), ids)
     session = opened(bundle)
     with session:
-        response = session.request("adopt", {"workspace": far_name, "token": _fs.fresh_token()}, upload=writer(data))
+        response = staged_adoption(session, far_name, ids, writer(data))
         assert response["ok"] is True
         lines = response["stderr"].splitlines()
         # Formatted by the far side's console handler, once, and only in the response.
@@ -737,98 +728,6 @@ def test_an_aborted_install_upload_installs_nothing(tmp_path: Path, remote: Remo
     assert not [path for path in (far.control / "tmp").iterdir() if path.name.startswith("push.")]
 
 
-# -- the command line: what the shared functions keep of job adopt and workflow install ------------------------------
-
-
-def test_job_adopt_stdin_tar_forwards_move(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, _ = registered(tmp_path, "near")
-    _, far_name = registered(tmp_path, "far")
-    holds, _ = hold_jobs(near, 1)
-    data = stream(outgoing_dir(near), [holds[0].transfer_id])
-    seen: list[bool] = []
-    real = job_cli._adopt_one
-
-    def adopt_one(*arguments: Any, move: bool, **options: Any) -> Any:
-        seen.append(move)
-        return real(*arguments, move=move, **options)
-
-    monkeypatch.setattr(job_cli, "_adopt_one", adopt_one)
-    for flags, expected in ((["--move"], True), ([], False)):
-        monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
-        argv = ["job", "adopt", "--json", "--stdin-tar", *flags, "--workspace", far_name]
-        assert command(argv, CLIContext("httk", tmp_path)) == 0
-        assert seen.pop() is expected
-    capsys.readouterr()
-
-
-def test_job_adopt_stdin_tar_reports_built_for_only_with_json(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, _ = registered(tmp_path, "near")
-    _, far_name = registered(tmp_path, "far")
-    holds, _ = hold_jobs(near, 1)
-    data = stream(outgoing_dir(near), [holds[0].transfer_id])
-
-    def built_for(*_arguments: Any) -> Any:
-        raise AssertionError("reported without --json")
-
-    monkeypatch.setattr(job_cli, "_built_for", built_for)
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
-    argv = ["job", "adopt", "--stdin-tar", "--workspace", far_name, "--built-for", GIT_ID]
-    assert command(argv, CLIContext("httk", tmp_path)) == 0
-    assert "\t" in capsys.readouterr().out  # the adopted job's line
-
-
-@pytest.mark.parametrize("fails", [None, "commit"], ids=["adopted", "commit-failed"])
-def test_the_leftovers_warning_comes_before_the_sync_line_and_also_when_the_commit_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fails: str | None
-) -> None:
-    near, _ = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    far.configure_settings({"io.sync": "syncfs"})
-    token = "0123456789abcdef0129"
-    landing, leftover = leftover_landing(far, near, token)
-    holds, _ = hold_jobs(near, 1)
-    data = stream(outgoing_dir(near), [holds[0].transfer_id])
-    Syncfs(monkeypatch, [None, errno.EIO] if fails else [])
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
-    argv = ["job", "adopt", "--json", "--stdin-tar", "--token", token, "--workspace", far_name]
-    assert command(argv, CLIContext("httk", tmp_path)) == (2 if fails else 0)
-    lines = capsys.readouterr().err.splitlines()
-    (warned,) = [
-        index for index, line in enumerate(lines) if line.startswith(f"warning: left 1 entr(ies) in {landing}")
-    ]
-    assert leftover in lines[warned]
-    if not fails:
-        (synced,) = [index for index, line in enumerate(lines) if line.startswith("syncing ")]
-        assert warned < synced
-
-
-def test_workflow_install_prints_its_document_before_the_landing_is_discarded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    source, _ = registered(tmp_path, "a")
-    _, target_name = registered(tmp_path, "b")
-    workflows(source, tmp_path)
-    entry = _store.lookup(source, GIT_ID)
-    assert entry is not None
-    real = _fs.discard
-
-    def discard(target: Any, **options: Any) -> None:
-        if "push." in str(target):
-            raise OSError("the landing could not be discarded")
-        real(target, **options)
-
-    monkeypatch.setattr(_fs, "discard", discard)
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(_entries_tar([entry]))))
-    argv = ["install", "--json", "--stdin-tar", "--workspace", target_name, "--source-label", "a"]
-    assert command(argv, CLIContext("httk", tmp_path)) != 0
-    document = json.loads(capsys.readouterr().out)
-    assert [row["status"] for row in document["workflows"]] == ["installed"]
-
-
 # -- the client: a segmented push over one session ------------------------------------------------------------------
 
 
@@ -846,9 +745,9 @@ def ssh(tmp_path: Path, remote: Remote) -> tuple[Path, Workspace, str, Workspace
 
 
 def adopts(requests: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
-    """The headers of the deliveries: ``stage`` requests (plan §7.10; ``adopt`` ones from a far side without it)."""
+    """The headers of the deliveries: ``stage`` requests (plan §7.10)."""
 
-    return [header for op, header in requests if op in ("adopt", "stage")]
+    return [header for op, header in requests if op == "stage"]
 
 
 def ops(requests: list[tuple[str, dict[str, Any]]]) -> list[str]:
@@ -1010,7 +909,7 @@ def test_a_session_failing_in_the_workflow_step_adopts_nothing(
         assert find(far, job_id) is None and outcome["transfer_id"] in outgoing(near)  # held, for a later run
 
 
-def test_an_older_far_side_costs_one_refused_start_then_the_adapter_path(
+def test_an_older_far_side_stops_the_push_before_anything_is_held(
     ssh: tuple[Path, Workspace, str, Workspace, str],
     remote: Remote,
     monkeypatch: pytest.MonkeyPatch,
@@ -1020,44 +919,99 @@ def test_an_older_far_side_costs_one_refused_start_then_the_adapter_path(
     monkeypatch.setenv("HTTK_TEST_OLD_FAR_SIDE", "1")
     calls = adapter_calls(monkeypatch)
     plan = jobs(near, 3)
-    assert run(project, "--json", *selected(plan), near_name, f"cluster:{far_name}") == 0
-    captured = capsys.readouterr()
-    assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 3
-    assert f"cluster:{far_name} serves no transfer session" in captured.err
-    assert calls == ["deliver job adopt"]
-    commands = remote.commands()
-    assert (len(commands), starts(commands)) == (2, 2)
-    assert "workflow transfer-session" in commands[0] and "job adopt" in commands[1]
-    assert_in(far, plan)
-    assert outgoing(near) == []
+    before = sorted(path.name for path in near.root.rglob("*"))
+    assert run(project, "--json", *selected(plan), near_name, f"cluster:{far_name}") == 1
+    document = outcomes(capsys)
+    assert document["transfers"] == []
+    (error,) = document["errors"]
+    assert (
+        "the httk on cluster is too old (or too new) for this transfer: install the same httk version on both ends"
+        in (error)
+    )
+    assert "3 selected job(s) were not attempted" in error
+    # One refused start, nothing else: no adapter operation, no hold, nothing changed on either end.
+    assert calls == [] and len(remote.commands()) == 1 and "workflow transfer-session" in remote.commands()[0]
+    assert outgoing(near) == [] and sorted(path.name for path in near.root.rglob("*")) == before
+    assert_in(near, plan)
+    assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan) and outgoing(far) == []
 
 
-def test_the_setting_off_takes_the_adapter_path_without_a_word(
+@pytest.mark.parametrize("held", [False, True], ids=["selection", "resume"])
+def test_a_newer_far_side_stops_the_push_and_an_earlier_hold_stays_held(
+    ssh: tuple[Path, Workspace, str, Workspace, str],
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    held: bool,
+) -> None:
+    project, near, near_name, far, far_name = ssh
+    monkeypatch.setenv("HTTK_TEST_PROTOCOL", str(TRANSFER_PROTOCOL + 1))
+    plan = jobs(near, 2)
+    if held:  # a hold an earlier run made (today's on-disk format), driven by --resume
+        assert run(project, "--hold", "--json", *selected(plan), near_name, f"cluster:{far_name}") == 0
+        capsys.readouterr()
+    earlier = sorted(outgoing(near))
+    argv = ["--resume"] if held else selected(plan)
+    assert run(project, "--json", *argv, near_name, f"cluster:{far_name}") == 1
+    document = outcomes(capsys)
+    error = " ".join(document["errors"]) + " ".join(str(item.get("message")) for item in document["transfers"])
+    assert "the httk on cluster is too old (or too new) for this transfer" in error
+    assert f"its transfer protocol is {TRANSFER_PROTOCOL + 1}, this side's {TRANSFER_PROTOCOL}" in error
+    assert sorted(outgoing(near)) == earlier  # an earlier hold stays held, untouched; no new one
+    assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan) and outgoing(far) == []
+    if not held:
+        assert_in(near, plan)
+    # Once both ends run the same httk, the hold made by the earlier run is resumed over a session.
+    monkeypatch.delenv("HTTK_TEST_PROTOCOL")
+    if held:
+        assert run(project, "--json", "-q", "--resume", near_name, f"cluster:{far_name}") == 0
+        assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 2
+        assert_in(far, plan)
+        assert outgoing(near) == []
+
+
+@pytest.mark.parametrize("direction", ["push", "pull"])
+def test_an_adapter_without_the_session_operation_stops_before_anything_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], direction: str
+) -> None:
+    from test_adapter_refusal import _unrecognized
+
+    project = tmp_path / "project"
+    initialize_project(project, name="session-refused")
+    _unrecognized(project, "cluster")  # an adapter kind that refuses every operation, session included
+    near, near_name = registered(tmp_path, "near")
+    far, far_name = registered(tmp_path, "far")
+    calls = adapter_calls(monkeypatch)
+    plan = jobs(near if direction == "push" else far, 2)
+    ends = [near_name, f"cluster:{far_name}"] if direction == "push" else [f"cluster:{far_name}", near_name]
+    assert run(project, "--json", *selected(plan), *ends) == 1
+    document = outcomes(capsys)
+    assert document["transfers"] == []
+    (error,) = document["errors"]
+    assert "the adapter of cluster cannot open a transfer session" in error and "'torque' is not implemented" in error
+    # Nothing held or changed on either end, and no adapter operation tried in its place.
+    assert calls == [] and outgoing(near) == [] and outgoing(far) == []
+    assert_in(near if direction == "push" else far, plan)
+
+
+def test_the_removed_setting_is_refused_by_remote_configure(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="session-setting")
+    fake_remote(project)
+    argv = ["remote", "configure", "--set", "transfer_session=off", "cluster"]
+    assert command(argv, CLIContext("httk", project)) != 0
+    assert "unknown remote setting 'transfer_session'" in capsys.readouterr().err
+
+
+def test_ssh_failing_to_open_the_session_holds_nothing(
     tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     project = tmp_path / "project"
-    initialize_project(project, name="session-off")
-    fake_remote(project, transfer_session="off")
-    near, near_name = registered(tmp_path, "near")
-    _, far_name = registered(remote.root, "far")
-    calls = adapter_calls(monkeypatch)
-    plan = jobs(near, 2)
-    assert run(project, "--json", *selected(plan), near_name, f"cluster:{far_name}") == 0
-    assert "transfer session" not in capsys.readouterr().err
-    assert calls == ["deliver job adopt"] and len(remote.commands()) == 1
-
-
-@pytest.mark.parametrize("failure", ["ssh 255", "bad setting"])
-def test_other_failures_to_open_the_session_never_fall_back(
-    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: str
-) -> None:
-    project = tmp_path / "project"
     initialize_project(project, name="session-open")
-    fake_remote(project, **({"transfer_session": "sometimes"} if failure == "bad setting" else {}))
+    fake_remote(project)
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(remote.root, "far")
-    if failure == "ssh 255":
-        monkeypatch.setenv("HTTK_FAKE_SSH_REFUSE", "1")
+    monkeypatch.setenv("HTTK_FAKE_SSH_REFUSE", "1")
     calls = adapter_calls(monkeypatch)
     plan = jobs(near, 2)
     assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
@@ -1065,11 +1019,9 @@ def test_other_failures_to_open_the_session_never_fall_back(
     # Plan §7.8: the session opens before the first hold, so one that cannot open leaves nothing held.
     assert document["transfers"] == []
     (error,) = document["errors"]
-    reason = "ssh connection failed" if failure == "ssh 255" else "auto or off"
-    assert "transfer session did not open" in error and reason in error
+    assert "transfer session did not open" in error and "ssh connection failed" in error
     assert "2 selected job(s) were not attempted" in error and "--resume" in error
-    assert calls == []  # no deliver: no second login
-    assert len(remote.commands()) == (1 if failure == "ssh 255" else 0)
+    assert calls == [] and len(remote.commands()) == 1
     assert outgoing(near) == [] and all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
     assert_in(near, plan)
 
@@ -1098,8 +1050,26 @@ def test_a_failed_commit_is_retried_in_its_segment_and_later_segments_fsync_dire
     assert outgoing(near) == [] and landings(far) == []
 
 
+def test_no_retry_under_ignore(
+    ssh: tuple[Path, Workspace, str, Workspace, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Under io.sync_errors ignore the far side trusts a failed commit after a second syncfs: the segment is
+    # adopted, never refused as sync_failed, so it is delivered once, without fsync.
+    project, near, near_name, far, far_name = ssh
+    far.configure_settings({"io.sync": "syncfs", "io.sync_errors": "ignore"})
+    monkeypatch.setenv("HTTK_TEST_FAIL_SYNCFS", "2")  # the first barrier's commit, after its prime
+    requests = recorded_requests(monkeypatch)
+    plan = jobs(near, 2)
+    assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
+    assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 2
+    assert [header.get("sync") for header in adopts(requests)] == [None]
+    assert_in(far, plan)
+
+
 def scripted(monkeypatch: pytest.MonkeyPatch, steps: dict[int, dict[str, Any]]) -> None:
-    """Script the far side's answers to adopt requests by number (see :data:`PATCHED_HTTK`)."""
+    """Script the far side's answers to stage requests by number (see :data:`PATCHED_HTTK`)."""
 
     monkeypatch.setenv("HTTK_TEST_SCRIPT", json.dumps({str(number): step for number, step in steps.items()}))
 
@@ -1409,13 +1379,15 @@ def test_an_aborted_upload_s_answer_counts_only_as_a_refusal(tmp_path: Path) -> 
             raise RequestAborted("adopt was aborted", response=self.response)
 
     def answer(response: dict[str, Any]) -> tuple[dict[str, Any], str]:
-        return transfer_cli._session_adopt(cast(Any, Stub(response)), src, dst, arguments, holds, "t" * 20, False)
+        return transfer_cli._session_stage(cast(Any, Stub(response)), src, dst, arguments, holds, 0, False)
 
     dst = transfer_cli._End("cluster:far", binding=registry.WorkspaceBinding("cluster:far", "cluster", None))
-    # An adoption claimed for an upload this side aborted is no answer.
-    claimed = {"ok": True, "document": {"bundles": [adopted], "workspace_id": workspace_id}}
+    # A stage claimed for an upload this side aborted is no answer, nor is an adoption so claimed.
+    claimed = {"ok": True, "token": "t", "transfer_ids": ["a" * 32], "workspace_id": workspace_id, "matures_in": 0}
     with pytest.raises(RuntimeError, match="whether the jobs arrived is unknown"):
-        answer(claimed)
+        answer({**claimed, "bytes": 0})
+    with pytest.raises(RuntimeError, match="whether the jobs arrived is unknown"):
+        answer({"ok": False, "document": {"bundles": [adopted], "workspace_id": workspace_id}, "error": "x"})
     refusal = {"bundles": [], "workspace_id": workspace_id, "refused": "aborted"}
     document, _err = answer({"ok": False, "document": refusal, "error": "aborted"})
     assert document["refused"] == "aborted"

@@ -14,7 +14,6 @@ import io
 import json
 import logging
 import os
-import re
 import sys
 import tarfile
 from collections.abc import Callable, Sequence
@@ -24,38 +23,35 @@ from typing import Any
 import pytest
 from httk.core.cli import CLIContext
 
-from conftest import Remote, fake_remote
+from conftest import fake_remote
 from httk.workflow import Workspace, _fs, _landing, _moving, _store
 from httk.workflow import scaffold as scaffold_module
+from httk.workflow._frames import END, REQUEST
 from httk.workflow._setting_catalog import classify_setting
-from httk.workflow._state import read_state_unowned
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import _transfer as transfer_cli
-from httk.workflow.workflow_cli import command
+from httk.workflow.workflow_cli import _transfer_session, command
 from test_deliver import hold_jobs, outgoing_dir, stream
 from test_job_creation import install, raw_package, ready
-from test_job_transfer import adapter_calls, jobs, outgoing, registered, selected, starts
+from test_job_transfer import jobs, outgoing, recorded_requests, registered, selected
 from test_moving import assert_in, find, io_workers  # noqa: F401 (io_workers: fixture)
 from test_sync_landings import (
     Events,
     adopt_stream,
-    in_process_far_side,
     landings,
     other_device,
     statuses,
     transfer,
 )
 from test_sync_publication import durable_workspace, ejected, prepared_payloads, staged_job, submit
-from test_transfer_workflows import GIT_ID, shipped, workflows
-from test_transfer_workflows import job as workflow_job
 from v3_helpers import cli_owner
 
 _FS_LOGGER = "httk.workflow._fs"
 
 
 def receive_tar(workspace: Workspace, landing: Path, **options: Any) -> list[str]:
-    """The far side's receiver reading standard input, as ``job adopt --stdin-tar`` hands it its stream."""
+    """The far side's receiver reading standard input as its stream (a session hands it its upload)."""
 
     return _landing.receive_tar(workspace, landing, sys.stdin.buffer, **options)
 
@@ -71,9 +67,8 @@ def project(tmp_path: Path) -> Path:
 
     root = tmp_path / "project"
     initialize_project(root, name="sync-errors")
-    # The adapter path, which Far scripts (a session's retry: test_session_push).
-    fake_remote(root, template="local", name="cluster", transfer_session="off")
-    fake_remote(root, template="local", name="other", transfer_session="off")
+    fake_remote(root, template="local", name="cluster")
+    fake_remote(root, template="local", name="other")
     return root
 
 
@@ -469,23 +464,6 @@ def test_only_a_failed_commit_marks_the_refusal_sync_failed(
     assert "refused" in document and "sync_failed" not in document
 
 
-def test_a_failed_commit_without_json_hints_at_the_remedy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, _ = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    far.configure_settings({"io.sync": "syncfs"})
-    holds, _ = hold_jobs(near, 1)
-    data = stream(outgoing_dir(near), [hold.transfer_id for hold in holds])
-    Syncfs(monkeypatch, [None, errno.EDQUOT])
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
-    argv = ["job", "adopt", "--stdin-tar", "--workspace", far_name]
-    assert command(argv, CLIContext("httk", tmp_path)) != 0
-    err = capsys.readouterr().err
-    assert "refused the stream, nothing of it was used" in err and "deliver the stream again" in err
-    assert "io.sync_errors" in err and "--sync" not in err  # the hidden option is not advertised
-
-
 def test_sync_fsync_forces_inline_fsync_whatever_io_sync_says(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -516,16 +494,16 @@ def test_sync_fsync_forces_inline_fsync_whatever_io_sync_says(
     assert_in(far, plan)
 
 
-def test_sync_is_refused_without_stdin_tar_and_takes_only_fsync(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_a_stage_takes_only_sync_fsync(tmp_path: Path) -> None:
+    from test_transfer_session import _Peer
+
     _, far_name = registered(tmp_path, "far")
-    argv = ["job", "adopt", "--sync", "fsync", "--workspace", far_name, str(tmp_path / "bundle")]
-    assert command(argv, CLIContext("httk", tmp_path)) != 0
-    assert "--sync applies to the landing of --stdin-tar" in capsys.readouterr().err
-    argv = ["job", "adopt", "--stdin-tar", "--sync", "syncfs", "--workspace", far_name]
-    assert command(argv, CLIContext("httk", tmp_path)) == 2
-    assert "invalid choice: 'syncfs'" in capsys.readouterr().err
+    peer = _Peer(dict(_transfer_session.OPS))
+    header = {"op": "stage", "workspace": far_name, "transfer_ids": ["0" * 32], "bytes": 0, "sync": "syncfs"}
+    peer.writer.send_json(REQUEST, 1, {**header, "upload": True})
+    peer.writer.send_json(END, 1, {"ok": True})
+    assert peer.answer() == {"ok": False, "error": "stage takes sync fsync or none, not 'syncfs'"}
+    assert peer.end() == 0
 
 
 def test_receive_tar_raises_commit_failed_only_for_the_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -545,72 +523,69 @@ def test_receive_tar_raises_commit_failed_only_for_the_commit(tmp_path: Path, mo
 # -- the client of a push: one retry ---------------------------------------------------------------------------------
 
 
-type Answer = tuple[int, str, str]
+type Answer = dict[str, Any]
 
 
 class Far:
-    """A recording, scripted far side of ``deliver``: each call's argv and source; each answer from *answers*
-    (``None``: run ``job adopt`` in this process on the delivered stream; a callable: the in-process answer, as
-    that callable changes it). Any other delivery (``workflow install``) goes through the real adapter."""
+    """A recording, scripted far side of a push's segments over its transfer session: each ``stage`` request's header,
+    the directory its bundles were uploaded from and whether they were there; each answer from *answers* (``None``:
+    the real far side's; a mapping: that response instead, nothing sent; a callable: the real response, as that
+    callable changes it)."""
 
     def __init__(
         self, monkeypatch: pytest.MonkeyPatch, answers: Sequence[Answer | Callable[[Answer], Answer] | None] = ()
     ) -> None:
         self.answers = list(answers)
-        self.calls: list[list[str]] = []
+        self.calls: list[dict[str, Any]] = []
         self.sources: list[str] = []
         self.present: list[bool] = []
-        adapter = transfer_cli._deliver_call
-        in_process_far_side(monkeypatch)
-        real = transfer_cli._deliver_call
+        real = transfer_cli._upload_holds
 
-        def deliver_call(
-            end: Any, context: CLIContext, arguments: Any, source: str, files: list[str], argv: list[str]
-        ) -> tuple[int, str, str]:
-            self.calls.append(list(argv))
-            if "adopt" not in argv:
-                return adapter(end, context, arguments, source, files, argv)
-            self.sources.append(source)
-            self.present.append(all((Path(source) / name).is_dir() for name in files))
+        def upload_holds(
+            session: Any, op: str, header: dict[str, Any], holds: list[Any], *rest: Any
+        ) -> tuple[dict[str, Any], str]:
+            self.calls.append(dict(header))
+            self.sources.append(str(Path(holds[0].path).parent))
+            self.present.append(all(Path(hold.path).is_dir() for hold in holds))
             answer = self.answers.pop(0) if self.answers else None
             if answer is None:
-                return real(end, context, arguments, source, files, argv)
+                return real(session, op, header, holds, *rest)
             if callable(answer):
-                return answer(real(end, context, arguments, source, files, argv))
-            return answer
+                response, aborted = real(session, op, header, holds, *rest)
+                return answer(response), aborted
+            return dict(answer), ""
 
-        monkeypatch.setattr(transfer_cli, "_deliver_call", deliver_call)
-
-    def tokens(self) -> list[str]:
-        return [argv[argv.index("--token") + 1] for argv in self.calls]
+        monkeypatch.setattr(transfer_cli, "_upload_holds", upload_holds)
 
     def strengthened(self) -> list[bool]:
-        return ["--sync" in argv and argv[argv.index("--sync") + 1] == "fsync" for argv in self.calls]
+        return [header.get("sync") == "fsync" for header in self.calls]
 
 
-def sync_failed(workspace_id: str, **extra: Any) -> tuple[int, str, str]:
-    refusal = {"bundles": [], "workspace_id": workspace_id, "refused": "refused the stream: syncfs failed"}
-    return 2, json.dumps({**refusal, "sync_failed": True, **extra}), ""
+def refusal(workspace_id: str | None, reason: str, **extra: Any) -> Answer:
+    """A ``stage`` request's answer refusing its segment whole."""
+
+    document = {"bundles": [], "workspace_id": workspace_id, "refused": reason, **extra}
+    return {"ok": False, "error": reason, "document": document, "returncode": 2, "stderr": ""}
 
 
-def test_a_failed_commit_refusal_is_delivered_once_more_with_a_fresh_token_and_sync_fsync(
+def sync_failed(workspace_id: str, **extra: Any) -> Answer:
+    return refusal(workspace_id, "refused the stream: syncfs failed", **{"sync_failed": True, **extra})
+
+
+def test_a_failed_commit_refusal_is_delivered_once_more_with_sync_fsync(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(tmp_path, "far")
     far.configure_settings({"io.sync": "syncfs"})
     plan = jobs(near, 3)
-    far_side = Far(monkeypatch)
-    calls = Syncfs(monkeypatch, [None, errno.EDQUOT])
+    far_side = Far(monkeypatch, [sync_failed(far.workspace_id)])
     assert transfer(project, "--json", *selected(plan), near_name, f"cluster:{far_name}") == 0
     captured = capsys.readouterr()
     assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 3
     assert far_side.strengthened() == [False, True]
-    first, second = far_side.tokens()
-    assert first != second and re.fullmatch(r"[0-9a-z]{16,64}", second)
-    assert [argv[:4] for argv in far_side.calls] == [far_side.calls[0][:4]] * 2  # the same job adopt --json --stdin-tar
+    assert [header["transfer_ids"] for header in far_side.calls] == [far_side.calls[0]["transfer_ids"]] * 2
     assert "delivering 3 bundle(s) again, with an fsync of every file" in captured.err
-    assert len(calls.descriptors) == 2  # the first delivery's prime and failed commit; the retry calls no syncfs
     assert_in(far, plan)
     assert outgoing(near) == [] and landings(far) == []
 
@@ -622,8 +597,7 @@ def test_the_retry_announcement_is_quiet_with_q(
     far, far_name = registered(tmp_path, "far")
     far.configure_settings({"io.sync": "syncfs"})
     plan = jobs(near, 1)
-    far_side = Far(monkeypatch)
-    Syncfs(monkeypatch, [None, errno.EDQUOT])
+    far_side = Far(monkeypatch, [sync_failed(far.workspace_id)])
     assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
     assert "again" not in capsys.readouterr().err and len(far_side.calls) == 2
 
@@ -634,8 +608,8 @@ def test_a_refused_retry_takes_a_local_source_s_holds_back(
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(tmp_path, "far")
     plan = jobs(near, 2)
-    refused = {"bundles": [], "workspace_id": far.workspace_id, "refused": "refused the stream: injected"}
-    far_side = Far(monkeypatch, [sync_failed(far.workspace_id), (2, json.dumps(refused), "")])
+    refused = refusal(far.workspace_id, "refused the stream: injected")
+    far_side = Far(monkeypatch, [sync_failed(far.workspace_id), refused])
     assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
     outcomes = statuses(capsys)
     assert [outcome["status"] for outcome in outcomes] == ["not_moved"] * 2
@@ -665,7 +639,7 @@ def test_an_unreadable_retry_answer_keeps_the_holds_and_a_resume_delivers(
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(tmp_path, "far")
     plan = jobs(near, 2)
-    far_side = Far(monkeypatch, [sync_failed(far.workspace_id), (255, "", "ssh: connection reset")])
+    far_side = Far(monkeypatch, [sync_failed(far.workspace_id), {"ok": False, "error": "garbled"}])
     assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
     outcomes = statuses(capsys)
     assert [outcome["status"] for outcome in outcomes] == ["failed"] * 2
@@ -723,25 +697,10 @@ def test_other_refusals_and_false_markers_are_not_retried(
     assert len(far_side.calls) == 1
     # A real refusal of another kind (a member already there would be a bundle refusal; a malformed stream is not):
     plan = jobs(near, 1)
-    far_side = Far(monkeypatch, [(2, json.dumps({"bundles": [], "workspace_id": None, "refused": "no such"}), "")])
+    far_side = Far(monkeypatch, [refusal(None, "no such")])
     assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
     assert [outcome["status"] for outcome in statuses(capsys)] == ["not_moved"]
     assert len(far_side.calls) == 1
-
-
-def test_no_retry_under_ignore(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    far.configure_settings({"io.sync": "syncfs", "io.sync_errors": "ignore"})
-    plan = jobs(near, 2)
-    far_side = Far(monkeypatch)
-    calls = Syncfs(monkeypatch, [None, errno.EDQUOT, None])
-    assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
-    assert [outcome["status"] for outcome in statuses(capsys)] == ["adopted"] * 2
-    assert far_side.strengthened() == [False] and len(calls.descriptors) == 3
-    assert_in(far, plan)
 
 
 def test_a_remote_source_s_retry_reuses_the_relay(
@@ -750,20 +709,14 @@ def test_a_remote_source_s_retry_reuses_the_relay(
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(tmp_path, "far")
     plan = jobs(near, 2)
-    pulls: list[str] = []
-    real = transfer_cli._adapter
-
-    def adapter(end: Any, context: Any, arguments: Any, operation: str, *rest: Any) -> None:
-        if operation == "pull":
-            pulls.append(str(rest[1]))
-        real(end, context, arguments, operation, *rest)
-
-    monkeypatch.setattr(transfer_cli, "_adapter", adapter)
+    requests = recorded_requests(monkeypatch)
     far_side = Far(monkeypatch, [sync_failed(far.workspace_id)])
     assert transfer(project, "--json", "-q", *selected(plan), f"cluster:{near_name}", f"other:{far_name}") == 0
     assert [outcome["status"] for outcome in statuses(capsys)] == ["adopted"] * 2
-    # One pull into the relay; both deliveries from that same, still present, relay.
-    assert len(pulls) == 1 and far_side.sources == [pulls[0]] * 2 and far_side.present == [True, True]
+    # One fetch into the relay; both deliveries from that same, still present, relay.
+    sends = [header for op, header in requests if op == "send" and header.get("kind") == "holds"]
+    assert len(sends) == 1 and len(set(far_side.sources)) == 1 and far_side.present == [True, True]
+    assert far_side.sources[0] != str(outgoing_dir(near))
     assert far_side.strengthened() == [False, True]
     assert_in(far, plan)
     assert outgoing(near) == []
@@ -782,204 +735,6 @@ def test_a_remote_source_s_refused_retry_keeps_its_holds(
     assert len(far_side.calls) == 2 and outgoing(near) == [outcome["transfer_id"]]
 
 
-# -- the counts: +1 connection and +1 remote start only when a retry happens ----------------------------------------
-
-_FAILING_HTTK = '''import errno
-import os
-import runpy
-import sys
-
-argv = sys.argv[1:]
-if os.environ.get("HTTK_TEST_FAIL_ADOPT_COMMIT") and "adopt" in argv and "--stdin-tar" in argv and "--sync" not in argv:
-    from httk.workflow import _fs
-
-    real = _fs._syncfs
-    calls = []
-
-    def syncfs(descriptor):
-        calls.append(descriptor)
-        if len(calls) == 2:  # the barrier's commit, after its prime
-            raise OSError(errno.EDQUOT, os.strerror(errno.EDQUOT))
-        real(descriptor)
-
-    _fs._syncfs = syncfs
-sys.argv = ["httk", *argv]
-runpy.run_module("httk.core.cli", run_name="__main__", alter_sys=True)
-'''
-
-
-def failing_far_commits(tmp_path: Path, remote: Remote) -> None:
-    """Make the stand-in cluster's ``httk`` fail the sync commit of every ``job adopt --stdin-tar`` without
-    ``--sync`` while ``HTTK_TEST_FAIL_ADOPT_COMMIT`` is set."""
-
-    wrapper = tmp_path / "failing_httk.py"
-    wrapper.write_text(_FAILING_HTTK, encoding="utf-8")
-    remote.install("httk", f'#!/bin/sh\nexec {{python}} {wrapper} "$@"\n')
-
-
-@pytest.mark.parametrize("retry", [False, True], ids=["no-retry", "retry"])
-def test_local_to_remote_over_ssh_costs_one_more_call_only_for_a_retry(
-    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], retry: bool
-) -> None:
-    project = tmp_path / "project"
-    initialize_project(project, name="ssh-retry")
-    fake_remote(project, transfer_session="off")  # the adapter path's count (a session's: test_session_push)
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(remote.root, "far")
-    far.configure_settings({"io.sync": "syncfs"})
-    failing_far_commits(tmp_path, remote)
-    if retry:
-        monkeypatch.setenv("HTTK_TEST_FAIL_ADOPT_COMMIT", "1")
-    calls = adapter_calls(monkeypatch)
-    before = len(remote.commands())
-    plan = jobs(near, 3)
-    assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
-    assert [outcome["status"] for outcome in statuses(capsys)] == ["adopted"] * 3
-    commands = remote.commands()[before:]
-    assert calls == ["deliver job adopt"] * (2 if retry else 1)
-    assert (len(commands), starts(commands)) == ((2, 2) if retry else (1, 1))
-    assert ["--sync fsync" in item for item in commands] == ([False, True] if retry else [False])
-    assert_in(far, plan)
-    assert outgoing(near) == []
-
-
-@pytest.mark.parametrize("retry", [False, True], ids=["no-retry", "retry"])
-def test_remote_to_remote_over_ssh_costs_one_more_call_only_for_a_retry(
-    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], retry: bool
-) -> None:
-    project = tmp_path / "project"
-    initialize_project(project, name="ssh-relay-retry")
-    # The adapter path on both ends, (A, A): its count (the sessions' retry: test_remote_to_remote).
-    fake_remote(project, transfer_session="off")
-    fake_remote(project, name="other", transfer_session="off")
-    near, near_name = registered(remote.root, "near")
-    far, far_name = registered(remote.root, "far")
-    far.configure_settings({"io.sync": "syncfs"})
-    failing_far_commits(tmp_path, remote)
-    if retry:
-        monkeypatch.setenv("HTTK_TEST_FAIL_ADOPT_COMMIT", "1")
-    calls = adapter_calls(monkeypatch)
-    before = len(remote.commands())
-    plan = jobs(near, 3)
-    assert transfer(project, "--json", "-q", *selected(plan), f"cluster:{near_name}", f"other:{far_name}") == 0
-    assert [outcome["status"] for outcome in statuses(capsys)] == ["adopted"] * 3
-    adoptions = ["deliver job adopt"] * (2 if retry else 1)
-    # No second pull: the retry delivers the relay's copies again.
-    assert calls == ["job transfer", "pull", *adoptions, "job transfer"]
-    commands = remote.commands()[before:]
-    assert (len(commands), starts(commands)) == ((5, 4) if retry else (4, 3))
-    assert_in(far, plan)
-    assert outgoing(near) == []
-
-
-# -- the local side of a pull: one re-pull --------------------------------------------------------------------------
-
-
-def recorded_pulls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """The landing directory of every adapter ``pull`` (installed after :class:`Events`, which wraps it too)."""
-
-    pulls: list[str] = []
-    real = transfer_cli._adapter
-
-    def adapter(end: Any, context: Any, arguments: Any, operation: str, *rest: Any) -> None:
-        if operation == "pull":
-            if pulls and Path(pulls[0]).parent.exists():
-                pulls.append("the earlier landing was not discarded before this pull")
-            pulls.append(str(rest[1]))
-        real(end, context, arguments, operation, *rest)
-
-    monkeypatch.setattr(transfer_cli, "_adapter", adapter)
-    return pulls
-
-
-def test_a_failed_pull_commit_is_pulled_once_more_into_a_fresh_landing_under_a_fresh_barrier(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    near.configure_settings({"io.sync": "syncfs"})
-    plan = jobs(far, 3)
-    events = Events(monkeypatch, syncfs_failures=[None, errno.EIO])
-    pulls = recorded_pulls(monkeypatch)
-    assert transfer(project, "--json", *selected(plan), f"cluster:{far_name}", near_name) == 0
-    captured = capsys.readouterr()
-    assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 3
-    # Two pulls into two landings, each under its own barrier, primed before its pull, committed after it.
-    assert len(pulls) == 2 and pulls[0] != pulls[1] and Path(pulls[0]).parent != Path(pulls[1]).parent
-    kinds = events.kinds()
-    assert kinds.count("enter") == 2 and kinds.count("syncfs") == 4
-    (first, _), (second, _) = events.barriers
-    assert first == second == "syncfs"
-    descriptors = events.syncfs_descriptors()
-    assert descriptors[0] == descriptors[1] and descriptors[2] == descriptors[3]
-    syncfs = [index for index, kind in enumerate(kinds) if kind == "syncfs"]
-    pull_starts = [index for index, kind in enumerate(kinds) if kind == "pull-start"]
-    pull_ends = [index for index, kind in enumerate(kinds) if kind == "pull-end"]
-    assert syncfs[0] < pull_starts[0] < pull_ends[0] < syncfs[1] < syncfs[2] < pull_starts[1] < pull_ends[1]
-    assert pull_ends[1] < syncfs[3] < events.first("take")
-    assert "again" in captured.err
-    assert not Path(pulls[0]).exists()  # the failed landing was discarded
-    assert_in(near, plan)
-    assert outgoing(far) == [] and not list((near.control / "tmp").glob("*.landing.*"))
-
-
-def test_a_second_failed_pull_commit_fails_the_chunk_and_a_resume_adopts(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    near.configure_settings({"io.sync": "syncfs"})
-    plan = jobs(far, 2)
-    Events(monkeypatch, syncfs_failures=[None, errno.EIO, None, errno.EDQUOT])
-    pulls = recorded_pulls(monkeypatch)
-    assert transfer(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
-    outcomes = statuses(capsys)
-    assert [outcome["status"] for outcome in outcomes] == ["failed"] * 2
-    assert all("not durable" in outcome["message"] and "stays held" in outcome["message"] for outcome in outcomes)
-    assert len(pulls) == 2
-    assert all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
-    assert sorted(outgoing(far)) == sorted(outcome["transfer_id"] for outcome in outcomes)
-    assert not list((near.control / "tmp").glob("*.landing.*"))
-    pulls.clear()
-    assert transfer(project, "--json", "-q", "--resume", f"cluster:{far_name}", near_name) == 0
-    assert [outcome["status"] for outcome in statuses(capsys)] == ["adopted"] * 2 and len(pulls) == 1
-    assert_in(near, plan)
-
-
-def test_a_failed_walk_of_an_fsync_pull_is_not_pulled_again(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    near.configure_settings({"io.sync": "fsync"})
-    plan = jobs(far, 1)
-
-    def failing(anchor: int, **options: Any) -> int:
-        raise _fs.SyncFailed(errno.EIO, "injected walk failure")
-
-    monkeypatch.setattr(_fs, "fsync_landing", failing)
-    pulls = recorded_pulls(monkeypatch)
-    assert transfer(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
-    (outcome,) = statuses(capsys)
-    assert outcome["status"] == "failed" and "injected walk failure" in outcome["message"]
-    assert len(pulls) == 1 and outgoing(far) == [outcome["transfer_id"]]
-
-
-def test_a_pull_under_ignore_is_adopted_without_a_re_pull(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    near.configure_settings({"io.sync": "syncfs", "io.sync_errors": "ignore"})
-    plan = jobs(far, 2)
-    events = Events(monkeypatch, syncfs_failures=[None, errno.EIO, None])
-    pulls = recorded_pulls(monkeypatch)
-    assert transfer(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 0
-    assert [outcome["status"] for outcome in statuses(capsys)] == ["adopted"] * 2
-    assert len(pulls) == 1 and events.kinds().count("syncfs") == 3 and events.kinds().count("enter") == 1
-    assert_in(near, plan)
-
-
 # -- review corrections ----------------------------------------------------------------------------------------------
 
 
@@ -995,48 +750,22 @@ def leftover_landing(far: Workspace, near: Workspace, token: str) -> tuple[Path,
 
 
 def test_sync_fsync_refuses_an_existing_landing_before_changing_anything(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     near, _ = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
+    far, _ = registered(tmp_path, "far")
     far.configure_settings({"io.sync": "syncfs"})
     token = "0123456789abcdef0123"
     landing, leftover = leftover_landing(far, near, token)
-    holds, plan = hold_jobs(near, 1)
-    data = stream(outgoing_dir(near), [hold.transfer_id for hold in holds])
-    argv = ["--sync", "fsync", "--token", token, "--workspace", far_name]
-    assert adopt_stream(monkeypatch, tmp_path, data, *argv) == 2
-    document = json.loads(capsys.readouterr().out)
-    assert "--sync fsync needs a fresh landing" in document["refused"] and "sync_failed" not in document
-    # Nothing adopted, the leftover neither adopted nor discarded.
-    assert sorted(os.listdir(landing)) == [leftover] and (landing / leftover / "partial").read_bytes() == b"x"
-    assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
-    # receive_tar itself refuses it the same way.
+    # A stage's landing is always fresh; the receiver itself refuses an existing one under fsync.
     empty_stream(monkeypatch)
     with pytest.raises(ValueError, match="needs a fresh landing"):
         receive_tar(Workspace(far.root), landing, barrier=True, force_fsync=True)
     assert sorted(os.listdir(landing)) == [leftover]
-    # Without --sync a delivery may reuse the token, but the leftover is still never returned (so never adopted).
+    # Without fsync an existing landing may be reused, but the leftover is still never returned (so never adopted).
     empty_stream(monkeypatch)
     assert receive_tar(Workspace(far.root), landing, barrier=True) == []
     assert sorted(os.listdir(landing)) == [leftover]
-
-
-@pytest.mark.parametrize("durable", [True, False], ids=["durable", "non-durable"])
-def test_sync_fsync_refuses_an_existing_landing_in_any_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], durable: bool
-) -> None:
-    near, _ = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    token = "0123456789abcdef0124"
-    landing, leftover = leftover_landing(far, near, token)
-    holds, plan = hold_jobs(near, 1)
-    data = stream(outgoing_dir(near), [hold.transfer_id for hold in holds])
-    argv = ["--sync", "fsync", "--token", token, *([] if durable else ["--no-durable"]), "--workspace", far_name]
-    assert adopt_stream(monkeypatch, tmp_path, data, *argv) == 2
-    assert "--sync fsync needs a fresh landing" in json.loads(capsys.readouterr().out)["refused"]
-    assert sorted(os.listdir(landing)) == [leftover]
-    assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
 
 
 def test_sync_fsync_refuses_a_landing_created_concurrently(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1056,29 +785,6 @@ def test_sync_fsync_refuses_a_landing_created_concurrently(tmp_path: Path, monke
     with pytest.raises(ValueError, match="needs a fresh landing"):
         receive_tar(Workspace(far.root), landing, barrier=True, force_fsync=True)
     assert os.listdir(landing) == ["theirs"] and (landing / "theirs").read_bytes() == b"x"
-
-
-def test_a_reused_token_adopts_only_the_bundles_its_stream_carries(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, _ = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    far.configure_settings({"io.sync": "syncfs"})
-    token = "0123456789abcdef0126"
-    landing, leftover = leftover_landing(far, near, token)  # an unrelated bundle of an interrupted delivery
-    holds, plan = hold_jobs(near, 2)
-    resent = holds[0].transfer_id
-    (landing / resent).mkdir()  # a re-sent bundle that the interrupted delivery had begun
-    data = stream(outgoing_dir(near), [hold.transfer_id for hold in holds])
-    assert adopt_stream(monkeypatch, tmp_path, data, "--token", token, "--workspace", far_name) == 0
-    captured = capsys.readouterr()
-    entries = json.loads(captured.out)["bundles"]
-    assert sorted(entry["bundle"] for entry in entries) == sorted(hold.transfer_id for hold in holds)
-    assert [entry["status"] for entry in entries] == ["adopted"] * 2
-    assert_in(far, plan)
-    # The leftover was neither adopted nor discarded, and a warning says so.
-    assert os.listdir(landing) == [leftover] and (landing / leftover / "partial").read_bytes() == b"x"
-    assert f"warning: left 1 entr(ies) in {landing}" in captured.err and leftover in captured.err
 
 
 def test_a_top_level_non_directory_member_still_refuses_the_stream(
@@ -1119,18 +825,19 @@ def test_a_retry_adopted_by_another_workspace_says_so_and_keeps_the_holds(
     far, far_name = registered(tmp_path, "far")
     plan = jobs(near, 1)
     expected = "00000000-0000-4000-8000-000000000002"
-    far_side = Far(monkeypatch, [sync_failed(expected)])  # the second delivery is adopted for real, by far
+    far_side = Far(monkeypatch, [sync_failed(expected)])  # the second delivery is staged for real, by far
     assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
     (outcome,) = statuses(capsys)
     assert outcome["status"] == "failed" and len(far_side.calls) == 2
     message = outcome["message"]
-    assert f"adopted the jobs into workspace {far.workspace_id}, not the expected workspace {expected}" in message
-    assert "the holds are kept" in message and "httk job transfer --resume" in message
+    assert f"staged the segment in workspace {far.workspace_id}, not the expected workspace {expected}" in message
+    assert "nothing of it was adopted" in message and "httk job transfer --resume" in message
     assert outgoing(near) == [outcome["transfer_id"]]
-    assert_in(far, plan)
-    # The resume finds them there and releases the holds.
+    assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
+    # The resume delivers it and releases the hold.
     assert transfer(project, "--json", "-q", "--resume", near_name, f"cluster:{far_name}") == 0
     assert outgoing(near) == []
+    assert_in(far, plan)
 
 
 def test_sync_fsync_names_itself_as_the_reason(
@@ -1163,94 +870,6 @@ def test_under_ignore_an_unsupported_syncfs_at_the_commit_refuses_without_sync_f
     Syncfs(monkeypatch, [None, errno.ENOSYS])
     assert adopt_stream(monkeypatch, tmp_path, data, "--workspace", far_name) == 2
     assert json.loads(capsys.readouterr().out)["sync_failed"] is True
-
-
-@pytest.mark.parametrize("policy", ["fail", "ignore"])
-def test_an_unsupported_syncfs_at_a_pull_commit_is_pulled_again_only_under_fail(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], policy: str
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    near.configure_settings({"io.sync": "syncfs", "io.sync_errors": policy})
-    plan = jobs(far, 1)
-    Events(monkeypatch, syncfs_failures=[None, errno.ENOSYS])
-    pulls = recorded_pulls(monkeypatch)
-    code = transfer(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name)
-    (outcome,) = statuses(capsys)
-    if policy == "fail":
-        assert code == 0 and outcome["status"] == "adopted" and len(pulls) == 2
-        assert_in(near, plan)
-    else:
-        assert code == 1 and outcome["status"] == "failed" and len(pulls) == 1
-        assert outgoing(far) == [outcome["transfer_id"]]
-
-
-def test_the_retry_repeats_the_first_delivery_and_its_answer_ships_the_workflows(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    job_id = workflow_job(near, workflows(near, tmp_path))
-    far_side = Far(monkeypatch, [sync_failed(far.workspace_id)])
-    argv = ["job", "transfer", "--json", "-q", "--job", job_id, near_name, f"cluster:{far_name}"]
-    assert command(argv, CLIContext("httk", project)) == 0
-    (outcome,) = json.loads(capsys.readouterr().out)["transfers"]
-    assert outcome["status"] == "adopted"
-    # From the second answer's workflows report: both were missing there, so both were shipped.
-    assert shipped(outcome) == {GIT_ID: "installed", "local:caller": "installed"}
-    first, second, install_call = far_side.calls
-    assert install_call[1:3] == ["workflow", "install"]
-    index = first.index("--token")
-    expected = [*first[: index + 2], "--sync", "fsync", *first[index + 2 :]]
-    expected[index + 1] = second[index + 1]
-    assert second == expected and second[index + 1] != first[index + 1]
-    assert first.count("--built-for") == 2 and {GIT_ID, "local:caller"} <= set(first)
-    assert {found.id for found in _store.list_installed(far)} == {GIT_ID, "local:caller"}
-    assert find(far, job_id) is not None and outgoing(near) == []
-
-
-def test_an_adoption_document_marked_sync_failed_is_not_retried(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    plan = jobs(near, 2)
-
-    def marked(answer: Answer) -> Answer:
-        code, out, err = answer
-        return code, json.dumps({**json.loads(out), "sync_failed": True}), err
-
-    far_side = Far(monkeypatch, [marked])
-    assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
-    assert [outcome["status"] for outcome in statuses(capsys)] == ["adopted"] * 2
-    assert len(far_side.calls) == 1
-    assert_in(far, plan)
-
-
-def test_keep_with_a_retry_records_the_second_answer_s_workspace(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    plan = jobs(near, 2)
-    # A first refusal that names no workspace (it could not be opened): the second answer's id is used.
-    refusal: dict[str, object] = {
-        "bundles": [],
-        "workspace_id": None,
-        "refused": "refused the stream: syncfs failed",
-        "sync_failed": True,
-    }
-    far_side = Far(monkeypatch, [(2, json.dumps(refusal), "")])
-    assert transfer(project, "--json", "-q", "--keep", *selected(plan), near_name, f"cluster:{far_name}") == 0
-    outcomes = statuses(capsys)
-    assert [outcome["status"] for outcome in outcomes] == ["adopted"] * 2 and all(o["kept"] for o in outcomes)
-    assert far_side.strengthened() == [False, True]
-    for mapping, _, _ in plan:
-        ref = find(near, mapping["id"])
-        assert ref is not None and ref.state == "away"
-        doc = read_state_unowned(ref.path / "state.json")[0]
-        assert doc is not None and doc.away is not None and doc.away["workspace_id"] == far.workspace_id
-    assert_in(far, plan)
 
 
 def test_landing_copies_under_ignore_are_not_redone(

@@ -1,25 +1,23 @@
 """Workflows travel with ordinary transfers: what DST lacks and SRC has is installed there under the same id."""
 
 import dataclasses
+import io
 import json
 import os
-import shutil
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from httk.core.cli import CLIContext
 
-from conftest import Remote, fake_remote
 from httk.workflow import Workspace, _moving, _store
 from httk.workflow.gc import collect_garbage
 from httk.workflow.packages import parse_workflow_manifest
-from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _transfer as transfer_cli
+from httk.workflow.workflow_cli._describe import install_copies
 from test_job_transfer import (  # noqa: F401 (project: fixture)
     adapter_calls,
-    adapter_path,
     outcomes,
     outgoing,
     project,
@@ -220,7 +218,7 @@ def test_a_held_transfer_reports_its_workflows_and_resume_re_queries(
     assert find(target, job_id) is not None
 
 
-def test_local_to_remote_and_pull_back_ship_through_the_adapter(
+def test_local_to_remote_and_pull_back_ship_over_transfer_sessions(
     project: Path,  # noqa: F811
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -260,37 +258,12 @@ def test_local_to_remote_and_pull_back_ship_through_the_adapter(
         for workflow_id in ("local:caller", GIT_ID):
             _store.uninstall(far, owner, workflow_id)
     calls.clear()
-    # Through the adapter operations of both ends, (A, A) (over sessions: test_remote_to_remote).
-    adapter_path(project, "cluster")
-    adapter_path(project, "other")
+    # Remote to remote, each end over its transfer session: the store entries relayed before the adoption.
     assert run(project, "--json", "--job", job_id, f"cluster:{near_name}", f"other:{far_name}") == 0
     (outcome,) = outcomes(capsys)["transfers"]
     assert shipped(outcome) == {GIT_ID: "installed", "local:caller": "installed"}
-    relayed = ["job transfer", "pull", "deliver job adopt", "pull", "deliver workflow install", "job transfer"]
-    assert calls == relayed
+    assert calls == []
     assert outgoing(near) == [] and landings(far) == [] and find(far, job_id) is not None
-
-
-def test_ssh_ships_store_entries_in_one_push_and_one_install(
-    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    project_root = tmp_path / "project"
-    initialize_project(project_root, name="ssh-workflows")
-    fake_remote(project_root, transfer_session="off")  # the adapter path's count (a session's: test_session_push)
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(remote.root, "far")
-    calls = adapter_calls(monkeypatch)
-    job_id = job(near, workflows(near, tmp_path), state="ready")
-    assert run(project_root, "--json", "--job", job_id, near_name, f"cluster:{far_name}") == 0
-    (outcome,) = outcomes(capsys)["transfers"]
-    assert shipped(outcome) == {GIT_ID: "installed", "local:caller": "installed"}
-    assert calls == ["deliver job adopt", "deliver workflow install"]
-    commands = remote.commands()
-    assert (len(commands), starts(commands)) == (2, 2)
-    assert _store.closure(far, "local:caller", check_builds=True).ok
-    assert {found.id for found in _store.list_installed(far)} == {GIT_ID, "local:caller"}
-    assert landings(far) == []
-    assert find(far, job_id) is not None
 
 
 def test_the_exchange_adoption_never_installs_workflows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -323,7 +296,7 @@ def test_transfer_status_reports_the_workflows_of_each_hold(tmp_path: Path, caps
     assert _moving.Hold.from_mapping(hold).workflows is not None
 
 
-def test_an_older_destination_s_install_refusal_is_reported_and_gc_sweeps_landings(
+def test_a_destination_s_install_refusal_is_reported_and_gc_sweeps_landings(
     project: Path,  # noqa: F811
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -331,20 +304,16 @@ def test_an_older_destination_s_install_refusal_is_reported_and_gc_sweeps_landin
 ) -> None:
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(tmp_path, "far")
-    adapter_path(project)  # the adapter path, which this test scripts
-    real = transfer_cli._deliver_call
 
-    def older(end: Any, context: Any, arguments: Any, source: str, files: list[str], argv: list[str]) -> Any:
-        if "workflow" in argv:
-            return 2, "", "httk: error: unrecognized arguments: --stdin-tar"
-        return real(end, context, arguments, source, files, argv)
+    def refused(*_arguments: Any) -> tuple[int, str, str]:  # DST's install op refused the request
+        return 2, "", "the workspace refused the installation: injected"
 
-    monkeypatch.setattr(transfer_cli, "_deliver_call", older)
+    monkeypatch.setattr(transfer_cli, "_install_over_session", refused)
     assert run(project, "--json", "--job", job(near, workflows(near, tmp_path)), near_name, f"cluster:{far_name}") == 0
     (outcome,) = outcomes(capsys)["transfers"]
     assert outcome["status"] == "adopted"
     assert set(shipped(outcome).values()) == {"failed"}
-    assert all("older httk-workflow" in entry["reason"] for entry in outcome["workflows"])
+    assert all("injected" in entry["reason"] for entry in outcome["workflows"])
     assert landings(far) == []
     # gc removes a pushed copy (an interrupted install's landing) after a day, and nothing else in tmp/.
     landing = far.control / "tmp" / ("push." + "3" * 32)
@@ -358,41 +327,6 @@ def test_an_older_destination_s_install_refusal_is_reported_and_gc_sweeps_landin
     os.utime(other, (old, old))
     collect_garbage(far, categories=["tmp_entries"])
     assert sorted(landings(far)) == sorted([young.name, other.name])
-
-
-def _pushed(workspace: Workspace, entry: _store.Installed) -> Path:
-    landing = workspace.control / "tmp" / ("push." + "1" * 32)
-    shutil.copytree(entry.directory, landing / entry.directory.name)
-    return landing / entry.directory.name
-
-
-def test_install_from_store_consumes_the_landing_even_when_refused_early(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from httk.workflow.workflow_cli import _describe, command
-
-    source, _ = registered(tmp_path, "a")
-    target, _ = registered(tmp_path, "b")
-    entry = _pushed(target, workflows(source, tmp_path))
-    context = CLIContext("httk", tmp_path)
-    argv = ["install", "--by-path", "--workspace", str(target.root), "--consume", "--from-store", str(entry)]
-
-    def sealed(_workspace: object) -> None:
-        raise RuntimeError("the workspace is sealed")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(_describe, "require_cli_modifiable", sealed)
-        assert command(argv, context) == 2
-    assert "sealed" in capsys.readouterr().err and not entry.parent.exists()
-    # A pushed copy that cannot be discarded is reported, leaving the document and the exit status alone.
-    entry = _pushed(target, workflows(source, tmp_path / "again"))
-    stray = tmp_path / "stray" / entry.name
-    shutil.copytree(entry, stray)
-    argv[-1:] = [str(entry), str(stray)]
-    assert command(argv, context) == 0
-    captured = capsys.readouterr()
-    assert [row["status"] for row in json.loads(captured.out)["workflows"]] == ["installed", "present"]
-    assert "the pushed copy was not discarded" in captured.err and not entry.parent.exists()
 
 
 def test_a_forward_incompatible_workflows_report_reads_as_none() -> None:
@@ -510,9 +444,9 @@ def test_workflow_list_probes_builds_only_for_the_ids_asked(tmp_path: Path, caps
     context = CLIContext("httk", tmp_path)
     assert command(["list", "--json", "--workspace", name], context) == 0
     assert all("built" not in row for row in json.loads(capsys.readouterr().out))
-    assert command(["list", "--json", "--workspace", name, "--built-for", GIT_ID], context) == 0
-    rows = {row["id"]: row for row in json.loads(capsys.readouterr().out)}
-    assert rows[GIT_ID]["built"] is False and "built" not in rows["local:caller"]
+    # The hidden --built-for of the removed adapter path is gone; the transfer session's workflows op reports builds.
+    assert command(["list", "--json", "--workspace", name, "--built-for", GIT_ID], context) == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_a_missing_root_workflow_is_warned_about_once(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -523,65 +457,6 @@ def test_a_missing_root_workflow_is_warned_about_once(tmp_path: Path, capsys: py
     err = capsys.readouterr().err
     assert "not installed, so their jobs wait: demo--0123456789abcdef" in err
     assert "installed in neither workspace" not in err
-
-
-def test_install_from_store_builds_in_the_same_call(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
-    from httk.workflow.workflow_cli import command
-
-    source, _ = registered(tmp_path, "a")
-    target, _ = registered(tmp_path, "b")
-    noisy = '\n[workflow.build]\ncommand = "sh -c \'echo noisy; echo built > out.bin\'"\nartifacts = ["out.bin"]\n'
-    workflows(source, tmp_path, build=noisy)
-    callee, caller = _store.lookup(source, GIT_ID), _store.lookup(source, "local:caller")
-    assert callee is not None and caller is not None
-    entry = _pushed(target, callee)
-    shutil.copytree(caller.directory, entry.parent / caller.directory.name)
-    with cli_owner(target) as owner:
-        here = _store.install(target, owner, package(tmp_path / "here", "here", noisy), build=False)
-    assert _store.built(here) is False
-    capfd.readouterr()  # the source's own build printed here
-    argv = ["install", "--by-path", "--workspace", str(target.root), "--consume", "--build"]
-    argv += ["--also-build", here.id, "--also-build", "local:absent"]
-    argv += ["--from-store", str(entry), str(entry.parent / caller.directory.name)]
-    # One call installs both, builds the one that declares [workflow.build], and builds the one already here.
-    assert command(argv, CLIContext("httk", tmp_path)) == 1  # local:absent cannot be built
-    captured = capfd.readouterr()
-    document = json.loads(captured.out)  # the builds' own output went to stderr
-    assert "noisy" in captured.err
-    rows = {row["id"]: row for row in document["workflows"]}
-    assert rows[GIT_ID]["status"] == "installed" and rows[GIT_ID]["build"] is True
-    assert rows[GIT_ID]["build_status"] == "built" and "build_reason" not in rows[GIT_ID]
-    assert rows["local:caller"]["build"] is False and rows["local:caller"]["build_status"] is None
-    (built, absent) = document["built"]
-    assert built == {"id": here.id, "status": "built"}
-    assert absent["id"] == "local:absent" and absent["status"] == "failed" and "not installed" in absent["reason"]
-    assert _store.closure(target, "local:caller", check_builds=True).ok
-    assert _store.built(_store.lookup(target, here.id)) is True  # type: ignore[arg-type]
-    assert not entry.parent.exists()
-
-
-def test_install_from_store_reports_a_failed_build_and_keeps_the_installation(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from httk.workflow.workflow_cli import command
-
-    source, _ = registered(tmp_path, "a")
-    target, _ = registered(tmp_path, "b")
-    failing = '\n[workflow.build]\ncommand = "sh -c \'exit 3\'"\nartifacts = ["out.bin"]\n'
-    workflows(source, tmp_path, build=failing, built=False)
-    callee = _store.lookup(source, GIT_ID)
-    assert callee is not None
-    entry = _pushed(target, callee)
-    argv = ["install", "--by-path", "--workspace", str(target.root), "--consume", "--build", "--from-store", str(entry)]
-    context = CLIContext("httk", tmp_path)
-    assert command(argv, context) == 1
-    (row,) = json.loads(capsys.readouterr().out)["workflows"]
-    assert row["status"] == "installed" and row["build_status"] == "failed" and row["build_reason"]
-    installed = _store.lookup(target, GIT_ID)
-    assert installed is not None and _store.built(installed) is False
-    # The build options belong to --from-store.
-    assert command(["install", "--workspace", str(target.root), "--build", "x"], context) == 2
-    assert "--from-store" in capsys.readouterr().err
 
 
 def _entries_tar(entries: list[_store.Installed]) -> bytes:
@@ -598,27 +473,22 @@ def _entries_tar(entries: list[_store.Installed]) -> bytes:
     return data.getvalue()
 
 
-def test_install_stdin_tar_installs_builds_and_discards_its_landing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    import io
-    import sys
+def _rows(document: dict[str, object], key: str) -> list[dict[str, Any]]:
+    """The rows of an ``install`` document's *key* (``workflows`` or ``built``)."""
 
-    from httk.workflow.workflow_cli import command
+    return cast(list[dict[str, Any]], document[key])
 
+
+def test_the_install_op_installs_builds_and_discards_its_landing(tmp_path: Path) -> None:
     source, _ = registered(tmp_path, "a")
-    target, target_name = registered(tmp_path, "b")
+    target, _ = registered(tmp_path, "b")
     workflows(source, tmp_path)
-    capsys.readouterr()
     entries = [_store.lookup(source, GIT_ID), _store.lookup(source, "local:caller")]
     assert all(entries)
     data = _entries_tar(entries)  # type: ignore[arg-type]
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
-    token = "2" * 32
-    argv = ["install", "--json", "--stdin-tar", "--token", token, "--workspace", target_name, "--build"]
-    assert command([*argv, "--source-label", "transfer from a"], CLIContext("httk", tmp_path)) == 0
-    document = json.loads(capsys.readouterr().out)
-    rows = {row["id"]: row for row in document["workflows"]}
+    document, returncode = install_copies(target, stream=io.BytesIO(data), source_label="transfer from a", build=True)
+    assert returncode == 0
+    rows = {row["id"]: row for row in _rows(document, "workflows")}
     assert rows[GIT_ID]["status"] == "installed" and rows[GIT_ID]["build_status"] == "built"
     assert rows["local:caller"]["status"] == "installed" and "built" not in document
     assert _store.closure(target, "local:caller", check_builds=True).ok
@@ -627,39 +497,81 @@ def test_install_stdin_tar_installs_builds_and_discards_its_landing(
     assert copy is not None and copy.record["source"] == "transfer from a"
 
 
-@pytest.mark.parametrize("bad", ["sources", "from-store", "token", "stream"])
-def test_install_stdin_tar_refusals(
-    tmp_path: Path, bad: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_the_install_op_builds_in_the_same_call_and_keeps_a_failed_build(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    import io
-    import sys
-
-    from httk.workflow.workflow_cli import command
-
-    target, target_name = registered(tmp_path, "b")
-    data = b"not a tar stream" * 64 if bad == "stream" else b""
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
-    argv = ["install", "--json", "--stdin-tar", "--workspace", target_name]
-    argv += {"sources": ["./x"], "from-store": ["--from-store", "x"], "token": ["--token", "../x"], "stream": []}[bad]
-    assert command(argv, CLIContext("httk", tmp_path)) == 2
-    assert capsys.readouterr().err
-    assert landings(target) == []
-
-
-def test_also_build_alone_builds_installed_workflows_in_one_call(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from httk.workflow.workflow_cli import command
-
-    target, target_name = registered(tmp_path, "b")
-    workflows(target, tmp_path, built=False)
-    argv = ["install", "--json", "--workspace", target_name, "--also-build", GIT_ID, "--also-build", "local:absent"]
-    assert command(argv, CLIContext("httk", tmp_path)) == 1
-    document = json.loads(capsys.readouterr().out)
-    assert document["workflows"] == []
-    assert document["built"][0] == {"id": GIT_ID, "status": "built"}
-    assert document["built"][1]["status"] == "failed"
+    source, _ = registered(tmp_path, "a")
+    target, _ = registered(tmp_path, "b")
+    noisy = '\n[workflow.build]\ncommand = "sh -c \'echo noisy; echo built > out.bin\'"\nartifacts = ["out.bin"]\n'
+    workflows(source, tmp_path, build=noisy)
+    callee, caller = _store.lookup(source, GIT_ID), _store.lookup(source, "local:caller")
+    assert callee is not None and caller is not None
+    with cli_owner(target) as owner:
+        here = _store.install(target, owner, package(tmp_path / "here", "here", noisy), build=False)
+    assert _store.built(here) is False
+    capfd.readouterr()  # the source's own build printed here
+    # One request installs both, builds the one that declares [workflow.build], and builds the one already here.
+    document, returncode = install_copies(
+        target, stream=io.BytesIO(_entries_tar([callee, caller])), build=True, also_build=[here.id, "local:absent"]
+    )
+    assert returncode == 1  # local:absent cannot be built
+    assert "noisy" in capfd.readouterr().err  # the builds' own output goes to stderr
+    rows = {row["id"]: row for row in _rows(document, "workflows")}
+    assert rows[GIT_ID]["status"] == "installed" and rows[GIT_ID]["build"] is True
+    assert rows[GIT_ID]["build_status"] == "built" and "build_reason" not in rows[GIT_ID]
+    assert rows["local:caller"]["build"] is False and rows["local:caller"]["build_status"] is None
+    (built, absent) = _rows(document, "built")
+    assert built == {"id": here.id, "status": "built"}
+    assert absent["id"] == "local:absent" and absent["status"] == "failed" and "not installed" in absent["reason"]
     assert _store.closure(target, "local:caller", check_builds=True).ok
+    assert _store.built(_store.lookup(target, here.id)) is True  # type: ignore[arg-type]
+    # A failed build is reported and the installation stays.
+    other, _ = registered(tmp_path, "c")
+    failing = '\n[workflow.build]\ncommand = "sh -c \'exit 3\'"\nartifacts = ["out.bin"]\n'
+    failed_source, _ = registered(tmp_path, "d")
+    workflows(failed_source, tmp_path / "failing", build=failing, built=False)
+    entry = _store.lookup(failed_source, GIT_ID)
+    assert entry is not None
+    document, returncode = install_copies(other, stream=io.BytesIO(_entries_tar([entry])), build=True)
+    (row,) = _rows(document, "workflows")
+    assert returncode == 1 and row["status"] == "installed" and row["build_status"] == "failed" and row["build_reason"]
+    installed = _store.lookup(other, GIT_ID)
+    assert installed is not None and _store.built(installed) is False
+
+
+def test_the_install_op_refuses_a_malformed_stream_and_builds_alone_without_one(tmp_path: Path) -> None:
+    target, _ = registered(tmp_path, "b")
+    with pytest.raises(ValueError, match="refused the stream"):
+        install_copies(target, stream=io.BytesIO(b"not a tar stream" * 64))
+    assert landings(target) == []
+    workflows(target, tmp_path, built=False)
+    document, returncode = install_copies(target, also_build=[GIT_ID, "local:absent"])
+    assert returncode == 1 and document["workflows"] == []
+    assert _rows(document, "built")[0] == {"id": GIT_ID, "status": "built"}
+    assert _rows(document, "built")[1]["status"] == "failed"
+    assert _store.closure(target, "local:caller", check_builds=True).ok
+
+
+@pytest.mark.parametrize(
+    "removed",
+    [
+        ["--stdin-tar"],
+        ["--from-store", "x"],
+        ["--token", "x"],
+        ["--also-build", "x"],
+        ["--build"],
+        ["--source-label", "x"],
+    ],
+)
+def test_the_hidden_receiver_options_of_workflow_install_are_gone(
+    tmp_path: Path, removed: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from httk.workflow.workflow_cli import command
+
+    _target, target_name = registered(tmp_path, "b")
+    argv = ["install", "--json", "--workspace", target_name, *removed, "./x"]
+    assert command(argv, CLIContext("httk", tmp_path)) == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_a_failed_build_at_a_remote_destination_is_reported_with_its_remedy(

@@ -16,8 +16,8 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import configure_identity, register_ws
-from httk.workflow import TaskManager, Workspace, _confine, _exchange, _fs, _kernel, _moving, removal
-from httk.workflow._bundles import MAX_MANIFEST_BYTES, BundleManifest, exchange_pool
+from httk.workflow import TaskManager, Workspace, _bundles, _confine, _exchange, _fs, _kernel, _moving, removal
+from httk.workflow._bundles import BundleManifest, exchange_pool
 from httk.workflow._daemon_client import Endpoint, read_passive_status
 from httk.workflow._exchange import (
     EXCHANGE_SUBDIRECTORIES,
@@ -277,11 +277,14 @@ def _symlink(path: Path) -> None:
 
 def _oversized(path: Path) -> None:
     write_bundle(path)
-    (path / "bundle.json").write_bytes(b" " * (MAX_MANIFEST_BYTES + 1))
+    (path / "bundle.json").write_bytes(b" " * (_bundles.MAX_UNTRUSTED_MANIFEST_BYTES + 1))
 
 
 @pytest.mark.parametrize("plant", [_fifo, _symlink, _oversized])
-def test_a_fifo_symlink_or_oversized_entry_is_refused_to_the_rejected_directory(tmp_path: Path, plant: Any) -> None:
+def test_a_fifo_symlink_or_oversized_entry_is_refused_to_the_rejected_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plant: Any
+) -> None:
+    monkeypatch.setattr(_bundles, "MAX_UNTRUSTED_MANIFEST_BYTES", 64 << 10)  # the exchange's cap, scaled down
     ws = _server(tmp_path / "ws")
     before = (exchange_directory(ws) / "exchange.json").read_bytes()
     plant(exchange_directory(ws) / "inbox" / "bad")

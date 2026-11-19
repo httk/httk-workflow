@@ -1689,3 +1689,320 @@ def test_a_refused_copy_of_a_hold_in_transfers_incoming_is_discarded(tmp_path: P
         _moving.adopt(target, owner, landed, untrusted=False)
     assert list(incoming.iterdir()) == [] and len(job_ids_below(target.jobs)) == 1
     assert (report.destination / "bundle.json").is_file()  # the original, like a hold, is untouched
+
+
+# -- the size of a bundle's records (plan WORKFLOW_TRANSFER_SESSION §7.12, correction C1) ---------------------------
+
+
+def manifest_at_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scale ``MAX_MANIFEST_BYTES`` down to exactly the size of every ``bundle.json`` written from now on, so that a
+    small tree's records sit at the cap, as a tree of millions of jobs would at the real one."""
+
+    real = BundleManifest.to_json
+
+    def to_json(manifest: BundleManifest) -> bytes:
+        data = real(manifest)
+        monkeypatch.setattr(_bundles, "MAX_MANIFEST_BYTES", len(data))
+        return data
+
+    monkeypatch.setattr(BundleManifest, "to_json", to_json)
+
+
+def test_a_tree_whose_bundle_json_exceeds_the_cap_is_refused_with_nothing_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    plan = tree(ws)
+    monkeypatch.setattr(_bundles, "MAX_MANIFEST_BYTES", 600)  # below this four-job tree's bundle.json
+    refused = r"more than the 600 bytes any reader accepts; nothing was moved"
+    with cli_owner(ws) as owner, pytest.raises(BundleError, match=refused):
+        _moving.hold(ws, owner, claim_root(ws, owner, plan[0][0]["id"]), tree=True, destination_locator="x:y")
+    # Every job where it was, nothing held, no scratch made.
+    assert_in(ws, plan)
+    assert _moving.held(ws) == [] and not list((ws.control / "tmp").iterdir())
+
+
+def test_a_tree_whose_bundle_json_is_at_the_cap_is_held_and_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    target = v3_workspace(tmp_path / "target")
+    plan = tree(ws)
+    manifest_at_the_cap(monkeypatch)
+    with cli_owner(ws) as owner:
+        hold = _moving.hold(ws, owner, claim_root(ws, owner, plan[0][0]["id"]), tree=True, destination_locator="x:y")
+    assert (Path(hold.path) / "bundle.json").stat().st_size == _bundles.MAX_MANIFEST_BYTES
+    # Read back at the cap: listed, adopted (plan.json written and read at the cap too) and released.
+    (listed,) = _moving.held(ws)
+    assert listed.transfer_id == hold.transfer_id
+    with cli_owner(target) as owner:
+        report = _moving.adopt(target, owner, Path(hold.path), untrusted=False)
+    assert report is not None and len(report.published) == 4
+    assert_in(target, plan)
+    assert _moving.held(ws) == []  # one filesystem: adoption took the hold in
+
+
+def test_a_failure_after_the_bundle_is_built_rolls_the_eject_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = v3_workspace(tmp_path / "ws")
+    plan = tree(ws)
+
+    def unreadable(*_arguments: object) -> None:
+        raise OSError("the root's state could not be read")
+
+    monkeypatch.setattr(_moving, "_exchange_root", unreadable)
+    with cli_owner(ws) as owner:
+        with pytest.raises(OSError, match="could not be read"):
+            _moving.hold(ws, owner, claim_root(ws, owner, plan[0][0]["id"]), tree=True, destination_locator="x:y")
+        # Rolled back by the eject itself, not later by the owner's close: every job where it was, nothing held,
+        # no scratch of the hold left.
+        assert_in(ws, plan)
+        assert _moving.held(ws) == [] and not [path for path in (ws.control / "tmp").iterdir() if ".hold." in path.name]
+    assert not list((ws.control / "tmp").iterdir())
+
+
+def test_a_dead_owner_s_hold_scratch_at_the_cap_is_recovered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The scratch the 5,101-job probe left (the jobs extracted into <owner>.hold.<token>/bundle/, no eject.json):
+    # recovery reads the bundle's records at the cap they were written under and returns every job.
+    ws = v3_workspace(tmp_path / "ws")
+    plan = tree(ws)
+    manifest_at_the_cap(monkeypatch)
+    owner = cli_owner(ws)
+    root = claim_root(ws, owner, plan[0][0]["id"])
+    members = [root, *_moving._claim_tree(ws, owner, root)]
+    bundle = _bundles.build_bundle(
+        owner, members, source_workspace_id=ws.workspace_id, scratch=lambda: owner.scratch(_moving._HOLD)
+    )
+    assert (bundle / "bundle.json").stat().st_size == _bundles.MAX_MANIFEST_BYTES
+    assert all(find(ws, mapping["id"]) is None for mapping, _, _ in plan)
+    die_and_recover(ws, owner)
+    assert_in(ws, plan)
+    assert not list((ws.control / "tmp").iterdir())
+
+
+def test_a_delivery_record_of_a_large_tree_still_decides(tmp_path: Path) -> None:
+    # eject.json carries the whole bundle.json as its token: for a tree of more than about 250 jobs it outgrew its
+    # old 64 KiB bound, so the reconciler read it as torn and could not decide a delivery (a delivered hold's scratch
+    # stayed; one copied across filesystems would have had its members returned while the copy was delivered).
+    # Here the delivery's record is written and the bundle delivered, the scratch not yet discarded.
+    ws = v3_workspace(tmp_path / "ws")
+    token = ('{"members": "' + "é😀" * 40_000 + '"}\n').encode()  # ~0.24 MB, as UTF-8 in eject.json
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "bundle.json").write_bytes(token)
+    with cli_owner(ws) as owner:
+        scratch = owner.scratch(_moving._HOLD)
+        record = _moving._Delivery(target, token, uuid.uuid4().hex, None).encode()
+        assert len(token) < len(record) < len(token) + 1000 and len(record) > 3 << 16
+        (scratch / "eject.json").write_bytes(record)
+        delivery = _moving._Delivery.read(scratch)
+        assert delivery is not None and delivery.token == token
+        assert _moving._settle(owner, scratch) is True  # delivered, decided from the record
+        owner.discard_scratch(scratch)
+
+
+# -- the caps of the untrusted path and of rewritten records (correction round 2: D1, D2, D7) ------------------------
+
+
+def _untrusted_scratches(ws: Workspace) -> list[Path]:
+    return [path for path in (ws.control / "tmp").iterdir() if ".adopt" in path.name]
+
+
+def _no_job_in(ws: Workspace) -> bool:
+    return not job_ids_below(ws.jobs)
+
+
+def test_an_untrusted_bundle_over_its_cap_is_refused_also_on_recovery_and_trusted_takes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The exchange keeps a 1 MiB bundle.json (D1): parsing one takes some 25 times its size, again on each recovery.
+    ws = v3_workspace(tmp_path / "ws")
+    rejected = tmp_path / "rejected"
+    over = _bundles.MAX_UNTRUSTED_MANIFEST_BYTES + 1
+
+    def padded(path: Path) -> list[dict[str, object]]:
+        jobs = client_bundle(path)
+        data = (path / "bundle.json").read_bytes()
+        (path / "bundle.json").write_bytes(data + b" " * (over - len(data)))
+        return jobs
+
+    padded(tmp_path / "inbox" / "entry")
+    with cli_owner(ws) as owner, pytest.raises(BundleError, match="larger"):
+        _moving.adopt(ws, owner, tmp_path / "inbox" / "entry", untrusted=True, refused_to=rejected)
+    assert len(list(rejected.iterdir())) == 1 and _no_job_in(ws) and not _untrusted_scratches(ws)
+
+    # Interrupted right after the take: the recovery's own validation refuses it the same way.
+    real = _moving._finish
+
+    def died(*_arguments: object, **_options: object) -> object:
+        raise Crash
+
+    padded(tmp_path / "inbox" / "again")
+    owner = cli_owner(ws)
+    monkeypatch.setattr(_moving, "_finish", died)
+    with pytest.raises(Crash):
+        _moving.adopt(ws, owner, tmp_path / "inbox" / "again", untrusted=True, refused_to=rejected)
+    monkeypatch.setattr(_moving, "_finish", real)
+    assert _untrusted_scratches(ws)
+    die_and_recover(ws, owner)
+    assert len(list(rejected.iterdir())) == 2 and _no_job_in(ws) and not _untrusted_scratches(ws)
+
+    # The trusted path still takes a bundle.json of that size.
+    jobs = padded(tmp_path / "operator" / "bundle")
+    with cli_owner(ws) as owner:
+        report = _moving.adopt(ws, owner, tmp_path / "operator" / "bundle", untrusted=False, synced=True)
+    assert report is not None and {ref.job_id for ref in report.published} == {str(job["id"]) for job in jobs}
+
+
+@pytest.mark.parametrize("untrusted", [False, True], ids=["trusted", "untrusted"])
+def test_a_bundle_json_at_the_cap_without_its_newline_is_refused_before_its_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, untrusted: bool
+) -> None:
+    # A compact bundle.json at the cap without the trailing newline is valid, but its plan.json (the canonical form,
+    # one byte more) would exceed the cap its reader applies: an interruption after the plan would strand the rest
+    # (D2). It is refused before anything is claimed or written; a crash once the plan is written would show.
+    ws = v3_workspace(tmp_path / "ws")
+    bundle = tmp_path / "inbox" / "entry"
+    client_bundle(bundle)
+    data = (bundle / "bundle.json").read_bytes().rstrip(b"\n")
+    (bundle / "bundle.json").write_bytes(data)
+    monkeypatch.setattr(_bundles, "MAX_UNTRUSTED_MANIFEST_BYTES" if untrusted else "MAX_MANIFEST_BYTES", len(data))
+    real = _fs.write_file
+
+    def write_file(target: _fs.Loc, content: bytes, **options: Any) -> None:
+        real(target, content, **options)
+        if target.path.name == "plan.json":
+            raise Crash  # the plan is there: the adoption dies before it publishes anything
+
+    monkeypatch.setattr(_fs, "write_file", write_file)
+    owner = cli_owner(ws)
+    options: dict[str, Any] = {"refused_to": tmp_path / "rejected"} if untrusted else {"synced": True}
+    with pytest.raises(BundleError, match="as rewritten by its adoption"):
+        _moving.adopt(ws, owner, bundle, untrusted=untrusted, **options)
+    monkeypatch.setattr(_fs, "write_file", real)
+    die_and_recover(ws, owner)  # whatever is left, recovery settles it
+    assert _no_job_in(ws) and not _untrusted_scratches(ws)
+    if untrusted:
+        assert len(list((tmp_path / "rejected").iterdir())) == 1
+    else:
+        assert (bundle / "bundle.json").read_bytes() == data  # an operator's bundle goes back to its path
+
+
+def test_a_delivery_record_is_utf8_within_its_bound_and_an_escaped_one_still_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # eject.json is written without ASCII escapes (D7): a DEL or non-ASCII character of bundle.json would take six
+    # bytes escaped, beyond the threefold bound, which the cap (scaled to the token, as at the real one) checks.
+    ws = v3_workspace(tmp_path / "ws")
+    token = ('{"placement":"' + "\x7f" * 100_000 + "é😀" * 1000 + '"}\n').encode()
+    monkeypatch.setattr(_bundles, "MAX_MANIFEST_BYTES", len(token))
+    target = tmp_path / "target"
+    with cli_owner(ws) as owner:
+        scratch = owner.scratch(_moving._HOLD)
+        record = _moving._Delivery(target, token, uuid.uuid4().hex, None)
+        (scratch / "eject.json").write_bytes(record.encode())
+        assert (scratch / "eject.json").stat().st_size <= 3 * len(token) + (1 << 16)
+        assert _moving._Delivery.read(scratch) == record
+        # A record an earlier version wrote with ASCII escapes reads the same.
+        small = _moving._Delivery(
+            target, '{"p":"\x7fé😀"}\n'.encode(), uuid.uuid4().hex, ("name", str(uuid.uuid4()), None)
+        )
+        fields = json.loads(small.encode())
+        (scratch / "eject.json").write_bytes(json.dumps(fields).encode())
+        assert b"\\u" in (scratch / "eject.json").read_bytes()
+        assert _moving._Delivery.read(scratch) == small
+        owner.discard_scratch(scratch)
+
+
+# -- text a UTF-8 record cannot hold, and an exchange's bound at the eject (correction round 3: E1, E2, E3) ---------
+
+
+def test_a_delivery_record_round_trips_a_target_with_surrogate_escaped_bytes(tmp_path: Path) -> None:
+    # A path of a non-UTF-8 directory name holds surrogate escapes, which eject.json passes through (E1).
+    ws = v3_workspace(tmp_path / "ws")
+    record = _moving._Delivery(Path(os.fsdecode(b"/x/caf\xe9/t")), b'{"a":"b"}\n', uuid.uuid4().hex, None)
+    with cli_owner(ws) as owner:
+        scratch = owner.scratch(_moving._HOLD)
+        (scratch / "eject.json").write_bytes(record.encode())
+        assert _moving._Delivery.read(scratch) == record
+        owner.discard_scratch(scratch)
+
+
+def test_a_hold_from_a_workspace_below_a_non_utf8_directory_name_is_released_back(tmp_path: Path) -> None:
+    parent = Path(os.fsdecode(bytes(tmp_path) + b"/caf\xe9"))
+    try:
+        parent.mkdir()
+    except (OSError, UnicodeError) as exc:
+        pytest.skip(f"this filesystem takes no non-UTF-8 name: {exc}")
+    ws = v3_workspace(parent / "ws")
+    plan = tree(ws)
+    with cli_owner(ws) as owner:
+        _moving.hold(ws, owner, claim_root(ws, owner, plan[0][0]["id"]), tree=True, destination_locator="x:y")
+    (hold,) = _moving.held(ws)
+    assert all(find(ws, mapping["id"]) is None for mapping, _, _ in plan)
+    with cli_owner(ws) as owner:
+        report = _moving.adopt(ws, owner, Path(hold.path), untrusted=False, synced=True)
+    assert report is not None and len(report.published) == len(plan)
+    assert_in(ws, plan)
+
+
+def _surrogate_locator(path: Path) -> None:
+    """Rewrite a bundle's ``bundle.json`` with an escaped lone surrogate in its locator: valid JSON, no UTF-8 text."""
+
+    data = (path / "bundle.json").read_bytes()
+    assert data.count(b'"locator":null') == 1
+    (path / "bundle.json").write_bytes(data.replace(b'"locator":null', b'"locator":"x\\udc80"'))
+
+
+@pytest.mark.parametrize("crash", [False, True], ids=["direct", "recovered"])
+@pytest.mark.parametrize("untrusted", [False, True], ids=["trusted", "untrusted"])
+def test_a_manifest_with_an_escaped_lone_surrogate_is_refused_never_wedging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, untrusted: bool, crash: bool
+) -> None:
+    # E2: it raised UnicodeEncodeError, not BundleError, so the scratch stayed and every owner close and recovery
+    # raised again. It is a refusal: to rejected (untrusted) or back to its path (trusted), nothing left behind.
+    ws = v3_workspace(tmp_path / "ws")
+    bundle = tmp_path / "inbox" / "entry"
+    client_bundle(bundle)
+    _surrogate_locator(bundle)
+    data = (bundle / "bundle.json").read_bytes()
+    options: dict[str, Any] = {"refused_to": tmp_path / "rejected"} if untrusted else {"synced": True}
+    owner = cli_owner(ws)
+    if crash:
+        real = _moving._finish
+
+        def died(*_arguments: object, **_options: object) -> object:
+            raise Crash
+
+        monkeypatch.setattr(_moving, "_finish", died)
+        with pytest.raises(Crash):
+            _moving.adopt(ws, owner, bundle, untrusted=untrusted, **options)
+        monkeypatch.setattr(_moving, "_finish", real)
+        die_and_recover(ws, owner)
+    else:
+        with pytest.raises(BundleError, match="not valid UTF-8 JSON"):
+            _moving.adopt(ws, owner, bundle, untrusted=untrusted, **options)
+        owner.close()
+    assert not job_ids_below(ws.jobs) and not list((ws.control / "tmp").iterdir())
+    if untrusted:
+        (rejected,) = (tmp_path / "rejected").iterdir()
+        assert (rejected / "entry" / "bundle.json").read_bytes() == data
+    else:
+        assert (bundle / "bundle.json").read_bytes() == data
+
+
+def test_an_exchange_submission_over_its_bound_is_refused_before_any_job_leaves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # E3: the exchange would refuse it only after the client's jobs left; the eject refuses it with all in place.
+    ws = v3_workspace(tmp_path / "ws")
+    plan = tree(ws)
+    exchange = tmp_path / "exchange"
+    (exchange / "inbox").mkdir(parents=True)
+    (exchange / "exchange.json").write_text("{}")
+    monkeypatch.setattr(_bundles, "MAX_UNTRUSTED_MANIFEST_BYTES", 600)  # below this four-job tree's bundle.json
+    with cli_owner(ws) as owner, pytest.raises(BundleError, match="an exchange accepts; nothing was moved: submit"):
+        _moving.eject(ws, owner, claim_root(ws, owner, plan[0][0]["id"]), destination=exchange / "inbox", tree=True)
+    assert_in(ws, plan)
+    assert not list((exchange / "inbox").iterdir()) and not list((ws.control / "tmp").iterdir())

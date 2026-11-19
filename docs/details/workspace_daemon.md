@@ -546,7 +546,11 @@ serves the exchange adopts bundles from `inbox` itself: it takes the entry, copi
 into its own scratch, and validates, rekeys and publishes only that copy. An
 inbox bundle is untrusted input: it must hold only fresh jobs (never run, no
 `state.json`, logs, attempts, seal or `workflow/` runner copy) in state `ready`, with no symlink, special
-file or hard-linked file, and a root without a parent. The job's workflow must
+file or hard-linked file, and a root without a parent. Its `bundle.json` may
+take at most 1 MiB, about 5,000 jobs a submission (a trusted bundle may take
+512 MiB): the exchange is a trust boundary, and parsing a manifest takes some
+25 times its size in memory; `job eject` refuses a larger tree before any job
+leaves, so submit it in parts. The job's workflow must
 be installed in the workspace (an operator task), since exchange jobs run only
 pre-installed workflows; until then the adopted job
 waits, and `status.json` shows it `ready`. A client that keeps

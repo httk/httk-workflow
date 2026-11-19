@@ -5,7 +5,6 @@ would leave its jobs in both workspaces. Such a hold stays held, reported ``fail
 and that run's own are delivered separately, so that a refusal of the new ones can still take them back.
 """
 
-import json
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -15,16 +14,28 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote
-from httk.workflow import Workspace, _store
+from httk.workflow import Workspace
+from httk.workflow.adapters import TransferSession
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import command
-from test_job_transfer import adapter_calls, jobs, outcomes, outgoing, registered, run, selected, starts
+from test_job_transfer import (
+    adapter_calls,
+    at_once,
+    jobs,
+    outcomes,
+    outgoing,
+    recorded_requests,
+    registered,
+    run,
+    selected,
+    starts,
+)
 from test_moving import assert_in, find, io_workers  # noqa: F401 (io_workers: fixture)
-from test_sync_errors_retry import Far
+from test_sync_errors_retry import Far, refusal
 from test_sync_landings import statuses, transfer
-from test_transfer_workflows import job as workflow_job
-from test_transfer_workflows import package, shipped
-from v3_helpers import cli_owner
+
+#: A far side's answer to a segment that this side cannot read: whether anything was adopted is unknown.
+UNREADABLE = {"ok": False, "error": "garbled"}
 
 
 @pytest.fixture
@@ -33,8 +44,7 @@ def ssh_pair(tmp_path: Path, remote: Remote) -> tuple[Path, Workspace, str, Work
 
     project = tmp_path / "project"
     initialize_project(project, name="ssh-takeback")
-    # The adapter path these tests count and script (a session's take-back: test_session_push).
-    fake_remote(project, transfer_session="off")
+    fake_remote(project)
     near, near_name = registered(tmp_path, "near")
     far, far_name = registered(remote.root, "far")
     return project, near, near_name, far, far_name
@@ -67,15 +77,20 @@ def unrefuse(workspace: Workspace) -> None:
 def adopted_unreadably(
     project: Path, near_name: str, far_name: str, plan: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> list[str]:
-    """Push *plan*: the far side adopts it, but a login banner makes the answer unreadable, so the holds stay."""
+    """Push *plan*: the far side adopts it, but its answer is unreadable, so the holds stay."""
 
-    monkeypatch.setenv("HTTK_FAKE_SSH_BANNER", "*** Welcome to the fake cluster ***")
-    monkeypatch.setenv("HTTK_FAKE_SSH_BANNER_WHEN", "job adopt")
+    real = TransferSession.request
+
+    def garbled(session: TransferSession, op: str, header: Any = None, **options: Any) -> dict[str, Any]:
+        response = real(session, op, header, **options)
+        return {"ok": True, "garbled": True} if op == "adopt_staged" else response
+
+    monkeypatch.setattr(TransferSession, "request", garbled)
     assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
     transfers = outcomes(capsys)["transfers"]
     assert [outcome["status"] for outcome in transfers] == ["failed"] * 2
     assert all("whether the jobs arrived is unknown" in outcome["message"] for outcome in transfers)
-    monkeypatch.delenv("HTTK_FAKE_SSH_BANNER")
+    monkeypatch.setattr(TransferSession, "request", real)
     return sorted(outcome["transfer_id"] for outcome in transfers)
 
 
@@ -134,7 +149,7 @@ def test_a_refused_redelivery_never_takes_back_a_hold_an_earlier_run_may_have_de
     assert outgoing(near) == [] and all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
 
 
-def test_earlier_and_new_holds_are_delivered_separately_and_only_the_new_are_taken_back(
+def test_a_refused_earlier_hold_stops_the_push_before_the_new_jobs_are_held(
     ssh_pair: tuple[Path, Workspace, str, Workspace, str],
     refusing: list[Workspace],
     remote: Remote,
@@ -147,24 +162,25 @@ def test_earlier_and_new_holds_are_delivered_separately_and_only_the_new_are_tak
     new = jobs(near, 2)
     refuse(refusing, far)
     calls = adapter_calls(monkeypatch)
+    requests = recorded_requests(monkeypatch)
     before = len(remote.commands())
     assert run(project, "--json", "-q", *selected(new), near_name, f"cluster:{far_name}") == 1
-    transfers = outcomes(capsys)["transfers"]
+    document = outcomes(capsys)
+    transfers = document["transfers"]
     by_status: dict[str, list[dict[str, Any]]] = {}
     for outcome in transfers:
         by_status.setdefault(outcome["status"], []).append(outcome)
     assert sorted(outcome["transfer_id"] for outcome in by_status["failed"]) == held
     assert_kept_held(by_status["failed"], near, far, far_name)
-    # The two new jobs, held as one transfer each, are taken back.
-    assert sorted(by_status) == ["failed", "not_moved"] and len(by_status["not_moved"]) == 2
-    assert all("the jobs are back in" in outcome["message"] for outcome in by_status["not_moved"])
-    # Two deliveries, the earlier holds first, each one connection and one remote start.
-    assert calls == ["deliver job adopt", "deliver job adopt"]
+    # The earlier holds go first (plan §7.8, step 1), and the refusal of their segment as a whole stops the push
+    # before the selection is held: the two new jobs were never held, so nothing of them needs taking back.
+    assert sorted(by_status) == ["failed"]
+    assert any("2 selected job(s) were not attempted" in error for error in document["errors"])
+    stages = [header for op, header in requests if op == "stage"]
+    assert len(stages) == 1 and sorted(stages[0]["transfer_ids"]) == held and calls == []
     commands = remote.commands()[before:]
-    assert (len(commands), starts(commands)) == (2, 2)
-    first, second = (command for command in commands if "job adopt" in command)
-    assert first.split("--token ")[1].split()[0] != second.split("--token ")[1].split()[0]
-    # The new jobs are back in SRC and not in DST; the earlier ones are only in DST and stay held.
+    assert (len(commands), starts(commands)) == (1, 1)
+    # The new jobs are still in SRC and not in DST; the earlier ones are only in DST and stay held.
     assert_in(near, new)
     assert all(find(far, mapping["id"]) is None for mapping, _, _ in new)
     assert all(find(near, mapping["id"]) is None for mapping, _, _ in earlier)
@@ -172,7 +188,7 @@ def test_earlier_and_new_holds_are_delivered_separately_and_only_the_new_are_tak
     assert sorted(outgoing(near)) == held
 
 
-def test_earlier_and_new_holds_both_adopted_cost_two_deliveries(
+def test_earlier_and_new_holds_both_adopted_go_in_separate_segments(
     ssh_pair: tuple[Path, Workspace, str, Workspace, str],
     remote: Remote,
     monkeypatch: pytest.MonkeyPatch,
@@ -183,6 +199,7 @@ def test_earlier_and_new_holds_both_adopted_cost_two_deliveries(
     held = adopted_unreadably(project, near_name, far_name, earlier, monkeypatch, capsys)
     new = jobs(near, 1)
     calls = adapter_calls(monkeypatch)
+    requests = recorded_requests(monkeypatch)
     before = len(remote.commands())
     assert run(project, "--json", "-q", "--keep", *selected(new), near_name, f"cluster:{far_name}") == 0
     transfers = outcomes(capsys)["transfers"]
@@ -190,9 +207,11 @@ def test_earlier_and_new_holds_both_adopted_cost_two_deliveries(
     assert {statuses_by_id[transfer_id] for transfer_id in held} == {"already_adopted"}
     assert sorted(statuses_by_id.values()) == ["adopted", "already_adopted", "already_adopted"]
     assert all(outcome["kept"] for outcome in transfers)
-    assert calls == ["deliver job adopt", "deliver job adopt"]
+    # Two segments, the earlier holds first, over one connection and one remote start.
+    stages = [sorted(header["transfer_ids"]) for op, header in requests if op == "stage"]
+    assert stages == [held, sorted(set(statuses_by_id) - set(held))] and calls == []
     commands = remote.commands()[before:]
-    assert (len(commands), starts(commands)) == (2, 2)
+    assert (len(commands), starts(commands)) == (1, 1)
     assert_in(far, [*earlier, *new])
     assert outgoing(near) == []
     for mapping, _, _ in [*earlier, *new]:
@@ -206,7 +225,7 @@ def project(tmp_path: Path) -> Path:
 
     root = tmp_path / "project"
     initialize_project(root, name="takeback-scripted")
-    fake_remote(root, template="local", name="cluster", transfer_session="off")  # Far scripts the adapter path
+    fake_remote(root, template="local", name="cluster")
     return root
 
 
@@ -215,21 +234,19 @@ def test_a_second_delivery_answered_by_another_workspace_keeps_its_new_holds(
     project: Path, tmp_path: Path, answer: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
+    far, far_name = at_once(registered)(tmp_path, "far")  # each staged segment adopted before the next
     other = "00000000-0000-4000-8000-000000000001"
     earlier = jobs(near, 1)
     # Run 1's answer is lost before the far side adopts: the hold stays, to be re-driven by run 2.
-    Far(monkeypatch, [(255, "", "ssh: connection reset")])
+    Far(monkeypatch, [UNREADABLE])
     assert transfer(project, "--json", "-q", *selected(earlier), near_name, f"cluster:{far_name}") == 1
     (held,) = (outcome["transfer_id"] for outcome in statuses(capsys))
     new = jobs(near, 1)
 
-    def elsewhere(real: tuple[int, str, str]) -> tuple[int, str, str]:
-        code, out, err = real
-        return code, json.dumps({**json.loads(out), "workspace_id": other}), err
+    def elsewhere(real: dict[str, Any]) -> dict[str, Any]:
+        return {**real, "workspace_id": other}  # staged, but by another workspace
 
-    refusal = {"bundles": [], "workspace_id": other, "refused": "refused the stream: injected"}
-    second = (2, json.dumps(refusal), "") if answer == "refused" else elsewhere
+    second = refusal(other, "refused the stream: injected") if answer == "refused" else elsewhere
     far_side = Far(monkeypatch, [None, second])
     assert transfer(project, "--json", "-q", *selected(new), near_name, f"cluster:{far_name}") == 1
     by_id = {outcome["transfer_id"]: outcome for outcome in statuses(capsys)}
@@ -245,137 +262,37 @@ def test_a_second_delivery_answered_by_another_workspace_keeps_its_new_holds(
         assert all(find(far, mapping["id"]) is None for mapping, _, _ in new)
     else:
         assert (
-            f"adopted the jobs into workspace {other}, not the expected workspace {far.workspace_id} that answered "
-            "the batch's earlier delivery" in fresh["message"]
+            f"staged the segment in workspace {other}, not the expected workspace {far.workspace_id} that answered "
+            "the batch's earlier delivery; nothing of it was adopted" in fresh["message"]
         )
-        assert_in(far, new)
+        assert all(find(far, mapping["id"]) is None for mapping, _, _ in new)
     assert all(find(near, mapping["id"]) is None for mapping, _, _ in new)
     assert_in(far, earlier)
-
-
-def test_the_workflows_both_deliveries_report_are_shipped_once_after_them(
-    ssh_pair: tuple[Path, Workspace, str, Workspace, str],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    project, near, near_name, far, far_name = ssh_pair
-    installed: dict[str, _store.Installed] = {}
-    for workspace in (near, far):
-        with cli_owner(workspace) as owner:
-            for name in ("first", "second"):
-                # The same tree in both workspaces: DST reports each present.
-                directory = tmp_path / f"{workspace.root.name}-{name}"
-                installed[name] = _store.install(workspace, owner, package(directory, name))
-    earlier, new = workflow_job(near, installed["first"]), workflow_job(near, installed["second"])
-    monkeypatch.setenv("HTTK_FAKE_SSH_BANNER", "*** Welcome to the fake cluster ***")
-    monkeypatch.setenv("HTTK_FAKE_SSH_BANNER_WHEN", "job adopt")
-    assert run(project, "--json", "-q", "--job", earlier, near_name, f"cluster:{far_name}") == 1
-    ((held, status),) = [(outcome["transfer_id"], outcome["status"]) for outcome in outcomes(capsys)["transfers"]]
-    assert status == "failed"
-    monkeypatch.delenv("HTTK_FAKE_SSH_BANNER")
-    calls = adapter_calls(monkeypatch)
-    assert run(project, "--json", "-q", "--job", new, near_name, f"cluster:{far_name}") == 0
-    by_id = {outcome["transfer_id"]: outcome for outcome in outcomes(capsys)["transfers"]}
-    assert by_id.pop(held)["status"] == "already_adopted"
-    (fresh,) = by_id.values()
-    assert fresh["status"] == "adopted" and shipped(fresh) == {installed["second"].id: "present"}
-    # Each delivery asked about its own holds' workflows; together they report both present: nothing is installed.
-    assert calls == ["deliver job adopt", "deliver job adopt"]
-    assert find(far, earlier) is not None and find(far, new) is not None and outgoing(near) == []
 
 
 def held_before(project: Path, near_name: str, far_name: str, plan: Any, monkeypatch: Any, capsys: Any) -> str:
     """Push *plan* (one job) to a scripted far side whose answer is lost before it adopts: the hold stays."""
 
-    Far(monkeypatch, [(255, "", "ssh: connection reset")])
+    Far(monkeypatch, [UNREADABLE])
     assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
     ((transfer_id, status),) = [(outcome["transfer_id"], outcome["status"]) for outcome in statuses(capsys)]
     assert status == "failed"
     return str(transfer_id)
 
 
-@pytest.mark.parametrize("adopted", ["earlier", "new"])
-def test_only_the_holds_of_an_adopting_delivery_get_their_workflows_shipped(
-    project: Path, tmp_path: Path, adopted: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    with cli_owner(near) as owner:
-        present = _store.install(near, owner, package(tmp_path / "near-present", "present"))
-        lacking = _store.install(near, owner, package(tmp_path / "near-lacking", "lacking"))
-    with cli_owner(far) as owner:
-        _store.install(far, owner, package(tmp_path / "far-present", "present"))
-    # The delivery DST refuses carries the job whose workflow DST lacks.
-    earlier_workflow, new_workflow = (present, lacking) if adopted == "earlier" else (lacking, present)
-    earlier = workflow_job(near, earlier_workflow)
-    Far(monkeypatch, [(255, "", "ssh: connection reset")])
-    assert run(project, "--json", "-q", "--job", earlier, near_name, f"cluster:{far_name}") == 1
-    ((held,),) = [[outcome["transfer_id"] for outcome in outcomes(capsys)["transfers"]]]
-    new = workflow_job(near, new_workflow)
-    refusal = (2, json.dumps({"bundles": [], "workspace_id": far.workspace_id, "refused": "refused: injected"}), "")
-    far_side = Far(monkeypatch, [None, refusal] if adopted == "earlier" else [refusal, None])
-    assert run(project, "--json", "-q", "--job", new, near_name, f"cluster:{far_name}") == 1
-    by_id = {outcome["transfer_id"]: outcome for outcome in outcomes(capsys)["transfers"]}
-    earlier_outcome = by_id.pop(held)
-    (new_outcome,) = by_id.values()
-    shipped_outcome, refused_outcome = (
-        (earlier_outcome, new_outcome) if adopted == "earlier" else (new_outcome, earlier_outcome)
-    )
-    assert shipped_outcome["status"] in ("adopted", "already_adopted")
-    assert shipped(shipped_outcome) == {present.id: "present"}
-    assert refused_outcome["status"] == ("not_moved" if adopted == "earlier" else "failed")
-    assert "workflows" not in refused_outcome
-    # Two deliveries and no workflow install: the refused job's workflow is not installed in DST.
-    assert [argv[1:3] for argv in far_side.calls] == [["job", "adopt"]] * 2
-    assert _store.lookup(far, lacking.id) is None
-
-
-@pytest.mark.parametrize("second", ["refused", "adopted"])
-def test_an_unreadable_earlier_delivery_still_lets_the_new_holds_be_delivered(
-    project: Path, tmp_path: Path, second: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    earlier = jobs(near, 1)
-    held = held_before(project, near_name, far_name, earlier, monkeypatch, capsys)
-    new = jobs(near, 1)
-    refusal = (2, json.dumps({"bundles": [], "workspace_id": far.workspace_id, "refused": "refused: injected"}), "")
-    far_side = Far(monkeypatch, [(255, "", "ssh: connection reset"), refusal if second == "refused" else None])
-    assert transfer(project, "--json", "-q", *selected(new), near_name, f"cluster:{far_name}") == 1
-    by_id = {outcome["transfer_id"]: outcome for outcome in statuses(capsys)}
-    earlier_outcome = by_id.pop(held)
-    (new_outcome,) = by_id.values()
-    assert len(far_side.calls) == 2
-    assert earlier_outcome["status"] == "failed" and "whether the jobs arrived is unknown" in earlier_outcome["message"]
-    assert outgoing(near) == [held]
-    if second == "refused":
-        assert new_outcome["status"] == "not_moved"
-        assert_in(near, new)
-    else:
-        assert new_outcome["status"] == "adopted"
-        assert_in(far, new)
-        assert find(near, new[0][0]["id"]) is None
-
-
 def test_a_retry_with_no_workspace_id_is_held_to_the_earlier_delivery_s(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
+    far, far_name = at_once(registered)(tmp_path, "far")  # each staged segment adopted before the next
     other = "00000000-0000-4000-8000-000000000001"
     earlier = jobs(near, 1)
     held = held_before(project, near_name, far_name, earlier, monkeypatch, capsys)
     new = jobs(near, 1)
     # The new holds' first attempt fails its sync commit naming no workspace; the retry is refused by another.
-    unnamed: dict[str, Any] = {
-        "bundles": [],
-        "workspace_id": None,
-        "refused": "refused the stream: syncfs failed",
-        "sync_failed": True,
-    }
-    elsewhere = {"bundles": [], "workspace_id": other, "refused": "refused the stream: injected"}
-    far_side = Far(monkeypatch, [None, (2, json.dumps(unnamed), ""), (2, json.dumps(elsewhere), "")])
+    unnamed = refusal(None, "refused the stream: syncfs failed", sync_failed=True)
+    elsewhere = refusal(other, "refused the stream: injected")
+    far_side = Far(monkeypatch, [None, unnamed, elsewhere])
     assert transfer(project, "--json", "-q", *selected(new), near_name, f"cluster:{far_name}") == 1
     by_id = {outcome["transfer_id"]: outcome for outcome in statuses(capsys)}
     assert by_id.pop(held)["status"] == "adopted"

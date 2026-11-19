@@ -4,7 +4,7 @@ After its hello line, a transfer session speaks frames in both directions. A fra
 the request id (four bytes, big-endian unsigned) and the payload length (four bytes, big-endian), then the payload.
 The header's id is authoritative: every frame belongs to the request it names. ``Q`` (request), ``E`` (stream
 terminal), ``P`` (progress) and ``R`` (response) carry one compact UTF-8 JSON object; ``D`` carries raw stream
-bytes. Version 1 is half-duplex per request: the client sends ``Q``, then, for an upload, ``D`` frames and exactly
+bytes. The protocol is half-duplex per request: the client sends ``Q``, then, for an upload, ``D`` frames and exactly
 one ``E``; the far side sends only ``P`` frames until it has read that terminal, then the request's download
 (``D`` frames and one ``E``), if any, and exactly one ``R``.
 
@@ -64,8 +64,9 @@ RESPONSE = "R"
 KINDS = frozenset({REQUEST, DATA, END, PROGRESS, RESPONSE})
 #: The largest ``D`` payload, in bytes.
 DATA_LIMIT = 1 << 20
-#: The largest JSON payload, in bytes.
-JSON_LIMIT = 64 << 20
+#: The largest JSON payload, in bytes: 512 MiB, so that one answer can describe a tree of about a million jobs
+#: (parsing a maximal one takes a few GB of Python objects, accepted at that scale).
+JSON_LIMIT = 512 << 20
 #: Seconds between two progress frames of a request the far side executes. A client's bound is at least three.
 TICK = 10.0
 

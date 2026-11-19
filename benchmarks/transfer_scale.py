@@ -4,18 +4,18 @@ This is a script, not a test. One invocation measures one transfer of N single-j
 each) between two durable workspaces with the default policy (``io.sync=auto``, ``io.workers=8``) and the
 visibility deadline D, over the loopback stand-in ``ssh`` of the test fixtures, and writes one JSON result::
 
-    nice -n 10 python benchmarks/transfer_scale.py --out DIR --direction push --session auto --jobs 10000 \\
+    nice -n 10 python benchmarks/transfer_scale.py --out DIR --direction push --jobs 10000 \\
         --placement distributed [--deadline 5] [--prepopulate M] [--tree] [--strace-subset K]
     python benchmarks/transfer_scale.py --out DIR --summarize
 
 ``--direction`` is ``push`` (local to remote), ``pull`` (remote to local), ``rr`` (remote to remote, two remotes) or
-``local`` (local to local, where ``--session`` has no effect); ``--session off`` sets the remotes'
-``transfer_session=off``. ``--placement distributed`` spreads the jobs over 1,000 placements, ``flat`` puts them in
-one. ``--prepopulate M`` first places M other jobs in DST, in the same placement scheme. ``--tree`` moves N trees of
+``local`` (local to local); every remote end goes over its transfer session, which a transfer requires.
+``--placement distributed`` spreads the jobs over 1,000 placements, ``flat`` puts them in one. ``--prepopulate M`` first places M other jobs in DST, in the same placement scheme. ``--tree`` moves N trees of
 four jobs (a root and three descendants) with ``--tree`` instead of single jobs. ``--strace-subset K``, when
 ``strace`` is on ``PATH``, afterwards traces one more transfer of K jobs into the DST the run filled
 (``strace -f -c``) and records per-job syscall counts; otherwise it records that they were not measured.
-``--summarize`` writes ``DIR/summary.md`` from every result in ``DIR/results/``.
+``--summarize`` writes ``DIR/summary.md`` from every result in ``DIR/results/``. Results from before transfer sessions
+were required (``session`` ``off``, or no ``expected_counts``) are skipped, counted, and never matched as baselines.
 
 Everything lives below ``--out`` (never ``/tmp``): ``results/<run>.json``, ``logs/<run>/`` (the timestamped progress
 lines, the stand-in ssh's log, the per-process probe dumps and event files) and ``work/<run>/`` (the workspaces,
@@ -37,7 +37,7 @@ How each quantity is obtained (no source is changed):
 - The client's and far sides' ``VmRSS`` are sampled once a second from ``/proc`` (the CLI's descendants).
 - Connections are the stand-in ssh's log lines, starts those running ``httk`` (as the tests count them).
 - Validity: exit status 0, every bundle reported ``adopted``, every job present in DST, none left in SRC, no hold
-  left on SRC, every adoption seen by the probe, and (with sessions, or locally) the expected connections and
+  left on SRC, every adoption seen by the probe, and the expected connections and
   starts (push and pull 1/1, ``rr`` 2/2, ``local`` 0/0). An invalid run is reported as invalid, not timed.
 """
 
@@ -674,15 +674,13 @@ def _strace_counts(output: Path, jobs: int) -> dict[str, Any]:
     }
 
 
-def _remote(project: Path, name: str, host: str, session: str) -> None:
+def _remote(project: Path, name: str, host: str) -> None:
     from httk.workflow.adapters import add_remote
 
     bundle = add_remote(name, template="ssh", project=project)
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     settings = dict(metadata["settings"])
     settings.update({"host": host, "username": "someone"})
-    if session == "off":
-        settings["transfer_session"] = "off"
     metadata["settings"] = settings
     (bundle / "remote.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
 
@@ -830,8 +828,8 @@ def _acceptance(result: dict[str, Any], results: list[dict[str, Any]]) -> dict[s
             if other.get("valid")
             and other["parameters"]["deadline"] <= 0.05
             and all(
-                other["parameters"][key] == p[key]
-                for key in ("direction", "session", "placement", "jobs", "prepopulate", "tree", "probe")
+                other["parameters"].get(key) == p[key]
+                for key in ("direction", "placement", "jobs", "prepopulate", "tree", "probe")
             )
         ]
         if not same:
@@ -888,14 +886,11 @@ def _acceptance(result: dict[str, Any], results: list[dict[str, Any]]) -> dict[s
         }
     expected = result["expected_counts"]
     counts = [result["connections"], result["starts"]]
-    if expected is None:
-        verdicts["e"] = {"verdict": "not measured", "why": "adapter path (transfer_session=off)", "counts": counts}
-    else:
-        verdicts["e"] = {
-            "verdict": "pass" if counts == list(expected) else "fail",
-            "counts": counts,
-            "expected": list(expected),
-        }
+    verdicts["e"] = {
+        "verdict": "pass" if counts == list(expected) else "fail",
+        "counts": counts,
+        "expected": list(expected),
+    }
     return verdicts
 
 
@@ -925,7 +920,6 @@ def run(arguments: argparse.Namespace) -> int:
         raise SystemExit("transfer_scale: --out must not be below /tmp")
     p = {
         "direction": arguments.direction,
-        "session": "none" if arguments.direction == "local" else arguments.session,
         "jobs": arguments.jobs,
         "placement": arguments.placement,
         "deadline": arguments.deadline,
@@ -937,7 +931,7 @@ def run(arguments: argparse.Namespace) -> int:
     }
     stamp = time.strftime("%Y%m%dT%H%M%S")
     run_id = (
-        f"{p['direction']}-{p['session']}-{p['placement']}-n{p['jobs']}-d{p['deadline']:g}"
+        f"{p['direction']}-{p['placement']}-n{p['jobs']}-d{p['deadline']:g}"
         f"-m{p['prepopulate']}{'-tree' if p['tree'] else ''}{'-light' if p['probe'] == 'light' else ''}"
         f"{'' if p['io_sync'] == 'auto' else '-' + p['io_sync']}-{stamp}"
     )
@@ -989,10 +983,10 @@ def run(arguments: argparse.Namespace) -> int:
     project = work / "project"
     initialize_project(project, name="bench")
     if p["direction"] in ("push", "pull"):
-        _remote(project, "cluster", "fake.example.test", p["session"])
+        _remote(project, "cluster", "fake.example.test")
     elif p["direction"] == "rr":
-        _remote(project, "cluster", "src.example.test", p["session"])
-        _remote(project, "other", "dst.example.test", p["session"])
+        _remote(project, "cluster", "src.example.test")
+        _remote(project, "other", "dst.example.test")
     source_root, destination_root = _ends(p["direction"], work)
     names = (f"src-{uuid.uuid4().hex[:8]}", f"dst-{uuid.uuid4().hex[:8]}")
     for name, root in zip(names, (source_root, destination_root), strict=True):
@@ -1104,8 +1098,8 @@ def run(arguments: argparse.Namespace) -> int:
         problems.append(f"the probe saw {len(adopt_stamps)} adoptions into DST, not {p['jobs']}")
     if not any(probe["role"] == "client" for probe in probe_documents):
         problems.append("no client probe dump")
-    expected_counts = None if p["session"] == "off" else EXPECTED_COUNTS[p["direction"]]
-    if expected_counts is not None and (connections, starts) != expected_counts:
+    expected_counts = EXPECTED_COUNTS[p["direction"]]
+    if (connections, starts) != expected_counts:
         problems.append(f"connections/starts {connections}/{starts}, not {expected_counts[0]}/{expected_counts[1]}")
 
     first_adoption = min(adopt_stamps) - started if adopt_stamps else None
@@ -1151,7 +1145,7 @@ def run(arguments: argparse.Namespace) -> int:
     if p["strace_subset"] and shutil.which("strace") and not problems:
         result["strace"] = _traced_subset(arguments, p, project, source_root, names, logs)
 
-    others = [json.loads(path.read_text(encoding="utf-8")) for path in results.glob("*.json")]
+    others, _skipped = load_results(results)
     if result["valid"]:
         result["acceptance"] = _acceptance(result, others)
     after = _sha256(real)
@@ -1201,6 +1195,33 @@ def _traced_subset(
 # -- the summary ----------------------------------------------------------------------------------------------------
 
 
+def _current(result: object) -> bool:
+    """Whether *result* is a result of this benchmark since transfer sessions are required: not one of a run with
+    ``--session off``, nor one that recorded no ``expected_counts`` (both before §7.12, T7)."""
+
+    if not isinstance(result, dict) or not isinstance(result.get("parameters"), dict):
+        return False
+    return result["parameters"].get("session") != "off" and result.get("expected_counts") is not None
+
+
+def load_results(directory: Path) -> tuple[list[dict[str, Any]], int]:
+    """Read the results in *directory* (``results/``): the current ones, by name, and how many others were skipped
+    (:func:`_current`, or not readable as JSON)."""
+
+    current: list[dict[str, Any]] = []
+    skipped = 0
+    for path in sorted(directory.glob("*.json")):
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            result = None
+        if _current(result):
+            current.append(result)
+        else:
+            skipped += 1
+    return current, skipped
+
+
 def _verdict(result: dict[str, Any], key: str) -> str:
     value = str(result.get("acceptance", {}).get(key, {}).get("verdict", "-"))
     mark = "~" if value.startswith("indicative ") else ""
@@ -1209,7 +1230,7 @@ def _verdict(result: dict[str, Any], key: str) -> str:
 
 
 def summarize(out: Path) -> Path:
-    results = [json.loads(path.read_text(encoding="utf-8")) for path in sorted((out / "results").glob("*.json"))]
+    results, skipped = load_results(out / "results")
     for result in results:
         if result.get("valid"):
             result["acceptance"] = _acceptance(result, results)  # (a) once every D = 0.05 s run is in
@@ -1219,6 +1240,8 @@ def summarize(out: Path) -> Path:
         "One row a run (`benchmarks/transfer_scale.py`). Shares are thread-seconds over the wall time (the pools of",
         "`io.workers` can make them exceed 1). n/m: not measured. fail*: flat placement, recorded as a limitation.",
         "~: indicative only (N below 10^5: too few pages for (b), too little declared growth for (c)).",
+        f"Skipped {skipped} result(s) from before transfer sessions were required (`session` off, or no",
+        "`expected_counts`), or not readable: not listed and never matched as a baseline.",
         "",
         (
             "| run | valid | wall s | ms/job | first adopt s | settle | barrier | listing | names/job "
@@ -1256,7 +1279,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", required=True, help="the directory of the results, logs and work (never /tmp)")
     parser.add_argument("--summarize", action="store_true", help="write OUT/summary.md from OUT/results/ and stop")
     parser.add_argument("--direction", choices=("push", "pull", "rr", "local"), default="push")
-    parser.add_argument("--session", choices=("auto", "off"), default="auto")
     parser.add_argument("--jobs", type=int, default=200, help="N: the bundles (or trees) moved")
     parser.add_argument("--placement", choices=("flat", "distributed"), default="distributed")
     parser.add_argument("--deadline", type=float, default=5.0, help="D: the visibility deadline in seconds")

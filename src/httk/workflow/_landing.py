@@ -1,9 +1,8 @@
 """The receiving side of a pushed tar stream: one landing, extracted, validated and made durable before any use.
 
-The far side of a push (``job adopt --stdin-tar``, the transfer session's ``adopt`` op), ``workflow install
---stdin-tar`` (and its ``install`` op) and the near side of a pull over a transfer session read a tar stream into a
-landing directory with :func:`receive_tar`. The stream is any binary file: standard input for the command line, a
-transfer session's upload for an op, its download for a pull. This module
+The far side of a push (the transfer session's ``stage`` op), its ``install`` op and the near side of a pull over a
+transfer session read a tar stream into a landing directory with :func:`receive_tar`. The stream is any binary file:
+a transfer session's upload for an op, its download for a pull. This module
 imports nothing of the command line.
 """
 
@@ -128,12 +127,10 @@ def _extract_landing(
     *,
     durable: bool,
     progress: Progress | None,
-    on_leftovers: Callable[[list[str]], object] | None,
 ) -> tuple[list[str], int]:
     """Extract *stream* into *landing*: the top-level names it carried, sorted, each checked to be a directory, and
-    how many regular files the stream wrote. The landing's other entries, sorted, go to *on_leftovers* (when there are
-    any) before this returns; *progress* is told ``extract`` with the bytes read, then ``sync`` for the extraction's
-    tail."""
+    how many regular files the stream wrote; *progress* is told ``extract`` with the bytes read, then ``sync`` for the
+    extraction's tail."""
 
     names: set[str] = set()
     source: IO[bytes] = stream
@@ -149,10 +146,6 @@ def _extract_landing(
         found = _fs.lstat(_fs.loc(landing / name))
         if found is None or not stat.S_ISDIR(found.st_mode):
             raise StreamRefused(f"not a directory: {name!r}", bundle=name)
-    with os.scandir(landing) as listing:
-        others = sorted(entry.name for entry in listing if entry.name not in names)
-    if others and on_leftovers is not None:
-        on_leftovers(others)
     return sorted(names), count
 
 
@@ -165,7 +158,6 @@ def receive_tar(
     force_fsync: bool = False,
     finish: Callable[[], object] | None = None,
     progress: Progress | None = None,
-    on_leftovers: Callable[[list[str]], object] | None = None,
     quiet: bool = False,
     primed_devices: set[int] | None = None,
 ) -> list[str]:
@@ -175,8 +167,7 @@ def receive_tar(
     writing small files with up to the workspace's ``io.workers`` threads; every top-level entry of the stream must
     be a directory. A stream that fails either is refused whole and *landing* discarded (only after every write of
     the extraction finished), so nothing of it is used. Only the top-level names this stream carried are returned:
-    a reused landing's other entries (leftovers of an earlier, interrupted delivery) are left in place and never
-    used; *on_leftovers* is told them right after the extraction, before anything is committed.
+    any other entry of *landing* is left in place and never used (every caller lands in a fresh directory).
 
     :param workspace: The workspace *landing* belongs to (its ``tmp/`` takes the discarded landing).
     :param landing: The directory to extract into.
@@ -184,10 +175,10 @@ def receive_tar(
     :param barrier: The landing is what gets published (the far side of a push): in a durable workspace it is
         made durable before this returns, through a :class:`~httk.workflow._fs.Barrier` entered before the first
         member is extracted (``io.sync`` and ``io.sync_errors`` read afresh); a failed commit refuses the stream
-        like a refused member. ``workflow install --stdin-tar`` leaves it off: its landing is copied into the store,
-        not published.
+        like a refused member. The ``install`` op leaves it off: its landing is copied into the store, not
+        published.
     :param force_fsync: Use the strategy ``fsync`` whatever ``io.sync`` says, with *barrier*: every landed file is
-        fsynced on its writing descriptor as it is extracted (``job adopt --sync fsync``, a push's one retry after a
+        fsynced on its writing descriptor as it is extracted (a ``stage`` with ``sync: fsync``, a push's one retry after a
         failed commit); nothing more in a non-durable workspace. In any workspace, durable or not, *landing* must
         not exist yet: its parents are created, then *landing* itself exclusively, and an existing one (or one
         created concurrently) refuses the stream before anything is extracted or discarded.
@@ -199,7 +190,6 @@ def receive_tar(
         is made and the barrier entered (directory fsyncs, its prime's ``syncfs``), ``extract`` with the stream bytes
         read, then ``sync`` again once the reading ends, however it ends (the writes still running, the directory
         times and fsyncs, the terminal and the commit, or a refused stream's discard).
-    :param on_leftovers: Told a reused landing's other entries, when there are any.
     :param quiet: Print no progress line of the sync barrier (``job transfer -q`` receiving a pull).
     :param primed_devices: With *barrier*, the transfer's set of filesystems a barrier of it primed already (see
         :class:`~httk.workflow._fs.Barrier`): a transfer session's ``adopt`` and ``stage``, a pull's landings. The
@@ -229,7 +219,7 @@ def receive_tar(
                 os.close(parent)
     else:
         _fs.make_dirs(landing, durable=workspace.durable)
-    extract = partial(_extract_landing, workspace, landing, stream, progress=progress, on_leftovers=on_leftovers)
+    extract = partial(_extract_landing, workspace, landing, stream, progress=progress)
     try:
         if barrier and workspace.durable:
             # --sync fsync only strengthens: inline fsync on the writing descriptors, which no foreign error fails.

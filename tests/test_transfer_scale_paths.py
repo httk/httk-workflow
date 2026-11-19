@@ -916,7 +916,7 @@ def test_slow_listings_of_adopt_staged_report_progress_within_a_short_stall_boun
     holds, plan = hold_jobs(near, 2)
     ids = [hold.transfer_id for hold in holds]
     declared = sum(transfer_cli._measure(Path(hold.path))[0] for hold in holds)
-    session = TransferSession(bundle, needs={"stage", "adopt_staged"}, timeout=60)
+    session = TransferSession(bundle, timeout=60)
     session.open()
     session._limit = 1.0
     with session:
@@ -1018,3 +1018,56 @@ def test_an_adoption_entry_s_missing_workflows_as_a_list_of_ids_or_absent_is_acc
         entry["missing_workflows"] = missing
     document = {"bundles": [entry], "workspace_id": str(uuid.uuid4())}
     assert transfer_cli._checked_adoption(document, [bundle])["entries"] == {bundle: entry}
+
+
+def test_the_benchmark_summary_skips_results_from_before_sessions_were_required(tmp_path: Path) -> None:
+    # Correction C8: a result of a `--session off` run, or one without expected_counts (both before T7), is skipped
+    # and counted, never listed or matched as a run's D = 0.05 s baseline; an unreadable one is skipped alike.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "transfer_scale", Path(__file__).resolve().parents[1] / "benchmarks" / "transfer_scale.py"
+    )
+    assert spec is not None and spec.loader is not None
+    benchmark = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(benchmark)
+
+    parameters = {"direction": "push", "placement": "flat", "jobs": 10, "prepopulate": 0, "tree": False}
+    parameters |= {"probe": "light"}
+
+    def result(run: str, deadline: float, wall: float, **fields: Any) -> dict[str, Any]:
+        document = {
+            "run": run,
+            "valid": True,
+            "problems": [],
+            "parameters": {**parameters, "deadline": deadline},
+            "wall_seconds": wall,
+            "seconds_per_job": wall / 10,
+            "throughput": {},
+            "rss_slope_bytes_per_job": {},
+            "shares": {"names_examined_per_job": 1, "python_calls_per_job": 1},
+            "connections": 1,
+            "starts": 1,
+            "expected_counts": [1, 1],
+        }
+        return document | fields
+
+    results = tmp_path / "results"
+    results.mkdir()
+    documents = {
+        "now": result("now", 5.0, 20.0),
+        "baseline": result("baseline", 0.05, 10.0),
+        # A faster pre-T7 copy-time run: never the baseline.
+        "old-off": result("old-off", 0.05, 1.0, parameters={**parameters, "deadline": 0.05, "session": "off"}),
+        "old-null": result("old-null", 0.05, 1.0, expected_counts=None),
+    }
+    for name, document in documents.items():
+        (results / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+    (results / "torn.json").write_text("{", encoding="utf-8")
+    current, skipped = benchmark.load_results(results)
+    assert [document["run"] for document in current] == ["baseline", "now"] and skipped == 3
+    summary = benchmark.summarize(tmp_path).read_text(encoding="utf-8")
+    assert "Skipped 3 result(s) from before transfer sessions were required" in summary
+    assert "| now |" in summary and "| baseline |" in summary and "old-" not in summary
+    acceptance = benchmark._acceptance(documents["now"], current)
+    assert acceptance["a"]["copy"] == 10.0

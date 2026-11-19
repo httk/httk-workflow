@@ -69,13 +69,14 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, NamedTuple, Self, cast
 
-from httk.workflow import _fs, _kernel, _store
+from httk.workflow import _bundles, _fs, _kernel, _store
 from httk.workflow._bundles import (
-    MAX_MANIFEST_BYTES,
     BundleError,
     BundleManifest,
-    build_bundle,
+    build_bundle_with_manifest,
+    check_rewritten,
     exchange_names,
+    manifest_limit,
     read_manifest,
     read_rekeyed,
     rekey_untrusted,
@@ -157,6 +158,18 @@ _RELEASE_KEEP = "release-keep"
 #: The file of a ``release-keep`` scratch that holds the destination workspace id given to the release.
 _DESTINATION_ID_FILE = "destination-workspace-id"
 _RECORD_LIMIT = 1 << 16
+
+
+def _delivery_limit() -> int:
+    """The largest accepted ``eject.json``: its token is the whole ``bundle.json`` (up to
+    :data:`~httk.workflow._bundles.MAX_MANIFEST_BYTES`, read now) as a JSON string, written without ASCII escapes
+    (:meth:`_Delivery.encode`), so escaping at most doubles it (a quote or backslash; ``bundle.json`` holds no raw
+    control character), within the threefold allowed here; and the record's other fields, a target path among
+    them, within :data:`_RECORD_LIMIT`."""
+
+    return 3 * _bundles.MAX_MANIFEST_BYTES + _RECORD_LIMIT
+
+
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 #: The format of the ``reason.json`` beside a refused bundle.
 REJECTION_FORMAT = "httk-workspace-exchange-rejection"
@@ -558,7 +571,9 @@ class _Delivery:
             "transfer_id": self.transfer_id,
             "exchange": exchange,
         }
-        return json.dumps(fields).encode()
+        # UTF-8, not ASCII escapes: a non-ASCII character or a DEL of bundle.json would take six bytes escaped. A
+        # path's surrogate-escaped bytes (a non-UTF-8 directory name) pass as such; json.loads of bytes reads them back.
+        return json.dumps(fields, ensure_ascii=False).encode("utf-8", "surrogatepass")
 
     @classmethod
     def read(cls, scratch: Path) -> Self | None:
@@ -570,7 +585,7 @@ class _Delivery:
         """
 
         try:
-            data = _fs.read_bounded(_fs.loc(scratch / _DELIVERY), _RECORD_LIMIT)
+            data = _fs.read_bounded(_fs.loc(scratch / _DELIVERY), _delivery_limit())
             if data is None:
                 return None
             value = json.loads(data)
@@ -708,17 +723,30 @@ def _eject(
                 f"{unlocked.job_key} is unlocked (debug mode), which the exchange's adoption would drop with the rest "
                 "of state.json; run it here, or submit a new job to the exchange"
             )
-        scratch = owner.scratch(_HOLD if hold else "eject")
-        bundle = build_bundle(
-            owner,
-            [root, *members],
-            source_workspace_id=workspace.workspace_id,
-            destination_workspace_id=destination_workspace_id,
-            destination_locator=locator,
-            owner_key=owner_key,
-            event=("ejected", {"destination": str(destination)}),
-            scratch=scratch,
-        )
+        made: list[Path] = []
+
+        def make_scratch() -> Path:
+            # Made only once every check of the bundle passed (its size included): a refusal leaves nothing.
+            made.append(owner.scratch(_HOLD if hold else "eject"))
+            return made[0]
+
+        try:
+            bundle, token, manifest = build_bundle_with_manifest(
+                owner,
+                [root, *members],
+                source_workspace_id=workspace.workspace_id,
+                destination_workspace_id=destination_workspace_id,
+                destination_locator=locator,
+                owner_key=owner_key,
+                event=("ejected", {"destination": str(destination)}),
+                scratch=make_scratch,
+                untrusted=_exchange_inbox(destination),  # an exchange's bound, before anything moves
+            )
+        finally:
+            scratch = made[0] if made else None
+        # What build_bundle wrote, never read back; read in the scratch, before the bundle reaches a destination
+        # others may write. A failure here still rolls back.
+        exchange = _exchange_root(workspace, bundle, manifest)
     except Exception:
         # A refusal moved nothing: every job still held goes back, the root included. An error after some members
         # were extracted is settled now, never left in the scratch until this owner closes.
@@ -728,11 +756,7 @@ def _eject(
         if scratch is not None and _settle(owner, scratch) is not None:
             owner.discard_scratch(scratch)
         raise
-    read = read_manifest(bundle / "bundle.json")
-    assert read is not None
-    token, manifest = read
-    # Read in the scratch, before the bundle reaches a destination others may write.
-    exchange = _exchange_root(workspace, bundle, manifest)
+    assert scratch is not None
     name = root.job_key
     if exchange is not None and rekeyed_id(workspace.workspace_id, exchange[0]) == root.job_id:
         # A job this workspace adopted from its exchange goes back under the client's name.
@@ -999,7 +1023,7 @@ def _refuse(owner: Owner, scratch: Path, bundle: Path, record: _Record, reason: 
 def _validated(workspace: "Workspace", scratch: Path, bundle: Path, *, untrusted: bool) -> BundleManifest:
     if read_rekeyed(scratch) is not None:
         # An interrupted rekey: finish it, then the bundle is a trusted one (the _bundles contract).
-        read = read_manifest(bundle / "bundle.json")
+        read = read_manifest(bundle / "bundle.json", untrusted=True)  # only an untrusted adoption rekeys
         if read is None:
             raise BundleError(f"{bundle}/bundle.json is missing")
         manifest = rekey_untrusted(scratch, bundle, read[1], workspace_id=workspace.workspace_id)
@@ -1319,7 +1343,7 @@ def _late_return(found: Iterable[JobRef], source: str) -> str | None:
 def _read_replaces(scratch: Path) -> dict[str, str]:
     """The ``replaces.json`` of an ``adopt`` scratch; empty when it has none."""
 
-    data = _fs.read_bounded(_fs.loc(scratch / _REPLACES), MAX_MANIFEST_BYTES)
+    data = _fs.read_bounded(_fs.loc(scratch / _REPLACES), manifest_limit(untrusted=False))
     return {} if data is None else {str(key): str(value) for key, value in json.loads(data).items()}
 
 
@@ -1370,10 +1394,12 @@ def _finish(
     """Steps 2-6 of adoption on a taken bundle: the report, or the message of a refusal."""
 
     durable = workspace.durable
-    read = read_manifest(scratch / _PLAN)
+    read = read_manifest(scratch / _PLAN, untrusted=record.untrusted)
     if read is None:
         try:
             manifest = _validated(workspace, scratch, bundle, untrusted=record.untrusted)
+            # Measured before anything is claimed or published: a plan its reader would refuse strands the rest.
+            plan = check_rewritten(manifest, untrusted=record.untrusted)
             presence, copies = _presence(workspace, bundle, manifest, untrusted=record.untrusted, absent=absent)
         except BundleError as exc:
             return _refuse(owner, scratch, bundle, record, str(exc))
@@ -1415,8 +1441,12 @@ def _finish(
         if copies:
             # Before the plan: a replay that finds the plan finds the copies it replaces too.
             replaces = {job_id: placement_text(ref.placement or PurePosixPath()) for job_id, ref in copies.items()}
-            _fs.write_file(_fs.loc(scratch / _REPLACES), json_bytes(replaces), durable=durable)
-        _fs.write_file(_fs.loc(scratch / _PLAN), manifest.to_json(), durable=durable)
+            data = json_bytes(replaces)
+            if len(data) > (limit := manifest_limit(untrusted=False)):
+                reason = f"its replaces.json would take {len(data)} bytes, more than the {limit} accepted"
+                return _refuse(owner, scratch, bundle, record, reason)
+            _fs.write_file(_fs.loc(scratch / _REPLACES), data, durable=durable)
+        _fs.write_file(_fs.loc(scratch / _PLAN), plan, durable=durable)
     else:
         manifest = read[1]
     if not record.untrusted and (replaces := _read_replaces(scratch)):

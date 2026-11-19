@@ -155,35 +155,31 @@ everyone on it:
 
 - a push is delivered once more, the same bundles to a fresh landing at the
   destination, where every file is synchronized as it is written (which
-  another user's error cannot fail). Over a push's transfer session this is one
-  more request on it, per segment (the segment is staged once more, before
+  another user's error cannot fail). This is one more request on the push's
+  transfer session, per segment (the segment is staged once more, before
   anything of it is adopted), and every later segment of the session is
-  then synchronized file by file at once; without a session it costs one more
-  connection and one more remote `httk` start, only when it happens. A
+  then synchronized file by file at once. A
   push from a remote workspace (remote to remote) delivers its relayed local
   copies again rather than fetching them anew. If
   that delivery is refused too, a push from a local workspace takes the jobs
   it held itself back into the source (`not_moved`; run the transfer again),
   and from a remote workspace its jobs stay held there (`job transfer
   --resume`);
-- a pull is fetched once more into a fresh landing. Over a pull's transfer
-  session that is one more request on it, per segment, with every file
-  synchronized as it is written here, as every later fetch of the session then
-  is; without a session it is one more adapter fetch under a fresh `syncfs`
-  synchronization. Either way it happens only when needed. If that fails too,
-  a pull over a session stops there (that segment and every later one stay
-  held at the source, and no later page of the selection is held), and a pull
-  without one fails that chunk; their jobs stay held at the source, and `job
-  transfer --resume` delivers them again.
+- a pull is fetched once more into a fresh landing: one more request on the
+  pull's transfer session, per segment, with every file synchronized as it is
+  written here, as every later fetch of the session then is, only when needed.
+  If that fails too, the pull stops there (that segment and every later one
+  stay held at the source, and no later page of the selection is held); their
+  jobs stay held at the source, and `job transfer --resume` delivers them
+  again.
 
 A failure is not retried otherwise. A destination (or, for a pull, this
 workspace) on `io.sync fsync`, whose per-file errors are exact, fails at once:
 a push from a local workspace takes the jobs it held itself back into the
 source (`not_moved`; run the transfer again), and a push from a remote
 workspace keeps the jobs held at the source for `job transfer --resume`; a pull
-without a session fails that chunk, and a pull over a session stops (that
-segment and every later one stay held at the source), both resumable with
-`job transfer --resume`. A hold an earlier run left is never taken back, since an earlier
+stops (that segment and every later one stay held at the source), resumable
+with `job transfer --resume`. A hold an earlier run left is never taken back, since an earlier
 delivery may have adopted it (see {doc}`details/workflow_cli`). Job
 creation (`job new`, campaigns), `job submit` of copies and workflow
 installation have no retry either: the command fails, and for job creation
@@ -336,7 +332,11 @@ there, and the finished ones brought back with `httk job pull kappa:runs`
 (every succeeded job); the end left out is the workspace the command runs in,
 else the default workspace. A push leaves an `away` copy of each job in its
 source until the pull brings the job back. `httk job transfer SRC DST` is the
-general form; see {doc}`running`. Besides `ssh`, the packaged
+general form; see {doc}`running`. A transfer to or from a remote runs over one
+transfer session, so the remote's `httk` must be the same version as this
+machine's: otherwise the transfer stops before anything is held, with "the httk
+on REMOTE is too old (or too new) for this transfer: install the same httk
+version on both ends". Besides `ssh`, the packaged
 templates are `local` (a second tree on this machine), `mount` (files over a
 shared mount, commands through a separate executor) and `mount-daemon` (files
 as the only channel, through an exchange directory: the workspace's managers serve it, and the confined broker only starts, queries and cancels managers).

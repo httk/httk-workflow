@@ -9,9 +9,9 @@ description of the maintained adapters, and the command-line options that drive
 them, is in {doc}`/details/workflow_cli`.
 
 A *remote adapter* is a versioned directory with one dispatcher executable.
-Everything *httk-workflow* does on another machine (push a job bundle, run a
-command, pull results back) is one *operation*, and every operation runs the
-bundle's single `adapter` program. The engine never opens an ssh connection
+Everything *httk-workflow* does on another machine (run a command, push a
+workflow source, carry a job transfer's session) is one *operation*, and every
+operation runs the bundle's single `adapter` program. The engine never opens an ssh connection
 itself and parses only the JSON result that program prints. The optional
 `daemon` operation relays a typed request to the destination broker, which owns
 the protected scheduler policy.
@@ -304,7 +304,11 @@ workspace's id and root (a transfer does not: it learns the id from the adoption
 ### `push` and `pull`
 
 Move one tree, or one explicit batch of files, to (`push`) or from (`pull`) the
-target.
+target. Job transfers do not use them: they travel over the adapter's `session`
+operation, which every remote end of a transfer must open. *httk-workflow* pushes
+a local workflow source with `push` for `httk workflow install --workspace
+REMOTE:WS`, and calls `pull` itself no longer; both stay base operations, so an
+adapter must still implement them.
 
 | Member | Type | Meaning |
 | --- | --- | --- |
@@ -317,16 +321,16 @@ target.
 manifest cannot name anything outside the workspace it came from.
 
 ```json
-{"destination": "/scratch/me/runs/.httk-workspace/transfers/incoming/6f1c….k4q2…",
+{"destination": "/scratch/me/runs/.httk-workspace/tmp/push.6f1c…/my-workflow",
  "format": "httk-computer-request", "format_version": 2, "operation": "push",
- "source": "/home/me/ws/.httk-workspace/transfers/outgoing/6f1c…",
+ "source": "/home/me/src/my-workflow",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
  "remote_settings": {"host": "login.example.org"}}
 ```
 
 ```json
 {"format": "httk-computer-result", "format_version": 2, "operation": "push", "ok": true,
- "path": "/scratch/me/runs/.httk-workspace/transfers/incoming/6f1c….k4q2…"}
+ "path": "/scratch/me/runs/.httk-workspace/tmp/push.6f1c…/my-workflow"}
 ```
 
 `path` is where the data actually landed, and callers use it instead of the
@@ -335,58 +339,14 @@ destination for remote transfers and the resolved absolute path for local
 copies, so the result value is authoritative and the request value is not.
 
 A local copy onto an existing destination is idempotent when both sides carry
-the identical `bundle.json`, and an error otherwise. A resumed
-transfer therefore does not need to know whether the previous attempt finished.
-
-### `deliver`
-
-Pushes one batch of files and runs one `httk` command with that batch as an
-uncompressed `tar` stream on its standard input, in a single process: for `ssh`
-one connection, so the target needs no `tar` binary. A push of job bundles
-uses it to stream the bundles into `httk job adopt --json --stdin-tar …`, which
-extracts them with the same filters as a pull and prints its adoption report.
-
-| Member | Type | Meaning |
-| --- | --- | --- |
-| `source` | nonempty string, required | the local directory the batch is relative to |
-| `files` | nonempty array of relative paths, required | the paths sent (a directory entry with its contents), each archived under its relative name |
-| `argv` | array of nonempty strings, required | the command; `argv[0]` must be `httk` |
-| `cwd` | string, optional | the directory to run it in |
-
-`files` entries are refused as for `push`.
-
-```json
-{"argv": ["httk", "job", "adopt", "--json", "--stdin-tar", "--workspace", "runs"],
- "files": ["6f1c…", "9a2e…"], "format": "httk-computer-request", "format_version": 2,
- "operation": "deliver", "source": "/home/me/ws/.httk-workspace/transfers/outgoing",
- "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
- "remote_settings": {"host": "login.example.org"}}
-```
-
-```json
-{"format": "httk-computer-result", "format_version": 2, "operation": "deliver", "ok": true,
- "returncode": 0, "stdout": "{\"bundles\": [...], \"workspace_id\": \"…\"}\n", "stderr": ""}
-```
-
-The result is that of `invoke`: a nonzero `returncode` is still `ok: true`, and
-the command's `stderr` says why (a far side that stopped reading the stream
-included). The command's output is read while the stream is written, so a far
-side that prints before it reads cannot stall the transfer; the `cli_prelude`
-runs before the command, as for `invoke`, and what it prints precedes the
-command's answer on `stdout`.
-
-`deliver` is required for job transfers to a remote: every push to a remote
-workspace, and the workflows it ships, go through it. An adapter that lacks it
-(or refuses it) makes every transfer to that remote report each hold `failed`
-with the adapter's error; the holds stay in the source for `--resume` once the
-adapter supports `deliver`.
+the identical `bundle.json`, and an error otherwise.
 
 ## The optional `daemon` operation
 
 Protocol version 2 also recognizes `daemon`. It is optional, and existing
 adapters may refuse it. The maintained `mount-daemon` bundle uses a separate
 `python3 -m httk.workflow._daemon_adapter` dispatcher and refuses the generic
-`invoke`, `status`, `push`, `pull` and `deliver` operations. A missing or changed `kind` is
+`invoke`, `status`, `push`, `pull` and `session` operations. A missing or changed `kind` is
 an error; this dispatcher never falls back to local execution.
 
 Beyond the standard request envelope, `daemon` accepts exactly:
@@ -419,22 +379,23 @@ sends a health request when the daemon is pinned (otherwise it only checks
 `exchange.json`); success means the matching daemon answered `ready`. It
 does not install software or validate compute-node confinement.
 
-## The optional `session` operation
+## The `session` operation
 
 A caller that polls, such as `workflow monitor`, would otherwise pay one login
-and one remote `httk` start per read, and a push one per delivery. `session`
-instead starts one long-lived far-side process and talks to it over the
-adapter's own pipes, as rsync does. The monitor starts `httk workflow session`
-(text lines); a push from a local workspace, and a pull from a remote one
-into a local one, start `httk workflow transfer-session` (binary frames, see
-*The transfer session* in {doc}`/details/remotes`). It is optional: an adapter
-that does not implement it refuses it (or fails), and the caller then falls
-back to one `invoke` (the monitor), one `deliver` (a push) or its `invoke` and
-`pull` calls (a pull) per command. The caller also falls back when the far side
-cannot serve a session, for example because its `httk` predates the session
-command. The maintained `local`, `ssh` and `mount` kinds implement it;
-`mount-daemon` refuses it. The remote setting `transfer_session=off` (default
-`auto`) makes a push or a pull skip the transfer session without starting it.
+and one remote `httk` start per read. `session` instead starts one long-lived
+far-side process and talks to it over the adapter's own pipes, as rsync does.
+The monitor starts `httk workflow session` (text lines); every job transfer to
+or from a remote workspace starts `httk workflow transfer-session` (binary
+frames, see *The transfer session* in {doc}`/details/remotes`). The monitor
+falls back to one `invoke` per read when the adapter refuses the operation (or
+fails it). A transfer requires it: an adapter that refuses it, or whose channel
+does not carry binary data intact, stops the transfer before anything is held,
+with "the adapter of REMOTE cannot open a transfer session"; a far side whose
+`httk` lacks the command or speaks another transfer protocol version stops it
+with "the httk on REMOTE is too old (or too new) for this transfer: install the
+same httk version on both ends". The maintained `local`, `ssh` and `mount`
+kinds implement it; `mount-daemon` refuses it (its jobs move through its
+exchange with `job eject` and `job adopt`).
 
 Beyond the standard request envelope, `session` accepts exactly:
 
@@ -459,8 +420,8 @@ ahead of the far side's output. The wire format is that of the command run:
 for `httk workflow session` one hello line, then one JSON response line per
 JSON request line, until the caller closes stdin; for `httk workflow
 transfer-session` one hello line, then binary frames in both directions, so the
-channel must carry every byte value unchanged (a pty does not, and the caller
-then falls back).
+channel must carry every byte value unchanged (a pty does not, and a transfer
+then stops).
 
 ## Settings and credentials
 
@@ -469,7 +430,7 @@ key:
 
 - Keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS`
   (`check_connectivity`, `host`, `httk_command`, `interactive_auth`,
-  `legacy_settings`, `port`, `transfer_session`,
+  `legacy_settings`, `port`,
   `username`, the mount settings, `exchange` and the three `daemon_*` identity settings documented in
   {doc}`/details/remotes`, `vasp_command` and `vasp_pseudo_library`) are written
   into the flat `settings` object of the shareable, signable `remote.json`.
@@ -566,7 +527,7 @@ a large campaign, belongs in a bundle whose `timeout_seconds` allows for it.
 
 ### Scheduler sites
 
-For a PBS site, write a custom adapter that implements the seven base operations
+For a PBS site, write a custom adapter that implements the six base operations and `session`
 and uses `qsub` only when a command is explicitly invoked on that site. The
 manager launch policy belongs to the target workspace's launcher, not to the
 remote adapter. See {doc}`/details/launcher_authoring` for the compact PBS launcher

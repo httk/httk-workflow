@@ -2,8 +2,10 @@
 
 One long-lived process answers typed transfer requests in binary frames (``httk.workflow._frames``) over its stdin
 and stdout, so a transfer reaches a remote workspace through one connection and one ``httk`` start. It writes one
-hello line naming the format, its version and the ops it serves, then answers one request at a time until the end
-of its input or a ``bye`` request.
+hello line naming the format and its transfer protocol (:data:`~httk.workflow.adapters.TRANSFER_PROTOCOL`), then
+answers one request at a time until the end of its input or a ``bye`` request. The first request must carry that
+same ``protocol``; any other first request is refused before any op and ends the process, so a client of another
+``httk`` version changes nothing here. Every op of the protocol is served: there are no optional ones.
 
 An op is a function of one :class:`Request` returning its response members; it refuses by raising :class:`Refused`.
 The serve loop alone sets the reserved members ``ok`` and ``fatal``. Its upload (when the request announced
@@ -17,7 +19,7 @@ A push's segments may be staged (``stage``: received, committed and the first sc
 adopted later on the same connection (``adopt_staged``, one token a request, in staging order; plan
 WORKFLOW_TRANSFER_SESSION §7.10). Tokens are connection-local; a ``bye`` (before it answers) or the end of the input
 abandons the stages whose adoption never began (their landings discarded); after a fatal op, or when the process
-ends otherwise, they are left to recovery, which discards them. While ``adopt``, ``stage`` and ``adopt_staged`` run,
+ends otherwise, they are left to recovery, which discards them. While ``stage`` and ``adopt_staged`` run,
 every directory they list (the settle's scans, the presence lookups, any placement) advances the current phase's
 count by one (``_kernel.listing_progress``), so that a slow listing of a large placement is not taken for a stall.
 
@@ -54,7 +56,7 @@ from .._frames import (
     StreamReader,
     StreamWriter,
 )
-from ..adapters import TRANSFER_SESSION_FORMAT, TRANSFER_SESSION_FORMAT_VERSION
+from ..adapters import TRANSFER_PROTOCOL, TRANSFER_SESSION_FORMAT
 from ..errors import StreamAborted, TransferProtocolError
 from ._common import _ERRORS, _leaf, _local_root, _modifiable
 
@@ -283,48 +285,6 @@ def _workspace_arguments(name: str) -> argparse.Namespace:
     return argparse.Namespace(workspace=name, by_path=False, no_durable=False)
 
 
-def _adopt(request: Request) -> Mapping[str, Any]:
-    """Adopt the bundles the upload carries: ``job adopt --json --stdin-tar --token T [--sync fsync] --workspace WS
-    [--built-for ID ...]`` (:func:`~httk.workflow.workflow_cli._job.adopt_stream`).
-
-    Header: ``workspace`` (a registered name, resolved as the command line resolves it), ``token``, ``sync``
-    (``"fsync"`` or absent) and ``built_for`` (workflow ids). The response carries that command's JSON
-    ``document``, its ``returncode`` and its captured ``stderr``; it is ``ok`` exactly when the document is no
-    ``refused`` one (a refusal is answered ``ok: false`` with those members, and ``error`` its reason). An error
-    after the first adoption began is fatal.
-    """
-
-    header = request.header
-    workspace = _text(header, "workspace", required=True)
-    assert workspace is not None
-    token = _text(header, "token")
-    sync = header.get("sync")
-    if sync not in (None, "fsync"):
-        raise Refused(f"adopt takes sync fsync or none, not {sync!r}")
-    built_for = _texts(header, "built_for")
-    upload = request.upload
-    if upload is None:
-        raise Refused("adopt needs an upload")
-    from ._job import adopt_stream
-
-    context = CLIContext("httk", Path.cwd())
-    with _captured() as stderr, _kernel.listing_progress(request.advance):
-        document, returncode = adopt_stream(
-            lambda: _modifiable(_workspace_arguments(workspace), context, action="adopt jobs into it"),
-            upload,
-            token=token,
-            force_fsync=sync == "fsync",
-            built_for=built_for,
-            finish=upload.finish,
-            progress=request.progress,
-            primed_devices=_primed(request),
-        )
-    members = {"document": document, "returncode": returncode, "stderr": stderr.getvalue()}
-    if "refused" in document:
-        raise Refused(str(document["refused"]), **members)
-    return members
-
-
 #: The most segments one session keeps staged and not yet adopted (plan WORKFLOW_TRANSFER_SESSION §7.10, 1a), ...
 _STAGES = 8
 #: ... and the most landed regular-file bytes they hold (each staged segment's actual landed bytes), the incoming
@@ -376,8 +336,9 @@ def _stage(request: Request) -> Mapping[str, Any]:
     records its actual landed regular-file bytes (hard-link copies counted), so the session's staged bytes exceed
     the cap by at most one segment. The answer is a ``token`` (connection-local, bound to
     the workspace and *transfer_ids*), the ``transfer_ids``, the ``workspace_id``, the landed ``bytes`` and ``matures_in``
-    (advisory seconds until its deadline has run), with the captured ``stderr``. A refused stream is answered as
-    ``adopt`` answers it (``document``, ``returncode``, ``stderr``); anything failing after the commit is fatal, and
+    (advisory seconds until its deadline has run), with the captured ``stderr``. A refused stream is answered
+    ``ok: false`` with its refusal ``document`` (``bundles`` empty, ``workspace_id``, ``refused``, and ``bundle``,
+    ``sync_failed`` or ``stream_aborted`` when they apply), ``returncode`` 2 and ``stderr``; anything failing after the commit is fatal, and
     so is an upload carrying other bundles than *transfer_ids*. Once an adopted stage of the session could not be
     closed (:func:`_adopt_staged`), every later ``stage`` is refused before its upload is used, with ``unclosed:
     true`` (not ``capacity``): the client stops staging on this connection, the segment's holds kept.
@@ -458,7 +419,8 @@ def _adopt_staged(request: Request) -> Mapping[str, Any]:
     what it was staged with; anything else (an unknown or consumed token, another workspace or other ids, another
     stage first, a workspace sealed since) is refused before anything is touched, and the stage stays. The token is
     consumed once accepted:
-    the response is ``adopt``'s (``document``, ``returncode``, ``stderr``), and an error from then on is fatal,
+    the response is the adoption ``document`` (as ``job adopt --json`` prints it, with ``workspace_id``), its
+    ``returncode`` and the captured ``stderr``, and an error from then on is fatal,
     except one closing the stage after its adoption: that one is reported in ``stderr`` (a ``warning:`` line), the
     validated adoption is answered, no later ``stage`` is admitted, and one final attempt to close it runs at the
     ``bye`` or the end of the input (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a).
@@ -516,8 +478,7 @@ def _abandon(state: dict[str, Any]) -> None:
 
 
 def _install(request: Request) -> Mapping[str, Any]:
-    """Install the store entries the upload carries and build: ``workflow install --json [--stdin-tar
-    --source-label L --build] [--also-build ID ...] --workspace WS``
+    """Install the store entries the upload carries under their recorded ids, and build
     (:func:`~httk.workflow.workflow_cli._describe.install_copies`).
 
     Header: ``workspace``, ``source_label``, ``build`` and ``also_build`` (installed ids to build); the upload, when
@@ -569,8 +530,8 @@ def _install(request: Request) -> Mapping[str, Any]:
 
 
 def _workflows(request: Request) -> Mapping[str, Any]:
-    """Report the workflows *ids* as ``job adopt --built-for`` reports them: ``present``, ``unbuilt`` or
-    ``missing``, each with its ``tree_sha256`` (read only).
+    """Report each of the workflows *ids* as ``present``, ``unbuilt`` (installed without a build for this platform)
+    or ``missing``, each with its ``tree_sha256`` (read only).
 
     Header: ``workspace`` and ``ids``. The response carries ``workflows``, the rows in the order of *ids*; an
     unknown workspace refuses the request.
@@ -597,10 +558,11 @@ def _workflows(request: Request) -> Mapping[str, Any]:
     raise Refused(error, stderr=stderr.getvalue())
 
 
-#: The encoded bytes a whole answer of ``hold_page`` or ``holds_page`` carries at most: a hold (or error) that does not
-#: fit goes in the next answer; a first hold that does not fit the answer even with nothing else in it is named by id
-#: only (``oversized``).
-_ANSWER_BUDGET = 16 << 20
+#: The encoded bytes a whole answer of ``hold_page`` or ``holds_page`` carries at most: 448 MiB, the largest JSON frame
+#: (512 MiB) less headroom for the rest of the answer, so a hold describing a tree of about a million jobs fits. A hold
+#: (or error) that does not fit goes in the next answer; a first hold that does not fit the answer even with nothing
+#: else in it is named by id only (``oversized``).
+_ANSWER_BUDGET = 448 << 20
 #: The most characters of a request's captured standard error such an answer carries: its end, marked.
 _STDERR_TAIL = 64 << 10
 #: The most bytes one error takes in such an answer, as encoded: its start, marked.
@@ -1359,11 +1321,10 @@ def _release(request: Request) -> Mapping[str, Any]:
     }
 
 
-#: The ops of format version 1 this far side serves, by name.
+#: The ops of :data:`~httk.workflow.adapters.TRANSFER_PROTOCOL`, by name: this far side serves every one.
 OPS: dict[str, Op] = {
     "echo": _echo,
     "bye": _bye,
-    "adopt": _adopt,
     "stage": _stage,
     "adopt_staged": _adopt_staged,
     "install": _install,
@@ -1450,12 +1411,34 @@ def _answer(ops: Mapping[str, Op], request: Request) -> dict[str, Any]:
     return response
 
 
+def _refuse_protocol(request: Request, frames: FrameWriter) -> int:
+    """Answer a first request that names no protocol, or another one than :data:`TRANSFER_PROTOCOL`: its upload
+    discarded, no op run, one refusal naming this side's protocol; the session then ends.
+
+    :param request: The first request.
+    :param frames: The response stream.
+    :return: The serve loop's nonzero status.
+    """
+
+    asked = request.header.get("protocol")
+    request.discard_upload()
+    error = (
+        f"this httk speaks transfer protocol {TRANSFER_PROTOCOL}, the client {asked!r}: install the same httk version "
+        "on both ends"
+    )
+    print(f"transfer session: {error}", file=sys.stderr)
+    with contextlib.suppress(Exception), frames.lock:  # best effort: the refusal is the exit
+        frames.send_json(RESPONSE, request.id, {"ok": False, "protocol": TRANSFER_PROTOCOL, "error": error})
+    return _FAILED
+
+
 def serve(requests: IO[bytes], responses: IO[bytes], *, ops: Mapping[str, Op] | None = None) -> int:
     """Answer framed requests until the end of the input or a ``bye`` request.
 
     Writes the hello line, then answers each request with exactly one response frame (preceded by its
-    progress and download frames). An unknown op is answered ``ok: false`` (after its upload is discarded) and
-    changes nothing. Anything escaping an op, a response that cannot be sent, or a protocol error the op swallowed is
+    progress and download frames). A first request whose ``protocol`` is not :data:`TRANSFER_PROTOCOL` is refused
+    before any op (:func:`_refuse_protocol`) and ends the loop with a nonzero status. An unknown op is answered
+    ``ok: false`` (after its upload is discarded) and changes nothing. Anything escaping an op, a response that cannot be sent, or a protocol error the op swallowed is
     answered ``fatal`` and ends the loop with a nonzero status.
 
     :param requests: The protocol input stream.
@@ -1466,11 +1449,7 @@ def serve(requests: IO[bytes], responses: IO[bytes], *, ops: Mapping[str, Op] | 
     """
 
     served = OPS if ops is None else ops
-    hello = {
-        "format": TRANSFER_SESSION_FORMAT,
-        "format_version": TRANSFER_SESSION_FORMAT_VERSION,
-        "ops": sorted(served),
-    }
+    hello = {"format": TRANSFER_SESSION_FORMAT, "format_version": TRANSFER_PROTOCOL}
     try:
         responses.write(json.dumps(hello, separators=(",", ":")).encode("utf-8") + b"\n")
         responses.flush()
@@ -1481,6 +1460,7 @@ def serve(requests: IO[bytes], responses: IO[bytes], *, ops: Mapping[str, Op] | 
     frames = FrameWriter(responses.write, responses.flush)
     state: dict[str, Any] = {}  # the connection's: a pull's selection, a push's stages
     last_id = 0
+    agreed = False  # the first request named this side's protocol
     fatal = False
     try:
         while (frame := reader.read_frame()) is not None:
@@ -1492,6 +1472,11 @@ def serve(requests: IO[bytes], responses: IO[bytes], *, ops: Mapping[str, Op] | 
             assert frame.document is not None
             upload = StreamReader(reader.read_frame, frame.id) if frame.document.get("upload") is True else None
             request = Request(frame.id, frame.document, upload, frames, state)
+            if not agreed:
+                if frame.document.get("protocol") != TRANSFER_PROTOCOL:
+                    # Before any op: a client of another protocol changes nothing, and is answered once.
+                    return _refuse_protocol(request, frames)
+                agreed = True
             ticker = _Ticker(request, frames)
             with ticker:
                 try:

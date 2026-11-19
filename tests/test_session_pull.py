@@ -22,11 +22,13 @@ from httk.core.cli import CLIContext
 from conftest import Remote, fake_remote
 from httk.workflow import Workspace, _frames, _fs, _kernel, _landing, _moving, _store
 from httk.workflow._state import read_state_unowned
-from httk.workflow.adapters import RequestAborted, SessionFailed, TransferSession
+from httk.workflow.adapters import TRANSFER_PROTOCOL, RequestAborted, SessionFailed, TransferSession
+from httk.workflow.configuration import data_home
 from httk.workflow.errors import StreamAborted
 from httk.workflow.projects import initialize_project
+from httk.workflow.registry import DEFAULT_WORKSPACE_NAME, list_workspaces
 from httk.workflow.workflow_cli import _transfer as transfer_cli
-from httk.workflow.workflow_cli import command
+from httk.workflow.workflow_cli import _transfer_session, command
 from test_deliver import hold_jobs, outgoing_dir
 from test_job_transfer import (
     adapter_calls,
@@ -141,14 +143,6 @@ if argv[:2] == ["workflow", "transfer-session"]:
             return response
 
         _transfer_session.OPS["release"] = partial
-    if os.environ.get("HTTK_TEST_T1B_OPS"):
-        for op in ("holds_page", "select", "hold_page", "send", "release"):
-            del _transfer_session.OPS[op]
-    if os.environ.get("HTTK_TEST_T2_OPS"):
-        # A T2 far side: hold-everything-first ops in place of the paged ones.
-        for op in ("holds_page", "select", "hold_page"):
-            del _transfer_session.OPS[op]
-        _transfer_session.OPS["hold"] = _transfer_session.OPS["holds"] = lambda request: {}
     if os.environ.get("HTTK_TEST_ANSWER_BUDGET"):
         _transfer_session._ANSWER_BUDGET = int(os.environ["HTTK_TEST_ANSWER_BUDGET"])
     if os.environ.get("HTTK_TEST_SLOW_MANIFEST"):
@@ -277,7 +271,7 @@ PATCHED_PULL = PATCHED_HTTK.replace('sys.argv = ["httk", *argv]\n', PULL_PATCHES
 assert PATCHED_PULL != PATCHED_HTTK
 
 
-#: The ops a pull needs of its source's transfer session.
+#: The ops a pull requests of its source's transfer session.
 PULL_OPS = {"holds_page", "select", "hold_page", "send", "release"}
 #: The requests that open a pull of a selection: the selection, the earlier holds' listing (none), its one page.
 PAGE = ["select", "holds_page", "hold_page"]
@@ -314,7 +308,7 @@ def patched_pull(tmp_path: Path, remote: Remote) -> None:
 
 
 def opened(bundle: Path) -> TransferSession:
-    session = TransferSession(bundle, needs=PULL_OPS, timeout=60)
+    session = TransferSession(bundle, timeout=60)
     session.open()
     return session
 
@@ -357,10 +351,12 @@ def landed_bytes(path: Path) -> int:
 # -- the far side: hold, holds, send, release -----------------------------------------------------------------------
 
 
-def test_the_hello_lists_the_pull_ops(tmp_path: Path, remote: Remote) -> None:
+def test_the_far_side_serves_every_pull_op(tmp_path: Path, remote: Remote) -> None:
+    # One protocol, every op of it served (plan §7.12): no capability list, and no op of T2's hold-everything-first.
+    assert PULL_OPS <= set(_transfer_session.OPS) and not {"hold", "holds", "adopt"} & set(_transfer_session.OPS)
     _, bundle = local_project(tmp_path)
     with opened(bundle) as session:
-        assert PULL_OPS <= session.ops and not {"hold", "holds"} & session.ops
+        assert session.request("select", {"workspace": "no-such-workspace", "destination": "x"})["ok"] is False
 
 
 def hold_pages(session: TransferSession, **limits: int) -> list[dict[str, Any]]:
@@ -780,25 +776,67 @@ def test_workflows_arrive_before_the_first_adoption_in_the_one_start(
     assert find(near, job_id) is not None and landing_scratches(near) == []
 
 
-def test_an_older_far_side_costs_one_refused_start_then_the_adapter_path(
+@pytest.mark.parametrize("which", ["older", "newer"])
+def test_a_far_side_of_another_version_stops_the_pull_before_anything_is_selected(
     ssh: tuple[Path, Workspace, str, Workspace, str],
     remote: Remote,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    which: str,
 ) -> None:
     project, near, near_name, far, far_name = ssh
-    monkeypatch.setenv("HTTK_TEST_OLD_FAR_SIDE", "1")
+    if which == "older":
+        monkeypatch.setenv("HTTK_TEST_OLD_FAR_SIDE", "1")
+    else:
+        monkeypatch.setenv("HTTK_TEST_PROTOCOL", str(TRANSFER_PROTOCOL + 1))
     calls = adapter_calls(monkeypatch)
+    requests = recorded_requests(monkeypatch)
     plan = jobs(far, 3)
-    assert run(project, "--json", *selected(plan), f"cluster:{far_name}", near_name) == 0
-    captured = capsys.readouterr()
-    assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 3
-    assert f"cluster:{far_name} serves no transfer session" in captured.err
-    assert calls == ["job transfer", "pull", "job transfer"]
-    commands = remote.commands()
-    assert (len(commands), starts(commands)) == (4, 3) and "workflow transfer-session" in commands[0]
-    assert_in(near, plan)
+    assert run(project, "--json", *selected(plan), f"cluster:{far_name}", near_name) == 1
+    document = outcomes(capsys)
+    assert document["transfers"] == []
+    (error,) = document["errors"]
+    assert (
+        "the httk on cluster is too old (or too new) for this transfer: install the same httk version on both ends"
+        in (error)
+    )
+    assert "nothing was held" in error
+    # One refused start: nothing selected, held or changed on either end.
+    assert calls == [] and requests == [] and len(remote.commands()) == 1
+    assert outgoing(far) == [] and all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
+    assert_in(far, plan)
+
+
+@pytest.mark.parametrize("which", ["older", "newer"])
+def test_a_pull_into_the_default_workspace_creates_nothing_when_src_cannot_serve_it(
+    ssh: tuple[Path, Workspace, str, Workspace, str],
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    which: str,
+) -> None:
+    # `job pull REMOTE:WS` outside any workspace, with no default registered: the default workspace (DST) would be
+    # created and registered, but SRC's transfer session is opened and checked first (plan §7.12, correction C3).
+    project, _near, _near_name, far, far_name = ssh
+    if which == "older":
+        monkeypatch.setenv("HTTK_TEST_OLD_FAR_SIDE", "1")
+    else:
+        monkeypatch.setenv("HTTK_TEST_PROTOCOL", str(TRANSFER_PROTOCOL + 1))
+    plan = jobs(far, 1)
+    default = data_home() / "workspace"
+    assert not default.exists() and DEFAULT_WORKSPACE_NAME not in {b.name for b in list_workspaces()}
+    assert everyday("pull", project, "--json", f"cluster:{far_name}") == 1
+    (error,) = outcomes(capsys)["errors"]
+    assert "the httk on cluster is too old (or too new) for this transfer" in error and "nothing was held" in error
+    # Nothing created or registered here, nothing held there.
+    assert not default.exists() and DEFAULT_WORKSPACE_NAME not in {b.name for b in list_workspaces()}
     assert outgoing(far) == []
+    assert_in(far, plan)
+    # Once SRC serves the session, the same pull creates the default workspace and brings the job home.
+    monkeypatch.delenv("HTTK_TEST_OLD_FAR_SIDE", raising=False)
+    monkeypatch.delenv("HTTK_TEST_PROTOCOL", raising=False)
+    assert everyday("pull", project, "--json", f"cluster:{far_name}") == 0
+    assert default.exists() and outgoing(far) == []
 
 
 def test_a_selection_is_one_select_request_carrying_every_selector(
@@ -1510,49 +1548,6 @@ def test_a_release_answering_gone_counts_as_confirmed_and_an_unanswered_one_is_r
     (outcome,) = unconfirmed  # the one answered neither released nor gone
     assert "but the hold was not released: not confirmed by the source" in outcome["message"]
     assert "--resume" in outcome["message"]
-    assert_in(near, plan)
-
-
-def test_a_far_side_serving_only_the_push_ops_falls_back_for_a_pull(
-    ssh: tuple[Path, Workspace, str, Workspace, str],
-    remote: Remote,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    project, _near, near_name, far, far_name = ssh
-    monkeypatch.setenv("HTTK_TEST_T1B_OPS", "1")
-    calls = adapter_calls(monkeypatch)
-    plan = jobs(far, 2)
-    assert run(project, "--json", *selected(plan), f"cluster:{far_name}", near_name) == 0
-    captured = capsys.readouterr()
-    assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 2
-    assert "lacks the ops hold_page, holds_page, release, select, send" in captured.err
-    assert calls == ["job transfer", "pull", "job transfer"]
-    commands = remote.commands()
-    assert (len(commands), starts(commands)) == (4, 3)
-
-
-def test_a_t2_far_side_without_paged_holds_takes_the_adapter_path(
-    ssh: tuple[Path, Workspace, str, Workspace, str],
-    remote: Remote,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    # A far side serving T2's hold and holds but not select, hold_page and holds_page: SessionUnsupported at open,
-    # then the adapter path for the whole command (no T2 client remains to use those ops).
-    project, near, near_name, far, far_name = ssh
-    monkeypatch.setenv("HTTK_TEST_T2_OPS", "1")
-    calls = adapter_calls(monkeypatch)
-    requests = recorded_requests(monkeypatch)
-    plan = jobs(far, 2)
-    assert run(project, "--json", *selected(plan), f"cluster:{far_name}", near_name) == 0
-    captured = capsys.readouterr()
-    assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 2
-    assert "changed" not in json.loads(captured.out)  # hold-everything-first: nothing paged
-    assert "lacks the ops hold_page, holds_page, select" in captured.err
-    assert calls == ["job transfer", "pull", "job transfer"] and requests == []
-    commands = remote.commands()
-    assert (len(commands), starts(commands)) == (4, 3)
     assert_in(near, plan)
 
 

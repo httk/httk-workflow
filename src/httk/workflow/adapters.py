@@ -19,10 +19,10 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Buffer, Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Buffer, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, BinaryIO, Self
+from typing import IO, Any, BinaryIO, Self, cast
 
 from . import _frames
 from ._frames import (
@@ -85,8 +85,8 @@ __all__ = [
     "SEED_SETTING_MAP",
     "SESSION_FORMAT",
     "SESSION_FORMAT_VERSION",
+    "TRANSFER_PROTOCOL",
     "TRANSFER_SESSION_FORMAT",
-    "TRANSFER_SESSION_FORMAT_VERSION",
     "AdapterSession",
     "RemoteTarget",
     "RequestAborted",
@@ -114,7 +114,6 @@ __all__ = [
 ADAPTER_OPERATIONS = (
     "configure",
     "daemon",
-    "deliver",
     "install",
     "invoke",
     "push",
@@ -162,7 +161,6 @@ PERSISTABLE_REMOTE_SETTINGS = frozenset(
         "mount_root",
         "port",
         "remote_root",
-        "transfer_session",
         "username",
         "vasp_command",
         "vasp_pseudo_library",
@@ -183,6 +181,10 @@ _RETIRED_REMOTE_SETTINGS = frozenset(
         "workspace_root",
     }
 )
+
+#: Removed remote settings, refused as unknown: transfers always use a transfer session (plan
+#: WORKFLOW_TRANSFER_SESSION §7.12), so ``transfer_session`` has no value left to choose.
+_REMOVED_REMOTE_SETTINGS = frozenset({"transfer_session"})
 
 #: Renamed remote settings and the refusal naming the fix; never read under the old key.
 _RENAMED_REMOTE_SETTINGS = {"prelude": _PRELUDE_RENAMED}
@@ -218,8 +220,9 @@ SESSION_FORMAT_VERSION = 1
 REMOTE_TRANSFER_SESSION_COMMAND = ("httk", "workflow", "transfer-session")
 #: The ``format`` the transfer session's hello line names.
 TRANSFER_SESSION_FORMAT = "httk-workflow-transfer-session"
-#: The ``format_version`` the transfer session's hello line names.
-TRANSFER_SESSION_FORMAT_VERSION = 1
+#: The transfer protocol: the ``format_version`` the transfer session's hello line names, and the ``protocol`` the
+#: client's first request carries. Both ends must speak exactly this one; there is no range and no optional op.
+TRANSFER_PROTOCOL = 2
 
 
 def probe_remote_workspace(
@@ -518,6 +521,9 @@ def split_settings(settings: Mapping[str, str]) -> tuple[dict[str, str], dict[st
     if retired:
         names = ", ".join(retired)
         raise ValueError(f"unknown remote setting {names!r}; set scheduler values in the workspace settings")
+    removed = sorted(set(settings) & _REMOVED_REMOTE_SETTINGS)
+    if removed:
+        raise ValueError(f"unknown remote setting {', '.join(removed)!r}")
     persistable = {key: value for key, value in settings.items() if key in PERSISTABLE_REMOTE_SETTINGS}
     credentials = {key: value for key, value in settings.items() if key not in PERSISTABLE_REMOTE_SETTINGS}
     return persistable, credentials
@@ -807,8 +813,20 @@ def run_adapter(
 class SessionUnsupported(RuntimeError):
     """The adapter refused the ``session`` operation, or its far side cannot serve a session.
 
-    Callers fall back to one ``invoke`` per command.
+    The monitor's :class:`AdapterSession` callers fall back to one ``invoke`` per read; a transfer stops before
+    anything is held or changed (:class:`TransferSession`).
+
+    :param message: What failed.
+    :param kind: ``adapter`` when the adapter cannot open a session (it refuses the operation, answers with its own
+        result document, or its channel does not carry binary data intact), ``version`` when the far side's ``httk``
+        speaks another protocol (or has no such command), ``missing`` when the far side's shell found no ``httk`` or
+        a command in its ``cli_prelude`` was not found (exit status 127), ``other`` for any other failure before the session was open (the far side crashed or refused
+        for a reason of its own, ...).
     """
+
+    def __init__(self, message: str, *, kind: str = "adapter") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 #: How much of a session's standard error is kept for error messages.
@@ -878,7 +896,7 @@ class AdapterSession:
         :param interactive: Whether the adapter keeps this process's controlling terminal (and so lets ssh
             prompt); False starts it in a new session without one.
         :raises SessionUnsupported: If the adapter refuses the operation or the far side cannot serve a
-            session; callers fall back to ``invoke``.
+            session; the monitor then falls back to ``invoke``.
         :raises TimeoutError: If no hello arrives within the timeout.
         :raises RuntimeError: If ssh itself fails (status 255), such as a refused login.
         """
@@ -1075,8 +1093,8 @@ class RequestAborted(RuntimeError):
 
 #: What every queued event counts for beyond its payload, so that empty frames are bounded too.
 _FRAME_OVERHEAD = 64
-#: How many bytes of far-side events a transfer session queues before its reader thread stops reading: 64 MiB, the
-#: largest JSON frame, with its overhead, so that every event fits an empty queue.
+#: How many bytes of far-side events a transfer session queues before its reader thread stops reading: the largest
+#: JSON frame (512 MiB) with its overhead, so that every event fits an empty queue.
 _TRANSFER_QUEUE_BYTES = JSON_LIMIT + _FRAME_OVERHEAD
 #: The phases in which a far side's progress may stand still: a running ``syncfs`` or fsync, the wait of the
 #: visibility deadline before a landing's absent jobs are settled, a build.
@@ -1097,17 +1115,25 @@ _PREAMBLE_LINE_BYTES = 1 << 16
 class _Event:
     """One thing the reader thread saw on a transfer session's stdout.
 
-    :param tag: ``hello``, ``foreign`` (another format's hello), ``refused`` (an adapter refusal), ``nohello``,
+    :param tag: ``hello``, ``foreign`` (another format's hello), ``refused`` (the adapter's result document: a refusal, or a result instead of a session), ``nohello``,
         ``frame``, ``error`` (a protocol error), ``cut`` (the output ended inside a frame) or ``eof``.
     :param value: The document, frame or error.
     :param released: When the reader was last released from a full queue before it read this event.
     :param arrival: When it was complete.
+    :param begun: When its first byte was read (a frame's), else its arrival: a frame in transit is no silence.
     """
 
     tag: str
     value: Any
     released: float
     arrival: float
+    begun: float | None = None
+
+    @property
+    def started(self) -> float:
+        """When the far side began to send it."""
+
+        return self.arrival if self.begun is None else self.begun
 
 
 class _ByteQueue:
@@ -1127,6 +1153,8 @@ class _ByteQueue:
         self.high_water = 0
         #: When a blocked :meth:`put` last got room: until then this side, not the far side, held the reader back.
         self.released = 0.0
+        #: When the reader last read a byte of the far side's output (a frame may take a while to arrive whole).
+        self.arrived = 0.0
         self._blocked_since: float | None = None
 
     def put(self, event: _Event, size: int) -> bool:
@@ -1201,15 +1229,47 @@ class _ByteQueue:
             self._condition.notify_all()
 
 
+class _Arrivals:
+    """The far side's output as the reader reads it: each read takes what is there (``read1``) and records when a
+    byte last arrived (:attr:`_ByteQueue.arrived`), and when the frame being read began (:attr:`begun`)."""
+
+    def __init__(self, stream: IO[bytes], events: "_ByteQueue") -> None:
+        self._stream = stream
+        self._events = events
+        #: When the first byte since :meth:`mark` arrived, if any did.
+        self.begun: float | None = None
+
+    def mark(self) -> None:
+        """Start a frame: its first byte is the next one read."""
+
+        self.begun = None
+
+    def read(self, size: int = -1) -> bytes:
+        """Read at most *size* bytes, those already there when any are.
+
+        :param size: The most bytes to read.
+        :return: The bytes; empty at the end of the output.
+        """
+
+        read1 = getattr(self._stream, "read1", None)
+        data = read1(size) if read1 is not None else self._stream.read(size)
+        if data:
+            now = time.monotonic()
+            self.begun = now if self.begun is None else self.begun
+            self._events.arrived = now
+        return data
+
+
 def _read_transfer_session(stream: IO[bytes], events: _ByteQueue) -> None:
     """Turn a transfer session's stdout into events: its hello (or why there is none), its frames, then ``eof``.
 
     Up to :data:`_SESSION_PREAMBLE_LINES` lines ahead of the hello (a login banner, a printing ``cli_prelude``)
-    are skipped. The stream is closed at the end.
+    are skipped. The stream is closed at the end. Every byte read after the hello is recorded as it arrives
+    (:class:`_Arrivals`), so that a large frame still in transit is no silence of the far side.
     """
 
-    def emit(tag: str, value: object, size: int = 0) -> bool:
-        return events.put(_Event(tag, value, events.released, time.monotonic()), size + _FRAME_OVERHEAD)
+    def emit(tag: str, value: object, size: int = 0, begun: float | None = None) -> bool:
+        return events.put(_Event(tag, value, events.released, time.monotonic(), begun), size + _FRAME_OVERHEAD)
 
     frames: FrameReader | None = None
     try:
@@ -1225,7 +1285,9 @@ def _read_transfer_session(stream: IO[bytes], events: _ByteQueue) -> None:
                 if not isinstance(document, dict):
                     continue
                 kind = document.get("format")
-                if kind == RESULT_FORMAT and document.get("ok") is False:
+                if kind == RESULT_FORMAT:
+                    # The adapter's own result document (a refusal, or a result where a session was asked for):
+                    # the adapter's answer, never the far side's httk.
                     emit("refused", document)
                     return
                 if kind == TRANSFER_SESSION_FORMAT:
@@ -1237,16 +1299,24 @@ def _read_transfer_session(stream: IO[bytes], events: _ByteQueue) -> None:
             else:
                 emit("nohello", None)
                 return
-            frames = FrameReader(stream)
+            arrivals = _Arrivals(stream, events)
+            frames = FrameReader(cast(IO[bytes], arrivals))
             while (frame := frames.read_frame()) is not None:
-                if not emit("frame", frame, frame.size):
+                if not emit("frame", frame, frame.size, arrivals.begun):
                     return
+                arrivals.mark()
     except TransferProtocolError as exc:
         emit("cut" if frames is not None and frames.ended else "error", exc)
     except (OSError, ValueError) as exc:
         emit("error", exc)
     finally:
         emit("eof", None)
+
+
+#: What an ``httk workflow`` without the ``transfer-session`` command prints, exit status 2: argparse's refusal of
+#: the subcommand, ``PROG workflow: error: argument GROUP: invalid choice: 'transfer-session' (choose from ...)``,
+#: PROG being ``httk`` (or the script name ``httk_command`` runs), ``GROUP`` the metavar of every released version.
+_NO_SUCH_COMMAND = re.compile(r"(?m)^\S+ workflow: error: argument GROUP: invalid choice: 'transfer-session'(?: \(|$)")
 
 
 def _exit_status(process: "subprocess.Popen[bytes]", wait: float) -> int | None:
@@ -1282,10 +1352,18 @@ def _exit_status(process: "subprocess.Popen[bytes]", wait: float) -> int | None:
 class _Watch:
     """The bounds of one request, judged by when frames arrived rather than when they were consumed.
 
-    Idle: no inbound frame and no accepted upload bytes for the bound. Stall: neither the far side's progress
-    (``phase``, ``count``) nor any data (accepted upload bytes, arriving download bytes) moved for the bound, outside
-    the ``sync``, ``settle`` and ``build`` phases; an empty ``D`` frame shows the far side alive but moves nothing. A queued frame
-    that arrived after its deadline fails the request all the same.
+    Idle: no inbound byte (of a frame, whole or still in transit) and no accepted upload bytes for the bound. Stall:
+    neither the far side's progress (``phase``, ``count``) nor any data (accepted upload bytes, arriving download
+    bytes, the bytes of a frame in transit) moved for the bound, outside the ``sync``, ``settle`` and ``build``
+    phases; an empty ``D`` frame shows the far side alive but moves nothing. The bytes of a progress tick count as
+    arriving, so while ticks keep coming a stall is noticed with the first tick that began to arrive after its
+    deadline (:meth:`late`): at the granularity of the ticks, not at the deadline itself.
+
+    A frame is judged by when it began to arrive: a queued frame that began after its deadline fails the request
+    all the same, and one that began in time is accepted however long the rest of it took. A pause in the middle of
+    a frame is therefore noticed only while this side waits for it (:meth:`remaining`, with the time of the last
+    byte read); one that ended while this side was busy elsewhere leaves a whole frame, which is accepted, since
+    failing a complete answer would turn its success into an unknown outcome.
 
     The bounds measure the far side's liveness only, so time in which this side offered it nothing is never charged
     to it: the reader blocked on a full queue (this side's back-pressure), and an upload source preparing its next
@@ -1305,14 +1383,15 @@ class _Watch:
         self._moved = now
         self._progress: tuple[str, int | None] | None = None
 
-    def _due(self, released: float) -> tuple[float, str]:
+    def _due(self, released: float, arrived: float = 0.0) -> tuple[float, str]:
         """Return the deadline and what expires then; *released* is when this side last stopped holding back the
-        reader, before which the far side could not send."""
+        reader, before which the far side could not send, and *arrived* when a byte of the far side's output last
+        arrived (part of a frame still in transit counts: the far side is sending)."""
 
-        due = max(self._activity, released) + self.bound
+        due = max(self._activity, released, arrived) + self.bound
         reason = f"the far side sent nothing and took no data for {self.bound:g} seconds"
         if self._progress is not None and self._progress[0] not in _UNCOUNTED_PHASES:
-            stalled = max(self._moved, released) + self.bound
+            stalled = max(self._moved, released, arrived) + self.bound
             if stalled < due:
                 phase, count = self._progress
                 due = stalled
@@ -1323,17 +1402,19 @@ class _Watch:
             due, reason = self._deadline, "the far side did not answer in time"
         return due, reason
 
-    def remaining(self, released: float) -> tuple[float, str]:
-        """Return the seconds left and what expires then, given when the reader was last released from a full queue."""
+    def remaining(self, released: float, arrived: float = 0.0) -> tuple[float, str]:
+        """Return the seconds left and what expires then, given when the reader was last released from a full queue
+        and when a byte of the far side's output last arrived."""
 
-        due, reason = self._due(released)
+        due, reason = self._due(released, arrived)
         return due - time.monotonic(), reason
 
     def late(self, event: _Event) -> str | None:
-        """Return what expired before *event* arrived, or ``None`` when it was in time."""
+        """Return what expired before *event* began to arrive, or ``None`` when it was in time (a frame whose first
+        byte came in time was being sent, however long the rest took)."""
 
         due, reason = self._due(event.released)
-        return reason if event.arrival > due else None
+        return reason if event.started > due else None
 
     def saw(self, frame: Frame, at: float) -> None:
         """Note a frame that arrived.
@@ -1409,13 +1490,14 @@ class TransferSession:
 
     One connection and one far-side ``httk`` start carry every request of a transfer, each a :meth:`request` in binary
     frames (the grammar is in ``httk.workflow._frames``). Whether the session can be used is decided by :meth:`open`
-    alone, before anything is changed: :class:`SessionUnsupported` means "use the adapter operations instead". After
+    alone, before anything is changed: :class:`SessionUnsupported` means that it cannot be (the adapter cannot open
+    one, or the far side speaks another :data:`TRANSFER_PROTOCOL`), and the transfer stops there. After
     that, any failure (a bound expiring, the far side ending, a protocol error, a fatal op) is :class:`SessionFailed`,
     an unknown outcome of the request in flight: the session is closed and every later request raises; it never
     reconnects. Use it as a context manager, or call :meth:`close`.
 
-    The far side's frames are read by a thread into a queue of 64 MiB (each frame counted with 64 bytes of overhead;
-    a JSON frame is at most 64 MiB, so every frame fits). The reader stops reading while the queue is full, so a slow
+    The far side's frames are read by a thread into a queue of 512 MiB (each frame counted with 64 bytes of overhead;
+    a JSON frame is at most 512 MiB, so every frame fits). The reader stops reading while the queue is full, so a slow
     download consumer holds back the far side instead of growing this process. Upload and download run in the
     calling thread.
 
@@ -1425,18 +1507,14 @@ class TransferSession:
     the reader threads' joins, 2 seconds each) and survive it.
 
     :param bundle: The adapter bundle path.
-    :param needs: The ops the caller will request; a far side lacking one is unsupported.
     :param timeout: The bound in seconds, or the bundle's ``timeout_seconds`` when omitted: on the far side's hello,
         and, per request, on the far side being idle (no frame, no upload bytes taken) or stalled (no progress, no data
         moving outside the ``sync``, ``settle`` and ``build`` phases). A request's bound is at least three progress intervals
         (30 seconds), since the far side reports progress only every 10 seconds.
     """
 
-    def __init__(
-        self, bundle: str | os.PathLike[str], *, needs: Collection[str] = (), timeout: float | None = None
-    ) -> None:
+    def __init__(self, bundle: str | os.PathLike[str], *, timeout: float | None = None) -> None:
         self._root = Path(bundle).expanduser().resolve()
-        self._needs = frozenset(needs) | {"echo", "bye"}
         self._timeout = timeout
         self._limit = 60.0
         self._lock = threading.Lock()
@@ -1455,8 +1533,7 @@ class TransferSession:
         # new -> open -> closed, or -> unsupported (at open), or -> failed (at open or a request)
         self._state = "new"
         self._reason = ""
-        #: The ops the far side's hello listed, once open.
-        self.ops: frozenset[str] = frozenset()
+        self._kind = "adapter"
 
     @property
     def is_open(self) -> bool:
@@ -1491,33 +1568,32 @@ class TransferSession:
         return max(self._limit, 3 * _frames.TICK)
 
     def open(self, *, interactive: bool = False) -> None:
-        """Start the far side and check it: its hello, the ops this caller needs, and a binary ``echo``.
+        """Start the far side and check it: its hello, which must name :data:`TRANSFER_PROTOCOL`, and a binary
+        ``echo``, whose header carries that protocol for the far side to check in turn.
 
         :param interactive: Whether the adapter keeps this process's controlling terminal (and so lets ssh
             prompt); False starts it in a new session without one.
-        :raises SessionUnsupported: If the remote setting ``transfer_session`` is ``off`` (nothing is started),
-            the adapter refuses the operation, no hello arrives (the far side ends first, or prints another format's
-            hello), the version differs, a needed op is missing, or the echo does not come back intact; the caller
-            falls back to the adapter operations. Raised again by a later call, without starting anything.
+        :raises SessionUnsupported: Of kind ``adapter`` if the adapter refuses the operation (or prints its own
+            result document instead of a session) or the echo does not come back intact (a channel that mangles
+            binary data); of kind ``version`` if the far side prints another format's hello, its hello names another
+            protocol, it refuses this one (naming its own), or it ends with exit status 2 before its hello after
+            ``httk workflow``'s argparse refused ``invalid choice: 'transfer-session'`` (an older ``httk workflow``
+            without the command); of kind ``missing`` if it ends before its hello with exit
+            status 127 (no ``httk`` there, or a command of its ``cli_prelude`` not found); of kind ``other`` for any
+            other end before the session was open (a crash, a refusal for a reason of its own). The caller stops;
+            nothing was changed. Raised again by a later call, without starting anything.
         :raises SessionFailed: If the session was opened, failed or closed before.
         :raises TimeoutError: If no hello arrives within the bound.
         :raises RuntimeError: If ssh itself fails (status 255, an ``ssh`` remote only), such as a refused login, at
             any stage; or if :meth:`close` ended the opening.
-        :raises ValueError: If the ``transfer_session`` setting is neither ``auto`` nor ``off``.
         """
 
         with self._held():
             if self._state == "unsupported":
-                raise SessionUnsupported(self._reason)
+                raise SessionUnsupported(self._reason, kind=self._kind)
             if self._state != "new":
                 raise SessionFailed(f"the transfer session was {self._state} already: {self._reason}")
             metadata = validate_adapter_bundle(self._root)
-            mode = remote_settings(self._root).get("transfer_session", "auto")
-            if mode not in {"auto", "off"}:
-                raise ValueError(f"remote setting transfer_session must be auto or off: {mode!r}")
-            if mode == "off":
-                self._state, self._reason = "unsupported", "the remote setting transfer_session is off"
-                raise SessionUnsupported(self._reason)
             self._limit = float(metadata.get("timeout_seconds", 60.0) if self._timeout is None else self._timeout)
             self._ssh = metadata.get("kind") == "ssh"
             request_path = _request_file(self._root, "session", {"argv": list(REMOTE_TRANSFER_SESSION_COMMAND)})
@@ -1528,7 +1604,7 @@ class TransferSession:
                 self._state = "open"
             except SessionUnsupported as exc:
                 self._discard()
-                self._state, self._reason = "unsupported", str(exc)
+                self._state, self._reason, self._kind = "unsupported", str(exc), exc.kind
                 raise
             except BaseException as exc:
                 self._discard()
@@ -1560,14 +1636,19 @@ class TransferSession:
         self._error_reader = threading.Thread(target=_keep_tail, args=(errors, self._errors), daemon=True)
         self._error_reader.start()
 
-    def _classify(self, detail: str) -> BaseException:
-        """Return what a failure before the session was open means; the one place that decides on a fallback.
+    def _classify(self, detail: str, kind: str) -> BaseException:
+        """Return what a failure before the session was open means; the one place that decides on a stop of kind
+        *kind* (:class:`SessionUnsupported`).
 
         The far side's input is closed and its exit status waited for (:data:`_EXIT_GRACE`) first. A :meth:`close`
-        from another thread is never a fallback, and neither is ssh's own failure (status 255 of an ``ssh`` remote):
-        falling back would log in again. Everything else is :class:`SessionUnsupported`.
+        from another thread is no such stop, and neither is ssh's own failure (status 255 of an ``ssh`` remote): a
+        connection failure, whatever the far side runs. Everything else is :class:`SessionUnsupported`; with
+        *kind* ``ended`` (the far side ended before its hello) its kind is ``missing`` for exit status 127,
+        ``version`` when the far side's ``httk workflow`` has no such command (:data:`_NO_SUCH_COMMAND`), else
+        ``other``.
 
         :param detail: What failed.
+        :param kind: ``adapter``, ``version``, ``missing``, ``other`` (see :class:`SessionUnsupported`) or ``ended``.
         :return: The exception to raise.
         """
 
@@ -1578,36 +1659,37 @@ class TransferSession:
             return RuntimeError(f"the transfer session was closed while opening: {message}")
         if self._ssh and status == 255:
             return RuntimeError(f"the transfer session's ssh connection failed: {message}")
-        return SessionUnsupported(message)
+        if kind == "ended":
+            if status == 127:
+                kind = "missing"
+            else:
+                kind = "version" if status == 2 and _NO_SUCH_COMMAND.search(tail) is not None else "other"
+        return SessionUnsupported(message, kind=kind)
 
     def _hello(self) -> None:
         try:
             event = self._events.get(self._limit)
         except queue.Empty:
             if self._closing:
-                raise self._classify("no hello") from None
+                raise self._classify("no hello", "other") from None
             raise TimeoutError(f"the transfer session did not start within {self._limit:g} seconds") from None
         document = event.value
         if event.tag == "refused":
-            raise self._classify(str(document.get("error", "the adapter refused the session")))
+            if document.get("ok") is False:
+                raise self._classify(str(document.get("error", "the adapter refused the session")), "adapter")
+            raise self._classify("the adapter answered with a result document instead of a transfer session", "adapter")
         if event.tag == "foreign":
             raise self._classify(
                 f"the far side speaks {document.get('format')!r} version {document.get('format_version')!r}, "
-                "not a transfer session"
+                "not a transfer session",
+                "version",
             )
         if event.tag == "nohello":
-            raise self._classify(f"no transfer session hello within {_SESSION_PREAMBLE_LINES} lines")
+            raise self._classify(f"no transfer session hello within {_SESSION_PREAMBLE_LINES} lines", "other")
         if event.tag != "hello":
-            raise self._classify("the transfer session ended before its hello")
-        if document.get("format_version") != TRANSFER_SESSION_FORMAT_VERSION:
-            raise self._classify(f"unsupported transfer session version: {document.get('format_version')!r}")
-        ops = document.get("ops")
-        if not isinstance(ops, list) or not all(isinstance(op, str) for op in ops):
-            raise self._classify("the transfer session hello lists no ops")
-        missing = sorted(self._needs - set(ops))
-        if missing:
-            raise self._classify(f"the far side's transfer session lacks the ops {', '.join(missing)}")
-        self.ops = frozenset(ops)
+            raise self._classify("the transfer session ended before its hello", "ended")
+        if (version := document.get("format_version")) != TRANSFER_PROTOCOL:
+            raise self._classify(f"its transfer protocol is {version!r}, this side's {TRANSFER_PROTOCOL}", "version")
 
     def _echo(self) -> None:
         received = bytearray()
@@ -1615,16 +1697,26 @@ class TransferSession:
         try:
             response = self._request(
                 "echo",
-                {},
+                {"protocol": TRANSFER_PROTOCOL},  # the far side refuses another one, before any op
                 upload=lambda stream: stream.write(_ECHO_PAYLOAD),
                 download=lambda stream: received.extend(stream.read()),
                 bound=bound,
                 deadline=time.monotonic() + bound,
             )
         except (SessionFailed, RequestAborted) as exc:
-            raise self._classify(f"the transfer session echo failed: {exc}") from None
-        if response.get("ok") is not True or bytes(received) != _ECHO_PAYLOAD:
-            raise self._classify("the transfer session does not carry binary data intact")
+            # Frames that do not decode came through a channel that changes bytes: the adapter's fault.
+            mangled = isinstance(exc, SessionFailed) and "broke its protocol" in str(exc)
+            raise self._classify(
+                f"the transfer session echo failed: {exc}", "adapter" if mangled else "other"
+            ) from None
+        if response.get("ok") is not True:
+            protocol = response.get("protocol")
+            if protocol is not None and protocol != TRANSFER_PROTOCOL:
+                detail = f"it refused this side's transfer protocol {TRANSFER_PROTOCOL}, speaking {protocol!r}"
+                raise self._classify(f"{detail}: {response.get('error')}", "version")
+            raise self._classify(f"it refused the transfer session: {response.get('error')}", "other")
+        if bytes(received) != _ECHO_PAYLOAD:
+            raise self._classify("the transfer session does not carry binary data intact", "adapter")
 
     def request(
         self,
@@ -1773,14 +1865,13 @@ class TransferSession:
             raise SessionFailed(f"the transfer session is {self._state}: {self._reason}")
         # A queued event is judged by when it arrived (``_frame``), however long it waited for this side.
         event = self._events.take()
-        if event is None:
-            remaining, reason = watch.remaining(self._events.held_back())
+        while event is None:
+            # A frame in transit (its bytes arriving) moves the deadline on: waited for again, not failed.
+            remaining, reason = watch.remaining(self._events.held_back(), self._events.arrived)
             if remaining <= 0:
                 raise self._fail(reason)
-            try:
+            with contextlib.suppress(queue.Empty):
                 event = self._events.get(remaining)
-            except queue.Empty:
-                raise self._fail(reason) from None
         return self._frame(event, request_id, watch)
 
     def _frame(self, event: _Event, request_id: int, watch: _Watch) -> Frame:
@@ -1850,7 +1941,7 @@ class TransferSession:
                 view = view[written:]
                 watch.sent()
                 continue
-            remaining, reason = watch.remaining(self._events.held_back())
+            remaining, reason = watch.remaining(self._events.held_back(), self._events.arrived)
             if remaining <= 0:
                 raise self._fail(reason)
             selector.select(min(remaining, 0.1))

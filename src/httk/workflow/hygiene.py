@@ -416,7 +416,9 @@ def _check_transfers(workspace_root: Path, days: float = STALE_TRANSFER_DAYS) ->
     """Held transfers and incoming copies older than *days*; this check reports and never acts.
 
     A stale hold is driven on with ``httk job transfer --resume``, or, once its destination is checked not to have
-    the jobs, taken back with ``httk job adopt`` of its path. An ``incoming`` entry is an interrupted copy (a refused one is discarded by adoption).
+    the jobs, taken back with ``httk job adopt`` of its path. An ``incoming`` entry is an interrupted copy an earlier
+    version pushed (none is written since transfer sessions are required; its jobs are still held on the source, so
+    it is safe to remove by hand, and a refused one is discarded by adoption).
     """
 
     workspace = _workspace_at(workspace_root)

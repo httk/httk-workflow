@@ -1,5 +1,6 @@
 """The transfer session: the far-side ``httk workflow transfer-session`` and :class:`TransferSession`."""
 
+import argparse
 import contextlib
 import io
 import json
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import IO, Any, BinaryIO
 
 import pytest
+from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote
 from httk.workflow import _frames, adapters
@@ -31,6 +33,7 @@ from httk.workflow._frames import (
     encode_json,
 )
 from httk.workflow.adapters import (
+    TRANSFER_PROTOCOL,
     TRANSFER_SESSION_FORMAT,
     RequestAborted,
     SessionFailed,
@@ -44,6 +47,8 @@ from httk.workflow.workflow_cli._transfer_session import OPS, Op, Request, serve
 from test_adapter_refusal import _unrecognized
 
 MiB = 1 << 20
+#: A transfer session hello this side accepts.
+HELLO = {"format": TRANSFER_SESSION_FORMAT, "format_version": TRANSFER_PROTOCOL}
 
 #: A stand-in far side: the real serve loop with the ops ``OPS`` the body defines added (or replaced). An op may
 #: write raw frames through ``request._frames`` to break the grammar on purpose.
@@ -320,7 +325,6 @@ def test_hello_echo_and_bye_over_one_ssh_login(tmp_path: Path, remote: Remote) -
     payload = os.urandom(900_000) + bytes(range(256)) * 9
 
     with _opened(bundle) as session:
-        assert {"echo", "bye"} <= session.ops
         response, received = _echo(session, payload)
         assert response == {"ok": True, "bytes": len(payload)}
         assert received == payload
@@ -352,36 +356,36 @@ def test_close_says_bye_and_the_far_side_ends_cleanly(tmp_path: Path, remote: Re
 def test_a_far_side_without_the_command_is_unsupported_once(tmp_path: Path, remote: Remote) -> None:
     old = tmp_path / "old.py"
     old.write_text(
-        "import sys\nprint(\"httk: error: invalid choice: 'transfer-session'\", file=sys.stderr)\nsys.exit(2)\n"
+        "import sys\nprint(\"httk workflow: error: argument GROUP: invalid choice: 'transfer-session' (choose from 'run', 'session')\", file=sys.stderr)\nsys.exit(2)\n"
     )
     bundle = fake_remote(_project(tmp_path), httk_command=shlex.join([sys.executable, str(old)]))
 
     session = TransferSession(bundle, timeout=60)
-    with pytest.raises(SessionUnsupported, match="invalid choice"):
+    with pytest.raises(SessionUnsupported, match="invalid choice") as raised:
         session.open()
-    with pytest.raises(SessionUnsupported, match="invalid choice"):
+    assert raised.value.kind == "version"
+    with pytest.raises(SessionUnsupported, match="invalid choice") as raised:
         session.open()  # decided once: no second login
+    assert raised.value.kind == "version"
     with pytest.raises(SessionFailed):
         session.request("echo")
     assert len(remote.commands()) == 1
 
 
-def test_the_setting_off_starts_nothing(tmp_path: Path, remote: Remote) -> None:
+def test_the_removed_setting_is_refused_and_a_stale_one_changes_nothing(tmp_path: Path, remote: Remote) -> None:
+    with pytest.raises(ValueError, match="unknown remote setting 'transfer_session'"):
+        adapters.split_settings({"transfer_session": "off"})
+    # A value an earlier httk persisted is no longer read: the session opens as for any remote.
     bundle = fake_remote(_project(tmp_path), transfer_session="off")
-    with pytest.raises(SessionUnsupported, match="transfer_session is off"):
-        TransferSession(bundle, timeout=60).open()
-    assert remote.commands() == []
-
-    bogus = fake_remote(_project(tmp_path / "other"), transfer_session="sometimes")
-    with pytest.raises(ValueError, match="auto or off"):
-        TransferSession(bogus, timeout=60).open()
-    assert remote.commands() == []
+    with _opened(bundle) as session:
+        assert _echo(session, b"x")[0]["ok"] is True
+    assert len(remote.commands()) == 1
 
 
 def test_ssh_status_255_is_a_connection_failure_at_every_stage_and_only_for_ssh(
     tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    hello = json.dumps({"format": TRANSFER_SESSION_FORMAT, "format_version": 1, "ops": ["bye", "echo"]})
+    hello = json.dumps(HELLO)
     at_echo = f"""
     import os, sys
     print({hello!r}, flush=True)
@@ -391,37 +395,175 @@ def test_ssh_status_255_is_a_connection_failure_at_every_stage_and_only_for_ssh(
     with pytest.raises(RuntimeError, match="ssh connection failed") as raised:
         TransferSession(_script_remote(tmp_path, "echo255", at_echo, template="ssh"), timeout=60).open()
     assert not isinstance(raised.value, SessionUnsupported)
-    with pytest.raises(SessionUnsupported, match="exit status 255"):
+    with pytest.raises(SessionUnsupported, match="exit status 255") as unsupported:
         TransferSession(_script_remote(tmp_path, "local255", at_echo), timeout=60).open()
+    assert unsupported.value.kind == "other"  # the far side ended in the echo: neither a version nor the adapter
 
     project = _project(tmp_path)
     monkeypatch.setenv("HTTK_FAKE_SSH_REFUSE", "someone@fake.example.test: Permission denied (publickey).")
     with pytest.raises(RuntimeError, match="Permission denied") as raised:
         TransferSession(fake_remote(project), timeout=60).open()
     assert not isinstance(raised.value, SessionUnsupported)
-    with pytest.raises(SessionUnsupported, match="'torque' is not implemented"):
+    with pytest.raises(SessionUnsupported, match="'torque' is not implemented") as unsupported:
         TransferSession(_unrecognized(project), timeout=60).open()
-
-
-def test_a_missing_needed_op_is_unsupported(tmp_path: Path, remote: Remote) -> None:
-    bundle = fake_remote(_project(tmp_path), template="local")
-    with pytest.raises(SessionUnsupported, match="lacks the ops frobnicate"):
-        TransferSession(bundle, needs=["frobnicate", "adopt", "echo"], timeout=60).open()
+    assert unsupported.value.kind == "adapter"
 
 
 def test_no_hello_another_format_or_another_version_is_unsupported(tmp_path: Path) -> None:
     other = json.dumps({"format": "httk-workflow-session", "format_version": 1})
-    newer = json.dumps({"format": TRANSFER_SESSION_FORMAT, "format_version": 2, "ops": ["bye", "echo"]})
+    older = json.dumps({"format": TRANSFER_SESSION_FORMAT, "format_version": 1, "ops": ["bye", "echo"]})
+    newer = json.dumps({**HELLO, "format_version": TRANSFER_PROTOCOL + 1})
     cases = {
-        "silent": ("print('welcome to the cluster')\n", "exit status 0"),
         "other": (f"import sys\nprint({other!r}, flush=True)\nsys.stdin.read()\n", "httk-workflow-session"),
-        "newer": (f"import sys\nprint({newer!r}, flush=True)\nsys.stdin.read()\n", "version: 2"),
+        "older": (f"import sys\nprint({older!r}, flush=True)\nsys.stdin.read()\n", "protocol is 1, "),
+        "newer": (
+            f"import sys\nprint({newer!r}, flush=True)\nsys.stdin.read()\n",
+            f"protocol is {TRANSFER_PROTOCOL + 1}, ",
+        ),
     }
     for name, (source, message) in cases.items():
         started = time.monotonic()
-        with pytest.raises(SessionUnsupported, match=message):
+        with pytest.raises(SessionUnsupported, match=message) as unsupported:
             TransferSession(_script_remote(tmp_path, name, source), timeout=60).open()
+        assert unsupported.value.kind == "version"
         assert time.monotonic() - started < 30  # decided at once, not by the hello timeout
+
+
+def _refusing_far_side(answer: dict[str, Any]) -> str:
+    """A far side whose hello names this side's protocol and which answers its first request with *answer*."""
+
+    return f"""
+    import sys
+    from httk.workflow._frames import END, RESPONSE, FrameReader, encode_json
+    print({json.dumps(HELLO)!r}, flush=True)
+    frames = FrameReader(sys.stdin.buffer)
+    request = frames.read_frame()
+    while (frame := frames.read_frame()) is not None and frame.kind != END:
+        pass
+    sys.stdout.buffer.write(encode_json(RESPONSE, request.id, {answer!r}))
+    sys.stdout.buffer.flush()
+    sys.exit(1)
+    """
+
+
+_TOO_OLD = "is too old (or too new) for this transfer: install the same httk version on both ends"
+_MISSING = "`httk` was not found on far, or a command in its cli_prelude was not found (exit status 127; "
+_ADAPTER = "the adapter of far cannot open a transfer session"
+_REAL_FORM = "{prog} workflow: error: argument GROUP: invalid choice: 'transfer-session' (choose from 'run')"
+_RESULT = {"format": "httk-computer-result", "format_version": 2, "operation": "session", "ok": True}
+_FAILING = "import sys\nprint({text!r}, file=sys.stderr)\nsys.exit({status})\n"
+
+
+@pytest.mark.parametrize(
+    ("case", "source", "expected"),
+    [
+        (
+            # What an older `httk workflow` prints (argparse), its exit status 2.
+            "no command",
+            _FAILING.format(text=_REAL_FORM.format(prog="httk"), status=2),
+            _TOO_OLD,
+        ),
+        # The same run as `python -m httk.core.cli` (an httk_command): argparse's prog is the script's name.
+        ("module form", _FAILING.format(text=_REAL_FORM.format(prog="cli.py"), status=2), _TOO_OLD),
+        # E5: only the httk workflow CLI's own refusal of exactly that token, exit status 2, is a version claim.
+        (
+            "unrelated",
+            _FAILING.format(
+                text="helper: error: argument --mode: invalid choice: 'transfer-session' (choose from 'a')", status=2
+            ),
+            "--mode",
+        ),
+        (
+            "extra token",
+            _FAILING.format(text=_REAL_FORM.format(prog="httk").replace("session'", "session-extra'"), status=2),
+            "transfer-session-extra",
+        ),
+        ("other status", _FAILING.format(text=_REAL_FORM.format(prog="httk"), status=1), "exit status 1"),
+        # E4: the adapter's own result document ahead of any hello is the adapter's answer, ok or not.
+        ("adapter result", f"import json\nprint(json.dumps({_RESULT!r}), flush=True)\n", _ADAPTER),
+        (
+            "adapter refusal",
+            f"import json\nprint(json.dumps({ {**_RESULT, 'ok': False, 'error': 'no sessions here'}!r}), flush=True)\n",
+            "no sessions here",
+        ),
+        ("not found", _FAILING.format(text="sh: 1: httk: not found", status=127), _MISSING),
+        # A failing cli_prelude ends the shell's command line with 127 alike.
+        ("prelude", _FAILING.format(text="module: command not found: python/3.13", status=127), _MISSING),
+        # Other words about the subcommand are no version claim: the plain stop, with them.
+        ("loose", _FAILING.format(text="transfer-session: unrecognized arguments: --x", status=2), "unrecognized"),
+        (
+            "other hello",
+            f"import sys\nprint({json.dumps({**HELLO, 'format_version': 9})!r}, flush=True)\nsys.stdin.read()\n",
+            _TOO_OLD,
+        ),
+        ("other protocol", _refusing_far_side({"ok": False, "protocol": 9, "error": "speaks 9"}), _TOO_OLD),
+        (
+            "maintenance",
+            _refusing_far_side({"ok": False, "protocol": TRANSFER_PROTOCOL, "error": "maintenance"}),
+            "maintenance",
+        ),
+        ("crash", _FAILING.format(text="Traceback (most recent call last): boom", status=1), "boom"),
+        ("failing", _FAILING.format(text="module: command not found: python/3.13", status=1), "python/3.13"),
+        ("silent", "print('welcome to the cluster')\n", "exit status 0"),
+    ],
+)
+def test_an_opening_stop_is_classed_by_its_cause(tmp_path: Path, case: str, source: str, expected: str) -> None:
+    from httk.workflow import registry
+    from httk.workflow.workflow_cli import _transfer
+
+    _script_remote(tmp_path, "far", source)
+    end = _transfer._End("far:ws", binding=registry.WorkspaceBinding("far:ws", "far", None))
+    arguments = argparse.Namespace(adapter_timeout=60.0)
+    with contextlib.ExitStack() as sessions, pytest.raises(RuntimeError) as raised:
+        _transfer._open_session(end, CLIContext("httk", tmp_path / "project-far"), arguments, sessions)
+    message = str(raised.value)
+    assert expected in message
+    if expected == _TOO_OLD:
+        assert message.startswith(f"the httk on far {_TOO_OLD}")
+    elif expected == _ADAPTER or case == "adapter refusal":
+        assert message.startswith(_ADAPTER) and "too old" not in message
+    elif expected == _MISSING:
+        assert message.startswith(_MISSING) and "too old" not in message and "httk_command=COMMAND" in message
+    else:
+        # Neither a version nor the adapter: the plain stop, with the far side's own words, and no upgrade advice.
+        assert message.startswith("could not open a transfer session to far: ") and "too old" not in message
+
+
+def test_an_adapter_stop_is_classed_as_the_adapter_s(tmp_path: Path) -> None:
+    from httk.workflow import registry
+    from httk.workflow.workflow_cli import _transfer
+
+    project = _project(tmp_path)
+    _unrecognized(project, "far")
+    end = _transfer._End("far:ws", binding=registry.WorkspaceBinding("far:ws", "far", None))
+    with contextlib.ExitStack() as sessions, pytest.raises(RuntimeError) as raised:
+        _transfer._open_session(end, CLIContext("httk", project), argparse.Namespace(adapter_timeout=60.0), sessions)
+    assert str(raised.value).startswith("the adapter of far cannot open a transfer session")
+
+
+def test_the_opening_echo_carries_the_protocol_and_a_refusal_of_it_is_a_version_stop(tmp_path: Path) -> None:
+    # A far side whose hello names this side's protocol but which refuses the protocol the echo carries (as one
+    # that checks another version does): a version stop, raised once the far side answered and ended.
+    seen = tmp_path / "seen.json"
+    source = f"""
+    import json, sys
+    from httk.workflow._frames import END, REQUEST, RESPONSE, FrameReader, encode_json
+    print({json.dumps(HELLO)!r}, flush=True)
+    frames = FrameReader(sys.stdin.buffer)
+    request = frames.read_frame()
+    with open({str(seen)!r}, "w") as stream:
+        json.dump(request.document, stream)
+    while (frame := frames.read_frame()) is not None and frame.kind != END:
+        pass
+    refusal = {{"ok": False, "protocol": {TRANSFER_PROTOCOL + 1}, "error": "install the same httk version"}}
+    sys.stdout.buffer.write(encode_json(RESPONSE, request.id, refusal))
+    sys.stdout.buffer.flush()
+    sys.exit(1)
+    """
+    with pytest.raises(SessionUnsupported, match="refused this side's transfer protocol") as unsupported:
+        TransferSession(_script_remote(tmp_path, "picky", source), timeout=60).open()
+    assert unsupported.value.kind == "version"
+    assert json.loads(seen.read_text()) == {"op": "echo", "protocol": TRANSFER_PROTOCOL, "upload": True}
 
 
 def test_a_mangling_channel_is_unsupported(tmp_path: Path, remote: Remote) -> None:
@@ -435,12 +577,13 @@ def test_a_mangling_channel_is_unsupported(tmp_path: Path, remote: Remote) -> No
 
     OPS["echo"] = mangle
     """
-    with pytest.raises(SessionUnsupported, match="binary data intact"):
+    with pytest.raises(SessionUnsupported, match="binary data intact") as unsupported:
         TransferSession(_far_side(tmp_path, body), timeout=60).open()
+    assert unsupported.value.kind == "adapter"  # a channel that mangles bytes is the adapter's fault
 
 
 def test_close_from_another_thread_while_opening_is_not_a_fallback(tmp_path: Path) -> None:
-    hello = json.dumps({"format": TRANSFER_SESSION_FORMAT, "format_version": 1, "ops": ["bye", "echo"]})
+    hello = json.dumps(HELLO)
     slow = f"import sys, time\ntime.sleep(3)\nprint({hello!r}, flush=True)\nsys.stdin.read()\n"
     session = TransferSession(_script_remote(tmp_path, "slow", slow), timeout=30)
     raised: list[BaseException] = []
@@ -482,7 +625,7 @@ def test_the_opening_echo_has_an_absolute_deadline(
     assert time.monotonic() - started < 12
 
 
-_HELLO = {"format": TRANSFER_SESSION_FORMAT, "format_version": 1, "ops": ["bye", "echo"]}
+_HELLO = HELLO
 
 
 @pytest.mark.parametrize(
@@ -490,9 +633,7 @@ _HELLO = {"format": TRANSFER_SESSION_FORMAT, "format_version": 1, "ops": ["bye",
     [
         ("refused", {"format": "httk-computer-result", "format_version": 2, "operation": "session", "ok": False}),
         ("foreign", {"format": "httk-workflow-session", "format_version": 1}),
-        ("version", {**_HELLO, "format_version": 2}),
-        ("malformed ops", {**_HELLO, "ops": "echo bye"}),
-        ("missing ops", {**_HELLO, "ops": ["bye"]}),
+        ("version", {**_HELLO, "format_version": TRANSFER_PROTOCOL + 1}),
         ("echo garbage", _HELLO),
     ],
 )
@@ -810,7 +951,7 @@ def test_close_bounds_its_bye(tmp_path: Path, remote: Remote, quick: None) -> No
 
 
 def test_empty_frames_count_against_the_queue_bound() -> None:
-    hello = json.dumps({"format": TRANSFER_SESSION_FORMAT, "format_version": 1, "ops": []}).encode() + b"\n"
+    hello = json.dumps(HELLO).encode() + b"\n"
     stream = io.BytesIO(hello + encode_frame(DATA, 1, b"") * 10_000)
     events = adapters._ByteQueue(100 * adapters._FRAME_OVERHEAD)
     reader = threading.Thread(target=adapters._read_transfer_session, args=(stream, events), daemon=True)
@@ -855,6 +996,35 @@ def test_empty_download_frames_do_not_move_a_stuck_count(tmp_path: Path, remote:
         assert time.monotonic() - started < 6
 
 
+@pytest.mark.parametrize(("gap", "answered"), [(0.1, True), (1.5, False)], ids=["dribbled", "silent"])
+def test_a_response_in_transit_is_no_silence(
+    tmp_path: Path, remote: Remote, quick: None, gap: float, answered: bool
+) -> None:
+    # A response frame whose bytes arrive within the bound of each other, but take longer than the bound in all (2.4 s
+    # against 0.5 s) is answered; one with a pause longer than the bound in its middle fails as before (correction C5).
+    body = f"""
+    def dribble(request):
+        frame = encode_json(RESPONSE, request.id, {{"ok": True, "padding": "x" * 4000}})
+        pieces = [frame[offset : offset + 200] for offset in range(0, len(frame), 200)]
+        with request._frames.lock:  # no progress frame in between
+            for index, piece in enumerate(pieces):
+                request._frames._write(piece)
+                request._frames._flush()
+                time.sleep({gap!r} if index == len(pieces) // 2 or {gap!r} < 1 else 0.0)
+            os._exit(0)  # this response is the request's one answer
+
+    OPS["dribble"] = dribble
+    """
+    session = _opened(_far_side(tmp_path, body.replace("encode_json", "_frames.encode_json")), bound=0.5)
+    with session:
+        if answered:
+            response = session.request("dribble")
+            assert response["ok"] is True and len(response["padding"]) == 4000
+        else:
+            with pytest.raises(SessionFailed, match="sent nothing and took no data for 0.5 seconds"):
+                session.request("dribble")
+
+
 def test_a_frame_cut_short_is_the_end_of_the_session(tmp_path: Path, remote: Remote) -> None:
     read, _ = _collector()
     with _opened(_far_side(tmp_path)) as session, pytest.raises(SessionFailed, match="transfer session ended"):
@@ -877,7 +1047,7 @@ def test_a_consumer_pause_past_the_bound_is_back_pressure_not_a_stall(
     with _opened(_far_side(tmp_path, tick=0.1), bound=0.5) as session:
         assert session.request("big", {"mib": 80, "stuck": True}, download=pausing)["ok"] is True
         assert received[0] == 80 * MiB
-        assert 32 * MiB < session._events.high_water <= adapters._TRANSFER_QUEUE_BYTES == (64 << 20) + 64
+        assert 32 * MiB < session._events.high_water <= adapters._TRANSFER_QUEUE_BYTES
 
 
 def test_a_blocked_reader_is_never_charged_to_the_far_side() -> None:
@@ -903,10 +1073,21 @@ def test_a_blocked_reader_is_never_charged_to_the_far_side() -> None:
 # The in-process serve loop, on pipes.
 
 
-class _Peer:
-    """The client end of an in-process :func:`serve` running on two pipes."""
+class _AgreeingWriter(FrameWriter):
+    """A client's frame writer whose requests name this side's transfer protocol, as :class:`TransferSession` names
+    it in its first one, so that :func:`serve` serves them."""
 
-    def __init__(self, ops: dict[str, Op]) -> None:
+    def send_json(self, kind: str, request_id: int, document: Any) -> None:
+        if kind == REQUEST and "protocol" not in document:
+            document = {**document, "protocol": TRANSFER_PROTOCOL}
+        super().send_json(kind, request_id, document)
+
+
+class _Peer:
+    """The client end of an in-process :func:`serve` running on two pipes; with *agree*, its requests name this side's
+    transfer protocol (:class:`_AgreeingWriter`)."""
+
+    def __init__(self, ops: dict[str, Op], *, agree: bool = True) -> None:
         requests_read, requests_write = os.pipe()
         responses_read, responses_write = os.pipe()
         self.requests: IO[bytes] = os.fdopen(requests_write, "wb")
@@ -922,7 +1103,8 @@ class _Peer:
         self.thread.start()
         self.hello = json.loads(self.responses.readline())
         self.frames = FrameReader(self.responses)
-        self.writer = FrameWriter(self.requests.write, self.requests.flush)
+        writer = _AgreeingWriter if agree else FrameWriter
+        self.writer = writer(self.requests.write, self.requests.flush)
 
     def end(self) -> int:
         self.requests.close()
@@ -950,12 +1132,46 @@ class _Peer:
 
 def test_serve_says_hello_and_ends_cleanly_between_requests() -> None:
     peer = _Peer(dict(OPS))
-    ops = sorted(
-        ["adopt", "adopt_staged", "bye", "echo", "hold_page", "holds_page", "install", "release", "select", "send"]
-        + ["stage", "workflows"]
+    assert peer.hello == {"format": TRANSFER_SESSION_FORMAT, "format_version": TRANSFER_PROTOCOL}
+    assert sorted(OPS) == sorted(
+        ["adopt_staged", "bye", "echo", "hold_page", "holds_page", "install", "release", "select", "send", "stage"]
+        + ["workflows"]
     )
-    assert peer.hello == {"format": TRANSFER_SESSION_FORMAT, "format_version": 1, "ops": ops}
     peer.writer.send_json(REQUEST, 1, {"op": "nope"})
+    assert peer.answer() == {"ok": False, "error": "unknown op 'nope'"}
+    assert peer.end() == 0
+
+
+@pytest.mark.parametrize("asked", [None, TRANSFER_PROTOCOL - 1, TRANSFER_PROTOCOL + 1, str(TRANSFER_PROTOCOL)])
+def test_serve_refuses_another_protocol_before_any_op_and_ends(asked: object) -> None:
+    ran: list[str] = []
+
+    def record(request: Request) -> dict[str, Any]:
+        ran.append(str(request.header.get("op")))
+        return {}
+
+    peer = _Peer({**OPS, "echo": record, "record": record}, agree=False)
+    header: dict[str, Any] = {"op": "echo", "upload": True}
+    if asked is not None:
+        header["protocol"] = asked
+    peer.writer.send_json(REQUEST, 1, header)
+    peer.writer.send(DATA, 1, b"x" * 1000)  # read to its terminal and dropped: nothing of it is used
+    peer.writer.send_json(END, 1, {"ok": True})
+    peer.writer.send_json(REQUEST, 2, {"op": "record", "protocol": TRANSFER_PROTOCOL})
+    seen = peer.until_response()
+    assert [frame.kind for frame in seen if frame.kind != PROGRESS] == [RESPONSE]
+    response = seen[-1].document
+    assert response is not None and response["ok"] is False and response["protocol"] == TRANSFER_PROTOCOL
+    assert "install the same httk version on both ends" in response["error"] and "fatal" not in response
+    assert peer.join() == 1
+    assert peer.frames.read_frame() is None and ran == []  # no op ran, the later request was never read
+
+
+def test_serve_checks_the_protocol_of_the_first_request_only() -> None:
+    peer = _Peer(dict(OPS), agree=False)
+    peer.writer.send_json(REQUEST, 1, {"op": "nope", "protocol": TRANSFER_PROTOCOL})
+    assert peer.answer() == {"ok": False, "error": "unknown op 'nope'"}
+    peer.writer.send_json(REQUEST, 2, {"op": "nope"})
     assert peer.answer() == {"ok": False, "error": "unknown op 'nope'"}
     assert peer.end() == 0
 
@@ -1090,7 +1306,7 @@ def test_a_failed_far_side_exits_at_once(tmp_path: Path, ending: str, frame: byt
     assert process.stdin is not None and process.stdout is not None
     try:
         assert json.loads(process.stdout.readline())["format"] == TRANSFER_SESSION_FORMAT
-        process.stdin.write(encode_json(REQUEST, 1, {"op": "linger"}))
+        process.stdin.write(encode_json(REQUEST, 1, {"op": "linger", "protocol": TRANSFER_PROTOCOL}))
         process.stdin.flush()
         frames = FrameReader(process.stdout)
         answer = frames.read_frame()

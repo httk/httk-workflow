@@ -26,7 +26,7 @@ from httk.workflow.projects import initialize_project
 from httk.workflow.seals import workspace_seal_path
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from test_deliver import hold_jobs, outgoing_dir, stream
-from test_job_transfer import adapter_path, jobs, outcomes, outgoing, recorded_requests, registered, run, selected
+from test_job_transfer import jobs, outcomes, outgoing, recorded_requests, registered, run, selected
 from test_moving import find, job_ids_below, single
 from test_paged_holds import family, ids, paged
 from test_remote_to_remote import DST_HOST, SRC_HOST, Ends, ends, held, relays_in  # noqa: F401 (ends: the fixture)
@@ -287,7 +287,7 @@ def test_recovery_of_a_dead_owner_in_adopting_completes_the_started_adoption(
 
 
 def _staged_session(bundle: Path) -> TransferSession:
-    session = TransferSession(bundle, needs={"stage", "adopt_staged"}, timeout=60)
+    session = TransferSession(bundle, timeout=60)
     session.open()
     return session
 
@@ -525,14 +525,11 @@ def test_a_malformed_stage_header_is_refused(tmp_path: Path, remote: Remote) -> 
 # -- the client: push, pull, relay and local → local ----------------------------------------------------------------
 
 #: The far side of these tests: :data:`test_session_pull.PATCHED_PULL` (with the push's scripted faults), and:
-#: ``HTTK_TEST_NO_STAGE`` (a far side without ``stage`` and ``adopt_staged``), ``HTTK_TEST_FAR_STAGES`` (its capacity
+#: ``HTTK_TEST_FAR_STAGES`` (its capacity
 #: in stages), ``HTTK_TEST_EXIT_AFTER_STAGE`` (the n-th ``stage`` commits, then the process ends before it answers) and
 #: ``HTTK_TEST_EXIT_IN_ADOPTION`` (the n-th bundle adopted, then the process ends: a stage left adopting).
 STAGED_PATCHES = """
 if argv[:2] == ["workflow", "transfer-session"]:
-    if os.environ.get("HTTK_TEST_NO_STAGE"):
-        _transfer_session.OPS.pop("stage")
-        _transfer_session.OPS.pop("adopt_staged")
     if os.environ.get("HTTK_TEST_FAR_STAGES"):
         _transfer_session._STAGES = int(os.environ["HTTK_TEST_FAR_STAGES"])
     if os.environ.get("HTTK_TEST_FAR_STAGED_BYTES"):
@@ -613,32 +610,17 @@ def test_a_push_settles_its_segments_while_it_copies_the_next(
     far.set_policy({"visibility_deadline_seconds": deadline})
     monkeypatch.setattr(transfer_cli, "_SEGMENT_BUNDLES", 1)
     requests = recorded_requests(monkeypatch)
-    wall: dict[str, float] = {}
-    for path in ("adopt", "stage"):
-        # A far side without the stage ops gets the adopt path (one settle a segment), decided when it opened.
-        if path == "adopt":
-            monkeypatch.setenv("HTTK_TEST_NO_STAGE", "1")
-        else:
-            monkeypatch.delenv("HTTK_TEST_NO_STAGE")
-        requests.clear()
-        plan = jobs(near, 4)
-        start = time.monotonic()
-        assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
-        wall[path] = time.monotonic() - start
-        assert _statuses(capsys) == ["adopted"] * 4
-        _once(far, plan)
-        assert outgoing(near) == []
-        sent = [op for op, _ in requests]
-        if path == "adopt":
-            assert sent == ["workflows", *["adopt"] * 4]
-        else:
-            assert [op for op in sent if op != "adopt_staged"] == ["workflows", *["stage"] * 4]
-            assert sent.count("adopt_staged") == 4
-            # Copying goes on while the first segment's deadline runs: at least two stages before its adoption.
-            assert sent.index("adopt_staged") > sent.index("stage") + 1
+    plan = jobs(near, 4)
+    assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
+    assert _statuses(capsys) == ["adopted"] * 4
+    _once(far, plan)
+    assert outgoing(near) == []
+    sent = [op for op, _ in requests]
+    assert [op for op in sent if op != "adopt_staged"] == ["workflows", *["stage"] * 4]
+    assert sent.count("adopt_staged") == 4
+    # Copying goes on while the first segment's deadline runs: at least two stages before its adoption.
+    assert sent.index("adopt_staged") > sent.index("stage") + 1
     _quiet(far)
-    # Each adopt waits out its own deadline; the stages wait about one (copy time plus one deadline).
-    assert wall["adopt"] - wall["stage"] > 1.5 * deadline
 
 
 def test_a_pull_settles_its_landings_while_it_fetches_the_next(
@@ -1315,22 +1297,6 @@ def _relayed_fully(relay_ends: Ends, plan: list[Any], capsys: pytest.CaptureFixt
     return [outcome["transfer_id"] for outcome in document["transfers"]]
 
 
-def test_an_adapter_source_s_part_above_the_staged_bytes_is_staged_in_segments(
-    relay_ends: Ends, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    adapter_path(relay_ends.project, "cluster")  # (A, S): a pull fetches a whole segment, of any bytes, into one relay
-    made = held(relay_ends.near, relay_ends.dst, 3)
-    plan = [entry for _, entry in made]
-    largest = max(_sizes(relay_ends.near).values())
-    cap = int(2.5 * largest)  # any one or two bundles fit; the three of the one relayed part do not
-    _caps(monkeypatch, cap // 2, cap)
-    requests = recorded_requests(monkeypatch)
-    _relayed_fully(relay_ends, plan, capsys, ["--resume", relay_ends.src, relay_ends.dst])
-    stages = [header for op, header in requests if op == "stage"]
-    assert len(stages) >= 2 and all(header["bytes"] <= cap for header in stages)
-    assert sorted(key for header in stages for key in header["transfer_ids"]) == sorted(h.transfer_id for h, _ in made)
-
-
 def test_a_send_s_small_then_large_bundles_are_staged_in_segments(
     relay_ends: Ends, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1422,30 +1388,6 @@ def test_src_failing_in_a_page_s_release_adopts_no_other_pair_s_matured_stage(
     assert a["status"] == "failed" and "not adopted, since the transfer stopped" in a["message"]
     assert len(outgoing(relay_ends.near)) == 2  # both held: B's unreleased, A's never adopted
     assert find(relay_ends.far, made[0][1][0]["id"]) is None and find(other, made[1][1][0]["id"]) is not None
-
-
-def test_src_failing_in_a_direct_adoption_s_release_adopts_no_further_piece_of_its_part(
-    relay_ends: Ends, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # A DST without stage/adopt_staged: each piece of a relayed part is adopted at once and released on SRC. SRC dies
-    # in the first piece's release: the part's next piece is not adopted (SRC is known dead), its hold kept there.
-    monkeypatch.setenv("HTTK_TEST_NO_STAGE", "1")
-    made = held(relay_ends.near, relay_ends.dst, 2)
-    largest = max(_sizes(relay_ends.near).values())
-    _caps(monkeypatch, largest + 1, 4 * largest)  # one send of both; delivered as two pieces of one bundle each
-    monkeypatch.setenv("HTTK_TEST_EXIT_ON_OP", "release")
-    requests = recorded_requests(monkeypatch)
-    assert run(relay_ends.project, "--json", "-q", "--resume", relay_ends.src, relay_ends.dst) == 1
-    transfers = outcomes(capsys)["transfers"]
-    ops = [op for op, _ in requests]
-    assert ops.count("send") == 1 and ops.count("adopt") == 1 and "adopt_staged" not in ops
-    assert ops[ops.index("release") + 1 :] == []
-    adopted = [outcome for outcome in transfers if outcome["status"] == "adopted"]
-    assert len(adopted) == 1 and "the hold was not released" in adopted[0]["message"]
-    (rest,) = [outcome for outcome in transfers if outcome["status"] != "adopted"]
-    assert "since the transfer stopped" in rest["message"] and "the transfer session failed" in rest["message"]
-    assert len(outgoing(relay_ends.near)) == 2  # kept on SRC: the adopted one unreleased, the other never sent
-    assert sum(find(relay_ends.far, entry[0]["id"]) is not None for _, entry in made) == 1
 
 
 @pytest.mark.parametrize("where", ["setup", "fetch"])

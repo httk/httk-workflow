@@ -19,7 +19,6 @@ from httk.workflow._bundles import (
     _EXCHANGE_NAMESPACE,
     BUNDLE_FORMAT,
     BUNDLE_VERSION,
-    MAX_MANIFEST_BYTES,
     BundleError,
     BundleManifest,
     BundleMember,
@@ -512,21 +511,43 @@ def test_direct_construction_is_validated() -> None:
     assert document["format"] == BUNDLE_FORMAT and document["format_version"] == BUNDLE_VERSION
 
 
+def test_text_no_utf8_record_can_hold_is_a_refusal() -> None:
+    # A lone surrogate (escaped in valid JSON) is refused as BundleError, never a UnicodeError: in a member's
+    # placement from from_mapping (checked before the placement's own parse encodes it), and anywhere in a decoded
+    # manifest, a key or an opaque value included, without a copy of the document.
+    member = manifest_of(family()).as_mapping()["members"]
+    assert isinstance(member, list)
+    with pytest.raises(BundleError, match="not valid Unicode text"):
+        BundleMember.from_mapping({**member[0], "placement": "a\udc80"}, 0)
+    data = manifest_of(family()).to_json()
+    for planted in (b'"x\\udc80"', b'"\\ud800"'):
+        with pytest.raises(BundleError, match="lone surrogate"):
+            BundleManifest.from_json(data.replace(b'"locator":null', b'"locator":' + planted))
+        with pytest.raises(BundleError, match="lone surrogate"):
+            BundleManifest.from_json(data.replace(b'{"created_at"', b'{' + planted + b':1,"created_at"'))
+    # A surrogate pair escapes one character, which is text like any other.
+    manifest = BundleManifest.from_json(data.replace(b'"locator":null', b'"locator":"x\\ud83d\\ude00"'))
+    assert manifest.destination_locator == "x\U0001f600"
+
+
 # -- bundle.json on disk --------------------------------------------------------------------------------------------
 
 
-def test_bundle_json_must_be_a_bounded_regular_file(tmp_path: Path) -> None:
+def test_bundle_json_must_be_a_bounded_regular_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle = tmp_path / "b"
     manifest, _ = write_bundle(bundle)
     assert validate_bundle(bundle, untrusted=True) == manifest
     target = bundle / "bundle.json"
     data = target.read_bytes()
-    # Oversized: valid JSON padded beyond the bound.
-    target.write_bytes(data + b" " * (MAX_MANIFEST_BYTES + 1 - len(data)))
-    with pytest.raises(BundleError, match="larger"):
-        validate_bundle(bundle, untrusted=False)
-    target.write_bytes(data + b" " * (MAX_MANIFEST_BYTES - len(data)))
-    assert validate_bundle(bundle, untrusted=False) == manifest
+    # Oversized: valid JSON padded beyond the bound (each scaled down, as read at call time).
+    for name, untrusted in (("MAX_MANIFEST_BYTES", False), ("MAX_UNTRUSTED_MANIFEST_BYTES", True)):
+        monkeypatch.setattr(_bundles, name, 64 << 10)
+        target.write_bytes(data + b" " * ((64 << 10) + 1 - len(data)))
+        with pytest.raises(BundleError, match="larger"):
+            validate_bundle(bundle, untrusted=untrusted)
+        target.write_bytes(data + b" " * ((64 << 10) - len(data)))
+        assert validate_bundle(bundle, untrusted=untrusted) == manifest
+    target.write_bytes(data)
     # A symlink to a valid manifest.
     (tmp_path / "real.json").write_bytes(data)
     target.unlink()

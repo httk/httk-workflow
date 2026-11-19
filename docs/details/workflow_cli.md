@@ -288,7 +288,7 @@ manager's platform stays `ready` and unclaimed there.
 | `job detach JOB...` | make spawned jobs independent of their parents, permanently | `--workspace` |
 | `job unlock [--no-copy] JOB...` | put jobs, and every ancestor of them, in debug mode (one-way) and, unless `--no-copy`, give each selected job its own copy of the runner to edit | `--workspace`, `--no-copy`, `--reason TEXT` (default `job unlock`) |
 | `job eject JOB [DEST]` | move a quiescent job out into the bundle `DEST/<job-key>` | `--workspace`, `--tree`, `--wait`, `--timeout`, `--hold`, `--destination-id`, `--operator`, `--json` |
-| `job adopt BUNDLE...` | move ejected bundles into the workspace, in turn | `--workspace`, `--move`, `--stdin-tar`, `--json` |
+| `job adopt BUNDLE...` | move ejected bundles into the workspace, in turn | `--workspace`, `--move`, `--json` |
 | `job list` | list jobs a page at a time (remote: over the adapter) | `--workspace`, `--state`, `--step`, `--placement`, `--limit`, `--after`, `--tag-contains`, `--counts`, `--json` |
 | `job show JOB...` | describe jobs from their documents (remote: over the adapter) | `--workspace`, `--no-children`, `--json` |
 | `job log JOB...` | print run logs (remote: over the adapter) | `--workspace`, `--limit`, `--json` |
@@ -679,26 +679,16 @@ positions, every member's `job.json` agreeing with the manifest, and an adopted
 job's placement satisfying the
 [placement rule](workflow_filesystem_api.md#placement-rules).
 
-`job adopt --stdin-tar` (no BUNDLE) is the receiving end of a push: it reads the
-bundles as one `tar` stream on standard input, extracts it whole into a fresh
-landing `transfers/incoming/<token>/` with the same filters as a pull (a
-malformed stream or a refused member exits `2` and adopts nothing), then adopts
-every top-level bundle directory the stream carried and removes the emptied
-landing (anything else a reused `--token` landing held is left there, not
-adopted, with a `warning:` line). A bundle
-whose `bundle.json` records another destination workspace id is refused and
-discarded there. The `--json` document then also carries `workspace_id`, this
-workspace's id, and, for each hidden `--built-for ID`, a `workflows` entry
-`{"id", "status", "tree_sha256"}` with status `present`, `unbuilt` or `missing`.
-A stream refused before any adoption (exit `2`) prints instead the document
-`{"bundles": [], "workspace_id": ..., "refused": REASON}` (`workspace_id` is
-`null` when the workspace could not be opened); when the extraction refused a
-member, `"bundle"` names the top-level bundle directory it belongs to; when the
-refusal is the landing's
-failed `syncfs` under `io.sync_errors` `fail` (a write error on that filesystem,
-possibly another user's; see {doc}`../workspaces`), and only then, it also
-carries `"sync_failed": true`, which makes a push deliver once more. Exit `0`
-means every bundle was adopted or already adopted, `1` that one was not.
+The receiving end of a push is the far side's transfer session (see *The
+transfer session* in {doc}`remotes`): it extracts each segment's `tar` stream
+whole into a fresh landing with the same filters as a pull (a malformed stream
+or a refused member adopts nothing), then adopts every top-level bundle
+directory the stream carried; a bundle whose `bundle.json` records another
+destination workspace id is refused and discarded there. A hold directory,
+`.httk-workspace/transfers/outgoing/<transfer id>/`, is itself a bundle: copied
+by hand to another machine, `job adopt` takes it like any ejected bundle (the
+remedy for a hold too large for a transfer session's answer; release the hold on
+its source afterwards with `job transfer --release`).
 
 Both commands are crash-safe and take no file locks: each records what it needs
 to finish before it moves anything, so an interrupted eject or adoption is
@@ -758,26 +748,23 @@ all of its descendants, which must be terminal or paused (a failed, cancelled
 or paused child travels with a succeeded root). A root whose children are not
 all terminal or paused (a parent that an `any_terminal`, `any_succeeded` or
 `at_least` join let finish first) is refused and stays, never split. A child that should move alone
-is detached first. A selection is held page by page (see *Paged holds* below);
-on a remote SRC without a transfer session it is held in one call: give a very
-large one time with `--adapter-timeout`. Should that call fail, the jobs it held
-are still driven by the same run or by `--resume`.
+is detached first. A selection is held page by page (see *Paged holds* below).
 
 A transfer is four steps. It **holds** each selected job on SRC (with `--tree`,
 its terminal or paused descendants too) in SRC's own
 `.httk-workspace/transfers/outgoing/<transfer id>/`, recording DST, after which
 the jobs are in neither workspace's state trees. It **copies** the held bundle
 to DST (on one filesystem adoption simply moves it in; a local DST receives it
-from a remote SRC over one transfer session, segment by segment (below), and
-otherwise with the adapter's `pull`; a remote DST receives it from a local SRC
-over one transfer session, segment by segment (below), and otherwise with the
-adapter's `deliver`, streamed into `job adopt --stdin-tar` there), **adopts** it there
-into the states and priorities it left, and only then **releases** the hold.
+from a remote SRC, and a remote DST from a local SRC, over one transfer session,
+segment by segment, below), **adopts** it there into the states and priorities
+it left, and only then **releases** the hold. Every remote end is reached over
+its transfer session, which both machines' *httk* must speak in the same
+version: an end that cannot open one stops the transfer before anything is held
+or changed (see *The transfer session* in {doc}`remotes` for the messages).
 A remote end is never probed first: its commands name the workspace by the
 plain name it has on the far side. On a remote SRC,
 `--job` needs canonical job UUIDs; `--state` and `--step` are resolved there.
-From a local SRC, and from a remote SRC over a transfer session, these steps run
-a page of holds at a time (*Paged holds*, below).
+These steps run a page of holds at a time (*Paged holds*, below).
 
 The workflows the held jobs need (each job's effective workflow and the
 closure of its calls, as SRC resolves them) that DST lacks and SRC has are
@@ -787,23 +774,14 @@ build for its platform. For a local DST this happens, builds included, before
 the first adoption of each page that needs a workflow not yet attempted for that
 DST in the command (one attempt per workflow and destination, a failed one
 included), from SRC's store (a remote SRC's entries fetched with one request on
-the pull's transfer session), so a page's adopted jobs can start at once; on the
-adapter path of a remote SRC the entries are fetched with the adapter's `pull`
-and the builds follow the release. Over a push's
-transfer session the same holds for a remote DST: before the first segment, one
+the pull's transfer session), so a page's adopted jobs can start at once. Over a
+push's transfer session the same holds for a remote DST: before the first segment, one
 request asks DST which of the workflows it has (`present`, `unbuilt` or
 `missing`), and one more installs the missing ones and builds the unbuilt ones
 (again before each page that needs one not yet attempted), so every segment can start as soon as it is adopted, even while later segments
 are still on their way; a failed installation or build is reported and the push
-goes on (those jobs wait). Without a session a remote DST
-reports what it has with the adoption itself (`job adopt --built-for ID`), and
-when something is missing or unbuilt it is installed and built once, after the
-last adoption, in one more remote start: one `deliver`
-of the store entries (`install.json` and `package/`) to the internal
-`workflow install --stdin-tar --build [--also-build ID …]`, or, with nothing to
-install, one `workflow install --also-build ID …`. Adopting before installing is safe: a
-manager skips, and does not fail, a ready job whose workflow is not installed
-yet. An installation DST already has is never replaced,
+goes on (those jobs wait); a manager skips, and does not fail, a ready job
+whose workflow is not installed yet. An installation DST already has is never replaced,
 even with another tree. `--no-workflows` skips all of this. With
 `--json` each outcome lists `workflows`, one `{id, status}` per needed workflow:
 `installed`, `present`, `mismatch` (DST keeps its other tree, which the jobs
@@ -815,40 +793,18 @@ still lacks. The command prints one line per hold,
 every hold was adopted or already was. Progress, one line per step, goes to
 stderr unless `-q`/`--quiet` is given.
 
-Each hold is its own bundle, but the holds bound for one destination travel as
-one batch, so the number of adapter calls, ssh connections and remote `httk`
-starts does not grow with the number of jobs: one hold call on a remote SRC
-(its answer also lists the other holds already bound for DST, so no
-`transfer status` call follows), one `pull` of every bundle from a remote SRC,
-one `deliver` to a remote DST (which lands the bundles in
-`.httk-workspace/transfers/incoming/<batch token>/` and adopts them in the same
-start), and one release call on a remote SRC. Local to remote takes one ssh
-connection and one remote `httk` start, whatever it ships, builds or retries and
-however many pages it holds:
-the push runs over one transfer session (see *The transfer session* in
-{doc}`remotes`); remote to local one connection and one start too, whatever it
-ships or retries and however many pages it holds, over one transfer session to
-SRC (`--resume` without DST: one session for each remote end in play); remote to
-remote one connection and one start at each end when both serve a session (two
-and two in all, whatever the pages and segments), and four connections and
-three starts when neither does (see *Remote to remote* for the mixed cases). Without a session (a far side whose `httk`
-predates it, which costs one more connection and start for the refused session,
-or the remote setting `transfer_session=off`), a pull costs three connections
-(hold, pull, release) and two starts, and a push what it did before sessions: one `deliver`
-of the whole batch, plus one connection and one start for shipping missing or
-unbuilt workflows, for the second delivery when a push from a local SRC both
-re-drives holds an earlier run left bound for DST and holds new jobs (the two
-sets travel separately, the earlier holds first), and for each delivery retried
-after DST's failed `syncfs`. Remote to remote without a session at DST ships and
-retries the same way (its holds travel as one delivery: a remote SRC's holds are
-never taken back, so they are not separated), and a remote SRC's bundles are not
-fetched again for a retry. Without a session, a
-pull chunk fetched again after a failed `syncfs` of its landing adds one
-`pull`; nothing is added when no retry happens.
-Only a hold, pull or release whose id list exceeds 64 KiB of command text (some
-1500 jobs) is split, into as many such calls as it needs.
+Each hold is its own bundle, but the number of ssh connections and remote
+`httk` starts does not grow with the number of jobs. Local to remote takes one
+ssh connection and one remote `httk` start, whatever it ships, builds or
+retries and however many pages it holds: the push runs over one transfer
+session (see *The transfer session* in {doc}`remotes`); remote to local one
+connection and one start too, whatever it ships or retries and however many
+pages it holds, over one transfer session to SRC (`--resume` without DST: one
+session for each remote end in play); remote to remote one connection and one
+start at each end (two and two in all, whatever the pages and segments). A
+retry after DST's failed `syncfs` adds no connection.
 
-Over a transfer session a push is delivered in segments, each closed at 256
+A push is delivered in segments, each closed at 256
 bundles, 16 GiB of file data or 16,384 archive members (a larger hold is a
 segment of its own; a hold is never split), and the earlier holds and the new
 ones never share a segment. Each segment is its own delivery, with its own archive,
@@ -911,8 +867,8 @@ deadline has passed, and the rest at the end of the command, across pages. A
 pull stages each fetch's landing in the local DST the same way between its
 fetches (only once SRC's answer naming what it sent was checked); a
 remote-to-remote transfer stages at DST as a push does, in the segments of a
-push (a fetched part larger than one, such as 256 large bundles from a source
-without a session, is staged in several), and the relay is removed once its
+push (a fetched part larger than one, such as a fetch whose last bundle is
+large, is staged in several), and the relay is removed once its
 segments are staged; a local-to-local transfer stages each page (on one
 filesystem without `--keep`, the first look is over the original holds, which
 stay where they are) and holds the next pages while the staged ones mature.
@@ -966,8 +922,7 @@ segment unasked. One whose adoption had begun is recovered as any interrupted
 adoption is, which may still publish its jobs; `--resume` then reports them
 already adopted. An interrupt (Ctrl-C) gives up the staged segments the same
 way; the holds already adopted are released only over a session that is still
-usable. A far side without these requests (an older `httk-workflow`) gets one
-`adopt` request a segment, which waits out its own deadline, as before. While
+usable. While
 DST's far side looks for a segment's jobs (the two looks, each bundle's fresh
 look), every directory it lists counts as progress of its request, so a slow
 listing of a large placement is not taken for a far side that stopped
@@ -990,14 +945,13 @@ right after its adoption, over the same session (with `--keep` recording DST's w
 id in the away copies). While SRC sends a hold, each file is checked against its
 own open descriptor: a file replaced, shrunk or grown since it was listed aborts
 the fetch, which never ends as complete. A file changed in place without changing
-its size is not detected (an accepted limitation: nothing writes a held bundle,
-and the adapter's tar copy has the same property). Per segment:
+its size is not detected (an accepted limitation: nothing writes a held bundle).
+Per segment:
 
 - a failed `syncfs` commit of a landing under `io.sync_errors` `fail` discards
   it and fetches it once more into a fresh landing with every file
   synchronized as it is written, as every later fetch of the session then is,
-  for every destination of the command (this replaces the fresh `syncfs`
-  barrier of a pull without a session); a second failure (an fsync error of the
+  for every destination of the command; a second failure (an fsync error of the
   re-fetch) stops the pull as a refusal naming no hold does (below);
 - a hold SRC cannot send (it changed or vanished while it was read, which
   aborts the fetch, or it is gone from SRC: another actor released or took it,
@@ -1026,56 +980,33 @@ and the adapter's tar copy has the same property). Per segment:
 **Remote to remote.** A transfer between two remote workspaces passes every
 bundle and store entry through this machine: each fetch lands in a temporary
 directory, the *relay* (`httk-transfer-*` in the default temporary location,
-`TMPDIR` when set), removed once what it holds is settled. A relay holds, from a
-SRC with a session, one fetch: SRC closes it once 16 GiB of file data (or 16,384
-archive members) went, but never inside a bundle, so it may exceed that by the
-last bundle, and a single larger bundle is a fetch of its own; from a SRC
-without one, one segment of 256 bundles, whatever their size; for a destination
-without a session, the whole batch. The workflow store entries a page needs are
+`TMPDIR` when set), removed once what it holds is settled. A relay holds one
+fetch: SRC closes it once 16 GiB of file data (or 16,384 archive members) went,
+but never inside a bundle, so it may exceed that by the last bundle, and a
+single larger bundle is a fetch of its own. The workflow store entries a page needs are
 fetched into a relay of their own, separately. A relay that cannot be made,
 written, read or removed (a full disk, say) stops that destination as a refusal
 naming no hold does. A relay is not a workspace landing: nothing in it is synchronized
 (DST makes what it adopts durable, segment by segment, as in a push); a fetch
 over SRC's session is extracted by the same untrusted-archive rules as a
 landing and its stream's end is checked before anything of it is sent on.
-Each end's session is decided before anything is held: SRC's first (its
-selection check), DST's before the first hold for it (one that cannot open
-holds nothing). With a selection, DST's session opens before SRC holds the
-first page, because SRC learns whether a `--state` selection is empty only by
-holding it: an empty selection therefore still connects to DST, and fails when
-DST cannot be reached. The four combinations:
-
-- **Both ends serve a session**: SRC holds page by page as a pull does; for
-  each page DST is asked which workflows it lacks or has unbuilt, their store
-  entries are fetched from SRC into a relay and installed and built over DST's
-  session, all before the page's first segment; then each segment is fetched
-  into its own relay (SRC closes a fetch at 16 GiB or 16,384 members, so a
-  segment may take several), adopted over DST's session by the rules of a push
-  (a failed `syncfs` delivered once more from the same relay with every file
-  synchronized, as every later segment to that DST then is; a refused member's
-  bundle fails alone and the rest go once more from the relay; the first
-  adopting workspace id is kept), and released on SRC over its session right
-  after (with `--keep` recording DST's workspace id). One connection and one
-  start at each end.
-- **SRC serves a session, DST does not**: SRC holds page by page, but the
-  holds for DST are gathered, fetched into one relay after the last page,
-  delivered with one adapter `deliver` as before sessions (the workflows after
-  the adoption, from its report, their store entries fetched over SRC's
-  session), and released over SRC's session. Each fetch asks for at most 256
-  holds and each release names at most 16,384, so no request grows with the
-  batch; a stop while fetching (a failed session, a refusal naming no hold, the
-  relay) delivers nothing, and an unknown outcome or a refusal of the delivery
-  stops the destination too. SRC one connection and one start;
-  DST what a push to it costs without a session.
-- **DST serves a session, SRC does not**: SRC holds everything first (`job
-  transfer --hold`); its bundles are pulled with the adapter a segment at a
-  time into a relay and each segment is adopted over DST's session (the
-  workflows first, their store entries pulled with the adapter and installed
-  over the session); the holds are released with one adapter release at the
-  end. SRC one hold, one `pull` a segment (a segment is 256 bundles) and one
-  release (three connections and two starts for one segment); DST one
-  connection and one start.
-- **Neither**: as before sessions, four connections and three starts.
+Both ends' sessions are opened, and their versions checked, before anything is
+selected or held on either end: SRC's first, then DST's when it is named (with
+`--resume` and no DST, each destination's before its holds are driven). An end
+that cannot open its session stops the transfer with nothing held or changed on
+either end (see *The transfer session* in {doc}`remotes`). An empty selection
+therefore still connects to DST, and fails when DST cannot be reached. SRC
+holds page by page as a pull does; for each page DST is asked which workflows
+it lacks or has unbuilt, their store entries are fetched from SRC into a relay
+and installed and built over DST's session, all before the page's first
+segment; then each segment is fetched into its own relay (SRC closes a fetch at
+16 GiB or 16,384 members, so a segment may take several), adopted over DST's
+session by the rules of a push (a failed `syncfs` delivered once more from the
+same relay with every file synchronized, as every later segment to that DST
+then is; a refused member's bundle fails alone and the rest go once more from
+the relay; the first adopting workspace id is kept), and released on SRC over
+its session right after (with `--keep` recording DST's workspace id). One
+connection and one start at each end.
 
 A remote SRC never takes a hold back: every refusal, of one bundle or of a whole
 segment, leaves the holds held there (`failed`, with `--resume`; a hold an earlier
@@ -1088,27 +1019,37 @@ every later hold stay held on SRC, and what earlier segments settled (adopted,
 released) stays so. A failure of
 SRC's session (in a fetch or a release) stops every destination of the command.
 A release that fails after the adoption leaves the jobs in DST and their holds on
-SRC ("not released"). `--resume` lists SRC's holds over its session, or with
-`transfer status` without one, and drives them by the same combinations.
+SRC ("not released"). `--resume` lists SRC's holds over its session and drives
+them the same way.
 
 Each answer of a page (holds, errors, notes and diagnostics alike) is held to
-16 MiB as encoded, the diagnostics cut to their last 64 KiB and each error to the
-start that takes 4 KiB encoded (both marked): a hold made or an error found that does not fit goes
+448 MiB as encoded (the largest message of a transfer session is 512 MiB), the
+diagnostics cut to their last 64 KiB and each error to the start that takes 4
+KiB encoded (both marked): a hold made or an error found that does not fit goes
 first in the next answer, which holds nothing new, and the note and the
 diagnostics give way to the first of them, so every answer carries at least one
 when there is one to carry. A hold whose own description does not fit the answer
-even with nothing else in it (a tree of some tens of thousands of jobs) is
-answered by its transfer id only: it fails alone,
-stays held on SRC, and the message names the remedy, `httk remote configure
---set transfer_session=off REMOTE`, then `--resume`, whose adapter path carries
-it (an accepted limitation). Also accepted: on a filesystem whose `fstat` of an
-open file reports another device or inode than `lstat` of its path, SRC refuses
-every fetch as changed; set `transfer_session=off` on that remote.
-
-A remote SRC that serves no session (an older `httk`, `transfer_session=off`, a
-`mount-daemon` remote) is pulled with the adapter's hold, `pull` and release
-calls as before, the holds of a batch in one pull per 64 KiB of ids, and a
-failed `syncfs` commit of its landing pulled once more under a fresh barrier.
+even with nothing else in it (at about 40 to 60 bytes a job, a tree of several
+million jobs, more than one bundle can hold) is answered by its transfer id
+only: it fails alone, stays held on SRC, and the message names the remedy by
+hand (an accepted limitation): copy its bundle
+`.httk-workspace/transfers/outgoing/<transfer id>/` from SRC to the
+destination's machine, run `httk job adopt BUNDLE` in the destination
+workspace, then `httk job transfer --release TRANSFER_ID SRC`, or, to keep away
+copies, `httk job transfer --release TRANSFER_ID --keep --destination-id ID
+SRC`, ID being the `workspace_id` that `httk workspace status --json DST`
+reports (such a hold records no destination id, and `--keep` alone keeps
+none). A tree's `bundle.json` (about 220 bytes a member) is held to 512 MiB,
+about 2.4 million jobs, and a larger tree is refused before any job moves; the
+answer of its adoption takes about 400 to 450 bytes a job. A push of a tree of
+more than about a million jobs, whose adoption answer exceeds 512 MiB, is
+copied and adopted, but its answer cannot be read (an accepted limitation): it
+reports an unknown outcome and keeps the hold, and `--resume` completes it (the
+second delivery is answered "already adopted" and the hold released), at the
+cost of a second copy; `httk job eject` and `httk job adopt` by hand avoid that.
+A pull adopts here, up to the bundle's bound. Also accepted: on a filesystem whose `fstat` of an open file reports
+another device or inode than `lstat` of its path, SRC refuses every fetch as
+changed; push from SRC's machine instead, or eject and adopt by hand.
 
 A bundle DST refuses (for example because some of its jobs are already there,
 or because its `bundle.json` records another destination workspace id) stays
@@ -1169,23 +1110,15 @@ next page. A page that holds nothing
 (every job of it failed, or moves only with its root) is no failure: paging goes
 on. The note on the children that move only with their root counts those that
 did not move with it once the last page is held. Each destination keeps for the
-whole command its transfer session (or, when it serves none, its holds, which
-are delivered once, as one batch, after the last page), the workspace id its
-first adoption answered, the synchronization file by file after a failed
-`syncfs`, and its workflow attempts. A DST that serves no transfer session
-(`transfer_session=off`, a `mount-daemon` remote, an older far side) gets the
-selection held as before sessions, everything first, and the holds delivered
-once.
+whole command its transfer session, the workspace id its first adoption
+answered, the synchronization file by file after a failed `syncfs`, and its
+workflow attempts.
 
 With `--json` the `transfers` list the earlier holds first (by transfer id,
 page by page), then the selection's holds in the order they were held, page by
-page (an adapter destination's after the last page, by transfer id). The
-document has `changed` (a count, possibly `0`) whenever the selection was held
-page by page, or could have been: an empty selection to a DST that serves a
-session (or a local one) prints `changed: 0`. It is absent when nothing was
-selected (`--resume`) and when the selection was held as before sessions (an
-adapter DST, a remote SRC without a session), where a job that changed since the
-listing is an error as before. A pull's far side reports with each page
+page. The document has `changed` (a count, possibly `0`) whenever there was a
+selection, an empty one included; it is absent when nothing was selected
+(`--resume`). A pull's far side reports with each page
 `remaining`, the selected jobs not attempted yet, those that moved with an earlier
 hold not counted; `consumed`, how far it got (it grows with every answer that is
 not the last: an answer that consumed nothing more is taken as a far side out of
@@ -1278,11 +1211,7 @@ between pages (an owner that cannot be registered, a hold that cannot be read)
 stops the destination (reading SRC's holds: every destination) and the pages
 already driven are still reported.
 
-A remote SRC without a session (an older far side, which also covers one that
-serves sessions without paged holds, `transfer_session=off`, a `mount-daemon`
-remote), a local SRC whose DST serves no session, and `job transfer --hold`
-still hold everything first; a remote SRC with a session whose remote DST serves
-none holds page by page but delivers once, after the last page.
+`job transfer --hold` alone still holds everything first.
 
 **Recovery.** Delivery is at least once. Every run, and
 `job transfer --resume`, first re-drives the holds of SRC bound for DST
@@ -1306,7 +1235,7 @@ which is safe only after checking that DST does not have the jobs;
 `job transfer --release T` discards a hold whose jobs DST has (add `--keep
 --destination-id ID` to keep away copies, as above). `job transfer
 --hold (--job JOB … | --state STATE … | --step STEP …) SRC DST` only holds jobs in a local SRC, recording DST as
-given; it is the first leg a client runs on a remote SRC. With `--json` it
+given, for a later `--resume` or `--release`. With `--json` it
 prints `{"holds": [...], "held_before": [...], "errors": [...]}`, where
 `held_before` lists, in the same shape, the other holds of SRC already bound for
 the same DST locator. `--release T --keep --destination-id ID` keeps away copies
@@ -1728,21 +1657,14 @@ first. See {doc}`/campaigns`.
 One machine runs these argument vectors on another over an adapter. They are
 protocol, not operator interface, and hidden from `--help` where they are not
 ordinary commands; their spelling is frozen because the far side may run a
-different *httk*. The batched `job transfer --hold`, the repeated `--release`,
-`job adopt --stdin-tar` and `workflow install --stdin-tar` need both ends to run
-the same *httk-workflow* release. An older SRC answers the hold with an error
-and no hold document, so nothing is held. An older DST rejects
-`--stdin-tar`: the holds are reported `failed` and stay held, and with any
-answer the client does not recognise the jobs may have arrived. Upgrade DST, check with
-`httk job show` whether the jobs are there, and then release the hold with
-`httk job transfer --release` (or re-run `--resume` after the upgrade):
+different *httk*. A transfer itself runs over the hidden `workflow
+transfer-session`, whose one protocol version both ends must speak (see *The
+transfer session* in {doc}`remotes`); the release and the listing below are what
+an operator's `job transfer --release` and `transfer status` run on a remote:
 
 ```text
-httk job transfer --hold --json [--tree] [--destination-id ID] [--job JOB …] [--state STATE …] [--step STEP …] [--placement PREFIX] -- WS DST
+httk workflow transfer-session
 httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [--keep [--destination-id ID]] WS
-httk job adopt --json --stdin-tar --token TOKEN --workspace WS [--built-for ID …]   (bundles as tar on stdin, by deliver)
-httk workflow install --json --workspace WS [--also-build ID …] --stdin-tar --source-label TEXT --build   (store entries as tar on stdin, by deliver)
-httk workflow install --json --workspace WS --also-build ID …
 httk transfer status --json WS
 httk job request-envelopes ACTION --workspace WS --operator LABEL --reason TEXT [--priority N] [--override-step S] [--workflow W] [--destination D] [--max-attempts-per-activation N|unlimited] [--max-total-attempts N|unlimited] [--max-activations N|unlimited] [--force] [--keep-budget] [--tree] JOB_ID …
 httk job publish-requests --workspace WS --document JSON [--document JSON …] [--wait] [--timeout S] [--sequential]
@@ -1774,6 +1696,9 @@ leases, receipts and the maintenance lock. These spellings no longer parse:
 | `workspace seal --force` | `job seal` the remaining jobs first, or seal the workspace with them listed as unsealed |
 | `manager run --lease-seconds`, `--takeover-grace-factor`, `--unsafe-persistent-takeover`, `--unsafe-isolated-takeover` | recovery only after the death proof or `workspace attest-dead` |
 | `transfer send`, `transfer fetch`, `transfer status REMOTE` (by remote) | `job transfer --job JOB … SRC DST`; `transfer status WS` lists one workspace's holds (`REMOTE:WS` for a remote one) |
+| the remote setting `transfer_session` (`off` forced the adapter operations) | nothing: transfers always use a transfer session, and both ends must run the same *httk* version; `remote configure --set transfer_session=…` is refused as an unknown setting |
+| `job adopt --stdin-tar` (with the hidden `--token`, `--sync`, `--built-for`), `workflow install --stdin-tar`, `--from-store`, `--source-label`, `--build`, `--also-build`, `workflow list --built-for` | the transfer session's own requests; `job adopt BUNDLE…` adopts bundles on disk |
+| the adapter operation `deliver` | the transfer session (`session` operation) |
 | `job list --kind`, `job transfer --kind` | `--state STATE` (and `--step STEP` to select by step) |
 
 Workspaces and bundles of the earlier layout are refused with a message that

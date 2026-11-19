@@ -82,11 +82,11 @@ WORKSPACE/
 │   ├── requests/<job-uuid>.<request-uuid>.json
 │   ├── tmp/<owner-id>.<purpose>.<token>/   owner scratch
 │   ├── tmp/trash.<token>                   an entry being removed
-│   ├── tmp/push.<hex>/                     a remote install's or transfer's pushed copy
+│   ├── tmp/push.<hex>/                     a remote workflow install's pushed copy
 │   ├── quarantine/<epoch>-<token>/         {entry, reason.json}
 │   ├── exchange-jobs/<exchange-name>/      the exchange index
 │   ├── transfers/outgoing/<transfer-id>/   held bundles
-│   ├── transfers/incoming/<transfer-id>.<token>/   pushed bundles awaiting adoption
+│   ├── transfers/incoming/<transfer-id>.<token>/   unused since transfer sessions (see below)
 │   └── seal.json                           the workspace seal, when sealed
 ├── jobs/
 │   ├── ready/<placement>/<job-key>~p<NNN>~<t>/
@@ -102,6 +102,14 @@ WORKSPACE/
 Initialization creates the control directories `owners`, `requests`, `tmp`,
 `quarantine` and `exchange-jobs`, the eight state directories and `workflows/`;
 everything else appears on demand.
+
+`transfers/incoming/` is written by no current *httk-workflow*: since transfer
+sessions are required, a pushed bundle lands in its stage's owner scratch. A
+copy left there by an earlier version is still recognized as the transfer
+machinery's (adopting it discards a duplicate, an emptied landing is removed),
+and the hygiene check reports one older than seven days. Its jobs are still
+held on the source, so such a copy is safe to remove by hand; `job adopt` of
+it still works too.
 
 ### `format.json`
 
@@ -491,8 +499,8 @@ barrier's walk or the caller does that): job creation's staged files and the
 store's package and artifact copies under a barrier of strategy `fsync`.
 
 **`extract_tar(stream, target, rename=None, workers=1, durable=False)`** extracts an untrusted tar
-stream (a pull's local side, `job adopt --stdin-tar`, `workflow install
---stdin-tar`) without resolving any path by name. `target` is opened once,
+stream (a pull's local side, a transfer session's `stage` and `install`
+requests) without resolving any path by name. `target` is opened once,
 following a symlink there; every member below it is reached through directory
 descriptors opened component by component `O_DIRECTORY|O_NOFOLLOW` (at most 64
 kept open), so a symlink at any component, whether this stream wrote it or an
@@ -524,8 +532,8 @@ member boundary, is refused (`tarfile.ReadError`) after its last complete
 member; a damaged (non-zero, invalid) header after the members is not
 detected: tarfile ends the stream there, as before. With
 `rename=(member, name)` only that one regular member is accepted, written as
-`name`. With `workers` above 1 (`job adopt --stdin-tar` and `workflow install
---stdin-tar` pass the workspace's `io.workers`), regular members of at most
+`name`. With `workers` above 1 (a transfer session's `stage` and `install`
+requests pass the workspace's `io.workers`), regular members of at most
 1 MiB are read into memory by the reading thread and written by worker threads
 through duplicated directory descriptors, everything else staying in the
 reading thread, which waits for the writes in flight at, above or below a
@@ -561,8 +569,8 @@ members through a cached descriptor). Recorded differences from tarfile's
 durable once, before any of it is published: a job must not be renamed into
 `jobs/<state>/` before its files are on disk, and nothing is reported to
 another host before it is durable. It is used, in a durable workspace only, by
-the far side of a push (`job adopt --stdin-tar`, not `workflow install
---stdin-tar`), the local side of a pull, and a local transfer whose holds are
+the far side of a push (a transfer session's `stage`, not its `install`), the
+local side of a pull, and a local transfer whose holds are
 on another filesystem (by the `st_dev` of `transfers/outgoing/` and of the
 destination's control directory) or kept (`--keep`), which copies every hold
 into a landing scratch first. Payload written outside the transfer paths is
@@ -640,8 +648,8 @@ synced quietly before it is published:
   mount point, a bind or a moved workspace. Fail safe: when the target cannot be placed so (or the
   marker is unreadable or not absolute) and the source is not a regular file
   at its recorded home, the scratch is kept for the operator;
-- the workflow store (`workflow install`, its `--stdin-tar` and transfer copies
-  through `install_copy`, `workflow build`): a barrier anchored on the staged
+- the workflow store (`workflow install`, a transfer session's `install` and
+  transfer copies through `install_copy`, `workflow build`): a barrier anchored on the staged
   `tree/` in the owner's `build` scratch around the package copy and
   `install.json`, and for a build a second one, entered only after the build
   command has run, anchored on `builds/` around the artifact copies and
@@ -695,7 +703,7 @@ descriptor, the *prime*: it flushes what was dirty already and consumes an
 unseen writeback error of someone else, so its error is logged and ignored;
 `ENOSYS`, `EPERM` or `EINVAL` there make the strategy `fsync` for that
 filesystem for the rest of the process. The landings of one transfer prime
-once per filesystem: a transfer session's `adopt` and `stage` landings (the
+once per filesystem: a transfer session's `stage` landings (the
 set belongs to the connection), a pull's landings and a local transfer's
 landing copies (the set belongs to the command's transfer) pass one
 `primed_devices` set, and only a barrier whose filesystem's `st_dev` is not in
@@ -768,40 +776,34 @@ transfer's commit, primed or not, which still fails, is not retried; job
 creation, `job submit`, `job adopt PATH` and the store have no retry):
 
 - the far side of a push refuses the stream (landing discarded, the refusal
-  document printed). When the barrier's `syncfs` commit itself raised
-  `SyncFailed` under `fail` (and for no other refusal), the `--json` document
-  carries `"sync_failed": true`, and without `--json` the message ends with a
-  hint. The client (`_deliver_remote`, a `bool`-validated marker, acted on only
-  in a refusal) delivers the same bundles once more, from the same local
-  directory (a remote source's relay copy, not pulled again), to a fresh
-  `--token` with `--sync fsync`: a hidden `job adopt` option, valid only with
-  `--stdin-tar`, that forces the strategy `fsync` for that command's barrier
-  (inline fsync on the writing descriptors in `extract_tar`, which no foreign
-  error can fail; only a strengthening, nothing in a non-durable workspace; the
-  progress line says `fsync: --sync fsync`). It needs a fresh landing, in any
-  workspace, durable or not: the parents are created, then
-  `transfers/incoming/<token>/` itself with an exclusive `mkdir`, and an
-  existing one (or one created concurrently) refuses the stream before
-  anything is extracted or discarded. Whatever the option, `receive_tar`
-  adopts only the top-level names the stream itself carried (collected by
-  `extract_tar(top_level=)`), never what a reused landing held before (an
-  interrupted earlier delivery's leftovers stay in place, with a `warning:`
-  line). The second answer is
-  the one answer the transfer processes (take-back of the holds a local
-  source made in this run after a refusal, release, workflow shipping and the
-  destination's `workspace_id`); it is never retried. A second answer reporting another
-  `workspace_id` than the first one reported keeps the holds for `--resume`:
-  as an unreadable answer when it is a refusal, and, when it is an adoption,
-  with a message saying that the jobs were adopted by that workspace, not the
-  expected one. The retry runs under the same `--adapter-timeout` as the first
-  delivery. The retry costs one more connection and one more remote
-  `httk` start, only when it happens. A push from a local source delivers the
-  holds an earlier run left and the holds of this run in separate deliveries
-  (the earlier first; only this run's holds are ever taken back), and each
-  delivery retries on its own. Each answer naming a `workspace_id` is also
-  checked against the one the batch's earlier delivery reported (the retry's
-  against it when the first attempt named none): a mismatch keeps the holds
-  for `--resume` in the same way;
+  document answered). When the barrier's `syncfs` commit itself raised
+  `SyncFailed` under `fail` (and for no other refusal), the refusal document
+  carries `"sync_failed": true`. The client (`_adopt_with_retry`, a
+  `bool`-validated marker, acted on only in a refusal) stages the same bundles
+  once more on the same transfer session, from the same local directory (a
+  remote source's relay copy, not fetched again), with `sync: fsync`, which
+  forces the strategy `fsync` for that stage's barrier (inline fsync on the
+  writing descriptors in `extract_tar`, which no foreign error can fail; only a
+  strengthening, nothing in a non-durable workspace; the progress line says
+  `fsync: --sync fsync`); every later segment of the session then goes so too.
+  A stage's landing is always fresh (an owner scratch): `receive_tar` with
+  `force_fsync` refuses an existing one (or one created concurrently) before
+  anything is extracted or discarded, and in any case adopts only the
+  top-level names the stream itself carried (collected by
+  `extract_tar(top_level=)`). The second answer is the one answer the
+  transfer processes (take-back of the holds a local source made in this run
+  after a refusal, release, and the destination's `workspace_id`); it is never
+  retried. A second answer reporting another `workspace_id` than the first
+  one reported keeps the holds for `--resume`: as an unreadable answer when it
+  is a refusal, and, when it is a stage, with a message saying that the
+  segment was staged by that workspace, not the expected one (nothing of it is
+  adopted). A push from a local source delivers the holds an earlier run left
+  and the holds of this run in separate segments (the earlier first; only
+  this run's holds are ever taken back), and each segment retries on its own.
+  Each answer naming a `workspace_id` is also checked against the one the
+  batch's earlier segment reported (the retry's against it when the first
+  attempt named none): a mismatch keeps the holds for `--resume` in the same
+  way;
 - a pull over a transfer session (`_pull_over_session`) whose landing's
   `syncfs` commit failed under `fail` (`_landing.CommitFailed`) discards the
   landing and fetches that segment's request once more into a fresh landing
@@ -809,15 +811,9 @@ creation, `job submit`, `job adopt PATH` and the store have no retry):
   descriptors, which no foreign error can fail; every later request of the
   session then goes so too, and a second failure (an inline fsync error, a
   `StreamRefused` naming no bundle) stops the pull with that segment's holds and
-  every later one's kept at the source (`--resume` delivers them again).
-  This supersedes, for a pull with a session, the fresh primed barrier below;
-- a pull without a session (`_deliver` from a remote source) whose `syncfs`
-  commit failed under `fail` discards the landing and pulls the chunk once more
-  into a fresh landing scratch under a fresh, primed barrier (one more adapter
-  `pull`); a clean commit of that one proves it durable, and a second failure
-  fails the chunk with its holds kept at the source (`--resume` delivers it
-  again). A failed walk of strategy `fsync` is exact and not pulled again. A remote-to-remote relay (with or without
-  sessions) has no barrier (a temporary copy); its delivery follows the push rule;
+  every later one's kept at the source (`--resume` delivers them again). A
+  remote-to-remote relay has no barrier (a temporary copy); its delivery
+  follows the push rule;
 - landing copies are discarded and made once more with an fsync of every file
   (their sources are untouched), the chunk failing with its holds kept if that
   fails, while any other copy error fails the chunk at once.
@@ -1852,8 +1848,8 @@ platform_tag, built_at}`.
   leaves only `.old.<t>`, which lookups use as the installation and which `gc`
   moves back into place; `gc` removes an `.old.<t>` tree only once the
   installation exists.
-- **Install a copy** (the receiving side of a transfer, hidden
-  `workflow install --workspace WS --from-store DIR…`) takes another
+- **Install a copy** (the receiving side of a transfer, a transfer session's
+  `install` request) takes another
   workspace's store entry: only `id`, `reference`, `calls` and `slots` from its
   `install.json` (a known id prefix, a git id pinned to a commit, `calls`
   naming the manifest's fixed-call aliases, `slots` its call slot aliases; a
@@ -1990,7 +1986,10 @@ never empty while a delivery is in doubt, so it always runs.
    whole tree also passes `walk_untrusted`, holds no symlink at all, holds only
    fresh jobs (no `state.json`, `seal.json`, `logs`, `attempts`,
    `workflow` or `.httk-job`) in state `ready`, and its root has no parent. A trusted root
-   may keep a parent outside the bundle.
+   may keep a parent outside the bundle. `bundle.json` takes at most 512 MiB
+   for a trusted bundle and 1 MiB for an untrusted one (about 5,000 jobs), and
+   its canonical form, which the adoption writes as `plan.json` (and, rekeyed,
+   as `bundle.json`), must fit the same bound.
 3. **Rekey** an untrusted bundle: each member gets the id whose first group
    (eight hex digits) is the client id's and whose rest is that of
    `uuid5(b480bb06-dc60-4d16-a78b-cc6b3af734b4, "<workspace-id>/<client-id>")`,
@@ -2052,12 +2051,10 @@ untrusted bundle and to nothing for a trusted one.
    locator. The jobs are now in neither state tree.
 2. **Copy and adopt.** On one filesystem DST adopts the hold directly (by
    move; a refusal moves it back). Across filesystems DST adopts by copy. To a
-   remote DST the bundle is pushed to DST's
-   `transfers/incoming/<transfer-id>.<t>` and adopted there by a remote
-   `job adopt`, or, over a transfer session that stages segments, into the
-   `landing` scratch of the segment's stage, adopted by a later `adopt_staged`
-   request; from a remote SRC it is pulled into a `landing` scratch (staged
-   there the same way when the pull uses a transfer session).
+   remote DST the bundle is sent over its transfer session into the `landing`
+   scratch of the segment's stage, adopted by a later `adopt_staged` request;
+   from a remote SRC it is fetched over SRC's transfer session into a
+   `landing` scratch, staged there the same way.
 3. **Release.** Only after DST adopted (or reported "already adopted") does
    SRC discard the hold (`take` into a `release` scratch, then discard); a hold
    already gone is fine.
@@ -2080,7 +2077,7 @@ does not have the jobs.
 | adopt, during the rekey | `rekey.json` | reconciler finishes the recorded rekey |
 | adopt, after `plan.json` | some members published | reconciler publishes the rest |
 | transfer, after the hold | `outgoing/<T>` | the next run or `--resume` re-drives it |
-| transfer, after a remote push | `incoming/<T>.<t>` on DST | re-driven; a stale copy is reported by hygiene |
+| transfer, staged on a remote DST | the stage's owner scratch on DST | the stage's owner is recovered there; the hold is re-driven |
 | transfer, adopted but not released | the jobs in DST, the hold in SRC | the re-drive finds "already adopted" and releases |
 
 **Delivery is at least once.** After a crash between a delivery and the source

@@ -139,8 +139,10 @@ def test_a_broken_frame_is_a_latched_protocol_error(wire: bytes, message: str) -
         reader.read_frame()  # latched: nothing after a broken frame is trusted
 
 
-def test_json_limit_is_64_mib() -> None:
-    assert JSON_LIMIT == 64 << 20
+def test_json_limit_is_512_mib() -> None:
+    # Transfer protocol 2 (plan WORKFLOW_TRANSFER_SESSION §7.12): a hold or an adoption of a tree of about a million
+    # jobs fits one message.
+    assert JSON_LIMIT == 512 << 20
 
 
 def test_encoding_refuses_what_decoding_would() -> None:

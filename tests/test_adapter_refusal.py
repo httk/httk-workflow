@@ -15,8 +15,6 @@ def _request(operation: str, root: Path) -> dict[str, object]:
         return {"source": str(root / "source"), "destination": str(root / "destination")}
     if operation in {"invoke", "status"}:
         return {"argv": ["true"]}
-    if operation == "deliver":
-        return {"source": str(root / "source"), "files": ["item"], "argv": ["httk", "--version"]}
     return {}
 
 

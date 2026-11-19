@@ -39,7 +39,7 @@ type Extract = Callable[[IO[bytes], Path], None]
 
 
 def receive_tar(workspace: Workspace, landing: Path, **options: Any) -> list[str]:
-    """The far side's receiver reading standard input, as ``job adopt --stdin-tar`` hands it its stream."""
+    """The far side's receiver reading standard input (a transfer session's ``stage`` reads its upload alike)."""
 
     return _landing.receive_tar(workspace, landing, sys.stdin.buffer, **options)
 

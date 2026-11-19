@@ -18,7 +18,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote
-from httk.workflow import Workspace, _frames, _kernel, _store
+from httk.workflow import Workspace, _frames, _kernel, _moving, _store
 from httk.workflow._state import Release
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _transfer as transfer_cli
@@ -71,7 +71,7 @@ if argv[:2] == ["workflow", "transfer-session"]:
         _transfer_session.OPS[nth_name] = exit_on_nth
     exit_workspace = os.environ.get("HTTK_TEST_EXIT_ADOPT_WORKSPACE")
     if exit_workspace:
-        for delivery in ("adopt", "stage"):
+        for delivery in ("stage",):
 
             def delivery_or_exit(request, real=_transfer_session.OPS[delivery]):
                 if request.header.get("workspace") == exit_workspace:
@@ -926,7 +926,7 @@ def test_holds_page_closes_a_page_at_its_byte_budget(
     assert [name for names in listed for name in names] == sorted(hold.transfer_id for hold in holds)
 
 
-def test_an_oversized_hold_is_answered_by_id_and_fails_alone_with_the_remedy(
+def test_an_oversized_hold_is_answered_by_id_and_fails_alone_with_the_manual_remedy(
     paged_ssh: tuple[Path, Workspace, str, Workspace, str],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -938,16 +938,54 @@ def test_an_oversized_hold_is_answered_by_id_and_fails_alone_with_the_remedy(
     document = json.loads(capsys.readouterr().out)
     (outcome,) = document["transfers"]
     assert outcome["status"] == "failed" and outcome["members"] == []
-    assert "too many for one answer" in outcome["message"]
-    assert "httk remote configure --set transfer_session=off cluster" in outcome["message"]
-    assert len(outgoing(far)) == 1 and find(near, mapping["id"]) is None
-    # The remedy: the adapter path carries it.
-    from test_job_transfer import adapter_path
+    message = outcome["message"]
+    assert "too many to describe in one answer of the transfer session" in message
+    (transfer_id,) = outgoing(far)
+    assert f".httk-workspace/transfers/outgoing/{transfer_id}/ of cluster:{far_name}" in message
+    assert "`httk job adopt BUNDLE` in the destination workspace" in message
+    assert f"`httk job transfer --release {transfer_id} cluster:{far_name}`" in message
+    assert "transfer_session" not in message and find(near, mapping["id"]) is None
+    # The remedy, by hand: copy the hold, adopt the copy, release the hold.
+    copy = project.parent / "carried" / transfer_id
+    shutil.copytree(far.control / "transfers" / "outgoing" / transfer_id, copy, symlinks=True)
+    context = CLIContext("httk", project)
+    assert command(["job", "adopt", "--workspace", near_name, str(copy)], context) == 0
+    assert command(["job", "transfer", "--release", transfer_id, f"cluster:{far_name}"], context) == 0
+    capsys.readouterr()
+    assert find(near, mapping["id"]) is not None and outgoing(far) == []
 
-    adapter_path(project)
-    assert run(project, "--json", "-q", "--resume", f"cluster:{far_name}", near_name) == 0
-    assert [o["status"] for o in json.loads(capsys.readouterr().out)["transfers"]] == ["adopted"]
-    assert find(near, mapping["id"]) is not None
+
+def test_an_oversized_hold_without_a_destination_id_keeps_away_copies_by_the_named_remedy(
+    paged_ssh: tuple[Path, Workspace, str, Workspace, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A hold that records no destination workspace id (as a remote-to-remote one): a release with --keep alone
+    # would keep nothing, so the remedy names --destination-id.
+    project, near, near_name, far, far_name = paged_ssh
+    monkeypatch.setenv("HTTK_TEST_ANSWER_BUDGET", "300")  # smaller than any hold's document
+    mapping, _, _ = single(far)
+    assert run(tmp_path, "--hold", *ids(mapping), str(far.root), str(near.root)) == 0  # no --destination-id
+    (transfer_id,) = outgoing(far)
+    assert _moving.Hold.from_mapping(transfer_cli.status_document(far)["holds"][0]).destination_workspace_id is None
+    capsys.readouterr()
+    assert run(project, "--json", "-q", "--keep", "--resume", f"cluster:{far_name}") == 1
+    (outcome,) = json.loads(capsys.readouterr().out)["transfers"]
+    message = outcome["message"]
+    release = f"httk job transfer --release {transfer_id} --keep --destination-id ID cluster:{far_name}"
+    assert f"`{release}`, ID being the workspace_id that `httk workspace status --json DST` reports" in message
+    # The remedy, by hand, as the message names it.
+    copy = tmp_path / "carried" / transfer_id
+    shutil.copytree(far.control / "transfers" / "outgoing" / transfer_id, copy, symlinks=True)
+    context = CLIContext("httk", project)
+    assert command(["job", "adopt", "--workspace", near_name, str(copy)], context) == 0
+    argv = release.replace(" ID ", f" {near.workspace_id} ").split()[1:]
+    assert command(argv, context) == 0
+    capsys.readouterr()
+    assert outgoing(far) == [] and find(near, mapping["id"]) is not None
+    kept = find(far, mapping["id"])
+    assert kept is not None and kept.state == "away"
 
 
 def test_hold_page_clamps_its_limits_to_the_far_side_s_maxima(
@@ -1139,30 +1177,6 @@ def test_a_pull_installs_and_builds_its_workflows_once_before_the_first_page_s_a
     assert (len(commands), starts(commands)) == (1, 1)
 
 
-# -- the adapter path keeps holding everything first ----------------------------------------------------------------
-
-
-def test_the_adapter_path_holds_every_page_and_delivers_once(
-    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    project = tmp_path / "project"
-    initialize_project(project, name="paged-adapter")
-    fake_remote(project, transfer_session="off")
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(remote.root, "far")
-    paged(monkeypatch, 1)
-    calls = adapter_calls(monkeypatch)
-    plan = jobs(near, 3)
-    assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
-    document = json.loads(capsys.readouterr().out)
-    assert [outcome["status"] for outcome in document["transfers"]] == ["adopted"] * 3
-    # The October 25 counts: one delivery of the three holds.
-    assert calls == ["deliver job adopt"]
-    commands = remote.commands()
-    assert (len(commands), starts(commands)) == (1, 1)
-    assert_in(far, plan)
-
-
 # -- correction round 1 (the Fable and Codex reviews) ---------------------------------------------------------------
 
 
@@ -1267,42 +1281,6 @@ def test_the_whole_answer_is_measured_again_after_its_holds_are_chosen(
     rest = _transfer_session._fit(answer, [("hold", hold) for hold in holds])
     assert len(_frames.json_payload({"ok": True, **answer})) <= 1200
     assert 0 < len(answer["holds"]) < 4 and len(rest) == 4 - len(answer["holds"])
-
-
-def test_a_push_without_a_session_holds_its_selection_as_before_sessions(
-    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # E5: a DST that serves no session (transfer_session=off): everything held first, today's error for a listed job
-    # claimed before its hold, no changed count; one delivery.
-    project = tmp_path / "project"
-    initialize_project(project, name="paged-legacy")
-    fake_remote(project, transfer_session="off")
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(remote.root, "far")
-    plan = jobs(near, 3)
-    paged(monkeypatch, 1)
-    other = cli_owner(near)
-    real = transfer_cli.iter_jobs
-    taken: list[Any] = []
-
-    def racing(workspace: Any, states: Any = None, *, placement_prefix: Any = None) -> Any:
-        listed = list(real(workspace, states, placement_prefix=placement_prefix))
-        if states is not None and not taken:  # a manager claims the second listed job right after the listing
-            taken.append(_kernel.claim(workspace, other, listed[1]))
-        return iter(listed)
-
-    monkeypatch.setattr(transfer_cli, "iter_jobs", racing)
-    calls = adapter_calls(monkeypatch)
-    assert run(project, "--json", "-q", "--state", "succeeded", near_name, f"cluster:{far_name}") == 1
-    document = json.loads(capsys.readouterr().out)
-    assert "changed" not in document
-    (error,) = document["errors"]
-    assert error == f"{taken[0].job_key} moved before it could be claimed"
-    assert [outcome["status"] for outcome in document["transfers"]] == ["adopted"] * 2
-    assert calls == ["deliver job adopt"]
-    taken[0].give_back()
-    other.close()
-    assert sum(find(far, mapping["id"]) is not None for mapping, _, _ in plan) == 2
 
 
 def test_a_named_job_moved_to_another_step_before_its_claim_is_left_out(
@@ -1769,27 +1747,6 @@ def test_a_hold_page_refused_before_its_owner_leaves_the_selection_where_it_was(
     assert len(page["holds"]) == 2 and page["done"] is True
 
 
-def test_an_adapter_destination_s_earlier_holds_are_delivered_once(
-    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # Earlier holds bound for a DST without a session are gathered over every page of step 1 and delivered once.
-    project = tmp_path / "project"
-    initialize_project(project, name="paged-adapter-resume")
-    fake_remote(project, transfer_session="off")
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(remote.root, "far")
-    plan = jobs(near, 3)
-    for mapping, _, _ in plan:
-        assert run(project, "--hold", *ids(mapping), near_name, f"cluster:{far_name}") == 0
-    capsys.readouterr()
-    paged(monkeypatch, 1)
-    calls = adapter_calls(monkeypatch)
-    assert run(project, "--json", "-q", "--resume", near_name, f"cluster:{far_name}") == 0
-    assert [outcome["status"] for outcome in json.loads(capsys.readouterr().out)["transfers"]] == ["adopted"] * 3
-    assert calls == ["deliver job adopt"]
-    assert_in(far, plan)
-
-
 def test_holds_page_measures_its_whole_answer_with_its_diagnostics(
     tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1838,7 +1795,9 @@ def test_a_first_hold_in_the_gap_of_the_cursor_is_answered_by_id_and_nothing_is_
     assert run(project, "--json", "-q", "--resume", f"cluster:{far_name}") == 1
     transfers = json.loads(capsys.readouterr().out)["transfers"]
     assert sorted(outcome["transfer_id"] for outcome in transfers) == sorted(outgoing(far))
-    assert len(transfers) == 3 and all("too many for one answer" in outcome["message"] for outcome in transfers)
+    assert len(transfers) == 3 and all(
+        "too many to describe in one answer" in outcome["message"] for outcome in transfers
+    )
     assert ops(requests) == ["holds_page"] * 3
 
 

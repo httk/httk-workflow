@@ -12,11 +12,9 @@ import argparse
 import contextlib
 import json
 import os
-import re
 import sys
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from functools import partial
 from pathlib import Path
 from typing import IO, Any, cast
 
@@ -46,9 +44,7 @@ from ._common import (
     _ERRORS,
     _add_adapter_timeout,
     _add_by_path_argument,
-    _durable,
     _leaf,
-    _local_root,
     _modifiable,
     _remote_workspace_read,
     _resolve_binding,
@@ -549,12 +545,6 @@ def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
         return _remote_relay(binding, context, arguments, "list")
     installations = _store.list_installed(Workspace(root))
     rows = [_installed_row(installed) for installed in installations]
-    if arguments.built_for:
-        # Whether a [workflow.build] package is built for this platform (null without one), for the ids a transfer
-        # asks about: the platform probe runs package code, so never for a plain listing.
-        for row, installed in zip(rows, installations, strict=True):
-            if installed.id in arguments.built_for:
-                row["built"] = _store.built(installed)
     if not rows and not arguments.json:
         print(f"no workflows installed in {root}")
     # A recorded tag or branch shows as the NAME@REF selector of that installation.
@@ -685,71 +675,17 @@ def _install_targets(source: str) -> tuple[list[str], dict[str, WorkflowProvider
     return [provider.workflow_id for provider in providers], siblings
 
 
-#: A ``workflow install --token``: the ``tmp/push.<token>/`` landing name ``workspace gc`` sweeps.
-_PUSH_TOKEN = re.compile(r"[0-9a-f]{32}")
-
-
-def _install_copies(arguments: argparse.Namespace, context: Any) -> int:
-    """Install copied store entries (``--from-store DIR...``) under their recorded ids, printing one JSON document.
-
-    See :func:`install_copies` for the document. The DIRs are left in place unless ``--consume`` discards the pushed
-    copy holding them, ``tmp/push.<hex>/``, whatever the outcome once the workspace is known (a failure to discard
-    it goes to stderr only). With ``--stdin-tar`` the entries arrive as one tar stream on standard input instead.
-    """
-
-    mode = "--stdin-tar" if arguments.stdin_tar else "--from-store"
-    given = [flag for flag in ("sources", "no_calls", "no_build", "format") if getattr(arguments, flag)]
-    if given:
-        raise ValueError(f"{mode} cannot be combined with {given[0].replace('_', '-')}")
-    if arguments.stdin_tar and arguments.from_store is not None:
-        raise ValueError("--stdin-tar cannot be combined with --from-store")
-    if arguments.token is not None and not arguments.stdin_tar:
-        raise ValueError("--token names the landing of --stdin-tar")
-    if arguments.token is not None and not _PUSH_TOKEN.fullmatch(arguments.token):
-        raise ValueError(f"--token must be 32 lowercase hexadecimal digits: {arguments.token!r}")
-    if arguments.workspace is None:
-        raise ValueError(f"{mode} needs --workspace")
-    workspace = Workspace(
-        _local_root(arguments, context, action="install workflows into it"), durable=_durable(arguments)
-    )
-    entries: list[str] = list(arguments.from_store or ())
-    try:
-        _document, returncode = install_copies(
-            workspace,
-            directories=entries,
-            stream=sys.stdin.buffer if arguments.stdin_tar else None,
-            token=arguments.token,
-            source_label=arguments.source_label,
-            build=arguments.build,
-            also_build=arguments.also_build,
-            # Before a stream's landing is discarded, as the document reports what is installed already.
-            report=lambda document: print(json.dumps(document, indent=2, sort_keys=True)),
-        )
-    finally:
-        if arguments.consume and not arguments.stdin_tar:
-            for directory in {Path(directory).parent: directory for directory in entries}.values():
-                try:
-                    _consume(workspace, directory)
-                except _ERRORS as exc:
-                    print(f"{directory}: the pushed copy was not discarded: {exc}", file=sys.stderr)
-    return returncode
-
-
 def install_copies(
     workspace: Workspace,
     *,
-    directories: Sequence[str] = (),
     stream: IO[bytes] | None = None,
-    token: str | None = None,
     source_label: str | None = None,
     build: bool = False,
     also_build: Sequence[str] = (),
     finish: Callable[[], object] | None = None,
     progress: _landing.Progress | None = None,
-    report: Callable[[dict[str, object]], object] | None = None,
 ) -> tuple[dict[str, object], int]:
-    """Install copied store entries under their recorded ids, and build: ``workflow install --json --from-store`` or
-    ``--stdin-tar``, which the transfer session's ``install`` op shares.
+    """Install copied store entries under their recorded ids, and build: the transfer session's ``install`` op.
 
     Each entry yields a row ``{"directory", "id", "status"}``, in order, with status ``installed``, ``present``
     (that id with the same tree), ``mismatch`` (that id with another tree, left as it is), ``refused`` (with
@@ -760,35 +696,30 @@ def install_copies(
     as ``built``: ``[{"id", "status", "reason"?}]``. A failed build leaves the installation in place. A build's own
     output goes to standard error.
 
-    With *stream* the entries arrive as one tar stream, extracted into ``tmp/push.<token>/`` (which ``workspace gc``
-    sweeps) and always discarded afterwards. With neither entries nor a stream, only the *also_build* ids are built:
+    The entries arrive as one tar stream (*stream*), extracted into a fresh ``tmp/push.<hex>/`` (which
+    ``workspace gc`` sweeps) and always discarded afterwards. Without a stream, only the *also_build* ids are built:
     ``{"workflows": [], "built": [...]}``.
 
     Nothing is installed when this raises before its first install (*progress* is told ``install`` once the
     command's owner is registered); an error after that leaves the owner for recovery.
 
     :param workspace: The workspace to install into.
-    :param directories: The entries' directories (``--from-store``).
-    :param stream: The binary tar stream of the entries (``--stdin-tar``) instead.
-    :param token: The stream's landing name (32 lowercase hexadecimal digits), or ``None`` for a fresh one.
+    :param stream: The binary tar stream of the entries.
     :param source_label: How the installations record their source.
-    :param build: Build what this installed (``--build``).
-    :param also_build: Installed ids to build (``--also-build``).
+    :param build: Build what this installed.
+    :param also_build: Installed ids to build.
     :param finish: See :func:`httk.workflow._landing.receive_tar`.
     :param progress: Told the phases of :func:`httk.workflow._landing.receive_tar`, then ``install`` with the entries
         done, then ``build`` before the builds.
-    :param report: Given the document before a stream's landing is discarded.
     :return: The document ``{"workflows": rows}`` (with ``"built"`` when *also_build* is given) and the exit status:
         1 when an entry or a build failed, else 0.
     """
 
-    from ._job import _warn_leftovers
-
     label = source_label or "a copied store entry"
     rows: list[dict[str, object]] = []
     built: list[dict[str, object]] = []
-    landing = workspace.control / "tmp" / f"push.{token or uuid.uuid4().hex}"
-    entries = list(directories)
+    landing = workspace.control / "tmp" / f"push.{uuid.uuid4().hex}"
+    entries: list[str] = []
     try:
         require_cli_modifiable(workspace)
         if stream is not None:
@@ -798,7 +729,6 @@ def install_copies(
                 stream,
                 finish=finish,
                 progress=progress,
-                on_leftovers=partial(_warn_leftovers, landing),
             )
             entries = [str(landing / name) for name in received]
         with _kernel.register_owner(
@@ -838,8 +768,6 @@ def install_copies(
         document: dict[str, object] = {"workflows": rows}
         if also_build:
             document["built"] = built
-        if report is not None:
-            report(document)
     finally:
         if stream is not None:
             _fs.discard(_fs.loc(landing), trash_dir=workspace.control / "tmp", durable=workspace.durable)
@@ -861,12 +789,6 @@ def _build_reason(workspace: Workspace, owner: _kernel.Owner, workflow_id: str) 
 def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
     """Install workflows into a workspace's store, or fetch git workflows on this machine without one."""
 
-    if arguments.from_store is not None or arguments.stdin_tar or (arguments.also_build and not arguments.sources):
-        return _install_copies(arguments, context)
-    if arguments.source_label is not None:
-        raise ValueError("--source-label applies only to --from-store")
-    if arguments.build or arguments.also_build:
-        raise ValueError("--build and --also-build apply only to --from-store or --stdin-tar")
     if not arguments.sources:
         raise ValueError("give at least one SOURCE to install")
     if arguments.workspace is None:
@@ -1109,7 +1031,6 @@ def build_list_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     )
     _add_store_options(listing, "list the workflows installed in this workspace")
     _add_by_path_argument(listing)
-    listing.add_argument("--built-for", action="append", default=[], metavar="ID", help=argparse.SUPPRESS)
 
 
 def build_describe_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1165,13 +1086,6 @@ def build_install_parser(subparsers: argparse._SubParsersAction[argparse.Argumen
     install.add_argument("--no-build", action="store_true", help="do not build a [workflow.build] package")
     install.add_argument("--format", metavar="FORMAT", help="force FORMAT for a bare workflow document or directory")
     install.add_argument("--consume", action="store_true", help=argparse.SUPPRESS)
-    # Hidden: the receiving side of a transfer, installing copied store entries under their recorded ids.
-    install.add_argument("--from-store", metavar="DIR", nargs="+", help=argparse.SUPPRESS)
-    install.add_argument("--source-label", metavar="TEXT", help=argparse.SUPPRESS)
-    install.add_argument("--build", action="store_true", help=argparse.SUPPRESS)
-    install.add_argument("--stdin-tar", action="store_true", help=argparse.SUPPRESS)
-    install.add_argument("--token", metavar="TOKEN", help=argparse.SUPPRESS)
-    install.add_argument("--also-build", action="append", default=[], metavar="ID", help=argparse.SUPPRESS)
     uninstall = _leaf(
         subparsers,
         "uninstall",

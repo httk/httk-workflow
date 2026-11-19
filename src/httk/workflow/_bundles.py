@@ -41,7 +41,7 @@ import os
 import re
 import stat
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -66,9 +66,17 @@ BUNDLE_FORMAT = "httk-workflow-bundle"
 BUNDLE_VERSION = 1
 REKEY_FORMAT = "httk-workflow-rekey"
 REKEY_VERSION = 1
-#: The largest accepted ``bundle.json``, in bytes.
-MAX_MANIFEST_BYTES = 1 << 20
-#: The largest accepted ``rekey.json`` (a manifest plus one name pair per member), in bytes.
+#: The largest accepted ``bundle.json`` of a trusted bundle (and a trusted adoption's ``plan.json`` and
+#: ``replaces.json``), in bytes: 512 MiB, the transfer session's largest message, so a tree's records never limit it
+#: before the session does (at about 220 bytes a member, some 2.4 million members). :func:`build_bundle` refuses a
+#: larger one before anything moves. Read at call time, never copied.
+MAX_MANIFEST_BYTES = 512 << 20
+#: The largest accepted ``bundle.json`` of an untrusted bundle (an exchange submission) and of its adoption's
+#: ``plan.json``, in bytes: 1 MiB, about 5,000 jobs. The exchange is a trust boundary: parsing a manifest takes
+#: some 25 times its size in memory, again on every recovery of its adoption.
+MAX_UNTRUSTED_MANIFEST_BYTES = 1 << 20
+#: The largest accepted ``rekey.json`` (an untrusted adoption's rekeyed manifest plus one name pair per member), in
+#: bytes: room for a manifest at :data:`MAX_UNTRUSTED_MANIFEST_BYTES` and its pairs.
 MAX_REKEY_BYTES = 4 << 20
 
 # The fixed namespace of rekeyed exchange job UUIDs: the client's first group, then the rest of
@@ -122,7 +130,37 @@ def _uuid(value: object, name: str) -> str:
 def _string(value: object, name: str) -> str:
     if not isinstance(value, str):
         raise BundleError(f"{name} must be a string")
+    return _encodable(value, name)
+
+
+#: A surrogate code point: text holding one (an escaped lone surrogate in valid JSON) cannot be written as UTF-8.
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _encodable(value: str, name: str) -> str:
+    """Return *value*, refusing text that cannot be written as UTF-8 (an escaped lone surrogate in valid JSON)."""
+
+    if _SURROGATE.search(value) is not None:
+        raise BundleError(f"{name} is not valid Unicode text: {value!r}")
     return value
+
+
+def _surrogate_text(value: object) -> str | None:
+    """Return the first text of a decoded JSON *value* (a key or a string, at any depth) holding a surrogate code
+    point, or ``None``; walked without recursion, and without copying the document."""
+
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            if _SURROGATE.search(item) is not None:
+                return item
+        elif isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return None
 
 
 def _optional(value: object, name: str) -> str | None:
@@ -130,6 +168,8 @@ def _optional(value: object, name: str) -> str | None:
 
 
 def _placement_text(value: object, name: str) -> PurePosixPath:
+    if isinstance(value, str):
+        _encodable(value, name)  # first: parse_placement_text encodes its components
     try:
         placement = parse_placement_text(value, name)
     except FormatError as exc:
@@ -415,12 +455,17 @@ def _refuse_constant(name: str) -> object:
 
 def _decode(data: bytes, name: str) -> object:
     try:
-        return json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object, parse_constant=_refuse_constant)
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object, parse_constant=_refuse_constant)
     except BundleError:
         raise
     except (ValueError, RecursionError) as exc:
         # ValueError covers undecodable UTF-8, malformed JSON and integers beyond the conversion limit.
         raise BundleError(f"{name} is not valid UTF-8 JSON: {exc}") from exc
+    # Valid JSON may still escape a lone surrogate, which no UTF-8 record written from it could hold: anywhere in the
+    # document (a key, a field read as an opaque value), it is refused here, never on a later write.
+    if (text := _surrogate_text(value)) is not None:
+        raise BundleError(f"{name} is not valid UTF-8 JSON: it escapes a lone surrogate in {text!r}")
+    return value
 
 
 def _read_optional(path: Path, limit: int) -> bytes | None:
@@ -438,16 +483,52 @@ def _read(path: Path, limit: int) -> bytes:
     return data
 
 
-def read_manifest(path: Path) -> tuple[bytes, BundleManifest] | None:
+def manifest_limit(*, untrusted: bool) -> int:
+    """Return the largest manifest a reader accepts: :data:`MAX_UNTRUSTED_MANIFEST_BYTES` on the untrusted path (an
+    exchange submission and its adoption), else :data:`MAX_MANIFEST_BYTES`; read now, so a test may scale them.
+
+    :param untrusted: Whether the manifest is on the untrusted path.
+    :return: The limit in bytes.
+    """
+
+    return MAX_UNTRUSTED_MANIFEST_BYTES if untrusted else MAX_MANIFEST_BYTES
+
+
+def read_manifest(path: Path, *, untrusted: bool = False) -> tuple[bytes, BundleManifest] | None:
     """Read a manifest file (``bundle.json``, or an adoption's ``plan.json``): bounded, regular, never followed.
 
     :param path: The file.
+    :param untrusted: Apply the untrusted path's bound (:func:`manifest_limit`).
     :return: Its exact bytes and the parsed manifest, or ``None`` when it does not exist.
     :raises BundleError: For a symlink, a special or oversized file, or a malformed manifest.
     """
 
-    data = _read_optional(path, MAX_MANIFEST_BYTES)
+    data = _read_optional(path, manifest_limit(untrusted=untrusted))
     return None if data is None else (data, BundleManifest.from_json(data))
+
+
+def check_rewritten(manifest: BundleManifest, *, untrusted: bool) -> bytes:
+    """Return the bytes an adoption writes for *manifest* (its ``plan.json``, a rekeyed ``bundle.json``), refusing
+    a manifest whose canonical form a reader would not accept: a valid ``bundle.json`` at the limit without its
+    trailing newline takes one byte more rewritten.
+
+    :param manifest: The validated manifest.
+    :param untrusted: Whether it is on the untrusted path (:func:`manifest_limit`).
+    :return: The canonical bytes, :meth:`BundleManifest.to_json`.
+    :raises BundleError: When they exceed the limit, or hold text that cannot be written as UTF-8; nothing was
+        written.
+    """
+
+    try:
+        data = manifest.to_json()
+    except UnicodeError as exc:
+        raise BundleError(f"the manifest holds text that cannot be written as UTF-8: {exc}") from exc
+    if len(data) > (limit := manifest_limit(untrusted=untrusted)):
+        raise BundleError(
+            f"the manifest of {len(manifest.members)} jobs takes {len(data)} bytes as rewritten by its adoption, more "
+            f"than the {limit} bytes its reader accepts"
+        )
+    return data
 
 
 # -- building -------------------------------------------------------------------------------------------------------
@@ -462,13 +543,14 @@ def build_bundle(
     destination_locator: str | None = None,
     owner_key: str | None = None,
     event: tuple[str, Mapping[str, object]] | None = None,
-    scratch: Path | None = None,
+    scratch: Callable[[], Path] | None = None,
 ) -> Path:
     """Build a bundle of quiescent owned jobs in an empty scratch of *owner* (a fresh ``eject`` one by default).
 
-    ``bundle.json`` is written first, recording each member's ``from`` state and
-    priority, and then each member is extracted out of ``owned/``. A crash, or an
-    error after k of n extractions, leaves the scratch for its reconciler.
+    Every check, the size of ``bundle.json`` (at most :data:`MAX_MANIFEST_BYTES`) included, passes before the
+    scratch is made. ``bundle.json`` is written first, recording each member's ``from`` state and priority, and then
+    each member is extracted out of ``owned/``. A crash, or an error after k of n extractions, leaves the scratch for
+    its reconciler.
 
     :param owner: The owner holding every member.
     :param members: The jobs, top-down: the root first, every parent before its children.
@@ -479,13 +561,57 @@ def build_bundle(
     :param event: A run-log event and its members, appended to each member that already has a run log once
         every check passed, right before its extraction; a fresh job (no run log) gets none, so it remains
         adoptable as an untrusted bundle, and a refusal leaves no such line.
-    :param scratch: The owner's empty scratch to build in, created by the caller (whose purpose names the
-        reconciler); ``None`` creates an ``eject`` scratch once every check passed.
+    :param scratch: Makes the owner's empty scratch to build in (whose purpose names the reconciler), called once
+        every check passed; ``None`` makes an ``eject`` scratch.
     :return: The bundle directory, ``<scratch>/bundle``.
     :raises ValueError: For no members, a member held by another owner or listed out of order.
-    :raises httk.workflow.errors.FormatError: For a malformed id or locator, or a ``job.json`` that is
-        unreadable or disagrees with its handle (:class:`BundleError` for all but an unreadable one).
+    :raises httk.workflow.errors.FormatError: For a malformed id or locator, a ``job.json`` that is unreadable or
+        disagrees with its handle, or a ``bundle.json`` larger than :data:`MAX_MANIFEST_BYTES` (:class:`BundleError`
+        for all but an unreadable ``job.json``).
     :raises httk.workflow.errors.WorkflowError: While a member's attempt runs or after it was released.
+    """
+
+    return build_bundle_with_manifest(
+        owner,
+        members,
+        source_workspace_id=source_workspace_id,
+        destination_workspace_id=destination_workspace_id,
+        destination_locator=destination_locator,
+        owner_key=owner_key,
+        event=event,
+        scratch=scratch,
+    )[0]
+
+
+def build_bundle_with_manifest(
+    owner: Owner,
+    members: Sequence[OwnedJob],
+    *,
+    source_workspace_id: str,
+    destination_workspace_id: str | None = None,
+    destination_locator: str | None = None,
+    owner_key: str | None = None,
+    event: tuple[str, Mapping[str, object]] | None = None,
+    scratch: Callable[[], Path] | None = None,
+    untrusted: bool = False,
+) -> tuple[Path, bytes, BundleManifest]:
+    """:func:`build_bundle`, also returning what it wrote: ``bundle.json``'s exact bytes and the manifest, so a
+    caller need not read them back.
+
+    :param owner: See :func:`build_bundle`.
+    :param members: See :func:`build_bundle`.
+    :param source_workspace_id: See :func:`build_bundle`.
+    :param destination_workspace_id: See :func:`build_bundle`.
+    :param destination_locator: See :func:`build_bundle`.
+    :param owner_key: See :func:`build_bundle`.
+    :param event: See :func:`build_bundle`.
+    :param scratch: See :func:`build_bundle`.
+    :param untrusted: The bundle goes where it is adopted as untrusted (an exchange's inbox): its ``bundle.json``
+        is held to :data:`MAX_UNTRUSTED_MANIFEST_BYTES` instead, before anything moves.
+    :return: The bundle directory, the bytes of its ``bundle.json`` and the manifest they encode.
+    :raises ValueError: See :func:`build_bundle`.
+    :raises httk.workflow.errors.FormatError: See :func:`build_bundle`.
+    :raises httk.workflow.errors.WorkflowError: See :func:`build_bundle`.
     """
 
     if not members:
@@ -522,10 +648,23 @@ def build_bundle(
     by_id = {member.job_id: member for member in manifest.members}
     for index, definition in enumerate(definitions):
         _check_job(manifest, index, definition, by_id, untrusted=False)
+    data = manifest.to_json()
+    if untrusted and len(data) > (limit := manifest_limit(untrusted=True)):
+        # An exchange would refuse it after the client's jobs left: refused here, with every job still in place.
+        raise BundleError(
+            f"the submission of {len(entries)} jobs would have a bundle.json of {len(data)} bytes, more than the "
+            f"{limit} bytes an exchange accepts; nothing was moved: submit the tree in parts"
+        )
+    if len(data) > (limit := manifest_limit(untrusted=False)):
+        # Never written: a manifest no reader accepts would strand the members (nothing could return them).
+        raise BundleError(
+            f"the bundle of {len(entries)} jobs would have a bundle.json of {len(data)} bytes, more than the "
+            f"{limit} bytes any reader accepts; nothing was moved: move a smaller tree"
+        )
     durable = owner.workspace.durable
-    bundle = (owner.scratch("eject") if scratch is None else scratch) / "bundle"
+    bundle = (owner.scratch("eject") if scratch is None else scratch()) / "bundle"
     _fs.make_dirs(bundle, durable=durable)
-    _fs.write_file(_fs.loc(bundle / _MANIFEST_NAME), manifest.to_json(), durable=durable)
+    _fs.write_file(_fs.loc(bundle / _MANIFEST_NAME), data, durable=durable)
     for job, member in zip(members, manifest.members, strict=True):
         target = manifest.member_dir(bundle, member)
         _fs.make_dirs(target.parent, durable=durable)
@@ -533,7 +672,7 @@ def build_bundle(
         if event is not None and _fs.exists(_fs.loc(job.path / "logs" / "runlog.jsonl")):
             job.append_log(event[0], **event[1])
         job.extract(target)
-    return bundle
+    return bundle, data, manifest
 
 
 # -- validating -----------------------------------------------------------------------------------------------------
@@ -543,6 +682,11 @@ def _check_job(
     manifest: BundleManifest, index: int, job: JobDefinition, by_id: Mapping[str, BundleMember], *, untrusted: bool
 ) -> None:
     member = manifest.members[index]
+    if untrusted:
+        try:
+            job.encode()  # the rekey rewrites it: text it could not write is refused now, not halfway through
+        except (UnicodeError, FormatError) as exc:
+            raise BundleError(f"member {member.job_id}: job.json cannot be rewritten: {exc}") from exc
     if untrusted and job.embedded is not None:
         # An exchange job runs only workflows the workspace operator installed, every member alike.
         raise BundleError(
@@ -639,12 +783,14 @@ def _structural_kinds(path: Path, manifest: BundleManifest) -> dict[PurePosixPat
     return kinds
 
 
-def _read_manifest(path: Path, kind: str | None) -> BundleManifest:
+def _read_manifest(path: Path, kind: str | None, *, untrusted: bool) -> BundleManifest:
     if kind != "file":
         raise BundleError(f"{path}/bundle.json is {'missing' if kind is None else f'a {kind}'}, not a regular file")
-    read = read_manifest(path / _MANIFEST_NAME)
+    read = read_manifest(path / _MANIFEST_NAME, untrusted=untrusted)
     if read is None:
         raise BundleError(f"{path / _MANIFEST_NAME} does not exist")
+    # Its adoption rewrites it canonically (plan.json, a rekeyed bundle.json): that must fit the same reader.
+    check_rewritten(read[1], untrusted=untrusted)
     return read[1]
 
 
@@ -680,7 +826,7 @@ def _validate(path: Path, *, untrusted: bool, limits: _fs.WalkLimits) -> BundleM
         except _fs.UntrustedContentError as exc:
             raise BundleError(f"{path}: {exc}") from exc
         kinds = {entry.relative: str(entry.kind) for entry in entries}
-        manifest = _read_manifest(path, kinds.get(_MANIFEST_NAME))
+        manifest = _read_manifest(path, kinds.get(_MANIFEST_NAME), untrusted=True)
         if manifest.members[0].parent_job_id is not None:
             raise BundleError("the root of an untrusted bundle may not have a parent")
         if stale := [member.job_id for member in manifest.members if member.state != "ready"]:
@@ -692,7 +838,7 @@ def _validate(path: Path, *, untrusted: bool, limits: _fs.WalkLimits) -> BundleM
             kind: str | None = _kind(os.lstat(path / _MANIFEST_NAME).st_mode)
         except FileNotFoundError:
             kind = None
-        manifest = _read_manifest(path, kind)
+        manifest = _read_manifest(path, kind, untrusted=False)
         kinds = _structural_kinds(path, manifest)
     _check_structure(manifest, kinds, untrusted=untrusted)
     by_id = {member.job_id: member for member in manifest.members}
@@ -790,7 +936,11 @@ def rekey_untrusted(scratch: Path, bundle: Path, manifest: BundleManifest, *, wo
             raise BundleError(f"client job id {collisions[0]} collides with a rekeyed id")
         rekeyed, names = _rekey(manifest, forward), {new: old for old, new in forward.items()}
         record = {"format": REKEY_FORMAT, "format_version": REKEY_VERSION, "manifest": rekeyed.as_mapping()}
-        _fs.write_file(_fs.loc(scratch / "rekey.json"), json_bytes(record | {"exchange_names": names}), durable=True)
+        data = json_bytes(record | {"exchange_names": names})
+        if len(data) > MAX_REKEY_BYTES:
+            # Before anything is renamed: a record its reader would refuse must never be the only way forward.
+            raise BundleError(f"rekey.json would take {len(data)} bytes, more than the {MAX_REKEY_BYTES} accepted")
+        _fs.write_file(_fs.loc(scratch / "rekey.json"), data, durable=True)
     else:
         rekeyed, names = loaded
         forward = {old: new for new, old in names.items()}
@@ -828,7 +978,9 @@ def rekey_untrusted(scratch: Path, bundle: Path, manifest: BundleManifest, *, wo
             _fs.move_owned(_fs.loc(old_dir), _fs.loc(new_dir), durable=True)
         elif not _fs.exists(_fs.loc(new_dir)):
             raise BundleError(f"member {old.job_id} is missing from {bundle} under both its old and its new key")
-    _fs.write_file(_fs.loc(bundle / _MANIFEST_NAME), rekeyed.to_json(), durable=True)
+    # A guard that cannot fire: validation checked the canonical form (_read_manifest), and rekeying keeps its length
+    # (every id and key keeps its length).
+    _fs.write_file(_fs.loc(bundle / _MANIFEST_NAME), check_rewritten(rekeyed, untrusted=True), durable=True)
     # A resumed rekey may find the temporaries of a write that died; untrusted validation passed before rekey.json
     # existed, so at these positions such names are ours.
     _remove_write_temporaries(bundle, _MANIFEST_NAME.name)

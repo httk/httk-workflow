@@ -238,12 +238,14 @@ def test_a_session_primes_only_its_first_landing_and_another_session_primes_agai
     staged = _stage(peer, 1, far_name, near, holds[:1])
     assert staged["ok"] is True
     assert _adopt_staged(peer, 2, far_name, staged)["ok"] is True
-    assert _stage(peer, 3, far_name, near, holds[1:2])["ok"] is True
-    # The T3 adopt op is a transfer landing of the session too.
-    header = {"op": "adopt", "workspace": far_name, "token": _fs.fresh_token()}
-    adopted = _send_upload(peer, 4, header, stream(outgoing_dir(near), [holds[2].transfer_id]))
-    assert adopted["ok"] is True
-    assert _request(peer, 5, {"op": "bye"})["ok"] is True
+    second = _stage(peer, 3, far_name, near, holds[1:2])
+    assert second["ok"] is True
+    # A third landing of the session: no prime either.
+    third = _stage(peer, 4, far_name, near, holds[2:3])
+    assert third["ok"] is True
+    assert _adopt_staged(peer, 5, far_name, second)["ok"] is True
+    assert _adopt_staged(peer, 6, far_name, third)["ok"] is True
+    assert _request(peer, 7, {"op": "bye"})["ok"] is True
     assert peer.join() == 0
     assert calls.primed() == [True, False, False] and calls.calls == 4
     # A new connection has its own set: its first landing primes.

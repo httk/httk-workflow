@@ -18,7 +18,6 @@ import tarfile
 import tempfile
 import threading
 from collections.abc import Iterator, Sequence
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -31,13 +30,15 @@ from httk.workflow import Workspace, _fs, _kernel, _landing, _moving
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
+from httk.workflow.workflow_cli._describe import install_copies
+from test_deliver import adopt_stream as receive_push
 from test_deliver import hold_jobs, outgoing_dir, stream
 from test_job_transfer import jobs, outgoing, registered, selected
 from test_moving import assert_in, find, io_workers, place, tree  # noqa: F401 (io_workers: fixture)
 
 
 def receive_tar(workspace: Workspace, landing: Path, **options: Any) -> list[str]:
-    """The far side's receiver reading standard input, as ``job adopt --stdin-tar`` hands it its stream."""
+    """The far side's receiver reading standard input as its stream (a session hands it its upload)."""
 
     return _landing.receive_tar(workspace, landing, sys.stdin.buffer, **options)
 
@@ -48,8 +49,7 @@ def project(tmp_path: Path) -> Path:
 
     root = tmp_path / "project"
     initialize_project(root, name="sync")
-    # The adapter path, whose far side in_process_far_side runs in this process to observe its barrier.
-    fake_remote(root, template="local", name="cluster", transfer_session="off")
+    fake_remote(root, template="local", name="cluster")
     return root
 
 
@@ -59,7 +59,7 @@ def _fresh_caches(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class Events:
-    """One ordered record of barrier entries, ``syncfs`` calls, landed writes, copies, adapter pulls and takes."""
+    """One ordered record of barrier entries, ``syncfs`` calls, landed writes, copies, extractions and takes."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, *, syncfs_failures: Sequence[int | None] = ()) -> None:
         self.lock = threading.Lock()
@@ -73,7 +73,7 @@ class Events:
         #: Set while an extraction runs.
         self.extracting = False
         real_enter, real_syncfs, real_write = _fs.Barrier.__enter__, _fs._syncfs, _fs.write_all
-        real_take, real_copy, real_adapter = _kernel.take, _fs.copy_tree, transfer_cli._adapter
+        real_take, real_copy = _kernel.take, _fs.copy_tree
         real_landing, real_extract, real_adopt = _fs.fsync_landing, _fs.extract_tar, _moving.adopt
 
         def enter(barrier: _fs.Barrier) -> _fs.Barrier:
@@ -113,11 +113,6 @@ class Events:
             real_copy(src, dst, durable=durable, **options)
             self.add("copied", durable)
 
-        def adapter(end: Any, context: Any, arguments: Any, operation: str, *rest: Any) -> None:
-            self.add(f"{operation}-start", None)
-            real_adapter(end, context, arguments, operation, *rest)
-            self.add(f"{operation}-end", None)
-
         def extract_tar(*arguments: Any, **options: Any) -> int:
             self.add("extract-start", None)
             self.extracting = True
@@ -138,7 +133,6 @@ class Events:
         monkeypatch.setattr(_fs, "write_all", write_all)
         monkeypatch.setattr(_kernel, "take", take)
         monkeypatch.setattr(_fs, "copy_tree", copy_tree)
-        monkeypatch.setattr(transfer_cli, "_adapter", adapter)
         monkeypatch.setattr(_fs, "fsync_landing", fsync_landing)
         monkeypatch.setattr(_fs, "extract_tar", extract_tar)
         monkeypatch.setattr(_moving, "adopt", adopt)
@@ -185,14 +179,19 @@ def assert_syncfs_barrier(events: Events, start: str, end: str, published: str =
     assert events.syncfs_descriptors() == [descriptor, descriptor]
 
 
-# -- the far side of a push: job adopt --stdin-tar ---------------------------------------------------------------
+# -- the far side of a push: the transfer session's stage and adopt_staged ---------------------------------------
 
 
-def adopt_stream(monkeypatch: pytest.MonkeyPatch, cwd: Path, data: bytes, *argv: str) -> int:
-    """A durable ``job adopt --json --stdin-tar`` reading *data*."""
+def adopt_stream(_monkeypatch: pytest.MonkeyPatch, cwd: Path, data: bytes, *argv: str) -> int:
+    """The far side of a push receiving *data* (:func:`test_deliver.adopt_stream`), durable unless ``--no-durable``;
+    *argv* names ``--workspace NAME`` and optionally ``--sync fsync``, as a ``stage`` request's header does."""
 
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
-    return command(["job", "adopt", "--json", "--stdin-tar", *argv], CLIContext("httk", cwd))
+    parser = argparse.ArgumentParser(exit_on_error=False)
+    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--sync", choices=["fsync"])
+    parser.add_argument("--no-durable", action="store_true")
+    parsed = parser.parse_args(argv)
+    return receive_push(cwd, data, parsed.workspace, fsync=parsed.sync == "fsync", durable=not parsed.no_durable)
 
 
 def landings(workspace: Workspace) -> list[str]:
@@ -242,44 +241,6 @@ def test_a_failed_commit_refuses_the_pushed_stream_and_adopts_nothing(
     assert "take" not in events.kinds()
     assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
     assert landings(far) == []
-
-
-def in_process_far_side(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run a push's ``job adopt --stdin-tar`` in this process, so that its barrier can be observed."""
-
-    def deliver_call(
-        end: Any, context: CLIContext, arguments: Any, source: str, files: list[str], argv: list[str]
-    ) -> tuple[int, str, str]:
-        data = stream(Path(source), files)
-        out, err = io.StringIO(), io.StringIO()
-        with monkeypatch.context() as patch, redirect_stdout(out), redirect_stderr(err):
-            patch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
-            code = command(list(argv[1:]), CLIContext("httk", context.cwd))
-        return code, out.getvalue(), err.getvalue()
-
-    monkeypatch.setattr(transfer_cli, "_deliver_call", deliver_call)
-
-
-def test_a_push_refused_by_a_failed_commit_is_delivered_once_more_with_fsync(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    far.configure_settings({"io.sync": "syncfs"})
-    plan = jobs(near, 2)
-    in_process_far_side(monkeypatch)
-    events = Events(monkeypatch, syncfs_failures=[None, errno.EDQUOT])
-    assert transfer(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
-    outcomes = statuses(capsys)
-    # Before P1 the refusal took the holds back (not_moved); now its one retry, with --sync fsync, adopts them
-    # (the refused retry's take-back is in test_sync_errors_retry.py).
-    assert [outcome["status"] for outcome in outcomes] == ["adopted"] * 2
-    assert_in(far, plan)
-    assert outgoing(near) == [] and landings(far) == []
-    # The failed commit's two syncfs share one descriptor; the retry's fsync barrier calls none.
-    assert len(events.syncfs_descriptors()) == 2
-    assert events.syncfs_descriptors()[0] == events.syncfs_descriptors()[1]
-    assert [strategy for strategy, _ in events.barriers] == ["syncfs", "fsync"]
 
 
 def test_a_long_lived_workspace_reads_io_sync_afresh_at_each_barrier(
@@ -348,93 +309,9 @@ def test_a_non_durable_or_install_landing_takes_no_barrier(
     capsys.readouterr()
     empty = io.BytesIO()
     tarfile.open(fileobj=empty, mode="w").close()
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(empty.getvalue())))
-    # workflow install --stdin-tar: its landing is copied into the store, not published (phase S2 covers that).
-    assert command(["install", "--json", "--stdin-tar", "--workspace", far_name], CLIContext("httk", tmp_path)) == 0
-    assert json.loads(capsys.readouterr().out)["workflows"] == []
-
-
-# -- the local side of a pull ---------------------------------------------------------------------------------------
-
-
-def test_a_pull_is_synced_before_its_first_adoption(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    near.configure_settings({"io.sync": "syncfs"})
-    plan = jobs(far, 3)
-    events = Events(monkeypatch)
-    assert transfer(project, "--json", *selected(plan), f"cluster:{far_name}", near_name) == 0
-    captured = capsys.readouterr()
-    assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 3
-    assert_syncfs_barrier(events, "pull-start", "pull-end")
-    assert "syncing the landed files to disk (syncfs: forced, " in captured.err
-    assert_in(near, plan)
-    assert outgoing(far) == []
-
-
-def test_a_failed_commit_fails_the_pulled_chunk_and_keeps_every_hold(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    near.configure_settings({"io.sync": "syncfs"})
-    plan = jobs(far, 2)
-    # Both commits fail: the first chunk's and that of its one re-pull (P1); before P1 the first alone failed it.
-    events = Events(monkeypatch, syncfs_failures=[None, errno.EIO, None, errno.EIO])
-    assert transfer(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
-    outcomes = statuses(capsys)
-    assert [outcome["status"] for outcome in outcomes] == ["failed"] * 2
-    assert all("not durable" in outcome["message"] and "stays held" in outcome["message"] for outcome in outcomes)
-    assert "take" not in events.kinds()
-    assert events.kinds().count("pull-start") == 2 and events.kinds().count("syncfs") == 4
-    assert all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
-    assert sorted(outgoing(far)) == sorted(outcome["transfer_id"] for outcome in outcomes)
-    assert not list((near.control / "tmp").glob("*.landing.*"))
-    assert transfer(project, "--json", "-q", "--resume", f"cluster:{far_name}", near_name) == 0
-    assert [outcome["status"] for outcome in statuses(capsys)] == ["adopted"] * 2
-    assert_in(near, plan)
-
-
-def test_an_fsync_pull_walks_the_landing_before_its_first_adoption(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    near.configure_settings({"io.sync": "fsync"})
-    plan = jobs(far, 2)
-    events = Events(monkeypatch)
-    assert transfer(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 0
-    assert [outcome["status"] for outcome in statuses(capsys)] == ["adopted"] * 2
-    walks = [detail for kind, detail in events.events if kind == "walk"]
-    assert len(walks) == 1 and isinstance(walks[0], int) and walks[0] >= 2 * 2  # job.json, input.txt, ... a job
-    assert events.last("pull-end") < events.first("walk") < events.first("take")
-    assert "syncfs" not in events.kinds()
-
-
-def test_an_fsync_pull_whose_landing_cannot_be_opened_fails_the_chunk(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    if os.geteuid() == 0:
-        pytest.skip("root opens a file of mode 000")
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    near.configure_settings({"io.sync": "fsync"})
-    plan = jobs(far, 1)
-    real = transfer_cli._adapter
-
-    def unreadable(end: Any, context: Any, arguments: Any, operation: str, *rest: Any) -> None:
-        real(end, context, arguments, operation, *rest)
-        if operation == "pull":
-            next(Path(rest[1]).rglob("input.txt")).chmod(0)
-
-    monkeypatch.setattr(transfer_cli, "_adapter", unreadable)
-    assert transfer(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
-    (outcome,) = statuses(capsys)
-    assert outcome["status"] == "failed" and "cannot read" in outcome["message"]
-    assert "input.txt to sync it to disk" in outcome["message"]
-    assert find(near, plan[0][0]["id"]) is None and outgoing(far) == [outcome["transfer_id"]]
+    # The install op: its landing is copied into the store, not published (phase S2 covers that).
+    document, returncode = install_copies(Workspace(far.root), stream=io.BytesIO(empty.getvalue()))
+    assert returncode == 0 and document["workflows"] == []
 
 
 # -- a local transfer across filesystems ----------------------------------------------------------------------------
@@ -777,7 +654,7 @@ def test_a_non_durable_pull_takes_no_barrier(
     events = Events(monkeypatch)
     assert transfer(project, "--json", "--no-durable", *selected(plan), f"cluster:{far_name}", near_name) == 0
     assert [outcome["status"] for outcome in statuses(capsys)] == ["adopted"] * 2
-    assert "pull-end" in events.kinds() and "enter" not in events.kinds() and "syncfs" not in events.kinds()
+    assert "extract-end" in events.kinds() and "enter" not in events.kinds() and "syncfs" not in events.kinds()
     assert_in(near, plan)
 
 
@@ -840,30 +717,6 @@ def test_a_failed_directory_fsync_of_an_fsync_landing_refuses_the_stream(
     assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
 
 
-def test_a_push_client_shows_the_far_side_sync_line_unless_quiet(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    near, near_name = registered(tmp_path, "near")
-    far, far_name = registered(tmp_path, "far")
-    far.configure_settings({"io.sync": "syncfs"})
-    in_process_far_side(monkeypatch)
-    for quiet in (False, True):
-        plan = jobs(near, 2)
-        flags = ["-q"] if quiet else []
-        assert transfer(project, "--json", *flags, *selected(plan), near_name, f"cluster:{far_name}") == 0
-        captured = capsys.readouterr()
-        assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 2
-        relayed = [line for line in captured.err.splitlines() if line.startswith(f"cluster:{far_name}: ")]
-        if quiet:
-            assert relayed == []
-        else:
-            # The far side's sync line; its warning about uninstalled workflows is the client's to report.
-            assert len(relayed) == 1, captured.err
-            assert relayed[0].startswith(f"cluster:{far_name}: syncing ")
-            assert " landed file(s) to disk (syncfs: forced, " in relayed[0]
-        assert_in(far, plan)
-
-
 FAR_SIDE_STDERR = """\
 Warning: Permanently added 'cluster.example.org' (ED25519) to the list of known hosts.
 Lmod has detected the following error: The following module(s) are unknown: "vasp/6.4"
@@ -897,10 +750,10 @@ def test_a_refused_adoption_relays_nothing(
     plan = jobs(near, 1)
     refused = {"bundles": [], "workspace_id": far.workspace_id, "refused": "refused the stream: injected"}
 
-    def deliver_call(*_arguments: Any) -> tuple[int, str, str]:
-        return 2, json.dumps(refused), FAR_SIDE_STDERR
+    def stage(*_arguments: Any) -> tuple[dict[str, Any], str]:
+        return dict(refused), FAR_SIDE_STDERR  # a segment refused whole, over the push's transfer session
 
-    monkeypatch.setattr(transfer_cli, "_deliver_call", deliver_call)
+    monkeypatch.setattr(transfer_cli, "_session_stage", stage)
     assert transfer(project, "--json", *selected(plan), near_name, f"cluster:{far_name}") == 1
     captured = capsys.readouterr()
     assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["not_moved"]

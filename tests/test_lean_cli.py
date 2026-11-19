@@ -7,6 +7,7 @@ unrelated command groups stayed unimported, since a remote start pays for every 
 import ast
 import json
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -18,7 +19,7 @@ import pytest
 
 import httk.workflow
 from httk.workflow import git_workflows, workflow_cli
-from test_deliver import hold_jobs, outgoing_dir, stream
+from test_deliver import hold_jobs
 from test_git_workflows import _git
 from test_job_transfer import jobs, registered
 
@@ -85,7 +86,7 @@ def probe(*argvs: Sequence[str], stdin: bytes = b"") -> dict[str, Any]:
     [
         pytest.param(
             [
-                ["job", "adopt", "--json", "--stdin-tar", "--workspace", "WS", "--help"],
+                ["job", "adopt", "--json", "--workspace", "WS", "--help"],
                 ["job", "transfer", "--hold", "--json", "--help"],
                 ["job", "transfer", "--release", "T", "WS", "--help"],
             ],
@@ -94,10 +95,7 @@ def probe(*argvs: Sequence[str], stdin: bytes = b"") -> dict[str, Any]:
         pytest.param([["transfer", "status", "--json", "WS", "--help"]], id="transfer"),
         pytest.param([["workspace", "status", "--json", "WS", "--help"]], id="workspace"),
         pytest.param(
-            [
-                ["workflow", "install", "--json", "--stdin-tar", "--workspace", "WS", "--help"],
-                ["workflow", "install", "--json", "--workspace", "WS", "--also-build", "ID", "--help"],
-            ],
+            [["workflow", "install", "--json", "--workspace", "WS", "--help"]],
             id="workflow",
         ),
     ],
@@ -109,7 +107,7 @@ def test_help_of_a_transfer_verb_stays_lean(argvs: list[list[str]]) -> None:
     assert result["loaded"] == []
 
 
-def test_adopting_a_stream_stays_lean(tmp_path: Path) -> None:
+def test_adopting_a_bundle_stays_lean(tmp_path: Path) -> None:
     # A fetched git workflow in another format on this machine: listing it in ``job new --workflow`` help would
     # parse it, importing every compat language and with them collecting.
     root = tmp_path / "repo"
@@ -125,15 +123,15 @@ def test_adopting_a_stream_stays_lean(tmp_path: Path) -> None:
     far, far_name = registered(tmp_path, "far")
     holds, _ = hold_jobs(near, 1)
     ((waiting, _, _),) = jobs(near, 1)
-    data = stream(outgoing_dir(near), [holds[0].transfer_id])
-    # The far side adopts the stream, then the near side releases that hold and holds the next job.
+    copy = tmp_path / "carried" / holds[0].transfer_id
+    shutil.copytree(holds[0].path, copy, symlinks=True)
+    # The far side adopts a copy of the hold, then the near side releases that hold and holds the next job.
     result = probe(
-        ["job", "adopt", "--json", "--no-durable", "--stdin-tar", "--workspace", far_name],
+        ["job", "adopt", "--json", "--no-durable", "--workspace", far_name, str(copy)],
         ["job", "transfer", "--no-durable", "--release", holds[0].transfer_id, "--keep"]
         + ["--destination-id", far.workspace_id, near_name],
         ["job", "transfer", "--no-durable", "--hold", "--json", "--destination-id", far.workspace_id]
         + ["--job", str(waiting["id"]), "--", near_name, "cluster:far"],
-        stdin=data,
     )
     assert result["codes"] == [0, 0, 0]
     assert [entry["status"] for entry in json.loads(result["outputs"][0])["bundles"]] == ["adopted"]
@@ -143,15 +141,13 @@ def test_adopting_a_stream_stays_lean(tmp_path: Path) -> None:
     assert result["loaded"] == []
 
 
-def test_inspecting_and_building_in_a_workspace_stays_lean(tmp_path: Path) -> None:
+def test_inspecting_a_workspace_stays_lean(tmp_path: Path) -> None:
     _, name = registered(tmp_path, "far")
     result = probe(
         ["workspace", "status", "--json", name],
         ["transfer", "status", "--json", name],
-        ["workflow", "install", "--json", "--workspace", name, "--also-build", "local:absent"],
     )
-    assert result["codes"] == [0, 0, 1]  # nothing to build: the build is reported failed
-    assert json.loads(result["outputs"][2])["built"][0]["status"] == "failed"
+    assert result["codes"] == [0, 0]
     assert result["loaded"] == []
 
 

@@ -232,11 +232,11 @@ a transfer session (below) that also ships and builds the workflows the
 destination lacks and retries a failed synchronization there (see
 {doc}`../workspaces`); a pull from a remote workspace is one connection and one
 `httk` start too, a transfer session that holds, copies the workflows and the
-jobs, and releases (three connections and two starts without one: hold, copy,
-release); a remote-to-remote transfer one connection and one start at each end
-when both serve a session, relayed through a temporary directory here (four
-connections and three starts when neither does; see *Remote to remote* in
-{doc}`workflow_cli` for the mixed cases, the relay and `TMPDIR`). On a site where
+jobs, and releases; a remote-to-remote transfer one connection and one start at
+each end, relayed through a temporary directory here (see *Remote to remote* in
+{doc}`workflow_cli` for the relay and `TMPDIR`). Every transfer to or from a
+remote workspace needs its transfer session, so both machines must run the same
+*httk* version (see *The transfer session* below). On a site where
 every Python start is slow, that is what a transfer costs. It reports each step
 on stderr (`-q` silences that). The
 steps and their recovery are in the `job transfer` section of {doc}`workflow_cli`.
@@ -253,17 +253,16 @@ workspace to a local one at its first request to the source (the check of its
 selection, or for `--resume` the listing of its holds); either closes it at the
 end of the command,
 whatever the number of pages it holds (see *Paged holds* in
-{doc}`workflow_cli`). A remote-to-remote transfer opens one to each end that
-serves one, SRC's first, DST's before the first hold for it; every bundle passes
-through a temporary directory here (the default temporary location, `TMPDIR`
-when set), removed once what it holds is settled: one fetch of about 16 GiB from
-a source with a session (never splitting a bundle, so possibly more), 256
-bundles of any size from one without, the whole batch for a destination
-without a session, and the workflow store entries separately. What one fetch
+{doc}`workflow_cli`). A remote-to-remote transfer opens one to each end, SRC's
+first and then, when DST is named, DST's, both before anything is selected or
+held on either end (with `--resume` and no DST, each destination's before its
+holds are driven); every bundle passes through a temporary directory here (the
+default temporary location, `TMPDIR` when set), removed once what it holds is
+settled: one fetch of about 16 GiB (never splitting a bundle, so possibly
+more), and the workflow store entries separately. What one fetch
 brings is delivered to a destination's session in the segments of a push (so
-no staged segment is larger than one, except a single bundle). With a selection,
-the destination's session opens before the source holds anything, so an empty
-selection still connects to it. A remote
+no staged segment is larger than one, except a single bundle). So an empty
+selection still connects to both ends. A remote
 source never takes a hold back: a refusal, an unknown outcome or a failure of
 that directory (a full disk) leaves the holds held there for `--resume`.
 
@@ -308,7 +307,7 @@ Over the session a pull first has the source check and resolve its selection
 holds an earlier run left bound for this destination, listed a page at a time,
 then has the source list the selection once and hold it a page at a time, each
 page driven before the next is asked for, so no answer grows with the
-selection (each answer is held to 16 MiB). For a page it fetches the store
+selection (each answer is held to 448 MiB). For a page it fetches the store
 entries of the workflows the jobs need that this workspace lacks (once a
 command per workflow) and installs and builds them here, all before the page's
 first adoption, and then fetches the page's holds in segments of 256 bundles. The source
@@ -329,31 +328,55 @@ answers something else, or a refusal naming no hold (a full quota here, say),
 stops the pull: nothing of that fetch was adopted, its holds and every later one
 stay held there, and no later page is held; `httk job transfer --resume` lists
 the holds over a new session and drives them (run the transfer again to select
-what was never held). A hold too large to describe in one answer (16 MiB) fails
-alone with the remedy `transfer_session=off`. A failed release leaves the jobs here with their holds on
-the source, reported with the remedy.
+what was never held). A hold too large to describe in one answer (448 MiB as
+encoded; at about 40 to 60 bytes a job, a tree of several million jobs, more
+than a bundle can hold, see below) fails alone and stays held on the source,
+and its message names the remedy by hand: copy its bundle
+`.httk-workspace/transfers/outgoing/<transfer id>/` from the source to the
+destination's machine, run `httk job adopt BUNDLE` in the destination
+workspace, then `httk job transfer --release TRANSFER_ID REMOTE:WS`; with
+`--keep`, `httk job transfer --release TRANSFER_ID --keep --destination-id ID
+REMOTE:WS`, ID being the `workspace_id` that `httk workspace status --json` of
+the destination reports (a hold of a remote source records no destination id,
+and a release without one keeps no away copies). A failed release leaves the
+jobs here with their holds on the source, reported with the remedy.
 
-Opening a session checks the far side before anything is changed: its hello
-must name the expected format version and every request the caller needs, and
-a round trip of all 256 byte values must come back intact. When any of that
-fails (an older far-side `httk` without the command, or one whose session lacks
-a request the caller needs, such as a pull's paged holds; an executor that
-mangles binary data), the push says so and falls back to one adapter `deliver` per
-delivery as before sessions (a pull to its adapter hold, copy and release
-calls), at the cost of one extra connection and start per command (the refused
-session; this is not remembered between commands). A `mount-daemon` remote,
-which has no session, and a remote with `transfer_session=off` take that path
-at once, without a word or a start. Any other failure to open the session stops
-that destination: the holds an earlier run left stay held for `--resume`, and
-nothing new is held (a pull holds nothing). A
-refused or broken
-ssh connection (ssh's own exit status 255) is never a fallback. Set
-`transfer_session=off` on a remote to skip the session and its check (the
-default is `auto`):
+Transfers to and from a remote workspace require the transfer session: there
+is no other way for a transfer to reach a remote. Opening it checks the far
+side before anything is selected, held or changed on either end: its hello must
+name this side's transfer protocol (a single version; there is no range and no
+optional request), this side's first request names it in turn, and the far
+side refuses any other version before it does anything, and a round trip of all
+256 byte values must come back intact. When that fails, the transfer stops with
+a nonzero exit, nothing held and nothing changed on either end, and one of four
+messages:
 
-```console
-$ httk remote configure --set transfer_session=off kappa
-```
+- a far side of another protocol version (older or newer: another hello, or a
+  refusal of this side's protocol naming its own), or a far-side `httk workflow`
+  without the command (an older one, whose argparse refuses it with `httk
+  workflow: error: argument GROUP: invalid choice: 'transfer-session'` and exit
+  status 2): "the httk on REMOTE is too old (or too new) for
+  this transfer: install the same httk version on both ends";
+- a far side whose shell ends with exit status 127 (no `httk` there, or a
+  command in its `cli_prelude` not found): "`httk` was not found on REMOTE, or a
+  command in its cli_prelude was not found (exit status 127; DETAIL)", with the
+  remedy: make `httk` reachable from a
+  non-interactive shell there, or configure the remote's `httk_command` or
+  `cli_prelude`;
+- an adapter that refuses the `session` operation (a `mount-daemon` remote,
+  which moves jobs through its exchange with `job eject` and `job adopt` instead),
+  answers it with its own result document, or whose channel does not carry binary data intact: "the adapter of REMOTE
+  cannot open a transfer session";
+- anything else, such as a far side of this protocol refusing for a reason of
+  its own (its error is kept), a crash, a session that
+  does not answer in time, or a refused or broken ssh connection (ssh's own exit
+  status 255): "could not open a transfer session to REMOTE: DETAIL".
+
+Holds an earlier run left stay held, untouched, and `--resume` drives them once
+both ends run the same *httk* (or the cause of the third kind is gone). The remote setting `transfer_session` was
+removed with the transfers that did not use a session: `httk remote configure
+--set transfer_session=…` is refused as an unknown setting, and a value an
+earlier version persisted is ignored (`--unset transfer_session` removes it).
 
 Once open, a session is never reopened: a request that fails (the far side
 ends, breaks the protocol, or fails the request fatally) has an unknown
@@ -370,8 +393,27 @@ a far side hung there, still reporting its progress, is caught only once it
 stops answering altogether (the idle bound), an accepted limitation. The far side reports progress every 10 seconds, so
 the bound is at least 30 seconds whatever is configured. Time in which this side
 offers nothing (a slow reader of a download, a slow source of an upload) is not
-held against the far side. This side holds at most 64 MiB of what the far side
-sent before it stops reading, and no single response document may be larger.
+held against the far side. This side holds at most 512 MiB of what the far side
+sent before it stops reading, and no single response document may be larger;
+an answer that large (a page of holds, or the adoption of a tree of about a
+million jobs) takes a few GB of Python objects to read on each side, an accepted
+cost at that scale. A tree whose adoption answer exceeds it (an accepted
+limitation) is still copied and adopted, but its answer cannot be read: the push
+reports an unknown outcome and keeps the hold, and `httk job transfer --resume`
+completes it, its second delivery answered "already adopted" (a short answer)
+and the hold released, at the cost of copying the tree a second time; `httk job
+eject` and `httk job adopt` by hand avoid that second copy.
+
+What bounds the size of one tree: its `bundle.json` (about 220 bytes a member)
+and an adoption's `plan.json` and `replaces.json` are held to 512 MiB, about
+2.4 million members, and a tree whose `bundle.json` would be larger is refused
+before any job moves; its description in an answer of holds takes about 40 to
+60 bytes a job (448 MiB); the answer of its adoption about 400 to 450 bytes a
+job (512 MiB). A push, and a transfer between two remotes, therefore moves a
+tree of up to about a million jobs in one run, bounded by the adoption answer
+(a larger one needs the `--resume` above); a pull, which adopts here, up to the
+2.4 million of `bundle.json`. These figures grow
+with the length of the job keys and the destination's paths.
 
 Staged segments belong to their session: their tokens mean nothing on another
 connection, and a `bye` (before the far side answers it) or the end of its
@@ -529,7 +571,10 @@ renames it into `inbox/` when complete. `job eject` records your identity's
 public key as optional `owner_key` in `bundle.json`; only untrusted (exchange)
 adoption uses it. The job must be fresh (never run) and
 have no parent there, since managers adopt it as untrusted input with fresh
-UUIDs, keeping your job UUID as its exchange name. The fresh UUID keeps the
+UUIDs, keeping your job UUID as its exchange name. One submission's
+`bundle.json` may take at most 1 MiB, about 5,000 jobs; `job eject` into an
+inbox refuses a larger tree before any job leaves (submit it in parts). The
+fresh UUID keeps the
 first eight hex digits of yours, so a unique prefix such as
 `httk job show 8f7047f2` selects the job in both workspaces. Its workflow must be
 installed in the workspace, an operator task; until then the adopted job waits.
