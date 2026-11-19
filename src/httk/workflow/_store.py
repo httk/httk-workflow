@@ -882,6 +882,7 @@ def install(
     siblings: Mapping[str, WorkflowProvider] | None = None,
     reference: str | None = None,
     by_name: bool = False,
+    reuse: bool = False,
 ) -> Installed:
     """Install (or reinstall, replacing) a workflow package in the workspace.
 
@@ -908,6 +909,10 @@ def install(
     :param reference: Record this tag or branch as the one the source was installed from (``NAME@REF``
         selects by it); by default that of a ``git+…@REF`` source, ``None`` for a commit or no ref.
     :param by_name: Take *source* as a workflow name or git URI only, never as a path where the install runs.
+    :param reuse: Keep the installation a reinstall would only repeat (``job new --install``): the source is still
+        resolved (a git URI fetched), but when an installation of its id is already the newest of its short name,
+        made from the same reference, of the same sources, binding the same calls and slot defaults, and built
+        where a build is asked for, it is returned as it is.
     :return: The installation.
     :raises ValueError: For an unresolvable or invalid source, a job's ``embedded:`` id, a symlink or special file
         in the package, a package registered in-process only, a call cycle, or a fixed-call target with a
@@ -928,6 +933,7 @@ def install(
         siblings=siblings or {},
         reference=reference,
         by_name=by_name,
+        reuse=reuse,
     )
 
 
@@ -945,6 +951,7 @@ def _install(
     reference: str | None = None,
     caller: str | None = None,
     by_name: bool = False,
+    reuse: bool = False,
 ) -> Installed:
     with _scratch(owner) as work:
         sibling = siblings.get(os.fspath(source))
@@ -965,6 +972,11 @@ def _install(
             )
         if stack and (installed := lookup(workspace, workflow_id)) is not None and installed.id == workflow_id:
             return installed  # a callee already installed under its resolved id is kept
+        if reuse and not stack and calls:
+            kept = _unchanged(workspace, workflow_id, name, reference, provider, siblings, build=build)
+            if kept is not None:
+                _LOGGER.info("workflow %s is installed in %s already; kept", workflow_id, kept.directory)
+                return kept
 
         def installed_callee(written: str, caller: str) -> str:
             # A sibling binds by its pinned id, so another installation of its name never answers.
@@ -1027,6 +1039,63 @@ def _install(
             _fs.move_owned(_fs.loc(old), _fs.loc(work / "old"), durable=workspace.durable)
     _LOGGER.info("installed workflow %s in %s", workflow_id, target)
     return Installed(workflow_id, name, target, record)
+
+
+def _unchanged(
+    workspace: KernelWorkspace,
+    workflow_id: str,
+    name: str,
+    reference: str | None,
+    provider: WorkflowProvider,
+    siblings: Mapping[str, WorkflowProvider],
+    *,
+    build: bool,
+) -> Installed | None:
+    """Return the installation of *workflow_id* that reinstalling *provider* would only repeat, if there is one.
+
+    That is the newest installation of its short name, made from the same *reference*, of sources with the same
+    digest as both its record and its installed package tree, whose recorded calls and slot defaults are what the
+    reinstall would record now (each call already installed), and built for this platform when *build* asks for a
+    declared build (plan WORKFLOW_LOCAL_COMMANDS §2 L1.5). A callee missing its slot defaults is refused as the
+    reinstall would refuse it.
+    """
+
+    found = lookup(workspace, workflow_id)
+    if found is None or found.id != workflow_id or found.name != name:
+        return None
+    named = [other for other in list_installed(workspace) if other.name == name]
+    newest = max(named, key=_installed_order, default=None)
+    if newest is None or newest.directory != found.directory or found.record.get("reference") != reference:
+        return None
+    assert provider.directory is not None  # _resolve refuses providers without a package directory
+    recorded = found.record.get("tree_sha256")
+    if recorded != source_digest(provider.directory):
+        return None
+    try:
+        # The installed tree itself, not only its record: a changed or missing installed file is installed again.
+        if source_digest(found.installed_package) != recorded:
+            return None
+    except (ValueError, OSError):
+        return None
+    calls: dict[str, str] = {}
+    for alias, written in (provider.calls or {}).items():
+        callee = lookup(workspace, written if (sibling := siblings.get(written)) is None else sibling.workflow_id)
+        if callee is None:
+            return None  # the reinstall installs it
+        _require_defaults(callee.id, callee.record.get("slots"), f"[workflow.calls].{alias} of {workflow_id}")
+        calls[alias] = callee.id
+    defaults: dict[str, str | None] = {}
+    for alias, slot in (provider.slots or {}).items():
+        default = None
+        if slot.default is not None:
+            sibling = siblings.get(slot.default)
+            default = lookup(workspace, slot.default if sibling is None else sibling.workflow_id)
+        defaults[alias] = default.id if default is not None else slot.default
+    if calls != found.record.get("calls") or defaults != found.record.get("slots"):
+        return None
+    if build and provider.build is not None and built(found) is not True:
+        return None
+    return found
 
 
 def slot_default_notices(workspace: KernelWorkspace, installed: Installed) -> list[str]:

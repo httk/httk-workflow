@@ -26,7 +26,7 @@ import stat
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -67,6 +67,7 @@ __all__ = [
     "JobRef",
     "KernelWorkspace",
     "ListingCache",
+    "LocationIndex",
     "OwnedJob",
     "Owner",
     "OwnerDeclaredDead",
@@ -98,6 +99,7 @@ __all__ = [
     "recoverable_owners",
     "register_owner",
     "register_reconciler",
+    "request_file",
     "scan_final",
     "scan_first",
     "submit",
@@ -1058,6 +1060,8 @@ class OwnedJob:
         self._attempt: str | None = None
         self._retired: set[str] = set()
         self._released = False
+        # Where a release or give-back moved the job out of owned/ (None until then, and after discard or extract).
+        self.moved_to: JobRef | None = None
         # Read while quiescent (at claim or adoption): a later attempt may rewrite or replace job.json.
         self._header = _read_header(self.path, self.job_key)
 
@@ -1421,7 +1425,8 @@ class OwnedJob:
         check_placement(self.owner.workspace, state, placement)
         _fs.move_owned(_fs.loc(self.path), _fs.loc(target), durable=self.owner.workspace.durable)
         self._retire()
-        return JobRef.from_path(target, state=state, placement=placement)
+        self.moved_to = JobRef.from_path(target, state=state, placement=placement)
+        return self.moved_to
 
     def give_back(self) -> JobRef:
         """Move the job back to where it was claimed from, unchanged, exactly as recovery would.
@@ -1795,6 +1800,153 @@ def locate_many(
     wanted = {canonical_uuid(job_id, "job_id") for job_id in job_ids}
     normalized = sorted({normalize_placement(item) for item in placements}, key=lambda item: item.parts)
     return _settled(workspace, wanted, normalized, include_owned=include_owned, settle=settle, cache=cache, poll=poll)
+
+
+def _every_job(workspace: KernelWorkspace) -> Iterator[JobRef]:
+    # What an exhaustive locate walks: every unowned state in order, then each owned/<owner-id>/.
+    for state in UNOWNED_STATES:
+        yield from list_jobs(workspace, state)
+    root = workspace.jobs / OWNED
+    for owner_id in list_names(root):
+        if _OWNER_ID.fullmatch(owner_id):
+            yield from _owned_refs(root / owner_id, owner_id)
+
+
+def _is_directory(path: Path) -> bool:
+    try:
+        status = _fs.lstat(_fs.loc(path))
+    except OSError:
+        return False
+    return status is not None and stat.S_ISDIR(status.st_mode)
+
+
+class LocationIndex:
+    """Where each job was seen by one listing of a command, kept current with the command's own moves.
+
+    The listing is taken once, when first needed, so the lookups of a many-job command cost one walk of the
+    workspace instead of one walk a job (plan WORKFLOW_LOCAL_COMMANDS §2 L1.1, §4.1). Every entry is a hint: an
+    unowned entry answers :meth:`locate` only after an ``lstat`` finds its directory still there, and a stale, owned
+    or missing entry is answered by :func:`locate` itself, for that job alone, whose answer then replaces the entry.
+    A job this command moves is recorded where it went (:meth:`moved`), or forgotten when that is not known.
+
+    :param workspace: The workspace.
+    :param listing: Produces the command's one listing, called at most once; by default every job of every unowned
+        state, then of every owner, as an exhaustive :func:`locate` walks them.
+    :param complete: Whether *listing* lists every job (a command restricted to some states lists only those; the
+        jobs outside them are located by the fallback when asked for).
+    """
+
+    def __init__(
+        self,
+        workspace: KernelWorkspace,
+        listing: Callable[[], Iterable[JobRef]] | None = None,
+        *,
+        complete: bool = True,
+    ) -> None:
+        self.workspace = workspace
+        self._listing = listing
+        #: Whether the listing lists every job of the workspace.
+        self.complete = complete
+        self._refs: list[JobRef] | None = None
+        self._listed: dict[str, JobRef] = {}
+        # A later observation of this command, which overrides the listing: None when the job's place is unknown.
+        self._observed: dict[str, JobRef | None] = {}
+
+    def refs(self) -> list[JobRef]:
+        """Return the listing in its own order, taking it now if it has not been taken yet.
+
+        :return: The references, as listed (never updated by later observations).
+        """
+
+        if self._refs is None:
+            listing = self._listing() if self._listing is not None else _every_job(self.workspace)
+            self._refs = list(listing)
+            for ref in self._refs:
+                # The first observation wins, as in an exhaustive locate's walk.
+                self._listed.setdefault(ref.job_id, ref)
+        return self._refs
+
+    def add(self, refs: Iterable[JobRef]) -> None:
+        """Take the entries of another listing of this command too, where the index has none for a job.
+
+        :param refs: The references, as listed (each still only a hint).
+        """
+
+        for ref in refs:
+            if ref.job_id not in self._observed:
+                self._listed.setdefault(ref.job_id, ref)
+
+    def _entry(self, job_id: str) -> JobRef | None:
+        if job_id in self._observed:
+            return self._observed[job_id]
+        self.refs()
+        return self._listed.get(job_id)
+
+    def locate(
+        self,
+        job_id: str,
+        *,
+        placement_hint: PurePosixPath | None,
+        include_owned: bool = True,
+        exhaustive: bool = False,
+        cache: ListingCache | None = None,
+    ) -> JobRef | None:
+        """Answer :func:`locate` with these arguments from the index where an ``lstat`` confirms the entry.
+
+        An unowned entry is used when it is where the call would look (any placement when *exhaustive*, else the
+        placement *placement_hint* names) and its directory is still there; anything else calls :func:`locate`.
+
+        :param job_id: The job UUID.
+        :param placement_hint: As for :func:`locate`.
+        :param include_owned: As for :func:`locate`.
+        :param exhaustive: As for :func:`locate`.
+        :param cache: As for :func:`locate`, used only by a fallback.
+        :return: The reference, or ``None``.
+        """
+
+        job_id = canonical_uuid(job_id, "job_id")
+        entry = self._entry(job_id)
+        if (
+            entry is not None
+            and entry.state != OWNED
+            and (exhaustive or (placement_hint is not None and entry.placement == normalize_placement(placement_hint)))
+            and _is_directory(entry.path)
+        ):
+            return entry
+        ref = locate(
+            self.workspace,
+            job_id,
+            placement_hint=placement_hint,
+            include_owned=include_owned,
+            exhaustive=exhaustive,
+            cache=cache,
+        )
+        if ref is not None or exhaustive:
+            self._observed[job_id] = ref
+        return ref
+
+    def present(self, job_id: str) -> bool:
+        """Report whether the job exists anywhere, as an exhaustive :func:`locate` that finds it would.
+
+        An entry, owned or not, whose directory an ``lstat`` still finds is the job; otherwise the walk decides.
+
+        :param job_id: The job UUID.
+        :return: Whether the job was found.
+        """
+
+        entry = self._entry(canonical_uuid(job_id, "job_id"))
+        if entry is not None and _is_directory(entry.path):
+            return True
+        return self.locate(job_id, placement_hint=None, exhaustive=True) is not None
+
+    def moved(self, job_id: str, handle: "OwnedJob | None") -> None:
+        """Record where this command moved a job: where *handle* released it to, else nowhere known.
+
+        :param job_id: The job UUID.
+        :param handle: The job's handle, or ``None`` when the command did not win it.
+        """
+
+        self._observed[job_id] = None if handle is None else handle.moved_to
 
 
 def submit(
@@ -2206,8 +2358,8 @@ def exchange_owner_key(workspace: KernelWorkspace, exchange_name: str, *, job_id
 # -- requests, placements and shared memory -------------------------------------------------------------------------
 
 
-def post_request(workspace: KernelWorkspace, doc: Mapping[str, object]) -> Path:
-    """Write a request onto its unique name ``requests/<job-uuid>.<request-uuid>.json``.
+def request_file(workspace: KernelWorkspace, doc: Mapping[str, object]) -> Path:
+    """Return the file a request document is posted as, ``requests/<job-uuid>.<request-uuid>.json``.
 
     :param workspace: The workspace.
     :param doc: The request document; its ``job_id`` and ``request_id`` name the file.
@@ -2216,9 +2368,19 @@ def post_request(workspace: KernelWorkspace, doc: Mapping[str, object]) -> Path:
 
     job_id = canonical_uuid(doc.get("job_id"), "job_id")
     request_id = canonical_uuid(doc.get("request_id"), "request_id")
-    directory = _requests_dir(workspace)
-    _fs.make_dirs(directory, durable=workspace.durable)
-    path = directory / f"{job_id}.{request_id}.json"
+    return _requests_dir(workspace) / f"{job_id}.{request_id}.json"
+
+
+def post_request(workspace: KernelWorkspace, doc: Mapping[str, object]) -> Path:
+    """Write a request onto its unique name ``requests/<job-uuid>.<request-uuid>.json``.
+
+    :param workspace: The workspace.
+    :param doc: The request document; its ``job_id`` and ``request_id`` name the file.
+    :return: The request file.
+    """
+
+    path = request_file(workspace, doc)
+    _fs.make_dirs(path.parent, durable=workspace.durable)
     # A unique name, or a deterministic id with equivalent content (§8.5): write_file is idempotent.
     _fs.write_file(_fs.loc(path), _encode(dict(doc)), durable=workspace.durable)
     return path

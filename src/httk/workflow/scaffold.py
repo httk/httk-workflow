@@ -2473,7 +2473,9 @@ def _installed(
     if found is not None:
         return found
     if owner is not None and install:
-        return _store.install(workspace, owner, path if path.exists() else text)
+        # A source no lookup resolves (a git URI not pinned to a commit) is resolved again, but an installation
+        # that reinstalling would only repeat is kept: install on first use.
+        return _store.install(workspace, owner, path if path.exists() else text, reuse=True)
     raise ValueError(
         f"workflow {text!r} is not installed in the workspace {workspace.root}; "
         f"install it first with `httk workflow install --workspace {shlex.quote(str(workspace.root))} "
@@ -2573,7 +2575,7 @@ def _installed_by_name(
     if found is not None:
         return found
     if owner is not None and install:
-        return _store.install(workspace, owner, reference, by_name=True)
+        return _store.install(workspace, owner, reference, by_name=True, reuse=True)
     raise ValueError(
         f"workflow {reference!r} is not installed in the workspace {workspace.root}; "
         f"install it first with `httk workflow install --workspace {shlex.quote(str(workspace.root))} "

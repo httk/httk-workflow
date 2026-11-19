@@ -50,6 +50,7 @@ __all__ = [
     "Unlock",
     "Unseal",
     "apply",
+    "compose",
     "operator_key",
     "parse",
     "post",
@@ -101,6 +102,12 @@ _FLAGS = frozenset({"force", "keep_budget", "tree", "no_copy"})
 _SIGNATURE = frozenset({"operator_key", "signature"})
 #: The actions that revive a failed or paused job (and may carry ``force`` and ``keep_budget``).
 _REVIVALS = ("continue", "restart", "override_step")
+#: The exact bytes of each request this process verified when it posted it, by request id: a request file holding
+#: exactly these bytes is not verified again when it is served (plan WORKFLOW_LOCAL_COMMANDS §2 L1.3). A
+#: signature's verification depends on the bytes alone, so the memo is sound whoever wrote the file.
+_POSTED: dict[str, bytes] = {}
+#: The memo is cleared whole when it passes this many entries (a cleared entry is only verified again).
+_POSTED_LIMIT = 1 << 16
 
 
 @dataclass(frozen=True)
@@ -267,6 +274,66 @@ def operator_key(document: Mapping[str, object]) -> str | None:
     return signature.operator_key
 
 
+def _remember_verified(document: Mapping[str, object]) -> str | None:
+    """Verify a request document (:func:`operator_key`) and remember the exact bytes it is posted as.
+
+    :func:`parse` then skips the signature check of a file that holds exactly these bytes, and only that check.
+
+    :param document: The document, as it is handed to :func:`httk.workflow._kernel.post_request`.
+    :return: The verified operator key, or ``None`` for an unsigned request.
+    :raises httk.workflow.errors.FormatError: If a signature is present and does not verify (nothing is remembered).
+    """
+
+    key = operator_key(document)
+    if len(_POSTED) >= _POSTED_LIMIT:
+        _POSTED.clear()
+    # The bytes post_request writes for this document.
+    _POSTED[str(document["request_id"])] = _kernel._encode(dict(document))
+    return key
+
+
+def compose(
+    *,
+    action: str,
+    job_id: str,
+    placement: str | PurePosixPath,
+    operator: str,
+    reason: str,
+    seed_path: Path | None = None,
+    **extra: object,
+) -> dict[str, object]:
+    """Build, validate and optionally sign the request document :func:`post` posts, posting nothing.
+
+    :param action: One of :data:`ACTIONS`.
+    :param job_id: The target job's UUID.
+    :param placement: The target's placement.
+    :param operator: The operator label.
+    :param reason: The operator's explanation.
+    :param seed_path: Sign with this identity seed; ``None`` leaves it unsigned.
+    :param **extra: As for :func:`post`.
+    :return: The document.
+    :raises httk.workflow.errors.FormatError: If the document would be invalid.
+    """
+
+    document: dict[str, object] = {
+        "format": REQUEST_FORMAT,
+        "format_version": REQUEST_FORMAT_VERSION,
+        "request_id": str(uuid.uuid4()),
+        "job_id": job_id,
+        "placement": placement_text(PurePosixPath(placement)),
+        "action": action,
+        "operator": operator,
+        "reason": reason,
+        "created_at": datetime.now(UTC).isoformat(),
+        **{name: value for name, value in extra.items() if value is not None and value is not False},
+    }
+    validate_envelope(document)
+    if seed_path is not None:
+        document = sign_document(document, seed_path=seed_path)
+        _remember_verified(document)
+    return document
+
+
 def post(
     workspace: _kernel.KernelWorkspace,
     *,
@@ -293,27 +360,23 @@ def post(
     :raises httk.workflow.errors.FormatError: If the document would be invalid.
     """
 
-    document: dict[str, object] = {
-        "format": REQUEST_FORMAT,
-        "format_version": REQUEST_FORMAT_VERSION,
-        "request_id": str(uuid.uuid4()),
-        "job_id": job_id,
-        "placement": placement_text(PurePosixPath(placement)),
-        "action": action,
-        "operator": operator,
-        "reason": reason,
-        "created_at": datetime.now(UTC).isoformat(),
-        **{name: value for name, value in extra.items() if value is not None and value is not False},
-    }
-    validate_envelope(document)
-    if seed_path is not None:
-        document = sign_document(document, seed_path=seed_path)
-        operator_key(document)
+    document = compose(
+        action=action,
+        job_id=job_id,
+        placement=placement,
+        operator=operator,
+        reason=reason,
+        seed_path=seed_path,
+        **extra,
+    )
     return _kernel.post_request(workspace, document)
 
 
 def parse(path: Path) -> Request:
     """Read and validate one request file: bounded, regular file only, never blocking.
+
+    The bytes read are the ones parsed. Their signature is not verified again when they are exactly the bytes this
+    process verified when it posted the request (:func:`_remember_verified`); every other check runs.
 
     :param path: The file ``requests/<job-uuid>.<request-uuid>.json``.
     :return: The request.
@@ -336,7 +399,8 @@ def parse(path: Path) -> Request:
     validate_envelope(value)
     if path.name != f"{value['job_id']}.{value['request_id']}.json":
         raise FormatError(f"{path.name} does not name the request's job and request ids")
-    operator_key(value)
+    if _POSTED.get(value["request_id"]) != data:
+        operator_key(value)
     return Request(
         request_id=value["request_id"],
         job_id=value["job_id"],

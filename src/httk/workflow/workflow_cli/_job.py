@@ -30,7 +30,7 @@ from .. import _fs, _kernel, _landing, _moving, _pool, _requests, _store, scaffo
 from .._bundles import BundleError, read_manifest
 from .._children import newest_labeled
 from .._job import JobDefinition
-from .._kernel import JobRef
+from .._kernel import JobRef, LocationIndex
 from .._landing import CommitFailed as _CommitFailed
 from .._landing import StreamRefused
 from .._logging import LOG_LEVELS, configure_logging
@@ -73,7 +73,7 @@ from ..introspection import (
     resolve_job_selectors,
     selector_uses_remote_path,
 )
-from ..introspection._reading import _jsonl
+from ..introspection._reading import _jsonl, _location_index, _resolve_selectors
 from ..models import (
     JOB_STATE_DIRECTORY,
     canonical_uuid,
@@ -87,8 +87,9 @@ from ..registry import WorkspaceBinding
 from ..removal import (
     RemovalReport,
     RequestOutcome,
-    remove_jobs,
-    request_now,
+    _post_and_serve,
+    _remove_jobs,
+    _request_jobs,
     serve_requests,
     workflow_switch_problem,
 )
@@ -847,7 +848,8 @@ def _serve_in_order(workspace: Workspace, posts: Sequence[tuple[JobRef, Callable
     """Post and serve one request at a time, in order, stopping at the first that does not resume its job.
 
     Serving each before posting the next keeps a live manager from reopening an ancestor's wait while a
-    descendant is still failed (``continue --tree`` posts deepest first).
+    descendant is still failed (``continue --tree`` posts deepest first). The far-side leg of a remote tree uses
+    this; a local one is served by :func:`_continue_tree` in the same order.
 
     :param workspace: The workspace.
     :param posts: Each job with the callable that posts its request and returns the request file.
@@ -857,17 +859,25 @@ def _serve_in_order(workspace: Workspace, posts: Sequence[tuple[JobRef, Callable
     for index, (ref, post) in enumerate(posts):
         (outcome,) = serve_requests(workspace, [(ref, post())])
         _print_outcome(outcome)
-        if outcome.status == "applied" and outcome.state != "failed":
+        if not _stops_tree(outcome, [rest for rest, _post in posts[index + 1 :]]):
             continue
-        status = "applied but left the job failed" if outcome.status == "applied" else outcome.status
-        for rest, _post in posts[index + 1 :]:
-            print(
-                f"not posted: {rest.job_key} (an earlier request in the tree was {status}; "
-                "resolve it and rerun continue --tree)",
-                file=sys.stderr,
-            )
         return 1
     return 0
+
+
+def _stops_tree(outcome: RequestOutcome, rest: Sequence[JobRef]) -> bool:
+    """Whether a tree stops at *outcome* (it did not resume its job); if so, say that *rest* are not posted."""
+
+    if outcome.status == "applied" and outcome.state != "failed":
+        return False
+    status = "applied but left the job failed" if outcome.status == "applied" else outcome.status
+    for ref in rest:
+        print(
+            f"not posted: {ref.job_key} (an earlier request in the tree was {status}; "
+            "resolve it and rerun continue --tree)",
+            file=sys.stderr,
+        )
+    return True
 
 
 def _continue_tree(
@@ -878,23 +888,59 @@ def _continue_tree(
     force: bool,
     keep_budget: bool,
     identity: OperatorIdentity,
+    index: LocationIndex,
 ) -> int:
-    """Post and serve ``continue --tree`` one job at a time, deepest first, stopping at one that does not resume."""
+    """Post and serve ``continue --tree`` one job at a time, deepest first, stopping at one that does not resume.
 
-    def post(ref: JobRef) -> Path:
-        ((_ref, path),) = publish_job_requests(
+    Each job is a chunk of its own (:func:`~httk.workflow.removal._post_and_serve`), so an uncertain outcome, an error
+    or an interrupt withdraws its request as for any local request; one CLI owner, registered once the first request
+    is posted, serves them all.
+    """
+
+    def prepare(ref: JobRef) -> tuple[JobRef, Mapping[str, object]]:
+        ((_ref, document),) = _prepare_job_requests(
             workspace,
             [ref],
             action="continue",
             reason=reason,
             operator=identity.label,
+            priority=None,
+            step=None,
             force=force,
-            keep_budget=keep_budget,
+            destination=None,
             identity=identity,
+            budget=None,
+            keep_budget=keep_budget,
+            workflow=None,
         )
-        return path
+        return ref, document
 
-    return _serve_in_order(workspace, [(ref, partial(post, ref)) for ref in refs])
+    with ExitStack() as stack:
+        owner = _command_owner(workspace, stack, "immediate job requests")
+        for position, ref in enumerate(refs):
+            (outcome,) = _post_and_serve(
+                workspace, [(ref.job_id, partial(prepare, ref))], owner=owner, index=index, report=_print_outcomes
+            )
+            if _stops_tree(outcome, refs[position + 1 :]):
+                return 1
+    return 0
+
+
+def _command_owner(workspace: Workspace, stack: ExitStack, label: str) -> Callable[[], _kernel.Owner]:
+    """Return a getter of the command's one CLI owner, registered in *stack* on the first call."""
+
+    registered: list[_kernel.Owner] = []
+
+    def owner() -> _kernel.Owner:
+        if not registered:
+            registered.append(
+                stack.enter_context(
+                    _kernel.register_owner(workspace, kind="cli", label=label, allocation=None, advertised={})
+                )
+            )
+        return registered[0]
+
+    return owner
 
 
 def publish_job_requests(
@@ -937,6 +983,43 @@ def publish_job_requests(
         cannot switch to.
     """
 
+    prepared = _prepare_job_requests(
+        workspace,
+        refs,
+        action=action,
+        reason=reason,
+        operator=operator,
+        priority=priority,
+        step=step,
+        force=force,
+        destination=destination,
+        identity=identity,
+        budget=budget,
+        keep_budget=keep_budget,
+        workflow=workflow,
+    )
+    return [(ref, _kernel.post_request(workspace, document)) for ref, document in prepared]
+
+
+def _prepare_job_requests(
+    workspace: Workspace,
+    refs: Sequence[JobRef],
+    *,
+    action: str,
+    reason: str,
+    operator: str | None,
+    priority: int | None,
+    step: str | None,
+    force: bool,
+    destination: str | None,
+    identity: OperatorIdentity | None,
+    budget: Mapping[str, int | None] | None,
+    keep_budget: bool,
+    workflow: str | None,
+) -> list[tuple[JobRef, dict[str, object]]]:
+    """Check every job and build its signed and verified request document (:func:`publish_job_requests`), posting
+    nothing; each document's bytes are remembered as verified (``_requests._remember_verified``)."""
+
     if action not in _requests.ACTIONS:
         raise ValueError(f"unknown job request action: {action}")
     selected = identity or _resolve_request_identity(None)
@@ -954,14 +1037,15 @@ def publish_job_requests(
     _prevalidate(refs, action, step, force=force)
     if workflow is not None:
         options["workflow"] = _switch_target(workspace, refs, workflow)
-    documents = []
+    prepared = []
     for ref in refs:
         document = _request_document(ref, action, operator or selected.label, reason, options)
         if selected.seed_path is not None:
             document = sign_document(document, seed_path=selected.seed_path)
-        _requests.operator_key(document)
-        documents.append(document)
-    return [(ref, _kernel.post_request(workspace, document)) for ref, document in zip(refs, documents, strict=True)]
+        # Verified here; serving exactly these bytes skips a second check.
+        _requests._remember_verified(document)
+        prepared.append((ref, document))
+    return prepared
 
 
 def _check_wait(wait: bool, timeout: float | None, actions: Sequence[str]) -> None:
@@ -990,20 +1074,40 @@ def _at_steps(ref: JobRef, steps: frozenset[str], *, named: bool) -> bool:
     return False
 
 
-def _selected_jobs(workspace: Workspace, cwd: Path, arguments: argparse.Namespace) -> list[JobRef]:
+def _selection_states(arguments: argparse.Namespace) -> Sequence[str] | None:
+    """The states a ``--state`` (or a ``--step`` without JOB selectors) selection lists, or ``None`` without one."""
+
+    if arguments.state:
+        return list(arguments.state)
+    if arguments.step is not None and not arguments.job_id:
+        return _MOVABLE_STATES  # an away copy is selected only by name or --state away
+    return None
+
+
+def _selection_index(workspace: Workspace, arguments: argparse.Namespace) -> LocationIndex:
+    """The command's location index, listing exactly what its ``--state`` selection traverses (all jobs without one)."""
+
+    states = _selection_states(arguments)
+    return _location_index(workspace) if states is None else _location_index(workspace, states, arguments.placement)
+
+
+def _selected_jobs(
+    workspace: Workspace, cwd: Path, arguments: argparse.Namespace, index: LocationIndex | None = None
+) -> list[JobRef]:
     """Return the JOB selectors' jobs, then every other job in a ``--state`` (under ``--placement``), once each.
 
     ``--step`` narrows both; without JOB selectors or ``--state`` it selects from every unowned state but ``away``.
+    The selection shares the listing of *index*, the command's location index (:func:`_selection_index`).
     """
 
     steps = None if arguments.step is None else frozenset(arguments.step)
-    refs = resolve_job_selectors(workspace, cwd, arguments.job_id)
+    index = _selection_index(workspace, arguments) if index is None else index
+    refs = _resolve_selectors(workspace, cwd, arguments.job_id, index)
     if steps is not None:
         refs = [ref for ref in refs if _at_steps(ref, steps, named=True)]
-    if arguments.state or (steps is not None and not arguments.job_id):
+    if _selection_states(arguments) is not None:
         seen = {ref.job_id for ref in refs}
-        states = arguments.state or _MOVABLE_STATES  # an away copy is selected only by name or --state away
-        for ref in iter_jobs(workspace, states, placement_prefix=arguments.placement):
+        for ref in index.refs():  # the --state listing itself
             if ref.job_id not in seen and (steps is None or _at_steps(ref, steps, named=False)):
                 seen.add(ref.job_id)
                 refs.append(ref)
@@ -1069,7 +1173,8 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         raise ValueError("--request-id is supported only for one mount-daemon job request")
     ensure_identity_key(identity)
     workspace = _modifiable(arguments, context, action="post requests in it")
-    refs = _selected_jobs(workspace, context.cwd, arguments)
+    index = _selection_index(workspace, arguments)
+    refs = _selected_jobs(workspace, context.cwd, arguments, index)
     if not refs:
         print("no jobs selected", file=sys.stderr)
         return 1
@@ -1082,7 +1187,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     if tree:
         refs = _with_failed_descendants(workspace, refs)
     # As `job unlock`: the parents of a debugged job take its results, so they are unlocked too (marker only).
-    ancestors = _ancestors(workspace, refs) if arguments.action == "unlock" else []
+    ancestors = _ancestors(workspace, refs, index) if arguments.action == "unlock" else []
     _continue_notes(workspace, refs, arguments.action, tree=tree)
     if tree:
         return _continue_tree(
@@ -1092,8 +1197,9 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
             force=bool(arguments.force),
             keep_budget=bool(arguments.keep_budget),
             identity=identity,
+            index=index,
         )
-    published = publish_job_requests(
+    prepared = _prepare_job_requests(
         workspace,
         refs,
         action=arguments.action,
@@ -1108,11 +1214,38 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         keep_budget=bool(arguments.keep_budget),
         workflow=arguments.workflow,
     )
-    status = _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
-    if not ancestors:
-        return status
-    with _kernel.register_owner(workspace, kind="cli", label="job request", allocation=None, advertised={}) as owner:
-        return 1 if _unlock_ancestors(workspace, owner, ancestors, arguments.reason) else status
+    with ExitStack() as stack:
+        # One CLI owner for the command, registered once the first chunk is posted.
+        owner = _command_owner(workspace, stack, "immediate job requests")
+        outcomes = _post_and_serve(
+            workspace,
+            [(ref.job_id, partial(_prepared, ref, document)) for ref, document in prepared],
+            owner=owner,
+            index=index,
+            report=_print_outcomes,
+        )
+        unlocked = not ancestors or not _unlock_ancestors(workspace, owner(), ancestors, arguments.reason, index)
+    if any(outcome.status in {"refused", "uncertain"} for outcome in outcomes) or not unlocked:
+        return 1
+    if not arguments.wait:
+        return 0
+    pending = [
+        (ref, outcome.request_id)
+        for ref, outcome in zip(refs, outcomes, strict=True)
+        if outcome.status == "queued" or (outcome.status == "applied" and outcome.state != "paused")
+    ]
+    return 0 if not pending else _wait_for_pauses(workspace, pending, timeout=arguments.timeout)
+
+
+def _prepared(ref: JobRef, document: Mapping[str, object]) -> tuple[JobRef, Mapping[str, object]]:
+    """One job's request document, prepared already (:func:`_prepare_job_requests`)."""
+
+    return ref, document
+
+
+def _print_outcomes(outcomes: Sequence[RequestOutcome]) -> None:
+    for outcome in outcomes:
+        _print_outcome(outcome)
 
 
 def _request_document(
@@ -1666,10 +1799,11 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
         sys.stderr.write(stderr)
         return status
     workspace = _modifiable(arguments, context, action="delete jobs in it")
-    refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+    index = _location_index(workspace)
+    refs = _resolve_selectors(workspace, context.cwd, arguments.jobs, index)
     if not (arguments.force or arguments.confirmed or _confirm_job_delete([(ref.job_key, ref.state) for ref in refs])):
         return 1
-    return _print_removal_report(refs, remove_jobs(workspace, refs))
+    return _print_removal_report(refs, _remove_jobs(workspace, refs, index))
 
 
 def handle_job_recover(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -1722,61 +1856,83 @@ def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str
     """
 
     workspace = _modifiable(arguments, context, action=f"{action} jobs in it")
-    refs = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+    index = _location_index(workspace)
+    refs = _resolve_selectors(workspace, context.cwd, arguments.jobs, index)
     if action == "unseal" and not confirm(f"Unseal {len(refs)} job(s)?", force=arguments.force):
         return 1
     copy = not getattr(arguments, "no_copy", False)
     reason = getattr(arguments, "reason", None) or f"job {action}"
     # Found before any request moves a job; a string stands in for an ancestor that cannot be followed.
-    ancestors = _ancestors(workspace, refs) if action == "unlock" else []
-    failed = False
+    ancestors = _ancestors(workspace, refs, index) if action == "unlock" else []
+    failed: list[bool] = []
     with _kernel.register_owner(workspace, kind="cli", label=f"job {action}", allocation=None, advertised={}) as owner:
-        for ref in refs:
-            failed |= _apply_now(workspace, owner, ref, action, reason, copy=copy, done=done)
-        failed |= _unlock_ancestors(workspace, owner, ancestors, reason)
-    return 1 if failed else 0
+        _request_jobs(
+            workspace,
+            owner,
+            refs,
+            action,
+            reason,
+            copy=copy,
+            index=index,
+            report=lambda outcomes: failed.extend(_print_now(outcome, done) for outcome in outcomes),
+        )
+        failed.append(_unlock_ancestors(workspace, owner, ancestors, reason, index))
+    return 1 if any(failed) else 0
 
 
-def _apply_now(
-    workspace: Workspace,
-    owner: _kernel.Owner,
-    ref: JobRef,
-    action: str,
-    reason: str,
-    *,
-    copy: bool,
-    done: str,
-    mark: str = "",
-) -> bool:
-    """Post one request and apply it now where the job is unowned, print its line; whether it failed."""
+def _print_now(outcome: RequestOutcome, done: str, mark: str = "") -> bool:
+    """Print the line of one request applied now where the job is unowned; whether it failed."""
 
-    observed: list[RequestOutcome] = []
-    request_now(workspace, owner, ref, action, reason, outcomes=observed, copy=copy)
-    (outcome,) = observed
     if outcome.status == "applied":
-        print(f"{ref.job_id}\t{done}{mark}")
+        print(f"{outcome.job_id}\t{done}{mark}")
         return False
-    print(f"{ref.job_id}\t{outcome.status}\t{outcome.explanation}{mark}")
+    print(f"{outcome.job_id}\t{outcome.status}\t{outcome.explanation}{mark}")
     return outcome.status != "queued"
 
 
 def _unlock_ancestors(
-    workspace: Workspace, owner: _kernel.Owner, ancestors: Sequence[JobRef | str], reason: str
+    workspace: Workspace,
+    owner: _kernel.Owner,
+    ancestors: Sequence[JobRef | str],
+    reason: str,
+    index: LocationIndex,
 ) -> bool:
-    """Post a marker-only ``unlock`` for each of :func:`_ancestors`, printing its lines; whether one failed."""
+    """Post a marker-only ``unlock`` for each of :func:`_ancestors`, printing its lines; whether one failed.
 
-    failed = False
-    for ancestor in ancestors:
+    Each line is printed in order as soon as its chunk is served (on an interrupt, those served so far), with the
+    lines of ancestors that cannot be followed in their places.
+    """
+
+    refs = [ancestor for ancestor in ancestors if not isinstance(ancestor, str)]
+    pending = iter(ancestors)
+    failed: list[bool] = []
+
+    def report(outcomes: Sequence[RequestOutcome]) -> None:
+        for outcome in outcomes:
+            # Print the lines that come before this ancestor, then its own.
+            for ancestor in pending:
+                if isinstance(ancestor, str):
+                    print(ancestor)
+                elif ancestor.job_id == outcome.job_id:
+                    failed.append(_print_now(outcome, "unlocked", " (ancestor)"))
+                    break
+
+    try:
+        _request_jobs(workspace, owner, refs, "unlock", reason, copy=False, index=index, report=report)
+    except BaseException:
+        # The lines before the ancestor that was being served when the command stopped.
+        for ancestor in pending:
+            if not isinstance(ancestor, str):
+                break
+            print(ancestor)
+        raise
+    for ancestor in pending:
         if isinstance(ancestor, str):
             print(ancestor)
-        else:
-            failed |= _apply_now(
-                workspace, owner, ancestor, "unlock", reason, copy=False, done="unlocked", mark=" (ancestor)"
-            )
-    return failed
+    return any(failed)
 
 
-def _ancestors(workspace: Workspace, refs: Sequence[JobRef]) -> list[JobRef | str]:
+def _ancestors(workspace: Workspace, refs: Sequence[JobRef], index: LocationIndex | None = None) -> list[JobRef | str]:
     """Return every ancestor of *refs* in this workspace, nearest first, without repeats or selected jobs.
 
     A parent that cannot be followed (not in this workspace, or behind an unreadable ``job.json``) ends
@@ -1798,7 +1954,11 @@ def _ancestors(workspace: Workspace, refs: Sequence[JobRef]) -> list[JobRef | st
                 break
             seen.add(job_id)
             # By job id alone, as Attempt.parent does: a tree transferred here keeps its origin's workspace_id.
-            ancestor = _kernel.locate(workspace, job_id, placement_hint=PurePosixPath(str(parent["placement"])))
+            hint = PurePosixPath(str(parent["placement"]))
+            if index is not None:
+                ancestor = index.locate(job_id, placement_hint=hint)
+            else:
+                ancestor = _kernel.locate(workspace, job_id, placement_hint=hint)
             if ancestor is None:
                 found.append(f"{child.job_id}\tparent {parent['job_key']} not found; not unlocked")
             elif (doc := read_state_unowned(ancestor.path / "state.json")[0]) is not None and doc.unlocked is not None:

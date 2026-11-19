@@ -497,8 +497,24 @@ see {doc}`/restarting_jobs`.
 
 After publication, the CLI immediately serves the pending requests of each
 unowned job, from a snapshot taken then, oldest first by `created_at` instant
-and request id, up to and including the published one. Each request prints its
-job id, request id, outcome (`applied`, `queued`, `refused` or `uncertain`) and
+and request id, up to and including the published one. It posts and serves the
+requests of at most 256 jobs at a time. A request of the command whose outcome
+is `uncertain`, and on an error or interrupt every request of the current batch
+not served yet, is withdrawn: its file is removed while the command holds the
+job (claiming it if need be, and giving it back only once the removals are
+durable; if they cannot be made durable the command stops with its jobs held
+for recovery), with a warning naming it. A request stays pending, with a
+warning, when its application had begun under this or any earlier owner (the
+job's run log records it, or cannot be read: its effect may have started), when
+its job was returned with an attempt that may still be running (a manager
+signals a cancelled attempt before it records the cancel), when
+it is a `delete` or `eject` of a job adopted from an exchange (a previous owner
+may have begun it), when its job cannot be held (another owner holds it, or it
+is not found: it may still be applied), and when it is `queued`. Only a `SIGKILL` (or a signal the CLI does not handle) can
+leave one batch's requests behind unannounced (an interrupted withdrawal names
+the requests it did not settle); local `continue --tree` withdraws
+the same way, one job at a time. On an interrupt, the outcomes known so far are
+printed first. Each request prints its job id, request id, outcome (`applied`, `queued`, `refused` or `uncertain`) and
 an explanation. A job held by another owner, or one needing a manager's
 reconciliation, keeps its request queued for that owner or manager, and so
 does a job with more than 256 pending requests; when an earlier request of the
@@ -509,8 +525,9 @@ queued pauses and exits `0` only when each reaches `paused`. A superseded,
 dropped or timed-out pause exits `1`. `--timeout SECONDS` requires `--wait`.
 
 `job delete`, `job seal`, `job unseal`, `job detach` and `job unlock` use the
-same immediate serving path and print one concise line per job: done, or the `queued`,
-`refused` or `uncertain` outcome with its explanation.
+same immediate serving path, in the same batches with the same withdrawal, and
+print one concise line per job: done, or the `queued`, `refused` or `uncertain`
+outcome with its explanation.
 
 For an ordinary remote workspace, `job request ACTION --workspace REMOTE:NAME
 JOB_ID ...` keeps the signed two-leg request-envelope exchange: the client

@@ -747,13 +747,14 @@ def test_continue_tree_restores_budgets_and_forwards_keep_budget(
     child = _failed(workspace, tree[1], (_link(tree[0]),))
     parent = _failed(workspace, tree[2], (_link(tree[1]),))
     seen: list[object] = []
-    original = job_cli.publish_job_requests
+    # A local tree prepares each job's request just before posting and serving it (_prepare_job_requests).
+    original = job_cli._prepare_job_requests
 
     def spy(*args: object, **kwargs: object) -> object:
         seen.append(kwargs.get("keep_budget"))
         return original(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(job_cli, "publish_job_requests", spy)
+    monkeypatch.setattr(job_cli, "_prepare_job_requests", spy)
     # Without --keep-budget the leaf's revival restores its declared attempt, so the whole tree resumes.
     argv = [*_request_args(workspace_name, parent.job_id, action="continue"), "--tree"]
     assert command(argv, _context(tmp_path)) == 0

@@ -10,19 +10,21 @@ waiting for a manager.
 """
 
 import dataclasses
+import json
 import logging
 import os
 import re
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from itertools import islice
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, cast
 
 from . import _fs, _joins, _kernel, _moving, _requests, _store
 from ._job import JobDefinition
-from ._kernel import JobRef, ListingCache, OwnedJob, Release
+from ._kernel import JobRef, ListingCache, LocationIndex, OwnedJob, Release
 from ._manager_scheduling import current_step, effective_workflow
 from ._state import TERMINAL_STATES, StateDoc, _thaw, read_state_unowned
 from .errors import FormatError, WorkflowError
@@ -42,6 +44,7 @@ __all__ = [
     "refusal",
     "release",
     "remove_jobs",
+    "request_jobs",
     "request_now",
     "serve",
     "serve_requests",
@@ -59,6 +62,8 @@ _HELD = "another owner holds the job; the request applies at its next boundary"
 _SNAPSHOT_LIMIT = 256
 #: The outcomes that settle a request.
 _SETTLED = frozenset({"applied", "refused"})
+#: The most jobs a command posts requests for before it serves them (plan WORKFLOW_LOCAL_COMMANDS §4.3).
+_CHUNK_JOBS = 256
 
 
 @dataclass(frozen=True)
@@ -402,6 +407,9 @@ def refusal(
     :return: Why the request must not apply, or ``None``.
     """
 
+    # Within a CLI command's serving, its location index answers the parent probes where it still holds.
+    index = None if (serving := _SERVING.get()) is None else serving.index
+
     attribution_refusal = daemon_attribution_refusal(workspace, job.id, job.placement, request)
     if attribution_refusal is not None:
         return attribution_refusal
@@ -422,15 +430,17 @@ def refusal(
             )
         return workflow_switch_problem(workspace, job, doc, candidate)
     if request.action in ("continue", "restart", "override_step"):
-        return _joins.consumed_by_decided_join(workspace, job, cache=cache)
+        return _joins.consumed_by_decided_join(workspace, job, cache=cache, index=index)
     if request.action == "eject":
         return _moving.destination_problem(Path(str(request.document["destination"])), workspace)
     parent = job.parent
     if request.action != "delete" or parent is None:
         return None
-    ref = _kernel.locate(
-        workspace, str(parent["job_id"]), placement_hint=PurePosixPath(str(parent["placement"])), cache=cache
-    )
+    hint = PurePosixPath(str(parent["placement"]))
+    if index is not None:
+        ref = index.locate(str(parent["job_id"]), placement_hint=hint, cache=cache)
+    else:
+        ref = _kernel.locate(workspace, str(parent["job_id"]), placement_hint=hint, cache=cache)
     if ref is None or ref.state in TERMINAL_STATES:
         return None
     parent_doc, _damaged = read_state_unowned(ref.path / "state.json")
@@ -467,10 +477,12 @@ def _order(request: _requests.Request) -> tuple[datetime, str]:
     return created if created.tzinfo is not None else created.replace(tzinfo=UTC), request.request_id
 
 
-def _history_outcome(workspace: _kernel.KernelWorkspace, ref: JobRef, request_id: str) -> RequestOutcome:
+def _history_outcome(
+    workspace: _kernel.KernelWorkspace, ref: JobRef, request_id: str, index: LocationIndex
+) -> RequestOutcome:
     """Recover a request result from its matching state-history record, when that proves the effect."""
 
-    current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+    current = index.locate(ref.job_id, placement_hint=ref.placement, exhaustive=True)
     if current is None:
         return RequestOutcome(ref.job_id, request_id, "uncertain", "job disappeared before its effect was observed")
     doc, _damage = read_state_unowned(current.path / "state.json")
@@ -768,6 +780,9 @@ def apply_requests(
         detail: dict[str, object] = {"request_id": request.request_id, "action": request.action}
         if isinstance(effect, _requests.Drop):
             detail["dropped"] = effect.reason
+        if (serving := _SERVING.get()) is not None:
+            # Its first durable mutation follows: the run-log record of its application, before any effect.
+            serving.started.add(request.request_id)
         owned.append_log("request_applied", detail=detail)
         if isinstance(effect, _requests.Discard):
             owned.discard()
@@ -833,18 +848,40 @@ def serve(
         the claim, or its ``state.json`` is unreadable).
     """
 
-    from .gc import quarantine, quarantine_damaged
+    from .gc import quarantine_damaged
 
+    owned: OwnedJob | None = None
     try:
-        owned = _kernel.claim(workspace, owner, ref)
-    except (FormatError, _fs.UnsafePath, OSError) as exc:
-        reason = f"job.json is damaged: {exc}"
-        moved = quarantine_damaged(cast("Workspace", workspace), owner, ref.job_id, reason)
-        raise WorkflowError(
-            f"quarantined {ref.job_key}: {reason}" if moved else f"cannot claim {ref.job_key}: {exc}"
-        ) from exc
-    if owned is None:
-        return False
+        try:
+            owned = _kernel.claim(workspace, owner, ref)
+        except (FormatError, _fs.UnsafePath, OSError) as exc:
+            reason = f"job.json is damaged: {exc}"
+            moved = quarantine_damaged(cast("Workspace", workspace), owner, ref.job_id, reason)
+            raise WorkflowError(
+                f"quarantined {ref.job_key}: {reason}" if moved else f"cannot claim {ref.job_key}: {exc}"
+            ) from exc
+        if owned is None:
+            return False
+        return _serve_claimed(workspace, owner, ref, owned, only=only, outcomes=outcomes)
+    finally:
+        if (serving := _SERVING.get()) is not None:
+            # Where this command moved the job, or that its place is no longer known: the index's next answer.
+            serving.index.moved(ref.job_id, owned)
+
+
+def _serve_claimed(
+    workspace: _kernel.KernelWorkspace,
+    owner: _kernel.Owner,
+    ref: JobRef,
+    owned: OwnedJob,
+    *,
+    only: Collection[str] | None,
+    outcomes: list[RequestOutcome] | None,
+) -> bool:
+    """Serve the job whose claim won *owned*: the rest of :func:`serve`."""
+
+    from .gc import quarantine
+
     owned.append_log("claimed", **{"from": ref.state, "to": _kernel.OWNED})
     try:
         job = JobDefinition.from_path(owned.path / "job.json")
@@ -890,11 +927,11 @@ def serve(
 
 
 def _serve_one(
-    workspace: "Workspace", owner: _kernel.Owner, ref: JobRef, request_id: str
+    workspace: "Workspace", owner: _kernel.Owner, ref: JobRef, request_id: str, index: LocationIndex
 ) -> tuple[RequestOutcome, bool]:
     """Serve one request of an unowned job as *owner*; the flag says that later requests of the job must wait."""
 
-    current = _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True)
+    current = index.locate(ref.job_id, placement_hint=ref.placement, exhaustive=True)
     if current is None:
         explanation = "job disappeared before the request was observed"
         return RequestOutcome(ref.job_id, request_id, "uncertain", explanation), True
@@ -908,14 +945,96 @@ def _serve_one(
     if observed:
         # Queued only when the job needs a manager's reconciliation first, which every later request waits for too.
         return observed[-1], observed[-1].status == "queued"
-    result = _history_outcome(workspace, ref, request_id)
-    if (
-        not claimed
-        and result.status == "uncertain"
-        and _kernel.locate(workspace, ref.job_id, placement_hint=ref.placement, exhaustive=True) is not None
-    ):
+    result = _history_outcome(workspace, ref, request_id, index)
+    if not claimed and result.status == "uncertain" and index.present(ref.job_id):
         result = dataclasses.replace(result, status="queued", explanation="another owner claimed the job first")
     return result, result.status not in _SETTLED
+
+
+@dataclass
+class _Progress:
+    """How far serving one snapshot got: the outcome of each request so far, the requests whose application began
+    (their first durable mutation, the run-log record of it, was reached), and the job being served right now.
+
+    :param index: The command's location index, through which the serving locates jobs and records their moves.
+    """
+
+    index: LocationIndex
+    results: dict[str, RequestOutcome] = field(default_factory=dict)
+    started: set[str] = field(default_factory=set)
+    serving: str | None = None
+
+
+#: The snapshot a CLI command is serving now, if any: :func:`serve`, :func:`apply_requests` and :func:`refusal` record
+#: into it and locate through its index. Never set for a manager, whose calls behave exactly as before.
+_SERVING: ContextVar[_Progress | None] = ContextVar("httk_workflow_removal_serving", default=None)
+
+
+def _order_snapshot(workspace: "Workspace", job_ids: Iterable[str]) -> dict[str, list[_requests.Request] | None]:
+    """Decide from one listing of ``requests/`` which requests of each job are served, and in which order.
+
+    Each job gets the requests the glob ``<job-uuid>.*.json`` would match, parsed and in application order, or
+    ``None`` when it has more than :data:`_SNAPSHOT_LIMIT` of them. This is only the order snapshot: a claim still
+    lists the job's requests afresh (:meth:`~httk.workflow._kernel.OwnedJob.request_files`), and only that listing
+    can show an applied request retired (plan WORKFLOW_LOCAL_COMMANDS §4.2).
+    """
+
+    directory = workspace.control / "requests"
+    listed: dict[str, list[str]] = {job_id: [] for job_id in job_ids}
+    for name in _kernel.list_names(directory):
+        # A job UUID holds no dot: the glob's "<job-uuid>." is the name up to its first dot.
+        job_id, _dot, rest = name.partition(".")
+        names = listed.get(job_id)
+        if names is not None and rest.endswith(".json"):
+            names.append(name)
+    snapshots: dict[str, list[_requests.Request] | None] = {}
+    for job_id, names in listed.items():
+        if len(names) > _SNAPSHOT_LIMIT:
+            snapshots[job_id] = None
+            continue
+        found = [request for name in names if (request := _parse(directory / name)) is not None]
+        snapshots[job_id] = sorted(found, key=_order)
+    return snapshots
+
+
+def _serve_snapshot(
+    workspace: "Workspace",
+    owner: _kernel.Owner,
+    items: Sequence[tuple[JobRef, str]],
+    snapshots: Mapping[str, list[_requests.Request] | None],
+    progress: _Progress,
+) -> None:
+    """Serve each item's job through its request, as :func:`serve_requests` describes, recording *progress*."""
+
+    results, index = progress.results, progress.index
+    token = _SERVING.set(progress)
+    try:
+        for ref, request_id in items:
+            ordered = snapshots[ref.job_id]
+            if ordered is None:
+                explanation = f"more than {_SNAPSHOT_LIMIT} requests are pending; they wait for a manager"
+                results[request_id] = RequestOutcome(ref.job_id, request_id, "queued", explanation)
+                continue
+            target = next((request for request in ordered if request.request_id == request_id), None)
+            if target is None:
+                results[request_id] = _history_outcome(workspace, ref, request_id, index)
+                continue
+            for request in ordered:
+                if _order(request) > _order(target):
+                    break
+                previous = results.get(request.request_id)
+                if previous is not None and previous.status in _SETTLED:
+                    continue
+                progress.serving = ref.job_id
+                result, halt = _serve_one(workspace, owner, ref, request.request_id, index)
+                progress.serving = None
+                results[request.request_id] = result
+                if halt:
+                    # The requested one waits behind it, for the same reason.
+                    results[request_id] = dataclasses.replace(result, request_id=request_id)
+                    break
+    finally:
+        _SERVING.reset(token)
 
 
 def serve_requests(
@@ -927,7 +1046,9 @@ def serve_requests(
     the requested id. A live owner, lost claim or unfinished reconciliation
     stops at the request it meets and leaves the requested one queued; a job
     with more than 256 pending requests is not served here at all, leaving
-    them to a manager. Arrivals after the snapshot are not considered.
+    them to a manager. Arrivals after the snapshot are not considered. One
+    listing of ``requests/`` takes the snapshot of every job, and one listing
+    of the workspace locates them.
 
     :param workspace: The local workspace.
     :param published: Published request files paired with their observed jobs.
@@ -935,49 +1056,445 @@ def serve_requests(
     :return: One result per published request, in input order.
     """
 
+    return _serve_requests(workspace, published, owner=owner, index=LocationIndex(workspace))
+
+
+def _serve_requests(
+    workspace: "Workspace",
+    published: Iterable[tuple[JobRef, Path]],
+    *,
+    owner: _kernel.Owner | None,
+    index: LocationIndex,
+) -> tuple[RequestOutcome, ...]:
+    """Serve as :func:`serve_requests` does, through the command's location index *index*."""
+
     items = [(ref, path.name.split(".")[1]) for ref, path in published]
     if not items:
         return ()
-    results: dict[str, RequestOutcome] = {}
-    snapshots: dict[str, list[_requests.Request] | None] = {}
-    for ref, _request_id in items:
-        if ref.job_id not in snapshots:
-            paths = list(islice((workspace.control / "requests").glob(f"{ref.job_id}.*.json"), _SNAPSHOT_LIMIT + 1))
-            found = [request for path in paths if (request := _parse(path)) is not None]
-            snapshots[ref.job_id] = None if len(paths) > _SNAPSHOT_LIMIT else sorted(found, key=_order)
-
-    def process(active: _kernel.Owner) -> None:
-        for ref, request_id in items:
-            ordered = snapshots[ref.job_id]
-            if ordered is None:
-                explanation = f"more than {_SNAPSHOT_LIMIT} requests are pending; they wait for a manager"
-                results[request_id] = RequestOutcome(ref.job_id, request_id, "queued", explanation)
-                continue
-            target = next((request for request in ordered if request.request_id == request_id), None)
-            if target is None:
-                results[request_id] = _history_outcome(workspace, ref, request_id)
-                continue
-            for request in ordered:
-                if _order(request) > _order(target):
-                    break
-                previous = results.get(request.request_id)
-                if previous is not None and previous.status in _SETTLED:
-                    continue
-                result, halt = _serve_one(workspace, active, ref, request.request_id)
-                results[request.request_id] = result
-                if halt:
-                    # The requested one waits behind it, for the same reason.
-                    results[request_id] = dataclasses.replace(result, request_id=request_id)
-                    break
-
+    snapshots = _order_snapshot(workspace, dict.fromkeys(ref.job_id for ref, _request_id in items))
+    progress = _Progress(index)
     if owner is None:
         with _kernel.register_owner(
             workspace, kind="cli", label="immediate job requests", allocation=None, advertised={}
         ) as active:
-            process(active)
+            _serve_snapshot(workspace, active, items, snapshots, progress)
     else:
-        process(owner)
-    return tuple(results[request_id] for _ref, request_id in items)
+        _serve_snapshot(workspace, owner, items, snapshots, progress)
+    return tuple(progress.results[request_id] for _ref, request_id in items)
+
+
+def _chunks[T](posts: Iterable[tuple[str, T]]) -> Iterator[list[tuple[str, T]]]:
+    """Cut *posts* (job id first) into chunks of at most :data:`_CHUNK_JOBS`, never holding one job twice.
+
+    A job named again starts a new chunk, so its second request is posted only after the first was served, as when
+    every request was posted and served in turn.
+    """
+
+    chunk: list[tuple[str, T]] = []
+    jobs: set[str] = set()
+    for post in posts:
+        if len(chunk) >= _CHUNK_JOBS or post[0] in jobs:
+            yield chunk
+            chunk, jobs = [], set()
+        chunk.append(post)
+        jobs.add(post[0])
+    if chunk:
+        yield chunk
+
+
+#: The error types of one job's withdrawal, which leave its request armed rather than stop the withdrawal.
+_WITHDRAWAL_ERRORS = (OSError, FormatError, WorkflowError, _fs.UnsafePath)
+
+
+def _held_for_withdrawal(
+    workspace: "Workspace",
+    owner: _kernel.Owner,
+    index: LocationIndex,
+    job_id: str,
+    here: Mapping[str, JobRef],
+    claimed: list[OwnedJob],
+) -> OwnedJob | str:
+    """Hold a job so that no other owner can be applying its requests: the handle, or why it cannot be held.
+
+    A job in this owner's ``owned/`` is held already; any other is claimed from where it is unowned, and joins
+    *claimed* (to be given back once the withdrawal is durable).
+    """
+
+    if (mine := here.get(job_id)) is not None:
+        held = owner.holds(mine)
+        handle = owner.adopt_owned(mine)
+        if not held:
+            claimed.append(handle)
+        return handle
+    current = index.locate(job_id, placement_hint=None, exhaustive=True)
+    if current is None:
+        return "the job was not found"
+    if current.state == _kernel.OWNED:
+        return "another owner holds the job"
+    won = _kernel.claim(workspace, owner, current)
+    if won is None:
+        return "another owner claimed the job first"
+    claimed.append(won)
+    return won
+
+
+def _withdraw(
+    workspace: "Workspace",
+    owner: Callable[[], _kernel.Owner],
+    posted: Sequence[tuple[JobRef, Path]],
+    progress: _Progress,
+    *,
+    stopped: bool,
+) -> None:
+    """Withdraw this command's requests of one chunk that are left armed, each while this command holds its job.
+
+    Left armed is a request whose outcome is ``uncertain`` and, when the command *stopped* (an exception or an
+    interrupt), every request without an outcome yet, including one whose publication raised after its file was
+    named; but only one whose application never began (:class:`_Progress`) is withdrawn. Its job is held first
+    (claimed, unless this command holds it already), so no other owner can be applying it; while held, its file is
+    unlinked, unless a previous owner may have begun applying it (:func:`_kept_for_recovery`). Every unlink that may
+    have happened, also one an interrupt cut short, is sealed by one fsync of ``requests/`` before any job goes back,
+    here or in the owner's exit; when that fsync fails or is interrupted, the owner fail-stops with every job held
+    and the original exception propagates. A request whose job cannot be held, whose application began, or whose
+    withdrawal fails stays armed and is logged by id, as is the job being served when the command stopped.
+    """
+
+    in_flight = progress.serving if stopped else None
+    # The requests to withdraw, decided from this command's own record alone (no I/O, so nothing interrupts it).
+    candidates: list[tuple[JobRef, str, Path]] = []
+    for ref, path in posted:
+        request_id = path.name.split(".")[1]
+        result = progress.results.get(request_id)
+        if ref.job_id == in_flight:
+            _LOGGER.warning("job %s was being served when the command stopped: its state is uncertain", ref.job_id)
+        if not ((result is None and stopped) or (result is not None and result.status == "uncertain")):
+            continue
+        if request_id in progress.started:
+            _LOGGER.warning("request %s for job %s stays pending: its application began", request_id, ref.job_id)
+            continue
+        candidates.append((ref, request_id, path))
+    if not candidates:
+        return
+    active: _kernel.Owner | None = None
+    claimed: list[OwnedJob] = []
+    # Every unlink that may have happened, recorded before the unlink is attempted: the barrier covers each of them.
+    pending: list[tuple[str, str]] = []
+    unlinked: list[tuple[str, str]] = []
+    # The requests settled (withdrawn, nothing to withdraw, or kept and reported); an interrupt anywhere in the
+    # withdrawal reports the rest by id.
+    settled: set[str] = set()
+    stopping: BaseException | None = None
+    here: dict[str, JobRef] = {}
+    try:
+        armed: list[tuple[JobRef, str, Path]] = []
+        for ref, request_id, path in candidates:
+            try:
+                if _fs.lstat(_fs.loc(path)) is None:
+                    settled.add(request_id)  # never published, or retired with its job meanwhile: nothing to withdraw
+                    continue
+            except _WITHDRAWAL_ERRORS as exc:
+                _LOGGER.warning("request %s for job %s was not withdrawn: %s", request_id, ref.job_id, exc)
+                settled.add(request_id)
+                continue
+            armed.append((ref, request_id, path))
+        if armed:
+            try:
+                active = owner()
+                active.check_alive()
+                here = {ref.job_id: ref for ref in active.owned()}
+            except _WITHDRAWAL_ERRORS as exc:
+                for ref, request_id, _path in armed:
+                    _LOGGER.warning(
+                        "request %s for job %s was not withdrawn (%s); it may still be applied",
+                        request_id,
+                        ref.job_id,
+                        exc,
+                    )
+                    settled.add(request_id)
+                armed = []
+        for ref, request_id, path in armed:
+            assert active is not None
+            try:
+                handle = _held_for_withdrawal(workspace, active, progress.index, ref.job_id, here, claimed)
+                if isinstance(handle, str):
+                    _LOGGER.warning(
+                        "request %s for job %s was not withdrawn (%s); it may still be applied",
+                        request_id,
+                        ref.job_id,
+                        handle,
+                    )
+                    settled.add(request_id)
+                    continue
+                if (kept := _kept_for_recovery(handle, path, request_id)) is not None:
+                    _LOGGER.warning("request %s for job %s kept: %s", request_id, ref.job_id, kept)
+                    settled.add(request_id)
+                    continue
+                pending.append((ref.job_id, request_id))
+                _fs.remove_file(_fs.loc(path), durable=False)
+            except _WITHDRAWAL_ERRORS as exc:
+                _LOGGER.warning(
+                    "request %s for job %s was not withdrawn (%s); it may still be applied", request_id, ref.job_id, exc
+                )
+                settled.add(request_id)
+                continue
+            unlinked.append((ref.job_id, request_id))
+            settled.add(request_id)
+    except BaseException as exc:
+        stopping = exc  # an interrupt: the unlinks made so far are still sealed before any job goes back
+        for ref, request_id, _path in candidates:
+            if request_id not in settled:
+                _LOGGER.warning(
+                    "request %s for job %s: its withdrawal was cut short (%s); it may still be applied",
+                    request_id,
+                    ref.job_id,
+                    type(exc).__name__,
+                )
+    if (failed := _seal_withdrawals(workspace, pending)) is not None:
+        # No job may go back while a withdrawal is not durable: fail-stop. The flight is never left, so the owner's
+        # exit touches nothing and keeps owner.json; recovery returns every job it holds.
+        assert active is not None  # an unlink was attempted, so the owner holds its job
+        active.enter_flight()
+        for job_id, request_id in pending:
+            _LOGGER.warning(
+                "the withdrawal of request %s for job %s is not durable (%s); its jobs stay held for recovery",
+                request_id,
+                job_id,
+                failed,
+            )
+        raise stopping if stopping is not None else failed
+    for job_id, request_id in unlinked:
+        _LOGGER.warning(
+            "request %s for job %s withdrawn while held by this command; it had not been applied", request_id, job_id
+        )
+    # Only now, the withdrawals durable, do the jobs claimed for them go back.
+    for handle in claimed:
+        try:
+            handle.give_back()
+        except _WITHDRAWAL_ERRORS as exc:
+            _LOGGER.warning("job %s stays with this command's owner after a withdrawal: %s", handle.job_id, exc)
+        progress.index.moved(handle.job_id, handle)
+    if stopping is not None:
+        raise stopping
+
+
+#: The most of a job's run log a withdrawal reads for an owner's record of applying a request; a longer log keeps it.
+_RUNLOG_EVIDENCE_LIMIT = 64 << 20
+#: How much of the run log one read takes.
+_RUNLOG_CHUNK = 1 << 20
+
+
+def _application_logged(handle: OwnedJob, request_id: str) -> bool | None:
+    """Whether the held job's run log records any owner's ``request_applied`` of *request_id*; ``None`` if unknown.
+
+    ``apply_requests`` appends that record durably before any effect of the request, so its absence proves that no
+    owner began applying it. The whole log is read (``None`` when it cannot be, or passes the limit).
+    """
+
+    needle, offset, carry = request_id.encode(), 0, b""
+    while True:
+        try:
+            data, offset = _fs.read_tail(handle.path, "logs/runlog.jsonl", _RUNLOG_CHUNK, offset)
+        except (OSError, _fs.UnsafePath):
+            return None
+        if offset > _RUNLOG_EVIDENCE_LIMIT:
+            return None
+        lines = (carry + data).split(b"\n")
+        carry = lines.pop() if data else b""  # a line the next read completes; at the end, the last line is whole
+        for line in lines:
+            if needle not in line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                return None  # a line naming the request that cannot be read: it may be the record
+            detail = entry.get("detail") if isinstance(entry, dict) else None
+            if (
+                isinstance(detail, dict)
+                and entry.get("event") == "request_applied"
+                and detail.get("request_id") == request_id
+            ):
+                return True
+        if not data:
+            return False
+
+
+def _kept_for_recovery(handle: OwnedJob, path: Path, request_id: str) -> str | None:
+    """Why a request of a held job must stay although this command never began applying it, or ``None``.
+
+    Any owner's run-log record of applying it: that owner (dead, its job returned) may have begun its effect, and the
+    pending request is what finishes it. A job whose ``state.json`` shows an attempt that may be live (``phase`` not
+    ``idle``) or an unfinished commit as well: a manager signals a running attempt for a ``cancel`` before it logs
+    the cancel. A ``delete`` or ``eject`` of an exchange-origin job as well: an exchange index may have been dropped.
+    A request, run log or ``state.json`` that cannot be read keeps it too.
+    """
+
+    try:
+        request = _requests.parse(path)
+    except FileNotFoundError:
+        return None
+    except FormatError as exc:
+        return f"it cannot be read: {exc}"
+    logged = _application_logged(handle, request_id)
+    if logged is None:
+        return "the job's run log cannot be read"
+    if logged:
+        return "an owner began applying it"
+    try:
+        doc = handle.read_state()
+    except (FormatError, _fs.UnsafePath, OSError):
+        return "a previous owner may have begun applying it"
+    if doc is not None and (doc.phase["kind"] != "idle" or doc.commit is not None):
+        # A manager acts on some requests before it logs them: it signals a running attempt for a cancel and records
+        # the cancel only at the attempt's commit. An attempt that may be live, or a commit that may be unfinished,
+        # may already carry the request's effect.
+        return "the job had a running attempt"
+    if request.action in ("delete", "eject") and doc is not None and doc.origin == "exchange":
+        return "a previous owner may have begun applying it"
+    return None
+
+
+def _seal_withdrawals(workspace: "Workspace", pending: Sequence[tuple[str, str]]) -> BaseException | None:
+    """Fsync ``requests/`` once for the withdrawals that may have been made; what stopped it, or ``None``."""
+
+    if not pending or not workspace.durable:
+        return None
+    try:
+        descriptor = _fs.open_dir(workspace.control / "requests")
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except BaseException as exc:
+        return exc
+    return None
+
+
+#: Prepares one job's request: the job as located and its verified document, or the job's outcome when there is none.
+type _Prepare = Callable[[], tuple[JobRef, Mapping[str, object]] | RequestOutcome]
+
+
+def _post_and_serve(
+    workspace: "Workspace",
+    posts: Sequence[tuple[str, _Prepare]],
+    *,
+    owner: Callable[[], _kernel.Owner],
+    index: LocationIndex,
+    report: Callable[[Sequence[RequestOutcome]], None] | None = None,
+) -> list[RequestOutcome]:
+    """Post and serve one command's requests chunk by chunk (plan WORKFLOW_LOCAL_COMMANDS §4.3).
+
+    Each post is a job id and its preparation. A chunk holds at most :data:`_CHUNK_JOBS` jobs, none twice: every
+    request is named in the chunk's record before it is published, then all are served from one order snapshot, in
+    order, by the owner *owner* returns (asked for when the first chunk is served). At the end of a chunk the requests
+    whose outcome is ``uncertain`` are withdrawn (:func:`_withdraw`); on an exception or an interrupt, so is every
+    request of the chunk without an outcome, the outcomes known so far are reported, and the original exception
+    propagates to the owner, which gives its jobs back as before. Requests left armed by a SIGKILL, or a signal the
+    CLI does not handle, are at most one chunk's.
+
+    :param workspace: The local workspace.
+    :param posts: The jobs and their preparations, in input order.
+    :param owner: Returns the command's CLI owner.
+    :param index: The command's location index.
+    :param report: Called with each chunk's outcomes once it is served, or with those known when it stops.
+    :return: One outcome per post, in input order.
+    """
+
+    outcomes: list[RequestOutcome] = []
+    for chunk in _chunks(posts):
+        made: list[RequestOutcome | None] = []
+        posted: list[tuple[JobRef, Path]] = []
+        progress = _Progress(index)
+        try:
+            for _job_id, prepare in chunk:
+                prepared = prepare()
+                if isinstance(prepared, RequestOutcome):
+                    made.append(prepared)
+                    continue
+                ref, document = prepared
+                made.append(None)
+                # Recorded before it is published: a post that renamed its file and then raised is withdrawn too.
+                posted.append((ref, _kernel.request_file(workspace, document)))
+                _kernel.post_request(workspace, document)
+            if posted:
+                items = [(ref, path.name.split(".")[1]) for ref, path in posted]
+                snapshots = _order_snapshot(workspace, dict.fromkeys(ref.job_id for ref, _path in posted))
+                _serve_snapshot(workspace, owner(), items, snapshots, progress)
+        except BaseException:
+            try:
+                _withdraw(workspace, owner, posted, progress, stopped=True)
+            except BaseException:
+                _LOGGER.warning("the withdrawal of this command's unserved requests stopped", exc_info=True)
+            _report_known(report, made, posted, progress)
+            raise
+        try:
+            _withdraw(workspace, owner, posted, progress, stopped=False)
+        except BaseException:
+            # The withdrawal reported what it left; no second cleanup. The outcomes known so far are reported.
+            _report_known(report, made, posted, progress)
+            raise
+        chunk_outcomes = [outcome for outcome in _known(made, posted, progress) if outcome is not None]
+        if report is not None:
+            report(chunk_outcomes)
+        outcomes += chunk_outcomes
+    return outcomes
+
+
+def _report_known(
+    report: Callable[[Sequence[RequestOutcome]], None] | None,
+    made: Sequence[RequestOutcome | None],
+    posted: Sequence[tuple[JobRef, Path]],
+    progress: _Progress,
+) -> None:
+    """Report the outcomes of a chunk known when the command stopped, in input order; never raise doing so."""
+
+    if report is None:
+        return
+    try:
+        report([outcome for outcome in _known(made, posted, progress) if outcome is not None])
+    except BaseException:
+        _LOGGER.warning("the outcomes known before the command stopped were not reported", exc_info=True)
+
+
+def _known(
+    made: Sequence[RequestOutcome | None], posted: Sequence[tuple[JobRef, Path]], progress: _Progress
+) -> list[RequestOutcome | None]:
+    """Each prepared job's outcome so far, in input order: its own, or its posted request's (``None`` if none yet)."""
+
+    served = iter(posted)
+    known: list[RequestOutcome | None] = []
+    for outcome in made:
+        if outcome is None and (post := next(served, None)) is not None:
+            outcome = progress.results.get(post[1].name.split(".")[1])
+        known.append(outcome)
+    return known
+
+
+def _post_now(
+    index: LocationIndex, ref: JobRef, action: str, reason: str, copy: bool
+) -> tuple[JobRef, Mapping[str, object]] | RequestOutcome:
+    """Prepare one unsigned CLI request for a job found where it was observed; the job's outcome otherwise.
+
+    A job that is not found, or whose ``job.json`` cannot be read for its placement, gets an ``uncertain`` outcome.
+    """
+
+    placement = ref.placement
+    if placement is None:
+        try:
+            placement = JobDefinition.from_path(ref.path / "job.json").placement
+        except (OSError, FormatError, _fs.UnsafePath) as exc:
+            return RequestOutcome(ref.job_id, "", "uncertain", f"the job cannot be read: {exc}")
+    current = index.locate(ref.job_id, placement_hint=placement)
+    if current is None:
+        return RequestOutcome(ref.job_id, "", "uncertain", "the job was not found")
+    document = _requests.compose(
+        action=action,
+        job_id=ref.job_id,
+        placement=placement,
+        operator="cli",
+        reason=reason,
+        no_copy=action == "unlock" and not copy,
+    )
+    return current, document
 
 
 def request_now(
@@ -992,7 +1509,8 @@ def request_now(
 ) -> str | None:
     """Post one request for a job and apply it now when the job is unowned (``job delete|seal|unseal|detach``).
 
-    A job another owner holds gets the request at its next boundary. Nothing is posted for a job that is not found.
+    A job another owner holds gets the request at its next boundary. Nothing is posted for a job that is not found,
+    or whose ``job.json`` cannot be read. :func:`request_jobs` is its many-job counterpart.
 
     :param workspace: The workspace.
     :param owner: The CLI owner that applies it.
@@ -1005,29 +1523,69 @@ def request_now(
     :return: ``None`` when the request took effect, otherwise why it did not (yet).
     """
 
-    placement = ref.placement if ref.placement is not None else JobDefinition.from_path(ref.path / "job.json").placement
-    current = _kernel.locate(workspace, ref.job_id, placement_hint=placement)
-    if current is None:
-        if outcomes is not None:
-            outcomes.append(RequestOutcome(ref.job_id, "", "uncertain", "the job was not found"))
-        return "the job was not found"
-    path = _requests.post(
-        workspace,
-        action=action,
-        job_id=ref.job_id,
-        placement=placement,
-        operator="cli",
-        reason=reason,
-        no_copy=action == "unlock" and not copy,
-    )
-    (outcome,) = serve_requests(workspace, [(current, path)], owner=owner)
+    index = LocationIndex(workspace)
+    prepared = _post_now(index, ref, action, reason, copy)
+    if isinstance(prepared, RequestOutcome):
+        outcome = prepared
+    else:
+        current, document = prepared
+        path = _kernel.post_request(workspace, document)
+        (outcome,) = _serve_requests(workspace, [(current, path)], owner=owner, index=index)
     if outcomes is not None:
         outcomes.append(outcome)
     return None if outcome.status == "applied" else outcome.explanation
 
 
+def request_jobs(
+    workspace: "Workspace",
+    owner: _kernel.Owner,
+    refs: Sequence[JobRef],
+    action: str,
+    reason: str,
+    *,
+    copy: bool = True,
+    report: Callable[[Sequence[RequestOutcome]], None] | None = None,
+) -> list[RequestOutcome]:
+    """Post one request per job and apply it now where the job is unowned: :func:`request_now` for many jobs.
+
+    The requests are posted and served in chunks of at most 256 jobs. A request of the command left armed by an
+    ``uncertain`` outcome, or by an error or interrupt before it was served, is withdrawn while the command holds its
+    job, unless its application began; what cannot be withdrawn is logged by id.
+
+    :param workspace: The workspace.
+    :param owner: The CLI owner that applies them.
+    :param refs: The jobs, as last observed.
+    :param action: The request action.
+    :param reason: The operator's reason.
+    :param copy: Whether an ``unlock`` copies the job's runner.
+    :param report: Called with each chunk's outcomes once the chunk is served (or with those known when it stops).
+    :return: One outcome per job, in order.
+    """
+
+    return _request_jobs(
+        workspace, owner, refs, action, reason, copy=copy, index=LocationIndex(workspace), report=report
+    )
+
+
+def _request_jobs(
+    workspace: "Workspace",
+    owner: _kernel.Owner,
+    refs: Sequence[JobRef],
+    action: str,
+    reason: str,
+    *,
+    copy: bool,
+    index: LocationIndex,
+    report: Callable[[Sequence[RequestOutcome]], None] | None = None,
+) -> list[RequestOutcome]:
+    """Request as :func:`request_jobs` does, through the command's location index *index*."""
+
+    posts = [(ref.job_id, partial(_post_now, index, ref, action, reason, copy)) for ref in refs]
+    return _post_and_serve(workspace, posts, owner=lambda: owner, index=index, report=report)
+
+
 def remove_jobs(workspace: "Workspace", refs: Iterable[JobRef], *, force: bool = False) -> RemovalReport:
-    """Post a ``delete`` request for each job and apply it now when the job is unowned.
+    """Post a ``delete`` request for each job and apply it now when the job is unowned, as :func:`request_jobs` does.
 
     :param workspace: The workspace.
     :param refs: The jobs, as last observed.
@@ -1036,11 +1594,23 @@ def remove_jobs(workspace: "Workspace", refs: Iterable[JobRef], *, force: bool =
     """
 
     del force
-    outcomes: list[RemovalOutcome] = []
+    return _remove_jobs(workspace, refs, LocationIndex(workspace))
+
+
+def _remove_jobs(workspace: "Workspace", refs: Iterable[JobRef], index: LocationIndex) -> RemovalReport:
+    """Remove as :func:`remove_jobs` does, through the command's location index *index*."""
+
+    selected = list(refs)
     with _kernel.register_owner(workspace, kind="cli", label="job delete", allocation=None, advertised={}) as owner:
-        for ref in refs:
-            observed: list[RequestOutcome] = []
-            reason = request_now(workspace, owner, ref, "delete", "job delete", outcomes=observed)
-            request = observed[0] if observed else None
-            outcomes.append(RemovalOutcome(ref.job_key, ref.state, reason is None, reason, request))
+        observed = _request_jobs(workspace, owner, selected, "delete", "job delete", copy=True, index=index)
+    outcomes = [
+        RemovalOutcome(
+            ref.job_key,
+            ref.state,
+            outcome.status == "applied",
+            None if outcome.status == "applied" else outcome.explanation,
+            outcome,
+        )
+        for ref, outcome in zip(selected, observed, strict=True)
+    ]
     return RemovalReport(tuple(outcomes))

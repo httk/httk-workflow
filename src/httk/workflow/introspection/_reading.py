@@ -378,7 +378,38 @@ def _matches(ref: JobRef, selector: str) -> bool:
     return ref.job_id.startswith(selector) or ref.job_key.startswith(selector)
 
 
-def _resolve_id(workspace: Workspace, selector: str, refs: Callable[[], Iterable[JobRef]]) -> JobRef:
+def _location_index(
+    workspace: Workspace,
+    states: Iterable[str] | None = None,
+    placement_prefix: str | PurePosixPath | None = None,
+) -> _kernel.LocationIndex:
+    """Return a location index for one command whose one listing is :func:`iter_jobs` of *states* (every state by
+    default) under *placement_prefix*.
+
+    Its listing is the one a command's selection shares (:class:`JobSelectorResolver`, a ``--state`` selection), so a
+    command that selects its jobs and then serves requests lists what it selects from once. A restricted listing
+    traverses no more than the selection does; jobs outside it (named by id, or ancestors) are located on demand.
+
+    :param workspace: The workspace.
+    :param states: The states to list; every state when ``None``.
+    :param placement_prefix: Restrict the listing to this placement subtree.
+    :return: The index; its listing is taken when first needed.
+    """
+
+    if states is None and placement_prefix is None:
+        return _kernel.LocationIndex(workspace, lambda: iter_jobs(workspace))
+    selected = None if states is None else tuple(states)
+    return _kernel.LocationIndex(
+        workspace, lambda: iter_jobs(workspace, selected, placement_prefix=placement_prefix), complete=False
+    )
+
+
+def _resolve_id(
+    workspace: Workspace,
+    selector: str,
+    refs: Callable[[], Iterable[JobRef]],
+    index: _kernel.LocationIndex | None = None,
+) -> JobRef:
     if not selector:
         raise ValueError("a job selector cannot be empty")
     try:
@@ -391,7 +422,13 @@ def _resolve_id(workspace: Workspace, selector: str, refs: Callable[[], Iterable
         # Only this lstat guards a remembered location: a job moving between it and the caller's read is the
         # window the walk has too.
         if ref is None or not _present(ref):
-            ref = _kernel.locate(workspace, job_id, placement_hint=None, exhaustive=True)
+            if index is not None:
+                ref = index.locate(job_id, placement_hint=None, exhaustive=True)
+                if ref is None:
+                    # A walk just found no such job: the index's listing, older than that, must not bring it back.
+                    raise ValueError(f"no job in {workspace.root} matches {selector!r}")
+            else:
+                ref = _kernel.locate(workspace, job_id, placement_hint=None, exhaustive=True)
         if ref is not None and selector in {ref.job_id, ref.job_key}:
             _remember(_LOCATIONS, key, _location(ref))
             return ref
@@ -446,7 +483,8 @@ class JobSelectorResolver:
     """Resolve job selectors while sharing one listing of the workspace for a batch.
 
     A path selector names a job directory, or any directory below ``jobs/``
-    (a state, a placement), meaning every job below it.
+    (a state, a placement), meaning every job below it. A job id or key is
+    found at its remembered location, else by a walk of the workspace.
 
     :param workspace: The workspace.
     :param cwd: The directory relative path selectors resolve from.
@@ -455,11 +493,20 @@ class JobSelectorResolver:
     def __init__(self, workspace: Workspace, cwd: Path) -> None:
         self.workspace = workspace
         self.cwd = cwd.resolve()
+        # A many-job command's location index (_resolve_selectors): its listing is shared with the selectors, and it
+        # answers a job id or key, each entry confirmed by an lstat, instead of one walk per selector.
+        self._index: _kernel.LocationIndex | None = None
         self._refs: list[JobRef] | None = None
 
     def _all(self) -> list[JobRef]:
         if self._refs is None:
-            self._refs = list(iter_jobs(self.workspace))
+            if self._index is not None and self._index.complete:
+                self._refs = self._index.refs()
+            else:
+                self._refs = list(iter_jobs(self.workspace))
+                if self._index is not None:
+                    # A restricted command index: these selectors list every state themselves; the index takes them.
+                    self._index.add(self._refs)
         return self._refs
 
     def _resolve_path(self, path_name: str) -> list[JobRef]:
@@ -496,7 +543,7 @@ class JobSelectorResolver:
             return _unique(ref for path in paths for ref in self._resolve_path(path))
         if (self.cwd / selector).exists():
             return _unique(self._resolve_path(selector))
-        return [_resolve_id(self.workspace, selector, self._all)]
+        return [_resolve_id(self.workspace, selector, self._all, self._index)]
 
 
 def _unique(refs: Iterable[JobRef]) -> list[JobRef]:
@@ -528,6 +575,17 @@ def resolve_job_selectors(workspace: Workspace, cwd: Path, selectors: Iterable[s
     """
 
     resolver = JobSelectorResolver(workspace, cwd)
+    return _unique(ref for selector in selectors for ref in resolver.resolve_one(selector))
+
+
+def _resolve_selectors(
+    workspace: Workspace, cwd: Path, selectors: Iterable[str], index: _kernel.LocationIndex
+) -> list[JobRef]:
+    """Resolve as :func:`resolve_job_selectors` does, through the command's location index *index*
+    (:func:`_location_index`), whose listing the selectors share with what the command does next."""
+
+    resolver = JobSelectorResolver(workspace, cwd)
+    resolver._index = index
     return _unique(ref for selector in selectors for ref in resolver.resolve_one(selector))
 
 

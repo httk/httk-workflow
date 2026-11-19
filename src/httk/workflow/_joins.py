@@ -15,7 +15,7 @@ from pathlib import PurePosixPath
 from typing import Literal
 
 from httk.workflow._job import JobDefinition
-from httk.workflow._kernel import OWNED, JobRef, KernelWorkspace, ListingCache, locate, locate_many
+from httk.workflow._kernel import OWNED, JobRef, KernelWorkspace, ListingCache, LocationIndex, locate, locate_many
 from httk.workflow._state import TERMINAL_STATES, _thaw, read_state_unowned
 from httk.workflow._util import require_string
 from httk.workflow.errors import FormatError
@@ -249,7 +249,11 @@ def evaluate(
 
 
 def consumed_by_decided_join(
-    workspace: KernelWorkspace, child: JobDefinition, *, cache: ListingCache | None = None
+    workspace: KernelWorkspace,
+    child: JobDefinition,
+    *,
+    cache: ListingCache | None = None,
+    index: LocationIndex | None = None,
 ) -> str | None:
     """The revival guard: describe the parent whose current ``state.json`` records *child* in a decided join.
 
@@ -261,6 +265,7 @@ def consumed_by_decided_join(
     :param workspace: The workspace.
     :param child: The child's ``job.json``.
     :param cache: The pass's listings, if any.
+    :param index: The command's location index, which answers the probe where it still holds.
     :return: ``"<parent key> (<state>)"``, or ``None`` when no decided join consumed the child.
     """
 
@@ -269,7 +274,10 @@ def consumed_by_decided_join(
         return None
     job_id, placement = parent["job_id"], parent["placement"]
     assert isinstance(job_id, str) and isinstance(placement, str)
-    ref = locate(workspace, job_id, placement_hint=PurePosixPath(placement), include_owned=True, cache=cache)
+    if index is not None:
+        ref = index.locate(job_id, placement_hint=PurePosixPath(placement), include_owned=True, cache=cache)
+    else:
+        ref = locate(workspace, job_id, placement_hint=PurePosixPath(placement), include_owned=True, cache=cache)
     if ref is None:
         return None
     doc, _ = read_state_unowned(ref.path / "state.json")

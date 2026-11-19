@@ -47,7 +47,11 @@ httk job new --workspace WS --install \
 
 `httk campaign submit --install`, {py:func}`~httk.workflow.scaffold.new_job`
 with `install=True`, and `[workflow.calls]` of an installed package (which
-must pin the full commit) install the same way.
+must pin the full commit) install the same way. With `--install` a URI is
+fetched each time, but an installation that installing it again would only
+repeat is kept: the same commit, installed from the same branch or tag, of the
+same sources and calls, and still the newest installation of its short name.
+`httk workflow install` always installs again.
 
 `@ref` is a branch, a tag, an abbreviated or full commit hash, or omitted for
 the remote default branch. Installing fetches the repository at that ref into
