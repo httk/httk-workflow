@@ -12,6 +12,7 @@ release the hold keeping the moved jobs in SRC as ``away`` copies, which a later
 import argparse
 import collections
 import contextlib
+import contextvars
 import enum
 import json
 import math
@@ -22,6 +23,7 @@ import stat
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Collection, Container, Iterable, Iterator, Sequence
@@ -916,6 +918,14 @@ class _NotHeld(enum.Enum):
 
 
 @dataclass(frozen=True)
+class _Raised:
+    """What an attempt of a page held ahead raised, returned rather than raised so that a pool hands over every hold
+    completed beside it (a pool emits only the results before its first failure)."""
+
+    exception: BaseException
+
+
+@dataclass(frozen=True)
 class _Page:
     """One page of a :class:`_Selection`, held."""
 
@@ -927,6 +937,21 @@ class _Page:
     changed: int
     #: Nothing of the selection is left.
     done: bool
+    #: The notes on ``--job`` jobs left out by ``--step``, when the page was held ahead (else they were printed).
+    notes: tuple[str, ...] = ()
+    #: What ended a page held ahead early (it is handed over with what the page completed, never instead of it).
+    exception: BaseException | None = None
+
+
+class _Cut:
+    """The stop flag of a page held ahead (plan §7.11, T6b), which the main thread sets, and how many of the page's
+    holds run now, for the main thread's wait."""
+
+    def __init__(self) -> None:
+        #: No new page starts, and the page in flight is cut before its next claim or sub-batch.
+        self.stop = False
+        #: The attempts of the page's current claim or sub-batch not finished yet (advisory, for a message).
+        self.running = 0
 
 
 def _key_id(job_key: str) -> bytes:
@@ -995,6 +1020,16 @@ class _Selection:
         self._ahead: set[bytes] = set()
         #: The attempts made (held, failed or left out), cumulative.
         self._attempted = 0
+        #: Where the notes on ``--job`` jobs left out by ``--step`` go while a page is held ahead (else printed).
+        self._notes: list[str] | None = None
+
+    def _note(self, line: str) -> None:
+        """Print a note on a ``--job`` job left out by ``--step``, or keep it for the page held ahead."""
+
+        if self._notes is None:
+            print(line, file=sys.stderr)
+        else:
+            self._notes.append(line)
 
     def _look(self) -> None:
         self._looked += 1
@@ -1113,7 +1148,7 @@ class _Selection:
             return found.damage
         if steps is not None and found.step not in steps:
             if explicit:
-                print(_left_out(ref, found.step, steps), file=sys.stderr)
+                self._note(_left_out(ref, found.step, steps))
             return None
         if explicit:
             return _Attempt(ref, True, True, relocated)
@@ -1135,7 +1170,7 @@ class _Selection:
         if found.damage is not None:
             return found.damage
         if found.step not in self._steps:
-            print(_left_out(ref, found.step, self._steps), file=sys.stderr)
+            self._note(_left_out(ref, found.step, self._steps))
             return _NotHeld.LEFT_OUT
         return None
 
@@ -1149,6 +1184,7 @@ class _Selection:
         measure: Callable[[_moving.Hold | str], int] | None = None,
         budget: int | None = None,
         tell: Callable[[str, int | None], object] | None = None,
+        cut: _Cut | None = None,
     ) -> _Page:
         """Decide the next page, then hold it under one owner, closed before this returns.
 
@@ -1159,6 +1195,11 @@ class _Selection:
         its errors and holds measure *budget* (each as *measure* says), checked between attempts (between sub-batches
         of ``io.workers`` roots when pooled), the rest of its attempts are left for the next page.
 
+        With *cut*, the page is held ahead in a thread of its own (plan §7.11, T6b): once *cut* says stop, the rest of
+        its attempts are left (checked before each claim of one at a time and between pooled sub-batches; what started
+        finishes); it never raises, but returns what ended it in its ``exception`` with what it completed (its holds,
+        errors and changed count); and it prints nothing, its notes returned in its ``notes``.
+
         :param holds: The most candidates attempted.
         :param errors: The most errors.
         :param scanned: The most candidates looked at.
@@ -1166,41 +1207,76 @@ class _Selection:
         :param measure: The size of a hold or an error in the page's answer.
         :param budget: The size at which holding stops.
         :param tell: Told the page's progress instead of the selection's own *tell*.
+        :param cut: The stop flag of a page held ahead.
         :return: The page.
         """
 
-        tell = tell or self._tell
-        self.snapshot()  # taken already (step 2), or now: a page never runs without its listing
-        if self.done:
-            return _Page([], [], 0, True)
+        if cut is not None:
+            self._notes = []
+        try:
+            return self._next_page(holds, errors, scanned, members, measure, budget, tell or self._tell, cut)
+        finally:
+            self._notes = None
+
+    def _next_page(
+        self,
+        holds: int | None,
+        errors: int | None,
+        scanned: int | None,
+        members: int | None,
+        measure: Callable[[_moving.Hold | str], int] | None,
+        budget: int | None,
+        tell: Callable[[str, int | None], object],
+        cut: _Cut | None,
+    ) -> _Page:
+        # next_page's work, its arguments resolved.
+        made: list[_moving.Hold] = []
         found: list[str] = []
         changed: list[str] = []
-        deferred: list[str] = []
-        consumed: list[bytes] = []
-        carried = self._pending if holds is None else self._pending[:holds]
-        later = self._pending[len(carried) :]
-        batch = list(carried)
-        cursor, looked = self._cursor, 0
-        while (
-            not later
-            and cursor < self.candidates
-            and (holds is None or len(batch) < holds)
-            and (errors is None or len(found) < errors)
-            and (scanned is None or looked < scanned)
-        ):
-            ref, explicit = self._candidate(cursor)
-            cursor += 1
-            looked += 1
-            consumed.append(uuid.UUID(ref.job_id).bytes)
-            tell("list", looked)
-            if ref.job_key in self.moving:
-                continue  # it went with an earlier hold: nothing read
-            decided = self._decide(ref, explicit, deferred, changed)
-            if isinstance(decided, _Attempt):
-                batch.append(decided)
-            elif decided is not None:
-                found.append(decided)
-        tell("hold", 0)
+        held = handled = missed = size = 0
+
+        def page(done: bool, exception: BaseException | None = None) -> _Page:
+            notes = () if self._notes is None else tuple(self._notes)
+            return _Page(made, found, len(changed) + missed, done, notes, exception)
+
+        try:
+            self.snapshot()  # taken already (step 2), or now: a page never runs without its listing
+            if self.done:
+                return page(True)
+            deferred: list[str] = []
+            consumed: list[bytes] = []
+            carried = self._pending if holds is None else self._pending[:holds]
+            later = self._pending[len(carried) :]
+            batch = list(carried)
+            cursor, looked = self._cursor, 0
+            while (
+                not later
+                and cursor < self.candidates
+                and (holds is None or len(batch) < holds)
+                and (errors is None or len(found) < errors)
+                and (scanned is None or looked < scanned)
+                and not (cut is not None and cut.stop)  # a stop cuts the page while it is decided too
+            ):
+                ref, explicit = self._candidate(cursor)
+                cursor += 1
+                looked += 1
+                consumed.append(uuid.UUID(ref.job_id).bytes)
+                tell("list", looked)
+                if ref.job_key in self.moving:
+                    continue  # it went with an earlier hold: nothing read
+                decided = self._decide(ref, explicit, deferred, changed)
+                if isinstance(decided, _Attempt):
+                    batch.append(decided)
+                elif decided is not None:
+                    found.append(decided)
+            tell("hold", 0)
+        except BaseException as exc:
+            if cut is None:
+                raise
+            # Nothing of the page was committed: none of what it found is reported, the next page decides it anew.
+            found.clear()
+            changed.clear()
+            return page(False, exc)
         # Committed before the owner's registration, from when on anything may have changed.
         self._cursor, self._pending = cursor, later
         self._deferred.update(deferred)
@@ -1209,9 +1285,7 @@ class _Selection:
                 self._ahead.discard(job_id)
             else:
                 self._unconsumed.discard(job_id)
-        made: list[_moving.Hold] = []
         size = 0 if measure is None else sum(measure(error) for error in found)
-        held = handled = missed = 0
         # The page's: a workflow installed meanwhile is seen by the next page.
         workflow_cache: _moving.WorkflowCache = {}
 
@@ -1220,6 +1294,7 @@ class _Selection:
                 (members is not None and held >= members)
                 or (budget is not None and size >= budget)
                 or (errors is not None and len(found) >= errors)
+                or (cut is not None and cut.stop)
             )
 
         def hold_one(attempt: _Attempt) -> _moving.Hold | str | _NotHeld:
@@ -1251,8 +1326,21 @@ class _Selection:
             assert not isinstance(outcome, _moving.EjectReport)
             return outcome
 
-        def record(_index: int, outcome: _moving.Hold | str | _NotHeld) -> None:
+        def tagged(attempt: _Attempt) -> _moving.Hold | str | _NotHeld | _Raised:
+            try:
+                return hold_one(attempt)
+            except BaseException as exc:  # handed over after the sub-batch, with every hold it completed
+                return _Raised(exc)
+
+        raised: list[BaseException] = []
+
+        def record(_index: int, outcome: _moving.Hold | str | _NotHeld | _Raised) -> None:
             nonlocal handled, held, size, missed
+            if isinstance(outcome, _Raised):
+                raised.append(outcome.exception)  # emitted in input order: the first is the first failure
+                if cut is not None:
+                    cut.running = max(cut.running - 1, 0)
+                return
             if outcome is _NotHeld.CHANGED:
                 missed += 1
             elif isinstance(outcome, str):
@@ -1269,52 +1357,223 @@ class _Selection:
                 size += 0 if measure is None else measure(outcome)
             handled += 1
             self._attempted += 1
+            if cut is not None:
+                cut.running = max(cut.running - 1, 0)
             tell("hold", handled)
+
+        def running(count: int) -> None:
+            if cut is not None:
+                cut.running = count
 
         named = [attempt for attempt in batch if attempt.explicit]
         listed = [attempt for attempt in batch if not attempt.explicit]
         workers = self.workspace.io_workers
         pooled = workers > 1 and not any(attempt.serial for attempt in listed)
         step = workers if pooled else 1
-        leftover: list[_Attempt] = []
         if not batch:
-            return _Page([], found, len(changed), self.done)  # nothing to attempt: no owner
+            return page(self.done)  # nothing to attempt: no owner
+        if cut is not None and cut.stop:
+            self._pending = [*batch, *self._pending]  # stopped while it was decided: no owner, nothing attempted
+            return page(False)
         try:
             registered = _owner(self.workspace, "job transfer")
-        except BaseException:
+        except BaseException as exc:
             self._pending = [*batch, *self._pending]  # nothing attempted: left for a later page
-            raise
-        with registered as owner:
-            for index, attempt in enumerate(named):
-                if full():
-                    leftover = [*named[index:], *listed]
-                    break
-                if attempt.ref.job_key not in self.moving:
-                    record(index, hold_one(attempt))
-                else:
-                    self._attempted += 1  # it went with an earlier selected tree: retired, nothing claimed
-            else:
-                start = 0
-                while start < len(listed):
+            if cut is None:
+                raise
+            return page(False, exc)
+        # The attempts not started yet, left for a later page on every exit (a cut, a limit, a failure).
+        leftover: list[_Attempt] = [*named, *listed]
+        try:
+            with registered as owner:
+                for index, attempt in enumerate(named):
                     if full():
-                        leftover = listed[start:]
                         break
-                    # No more attempts at once than errors the page may still take: the rest stays for later.
-                    width = step if errors is None else max(min(step, errors - len(found)), 1)
-                    batch_attempts, start = listed[start : start + width], start + width
-                    # Pooled: disjoint trees, since no listed root has a parent here, so none is in another's tree.
-                    run = [attempt for attempt in batch_attempts if attempt.ref.job_key not in self.moving]
-                    self._attempted += len(batch_attempts) - len(run)  # retired: they went with an earlier tree
-                    if pooled:
-                        run_batch(owner, hold_one, run, workers, emit=record)
-                        continue
-                    for attempt in run:
-                        if attempt.ref.job_key not in self.moving:
-                            record(0, hold_one(attempt))
-                        else:
-                            self._attempted += 1
-        self._pending = [*leftover, *self._pending]
-        return _Page(made, found, len(changed) + missed, self.done)
+                    leftover = [*named[index + 1 :], *listed]
+                    if attempt.ref.job_key not in self.moving:
+                        running(1)
+                        record(index, hold_one(attempt))
+                    else:
+                        self._attempted += 1  # it went with an earlier selected tree: retired, nothing claimed
+                else:
+                    start = 0
+                    while start < len(listed):
+                        if full():
+                            break
+                        # No more attempts at once than errors the page may still take: the rest stays for later.
+                        width = step if errors is None else max(min(step, errors - len(found)), 1)
+                        batch_attempts, start = listed[start : start + width], start + width
+                        leftover = listed[start:]
+                        # Pooled: disjoint trees, since no listed root has a parent here, so none is in another's tree.
+                        run = [attempt for attempt in batch_attempts if attempt.ref.job_key not in self.moving]
+                        self._attempted += len(batch_attempts) - len(run)  # retired: they went with an earlier tree
+                        if pooled:
+                            running(len(run))
+                            if cut is None:
+                                run_batch(owner, hold_one, run, workers, emit=record)
+                                continue
+                            # Held ahead: every hold the sub-batch completed is handed over, whatever failed.
+                            run_batch(owner, tagged, run, workers, emit=record)
+                            if raised:
+                                raise raised[0]
+                            continue
+                        for attempt in run:
+                            if attempt.ref.job_key not in self.moving:
+                                running(1)
+                                record(0, hold_one(attempt))
+                            else:
+                                self._attempted += 1
+        except BaseException as exc:
+            if cut is None:
+                raise
+            return page(False, exc)  # what the page held is handed over with it
+        finally:
+            running(0)
+            self._pending = [*leftover, *self._pending]
+        return page(self.done)
+
+
+#: How often a wait for the page held ahead looks again (each side also notifies the other).
+_AHEAD_POLL = 0.1
+
+
+class _Ahead:
+    """The one page a push to a remote DST holds ahead (plan §7.11, T6b): a producer thread holds the selection's next
+    page while the main thread drives the current one (stages and adopts it, and releases what was adopted).
+
+    The hand-over has one slot: the producer holds page k+1 only once the main thread took page k (:meth:`take`),
+    and hands each page over with everything it completed (its holds, errors, changed count and notes) and what ended
+    it early, if anything (:attr:`_Page.exception`). A page taken stays :attr:`outstanding` until the main thread
+    acknowledges it (its drive reports its holds from then on), so that a stop reports the holds of a page taken and
+    not driven. From :meth:`start` until :meth:`stop` returned the selection is the producer's alone; it touches
+    nothing but the selection and SRC, prints nothing (its log records go through logging), and its pools install no
+    ``SIGINT`` handler, since the main thread owns the interrupt. The stop flag (:attr:`cut`, which the pair's stop
+    sets at once) means that no new page starts and the page in flight is cut before its next claim or sub-batch,
+    what started finishing; :meth:`stop` sets it and waits for the producer.
+
+    Interrupts follow the contract stated in :func:`_stop_ahead`: whatever a Ctrl-C cuts short, the producer ends
+    (its flag is set by the pair's stop or first in step 3's ``finally``) after finishing its claims and closing its
+    owner, and every hold it made is delivered, taken back while no interrupt was seen, or left held for
+    ``--resume``. The start and the stop's wait run with interrupts deferred; the few bytecodes around them, and the
+    acknowledgement right before a page's drive (an interrupt there is one inside the drive), are accepted windows.
+
+    :param selection: The selection, its snapshot taken.
+    """
+
+    def __init__(self, selection: _Selection) -> None:
+        self._selection = selection
+        #: The stop flag (set by the main thread only, a plain store).
+        self.cut = _Cut()
+        #: The page taken and not acknowledged yet: reported by :meth:`stop`'s caller unless acknowledged.
+        self.outstanding: _Page | None = None
+        self._condition = threading.Condition()
+        # Guarded by the condition: the page held and not taken yet, whether the main thread took the last one (the
+        # producer may then hold the next) and whether the producer returned.
+        self._slot: _Page | None = None
+        self._taken = True
+        self._finished = False
+        self._started = False
+        # Not a daemon: the producer always finishes what it started, the process waiting for it.
+        self._thread = threading.Thread(
+            target=contextvars.copy_context().run, args=(self._produce,), name="httk-transfer-hold"
+        )
+
+    def start(self) -> bool:
+        """Start the producer, which holds the first page at once; an interrupt meanwhile is delivered only once the
+        start is recorded, so that :meth:`stop` always waits for a producer that runs.
+
+        :return: Whether it started (when no thread can be started, the caller holds its pages itself).
+        """
+
+        with _pool.DeferredInterrupts():
+            try:
+                self._thread.start()
+            except RuntimeError as exc:
+                if (interrupt := _pool.interrupt_of(exc)) is not exc:
+                    raise interrupt from None  # an interrupt, not a failure to start a thread
+                if self._thread.ident is None:
+                    return False  # as under a login node's task limit
+                raise  # it started: stop() waits for it
+            self._started = True
+        return True
+
+    def _produce(self) -> None:
+        main = threading.main_thread()
+        try:
+            while True:
+                with self._condition:
+                    while not (self._taken or self.cut.stop):
+                        if not main.is_alive():
+                            return  # the main thread is gone: nobody takes a page any more
+                        self._condition.wait(_AHEAD_POLL)
+                    if self.cut.stop:
+                        return  # no new page starts
+                    self._taken = False
+                try:
+                    page = self._selection.next_page(
+                        holds=_PAGE_HOLDS,
+                        errors=_PAGE_ERRORS,
+                        scanned=_PAGE_SCANNED,
+                        members=_PAGE_MEMBERS,
+                        cut=self.cut,
+                    )
+                except BaseException as exc:  # a page held ahead returns what ended it: this is only a guard
+                    page = _Page([], [], 0, False, exception=exc)
+                with self._condition:
+                    self._slot = page
+                    self._condition.notify_all()
+                if page.done or page.exception is not None:
+                    return
+        finally:
+            with self._condition:
+                self._finished = True
+                self._condition.notify_all()
+
+    def take(self) -> _Page | None:
+        """Wait for the next page and take it, which lets the producer hold the one after it; the page is
+        :attr:`outstanding` before it leaves the slot, so an interrupt never leaves it to nobody.
+
+        :return: The page, or ``None`` once the producer returned without one.
+        """
+
+        try:
+            with self._condition:
+                while self._slot is None and not self._finished:
+                    self._condition.wait(_AHEAD_POLL)
+                page = self._slot
+                if page is not None:
+                    self.outstanding = page  # first: from here on it is the main thread's
+                    self._slot = None
+                    self._taken = True
+                    self._condition.notify_all()
+                return page
+        except BaseException as exc:
+            raise _pool.interrupt_of(exc)  # an interrupt surfacing inside the wait as another error is the interrupt
+
+    def stop(self, *, interrupted: Callable[[], bool]) -> tuple[list[_Page], BaseException | None]:
+        """Stop the producer and wait for it: no new page starts, and the page in flight is cut before its next claim
+        or sub-batch; interrupts meanwhile are absorbed and, once one was seen (*interrupted*), a line says what is
+        waited for while holds still run. The selection is the caller's again once this returns.
+
+        :param interrupted: Whether an interrupt was seen.
+        :return: The pages not driven: the outstanding one (taken, not acknowledged) and the one the producer
+            finished and did not hand over (a cut one included), each once; and the first interrupt absorbed while
+            waiting.
+        """
+
+        self.cut.stop = True
+        absorbed = None
+        # Started, even when what followed its start did not run to its end (it has an ident once it was started).
+        if self._started or self._thread.ident is not None:
+            cut = self.cut
+            absorbed = _pool.wait_quietly(
+                self._condition, lambda: self._finished, lambda: cut.running, interrupted=interrupted
+            )
+        pages = [self.outstanding] if self.outstanding is not None else []
+        if self._slot is not None and self._slot is not self.outstanding:  # the producer returned: no lock needed
+            pages.append(self._slot)
+        self.outstanding = self._slot = None
+        return pages, absorbed
 
 
 def _gone(path: Path) -> bool:
@@ -3064,11 +3323,13 @@ def _push_segment(
             settled.settle([offender], document)
             holds, resent = [hold for hold in holds if hold is not offender], True
             continue
-        settled.settle(holds, document)
         if not any(document.get(key) for key in ("bundle", "sync_failed", "stream_aborted")):
             # Refused as a whole, by the far side's statement (an unknown or sealed workspace, a quota), whatever
-            # this side's upload did: every later segment would be too.
+            # this side's upload did: every later segment would be too. The stop is stored before the segment is
+            # settled (settling reads no stop), so that a page held ahead is cut before this one is taken back.
             settled.stopped, settled.refusal = f"{dst.locator}: {document['refused']}", document
+            pair.refusal = document
+        settled.settle(holds, document)
         break
 
 
@@ -3547,8 +3808,12 @@ class _Pair:
         self.destination_id: str | None = dst.workspace_id
         #: A push's sync commit failed: every later segment goes with ``--sync fsync``.
         self.fsync = False
-        #: Why the pair stopped: it holds and drives nothing more.
-        self.stopped: str | None = None
+        #: The stop flag of the page held ahead for the pair, if one is (:class:`_Ahead`): the pair's stop sets it.
+        self.cut: _Cut | None = None
+        self._stopped: str | None = None
+        #: The refusal of a whole segment (naming no bundle) that stopped the pair, when that is what stopped it: the
+        #: holds of a page held ahead, never sent, are taken back by it (plan §7.11, T6b).
+        self.refusal: dict[str, Any] | None = None
         #: Holds of this pair a stop left undriven.
         self.undriven = 0
         #: The workflows attempted for the pair (installed and built, or failed), by id.
@@ -3558,6 +3823,20 @@ class _Pair:
         self.pending: collections.deque[_PendingStage] = collections.deque()
         #: The command was interrupted: a release goes only over a session that is still usable.
         self.interrupted = False
+
+    @property
+    def stopped(self) -> str | None:
+        """Why the pair stopped: it holds and drives nothing more."""
+
+        return self._stopped
+
+    @stopped.setter
+    def stopped(self, value: str | None) -> None:
+        self._stopped = value
+        if value is not None and self.cut is not None:
+            # At once, not once the page being driven returns: the page held ahead is cut at its next claim (plan
+            # §7.11, T6b). A plain store; the producer never touches the pair.
+            self.cut.stop = True
 
 
 class _Concluding:
@@ -4615,6 +4894,9 @@ class _Transfer:
             )
         except _ERRORS as exc:
             pair.stopped = str(exc)
+            # A failure (of SRC, say, taking a refused segment back) withdraws a refusal's authorization to take back
+            # a page held ahead: those holds stay held (plan §7.11, T6b).
+            pair.refusal = None
             message = (
                 f"the transfer to {pair.dst.locator} failed while it was driven ({exc}); it stays held on "
                 f"{self.src.locator} unless it was adopted: `httk job transfer --resume {self.src.locator} "
@@ -4638,6 +4920,33 @@ class _Transfer:
             f"{self.src.locator}"
         )
         return [self._outcome(pair, hold, message) for hold in holds]
+
+    def unsent(self, pair: _Pair, holds: list[_moving.Hold], *, take_back: bool) -> None:
+        """Report the holds of a page held ahead (plan §7.11, T6b) that *pair*'s stop left unsent, after the outcomes
+        of the pages given before them: with *take_back* (the pair stopped at a refusal of a whole segment, and
+        nothing failed on SRC) they are taken back into SRC, since this run made them and never sent them
+        (``not_moved``; ``failed`` for one that cannot be taken back); otherwise they stay held for ``--resume``, as
+        the holds of any stopped pair do.
+
+        :param pair: The stopped pair.
+        :param holds: The holds this run made and never sent.
+        :param take_back: Take them back.
+        """
+
+        refusal = pair.refusal
+        if not take_back or refusal is None:
+            self.report.add(self._undriven(pair, holds))
+            return
+        try:
+            updates = _take_back(self.src, holds, f"{pair.dst.locator}: {refusal['refused']}")
+        except _ERRORS as exc:
+            message = (
+                f"not delivered, since the transfer to {pair.dst.locator} stopped ({pair.stopped}); taking it back "
+                f"failed ({exc}); it stays held on {self.src.locator}"
+            )
+            self.report.add(self._outcome(pair, hold, message) for hold in holds)
+            return
+        self.report.add({**self._outcome(pair, hold, ""), **updates[hold.transfer_id]} for hold in holds)
 
     @contextlib.contextmanager
     def interruptible(self) -> Iterator[None]:
@@ -4725,9 +5034,12 @@ def _transfer_local(run: _Transfer, selection: "_Selection | None") -> int | Non
     """A transfer from a local SRC, paged (plan §7.8): the holds left bound for DST (every hold for ``--resume``
     without DST) driven first, a page at a time from one listing of their names (step 1); then, with a *selection*,
     its snapshot (step 2) and its pages, each held and driven before the next is held, until it is exhausted or the
-    pair stops (step 3). A remote DST's transfer session is opened before the first hold for it; one that cannot be
-    opened holds nothing. An error between pages stops the pair (reading SRC's holds: every pair); the pages driven
-    before are reported.
+    pair stops (step 3). A push to a remote DST without ``--keep`` holds one page ahead instead (plan §7.11, T6b):
+    a producer thread (:class:`_Ahead`) holds page k+1 while page k is staged, adopted and released here; after a
+    stop no new page starts, the page in flight is cut before its next claim or sub-batch, and the holds it made are
+    taken back after a refusal of a whole segment and stay held otherwise (:func:`_stop_ahead`). A remote DST's
+    transfer session is opened before the first hold for it; one that cannot be opened holds nothing. An error
+    between pages stops the pair (reading SRC's holds: every pair); the pages driven before are reported.
 
     :param run: The transfer.
     :param selection: The selection, resolved (step 0); ``None`` for ``--resume``.
@@ -4757,28 +5069,154 @@ def _transfer_local(run: _Transfer, selection: "_Selection | None") -> int | Non
     assert dst is not None
     pair = run.pair(dst)
     changed = 0
+    # A push to a remote DST without --keep holds one page ahead (plan §7.11, T6b).
+    ahead: _Ahead | None = None
+    # What ended a page held ahead early (SRC failed), handed over at the hand-over.
+    failure: BaseException | None = None
+    # The exception already handled by a caller, if any (step 3's finally tells its own from it).
+    outer = sys.exception()
+    # The last page whose notes, errors and changed count were reported (or began to be: never replayed).
+    reported: _Page | None = None
+
+    def handed(page: _Page) -> None:
+        nonlocal changed, reported
+        reported = page
+        changed += page.changed
+        for note in page.notes:
+            print(note, file=sys.stderr)
+        run.report.extend_errors(page.errors)
+
     try:
-        if pair.stopped is None:
-            selection.snapshot()  # not after a stop: nothing of the selection is attempted then
-            if pair.stopped is None and not selection.done:
-                run.start(pair)  # before the first hold: a push that cannot open its session holds nothing
-        if pair.stopped is None:
-            _holding(arguments, src)
-        while pair.stopped is None and not selection.done:
-            page = selection.next_page(
-                holds=_PAGE_HOLDS, errors=_PAGE_ERRORS, scanned=_PAGE_SCANNED, members=_PAGE_MEMBERS
-            )
-            run.report.extend_errors(page.errors)
-            changed += page.changed
-            if page.holds:
-                run.drive(pair, page.holds, fresh=frozenset(hold.transfer_id for hold in page.holds))
-    except _ERRORS as exc:
-        pair.stopped = pair.stopped or str(exc)
+        try:
+            if pair.stopped is None:
+                selection.snapshot()  # not after a stop: nothing of the selection is attempted then
+                if pair.stopped is None and not selection.done:
+                    run.start(pair)  # before the first hold: a push that cannot open its session holds nothing
+            if pair.stopped is None:
+                _holding(arguments, src)
+            if pair.stopped is None and not selection.done and dst.workspace is None and not arguments.keep:
+                ahead = _Ahead(selection)
+                pair.cut = ahead.cut  # the pair's stop cuts the page held ahead at once
+                if not ahead.start():
+                    ahead, pair.cut = None, None  # no thread could be started: each page is held here, then driven
+            while pair.stopped is None:
+                if ahead is not None:
+                    page = ahead.take()  # outstanding until acknowledged below
+                elif selection.done:
+                    page = None
+                else:
+                    page = selection.next_page(
+                        holds=_PAGE_HOLDS, errors=_PAGE_ERRORS, scanned=_PAGE_SCANNED, members=_PAGE_MEMBERS
+                    )
+                if page is None:
+                    break
+                handed(page)
+                if page.exception is not None:
+                    # Raised here, so that it stops the pair as an error of holding does; its holds stay held (the
+                    # page stays outstanding, reported when the producer is stopped).
+                    failure = page.exception
+                    raise page.exception
+                if ahead is not None:
+                    ahead.outstanding = None  # acknowledged: from here on its drive reports its holds
+                if page.holds:
+                    run.drive(pair, page.holds, fresh=frozenset(hold.transfer_id for hold in page.holds))
+                if page.done:
+                    break
+        except _ERRORS as exc:
+            pair.stopped = pair.stopped or str(exc)
+    finally:
+        if ahead is not None:
+            ahead.cut.stop = True  # first, a plain store: whatever comes next, the producer starts nothing more
+            # Before anything is abandoned or concluded (interruptible(), finish()): the producer is stopped and waited
+            # for, and the pages it held and that were not driven are reported.
+            escaping = sys.exception()
+            escaping = None if escaping is outer else escaping
+            changed += _stop_ahead(run, pair, ahead, failure, escaping=escaping, reported=reported)
     if pair.stopped is None and (note := selection.note()) is not None:
         print(note, file=sys.stderr)
     # Without its listing nothing was attempted: no count.
     count = selection.remaining() if selection.snapshotted else None
     run.finish(_not_attempted(count) if pair.stopped is not None else None)
+    return changed
+
+
+def _stop_ahead(
+    run: _Transfer,
+    pair: _Pair,
+    ahead: _Ahead,
+    failure: BaseException | None,
+    *,
+    escaping: BaseException | None,
+    reported: _Page | None,
+) -> int:
+    """Stop the producer of the page held ahead for *pair* and wait for it (plan §7.11, T6b), then report the pages it
+    held that were not driven (the one taken and not acknowledged, and the one it finished and did not hand over)
+    and their holds, never sent: taken back after a refusal of a whole segment, left held after anything else (an
+    unknown outcome, another stop, a failure of SRC: *failure*, or the pages' own, classified first, an exception
+    propagating, or an interrupt).
+
+    The interrupt contract (nothing of a transfer is reported on Ctrl-C, since :func:`handle_transfer` renders no
+    report then): no hold is lost (each is delivered, taken back while no interrupt was seen, or left held for
+    ``--resume``); the producer always ends (the stop flag is set by the pair's stop or first in step 3's
+    ``finally``, and it finishes its claims and closes its owner); once an interrupt was seen no take-back starts;
+    Ctrl-C stays responsive (only the stop, the join and taking the pages run with interrupts deferred, never a take-
+    back or another long loop); and an exception already propagating is never replaced. An interrupt in the few
+    bytecodes before this runs is covered by the first two points and accepted.
+
+    :param run: The transfer.
+    :param pair: The pair the pages are held for.
+    :param ahead: The producer.
+    :param failure: What ended the page taken last, when something did.
+    :param escaping: The exception leaving step 3, if any: the pair is marked stopped, nothing is taken back, and
+        nothing of this is raised in its place.
+    :param reported: The page whose notes, errors and changed count were reported already (or were being), if any.
+    :return: The count of listed jobs changed since the listing that those pages found.
+    """
+
+    interrupt = isinstance(escaping, KeyboardInterrupt)
+    # Deferred only while the producer is stopped and joined and its pages taken; an interrupt recorded meanwhile is
+    # raised as this block ends (unless an exception propagates already), before anything is taken back.
+    with _pool.DeferredInterrupts(propagating=escaping) as deferred:
+        pages, absorbed = ahead.stop(interrupted=lambda: interrupt or deferred.signals > 0)
+    if absorbed is not None and escaping is None:
+        raise absorbed  # seen while joining (off a recording handler): the holds stay held
+    if escaping is not None:
+        # Only for a run that is leaving: a completed one that saw an interrupt its handler let pass is not stopped.
+        seen = interrupt or absorbed is not None or deferred.signals > 0
+        if seen:
+            pair.stopped = pair.stopped or "the transfer was interrupted"
+        else:
+            pair.stopped = pair.stopped or f"the transfer stopped on {type(escaping).__name__}: {escaping}"
+    changed = 0
+    unsent = [hold for page in pages for hold in page.holds]
+    for page in pages:
+        failure = failure or page.exception
+    with contextlib.ExitStack() as quiet:
+        if escaping is not None:
+            # Best effort, whatever happens (a Ctrl-C included): the propagating exception stays the one raised.
+            quiet.enter_context(contextlib.suppress(BaseException))
+        if unsent:
+            # A failure of SRC is classified first: then nothing is taken back, whatever stopped the pair; nor once an
+            # interrupt was seen. The interrupt state is looked at again here for a handler that let the interrupt
+            # pass (the default one raised it as the deferral ended).
+            take_back = escaping is None and failure is None and pair.refusal is not None
+            take_back = take_back and not (absorbed is not None or deferred.signals > 0)
+            run.unsent(pair, unsent, take_back=take_back)
+        # The holds first: a stderr that keeps failing must not cost their report.
+        with contextlib.suppress(*_ERRORS):
+            for page in pages:
+                if page is not reported:
+                    changed += page.changed
+                    for note in page.notes:
+                        print(note, file=sys.stderr)
+                    run.report.extend_errors(page.errors)
+            if failure is not None and str(failure) != pair.stopped:
+                run.report.error(
+                    f"holding a page on {run.src.locator} failed: {failure}; what it held stays held there: "
+                    f"`httk job transfer --resume {run.src.locator} {pair.dst.locator}` drives it"
+                )
+    if escaping is None and failure is not None and not isinstance(failure, _ERRORS):
+        raise failure  # an unexpected failure of the producer, as it would have been raised holding the page here
     return changed
 
 
@@ -5100,12 +5538,13 @@ neither workspace), copies the held bundle to DST, adopts it there into the
 states it left, and only then releases the hold. A bundle DST refuses (say,
 because one of its jobs is already there) stays held on SRC and is reported.
 The selection is held page by page (up to 256 jobs a page), each page copied,
-adopted and released before the next is held, over one connection to each
-remote end however many pages there are.
+adopted and released before the next is held (a push to a remote DST without
+--keep holds the next page meanwhile), over one connection to each remote end
+however many pages there are.
 A listed job that changed since the listing is left out and counted
 (`changed` in --json), not an error. A failure that stops a destination (a
-failed session, an unknown outcome, a refusal naming no bundle) holds nothing
-more for it: the command exits 1, says how many selected jobs were not
+failed session, an unknown outcome, a refusal naming no bundle) starts no new
+page for it: the command exits 1, says how many selected jobs were not
 attempted, and names the --resume that drives what it left held; run the
 transfer again to select the rest. Progress goes to stderr unless -q is given.
 

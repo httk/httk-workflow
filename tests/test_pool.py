@@ -1,5 +1,6 @@
 """Tests of :func:`httk.workflow._pool.run_ordered`: order, progressive emission, failures, admission, interrupts."""
 
+import _thread
 import contextvars
 import random
 import signal
@@ -821,3 +822,120 @@ def test_a_worker_starting_late_takes_nothing_once_the_feed_resumed_inline(monke
     assert ledger.runs == Counter({number: 1 for number in range(30)}) and not ledger.discarded
     # Only the two parked tasks ran in workers; the rest ran here once the handler let the interrupt pass.
     assert {number for number, thread in ledger.threads.items() if thread != caller} == {0, 1}
+
+
+# -- the helpers of a producer the caller joins (plan WORKFLOW_TRANSFER_SESSION §7.11, T6b) --------------------------
+
+
+def test_interrupt_of_finds_the_interrupt_behind_a_lock_error() -> None:
+    interrupt = KeyboardInterrupt()
+    wrapped = RuntimeError("cannot release un-acquired lock")
+    wrapped.__context__ = interrupt
+    assert _pool.interrupt_of(wrapped) is interrupt
+    plain = RuntimeError("can't start new thread")
+    assert _pool.interrupt_of(plain) is plain
+    other = ValueError("x")
+    other.__context__ = interrupt
+    assert _pool.interrupt_of(other) is other
+
+
+class _Finisher:
+    """A thread that sets ``state["done"]`` once the waiter asked it *asks* times how many operations run (a wait
+    that polled that often, interrupts included, is the precondition of what is tested)."""
+
+    def __init__(self, condition: threading.Condition, asks: int, count: int, on_ask: Callable[[int], None]) -> None:
+        self.condition, self.asks, self.count, self.on_ask = condition, asks, count, on_ask
+        self.done = False
+        self.asked = 0
+        self.ready = threading.Event()
+        self.thread = threading.Thread(target=self._finish)
+        self.thread.start()
+
+    def running(self) -> int:
+        self.asked += 1
+        self.on_ask(self.asked)
+        if self.asked >= self.asks:
+            self.ready.set()
+        return self.count
+
+    def _finish(self) -> None:
+        assert self.ready.wait(10.0)
+        with self.condition:
+            self.done = True
+            self.condition.notify_all()
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_wait_quietly_waits_and_says_so_only_after_an_interrupt(
+    capsys: pytest.CaptureFixture[str], interrupted: bool
+) -> None:
+    condition = threading.Condition()
+    finisher = _Finisher(condition, 1, 2, lambda _asked: None)  # done once the waiter polled with 2 running
+    absorbed = _pool.wait_quietly(condition, lambda: finisher.done, finisher.running, interrupted=lambda: interrupted)
+    finisher.thread.join()
+    assert absorbed is None and finisher.done
+    said = "waiting for 2 running operations to finish"
+    assert capsys.readouterr().err.count(said) == (1 if interrupted else 0)
+
+
+def test_wait_quietly_absorbs_interrupts_and_returns_the_first(
+    default_sigint: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    condition = threading.Condition()
+
+    def interrupt(asked: int) -> None:
+        if asked <= 2:
+            _thread.interrupt_main()  # a Ctrl-C from inside the wait, twice
+
+    finisher = _Finisher(condition, 3, 1, interrupt)  # done only after both were absorbed
+    absorbed = _pool.wait_quietly(condition, lambda: finisher.done, finisher.running)
+    finisher.thread.join()
+    assert isinstance(absorbed, KeyboardInterrupt) and finisher.done
+    assert capsys.readouterr().err.count("waiting for 1 running operations to finish") == 1
+
+
+def _until(condition: Callable[[], object]) -> None:
+    """Spin (each turn lets a pending signal handler run) until *condition* holds."""
+
+    deadline = time.monotonic() + 10.0
+    while not condition():
+        assert time.monotonic() < deadline
+
+
+def test_deferred_interrupts_deliver_the_first_once_the_block_ends(default_sigint: None) -> None:
+    reached = []
+    with pytest.raises(KeyboardInterrupt), _pool.DeferredInterrupts() as deferred:
+        _thread.interrupt_main()
+        _until(lambda: deferred.signals > 0)  # recorded, not raised here
+        _thread.interrupt_main()
+        _until(lambda: deferred.signals > 1)
+        reached.append(deferred.signals)
+    assert reached == [2]  # both recorded, delivered once
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_deferred_interrupts_never_replace_an_interrupt_that_propagates(default_sigint: None) -> None:
+    original = KeyboardInterrupt("the first")
+    with pytest.raises(KeyboardInterrupt) as caught, _pool.DeferredInterrupts() as deferred:
+        _thread.interrupt_main()
+        _until(lambda: deferred.signals > 0)
+        raise original
+    assert caught.value is original
+
+
+def test_deferred_interrupts_never_replace_a_propagating_system_exit(default_sigint: None) -> None:
+    with pytest.raises(SystemExit) as caught, _pool.DeferredInterrupts() as deferred:
+        _thread.interrupt_main()
+        _until(lambda: deferred.signals > 0)
+        raise SystemExit(17)
+    assert caught.value.code == 17
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_deferred_interrupts_deliver_nothing_while_the_caller_cleans_up_after_an_exception(
+    default_sigint: None,
+) -> None:
+    with _pool.DeferredInterrupts(propagating=LookupError("being handled")) as deferred:
+        _thread.interrupt_main()
+        _until(lambda: deferred.signals > 0)
+    assert deferred.signals >= 1  # recorded, and dropped rather than raised over the caller's exception

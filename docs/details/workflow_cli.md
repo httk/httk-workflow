@@ -1114,6 +1114,19 @@ whole command its transfer session, the workspace id its first adoption
 answered, the synchronization file by file after a failed `syncfs`, and its
 workflow attempts.
 
+A push from a local SRC to a remote DST that keeps no away copies
+(`job transfer` without `--keep`, or `job push --no-keep`) holds one page ahead:
+a second thread holds the next page while the current one is staged, adopted
+and released (so a page costs about the longer of the two, not their sum),
+starting each page only once the one before was handed over. It holds nothing
+else, prints nothing (its warnings go to stderr through logging), and hands
+each page over with everything it completed, a failure on SRC included, which
+then stops the destination as an error between pages does. With its pooled
+holds and the releases of the page before, up to twice `io.workers`
+operations can run on SRC at once. `job push` keeps away copies by default
+(like `--keep`), so it holds no page ahead unless given `--no-keep`; nor do
+pulls, remote to remote, local to local and the holds an earlier run left.
+
 With `--json` the `transfers` list the earlier holds first (by transfer id,
 page by page), then the selection's holds in the order they were held, page by
 page. The document has `changed` (a count, possibly `0`) whenever there was a
@@ -1181,7 +1194,8 @@ Paging is not the same as holding everything first, deliberately:
   *Staged segments*), the child is a hold, not an away copy, and its parent is
   held by itself in the later page; which of the two happens depends on how
   far the staged pages got. A take-back in one page can change what a later
-  page finds likewise.
+  page finds likewise, except for the page a push holds ahead, which was held
+  before (as when everything is held first).
 - A job adopted into SRC after the listing can be held alone although its parent
   is then present (whether a parent is present is a conservative filter, not a
   guarantee the claim makes), and the descendants a selected root gets after
@@ -1194,10 +1208,15 @@ Paging is not the same as holding everything first, deliberately:
 
 **Stops.** A failed session, an unknown outcome, a refusal naming no hold, an
 answer from another workspace id than the first, and, from a local SRC to a
-local DST, a delivery that fails as a whole stop that destination: nothing more
-is held or driven for it, and a failure of a pull's session to SRC stops every
-destination of that SRC. The unsent holds of the page follow the rules of their
-segments above. The command then exits nonzero and says, for each stopped
+local DST, a delivery that fails as a whole stop that destination: no new page
+is held for it and nothing more is driven, and a failure of a pull's session to
+SRC stops every destination of that SRC. The unsent holds of the page follow
+the rules of their segments above. A page a push was holding ahead is cut as
+soon as the destination stops, before its next claim (or batch of `io.workers`
+claims; those running finish, and after Ctrl-C the command waits for them,
+saying so), and its holds, never sent, are taken back after a refusal naming
+no hold (`not_moved`), and otherwise (an unknown outcome, a failure of SRC, an
+interrupt) stay held for `--resume`, reported as not delivered. The command then exits nonzero and says, for each stopped
 destination, why, how many selected jobs were not attempted (or that the
 selection was not, when the stop came before it; the holds not yet listed, when
 it came while the earlier holds were), and that

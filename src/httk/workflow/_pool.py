@@ -19,9 +19,10 @@ import signal
 import sys
 import threading
 from collections.abc import Callable, Sequence
-from types import FrameType
+from types import FrameType, TracebackType
+from typing import Self
 
-__all__ = ["Feed", "run_ordered"]
+__all__ = ["DeferredInterrupts", "Feed", "interrupt_of", "run_ordered", "wait_quietly"]
 
 #: How often a waiting caller looks at a stop recorded by the signal handler (which cannot notify).
 _POLL = 0.1
@@ -240,6 +241,122 @@ class _Pool[T, R]:
                 assert isinstance(outcome[1], BaseException)
                 return outcome[1]
         return None
+
+
+def interrupt_of(exc: BaseException) -> BaseException:
+    """The interrupt behind *exc*, when it is one: an interrupt landing inside ``Condition.wait`` can surface as the
+    ``RuntimeError`` of releasing a lock it left released; any other exception is itself.
+
+    :param exc: The exception caught.
+    :return: The interrupt behind it, or *exc*.
+    """
+
+    return _interrupt(exc)
+
+
+def wait_quietly(
+    condition: threading.Condition,
+    done: Callable[[], bool],
+    running: Callable[[], int],
+    *,
+    interrupted: Callable[[], bool] = lambda: False,
+) -> BaseException | None:
+    """Wait under *condition* until *done* holds, absorbing interrupts meanwhile, as a pool's drain does: once an
+    interrupt was seen (*interrupted* says so, or one was absorbed here) while *running* says operations still run,
+    say once on standard error what is waited for (outside the condition's lock). A thread that is not a pool's (a
+    producer the calling thread joins) is waited for so, through its own condition, never through ``Thread.join``.
+
+    :param condition: The condition the awaited thread notifies once *done* holds.
+    :param done: Whether the wait is over, called under *condition*.
+    :param running: How many operations still run, called under *condition*.
+    :param interrupted: Whether an interrupt was seen elsewhere (one the wait follows, or one recorded by a
+        :class:`DeferredInterrupts`), called after each poll.
+    :return: The first interrupt absorbed, if any (to be raised by the caller when nothing else is raised).
+    """
+
+    absorbed: BaseException | None = None
+    noted = False
+    while True:
+        try:
+            with condition:
+                condition.notify_all()
+                if done():
+                    return absorbed
+                condition.wait(_POLL)
+                count = 0 if done() else running()
+            if count and not noted and (absorbed is not None or interrupted()):
+                noted = True
+                # Best effort: a closed or failing stderr must not end the wait.
+                with contextlib.suppress(BaseException):
+                    print(f"waiting for {count} running operations to finish", file=sys.stderr)
+        except BaseException as exc:
+            interrupt = _interrupt(exc)
+            if not isinstance(interrupt, (KeyboardInterrupt, SystemExit)):
+                raise
+            absorbed = absorbed or interrupt
+
+
+class DeferredInterrupts:
+    """While entered on the main thread, ``SIGINT`` (when it has a handler set from Python) only is recorded, as a
+    pool records it, so that a short transition that must not be cut (a thread started and recorded as started, a
+    stop flag set and its thread joined) runs to its end; on leaving, the previous handler is restored and a recorded
+    interrupt delivered to it once (``KeyboardInterrupt`` for the default handler), unless an exception propagates
+    (through the block, or *propagating*, one the caller's cleanup runs for): that one is never replaced. Off the main
+    thread, or with an ignored ``SIGINT``, it does nothing.
+
+    Keep the block short: a pool run inside it records its own interrupts and hands them to this recorder, whose
+    handler returns, so the pool then runs its remaining items inline in the calling thread, as it does under any
+    custom handler that returns. No pool (a take-back, say) belongs inside it.
+
+    :param propagating: The exception the caller is cleaning up after, if any: then nothing is delivered.
+    """
+
+    def __init__(self, propagating: BaseException | None = None) -> None:
+        #: The ``SIGINT`` recorded so far.
+        self.signals = 0
+        self._previous: object = None
+        self._propagating = propagating
+
+    def _record(self, _signum: int, _frame: FrameType | None) -> None:
+        # Runs in the main thread between two bytecodes: no lock.
+        self.signals += 1
+
+    def __enter__(self) -> Self:
+        """Start recording ``SIGINT``.
+
+        :return: The recorder.
+        """
+
+        if threading.current_thread() is threading.main_thread():
+            previous = signal.getsignal(signal.SIGINT)
+            if previous is not None and previous != signal.SIG_IGN:
+                signal.signal(signal.SIGINT, self._record)
+                self._previous = previous
+        return self
+
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None
+    ) -> None:
+        """Restore the previous handler and deliver a recorded interrupt to it, unless an exception propagates.
+
+        :param exc_type: The exception type propagating, if any.
+        :param exc: The exception propagating, if any.
+        :param traceback: Its traceback, if any.
+        """
+
+        previous, self._previous = self._previous, None
+        if previous is None:
+            return
+        signal.signal(signal.SIGINT, previous)  # type: ignore[arg-type]
+        if not self.signals or exc is not None or self._propagating is not None:
+            return  # an exception already propagating is never replaced
+        if previous is signal.default_int_handler:
+            raise KeyboardInterrupt
+        if previous == signal.SIG_DFL:
+            signal.raise_signal(signal.SIGINT)
+            raise KeyboardInterrupt  # not reached unless the default action did not end the process
+        if callable(previous):
+            previous(signal.SIGINT, None)
 
 
 def run_ordered[T, R](

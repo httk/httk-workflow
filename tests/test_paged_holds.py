@@ -698,23 +698,33 @@ def test_a_push_keeps_one_session_and_one_pin_across_pages(
     assert requests_in_order(requests)
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (1, 1)
-    # Another workspace answering the second page's adoption stops the pair: no third hold is made.
+    # Another workspace answering the second page's adoption stops the pair: no new page starts (plan §7.8(b), as
+    # amended for T6b in §7.11), and the third, held ahead while the second was driven, is cut before its claim or
+    # was held already, and then stays held, reported as not delivered; the fourth is never held.
     requests.clear()
     monkeypatch.setenv("HTTK_TEST_OTHER_ID_FROM_ADOPT", "2")
-    plan = jobs(near, 3)
+    plan = jobs(near, 4)
     assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 1
     document = json.loads(capsys.readouterr().out)
     statuses = [outcome["status"] for outcome in document["transfers"]]
     (error,) = document["errors"]
     assert "stopped" in error and f"--resume {near.root} cluster:{far_name}" in error
     if DEADLINE:
-        # The third page may be held and staged before the second's adoption answers: given up, held.
-        assert statuses[0] == "adopted" and statuses[1:] in (["failed"], ["failed", "failed"])
+        # The third page may be held and staged before the second's adoption answers (given up, held), and the
+        # fourth then held ahead.
+        assert statuses[0] == "adopted" and statuses[1:] in (["failed"] * 1, ["failed"] * 2, ["failed"] * 3)
         assert len(outgoing(near)) == len(statuses) - 1
         return
-    assert statuses == ["adopted", "failed"] and "1 selected job(s) were not attempted" in error
-    assert len(adopts(requests)) == 2 and len(outgoing(near)) == 1
-    assert find(near, plan[2][0]["id"]).state == "succeeded"  # type: ignore[union-attr]
+    ahead = len(statuses) == 3
+    assert statuses == ["adopted", "failed", *["failed"] * ahead]
+    assert f"{2 - ahead} selected job(s) were not attempted" in error
+    assert len(adopts(requests)) == 2 and len(outgoing(near)) == 1 + ahead
+    if ahead:
+        message = document["transfers"][2]["message"]
+        assert message.startswith(f"not delivered, since the transfer to cluster:{far_name} stopped (")
+    else:
+        assert find(near, plan[2][0]["id"]).state == "succeeded"  # type: ignore[union-attr]
+    assert find(near, plan[3][0]["id"]).state == "succeeded"  # type: ignore[union-attr]  # never held
 
 
 def test_a_push_s_fsync_after_a_failed_commit_sticks_across_pages(
@@ -1417,22 +1427,30 @@ def test_a_session_failure_in_a_later_page_s_workflows_keeps_the_report(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # E9: page 1 needs a workflow installed nowhere, page 2 two others: the far side dies on the second workflows
-    # request. Page 2 is not recorded as attempted, its hold is kept and named, page 3 is never held.
+    # request. Page 2 is not recorded as attempted, its hold is kept and named; page 3, held ahead while page 2 is
+    # driven (plan §7.11, T6b), is cut before its claim or was held already, and then stays held, named too; page 4 is
+    # never held.
     project, near, near_name, _far, far_name = push_ssh
     first, _, _ = single(near)
     caller = workflows(near, tmp_path / "packages")
-    second, third = workflow_job(near, caller), workflow_job(near, caller)
+    second, third, fourth = (workflow_job(near, caller) for _ in range(3))
     paged(monkeypatch, 1)
     monkeypatch.setenv("HTTK_TEST_EXIT_ON_NTH_OP", "workflows:2")
-    argv = ["--json", "-q", *ids(first), "--job", second, "--job", third, near_name, f"cluster:{far_name}"]
+    selectors = ["--job", second, "--job", third, "--job", fourth]
+    argv = ["--json", "-q", *ids(first), *selectors, near_name, f"cluster:{far_name}"]
     assert run(project, *argv) == 1
     document = json.loads(capsys.readouterr().out)
-    page_one, page_two = document["transfers"]
+    page_one, page_two, *page_three = document["transfers"]
     assert adopted_or_abandoned(page_one, DEADLINE) and page_one["workflows"][0]["status"] == "missing"
     assert page_two["status"] == "failed" and "--resume" in page_two["message"] and "workflows" not in page_two
+    ahead = len(page_three)
+    assert ahead in (0, 1) and all(outcome["status"] == "failed" for outcome in page_three)
+    assert all(f"stays held on {near.root}" in outcome["message"] for outcome in page_three)
     (error,) = document["errors"]
-    assert "stopped" in error and "1 selected job(s) were not attempted" in error
-    assert len(outgoing(near)) == (1 if page_one["status"] == "adopted" else 2) and find(near, third) is not None
+    assert "stopped" in error and f"{2 - ahead} selected job(s) were not attempted" in error
+    assert len(outgoing(near)) == (1 if page_one["status"] == "adopted" else 2) + ahead
+    assert (find(near, third) is not None) == (not ahead)
+    assert find(near, fourth) is not None  # never held
 
 
 def test_an_error_between_pages_keeps_the_report_of_the_pages_driven(

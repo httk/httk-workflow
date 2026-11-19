@@ -266,7 +266,11 @@ selection still connects to both ends. A remote
 source never takes a hold back: a refusal, an unknown outcome or a failure of
 that directory (a full disk) leaves the holds held there for `--resume`.
 
-A push holds and delivers its jobs a page at a time. Over the session it first
+A push holds and delivers its jobs a page at a time (when it keeps no away
+copies, as `job transfer` without `--keep` and `job push --no-keep`, the next
+page is held while the current one is delivered, so up to twice `io.workers`
+operations can run on the source; `job push` keeps away copies by default and
+so does not; see *Paged holds* in {doc}`workflow_cli`). Over the session it first
 asks the destination which of the workflows a page's jobs need it lacks or has
 unbuilt, installs and builds those (once a command per workflow; a failure is
 reported and the jobs wait, the push goes on), and only then travels in
