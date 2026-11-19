@@ -395,6 +395,16 @@ class _Collection:
             except WorkflowError as exc:
                 _LOGGER.info("recovery of owner %s did not finish: %s", record.owner_id, exc)
                 continue
+            except _kernel.RecoverySealFailed as exc:
+                # The recovery seal failed before anything moved: the owner stays for the next pass (plan
+                # WORKFLOW_LOCAL_COMMANDS amendment 27). A later failure propagates.
+                _LOGGER.warning(
+                    "recovery of dead owner %s did not finish; it stays for the next pass: %s",
+                    record.owner_id,
+                    exc,
+                    extra={"event": "owner_recovery_failed", "dead_owner": record.owner_id},
+                )
+                continue
             tally.removed += 1
             _LOGGER.warning(
                 "recovered dead owner %s: %d job(s) returned, %d quarantined",

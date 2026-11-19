@@ -1110,6 +1110,37 @@ placement).
    `owner.json`, `heartbeat.json` and leftover write temporaries. `dead.json`
    stays. Otherwise it repeats from step 1, up to 8 rounds.
 
+Before step 1, recovery in a durable workspace seals what the dead owner may
+have renamed or unlinked without a commit point yet: it fsyncs `requests/`,
+`owned/<dead>/`, every job directory held there (a batched state replace may be
+unsealed in it), the dead owner's `tmp/<dead>.*` scratch directories and
+`tmp/`, at a cost proportional to the jobs it held. Only for an owner that
+wrote its batched marker (`owners/<id>/.batched`, durably, before its first
+batched mutation) does it also fsync each unowned state's directory and every
+placement directory below it; a serial owner seals its moves inline. Where the
+protocol predicate holds (`_fs.protocol_mode`: `io.sync` is `auto` or `syncfs`,
+`auto` resolves to `syncfs` there, and the filesystem is not Lustre), one
+`syncfs` per filesystem replaces the fsyncs. A directory that is gone stands for
+its nearest existing ancestor; any other error inspecting or syncing a
+directory fails the seal, and with it the recovery, which then returns,
+reconciles and removes nothing: managers, `gc` and the daemon keep the dead
+owner and retry at their next probe. A failure after recovery began to move
+things (a returned job's fsync, say) propagates as it always has. So no successor writes on top of a rename
+a machine crash could still undo. The live owner keeps the same discipline for
+batched steps: each step that renames or unlinks without its fsync first
+registers an obligation on the directories it may change, of one of two kinds:
+one that gates `owner.json` (moves out of `owned/<O>/`, their destinations,
+the trash, `tmp/`) or one that gates the job's exposure (its state replace, its
+request unlinks). Only a seal that starts after the step finished clears it,
+and a seal is all or nothing. `Owner.close` seals every obligation as its first
+step, before self-healing, the `rmdir` of `owned/<O>/` and the trash's
+reconcile; a failed seal keeps `owner.json`. A job with an unsealed exposure
+obligation never leaves `owned/<O>/` (`give_back`, the move out and `extract`
+refuse), and an owner holding such a job is latched: an exception or interrupt
+inside its context seals every obligation (all or nothing) and gives nothing
+back, leaving every job for recovery. The serial paths register no obligation,
+and a workspace that is not durable registers and syncs nothing.
+
 `recoverable_owners` lists every owner with a readable `owner.json`, plus
 every tombstoned owner that again holds jobs, launches or scratch (a falsely
 attested owner that kept working). Managers probe up to three of them, at

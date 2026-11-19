@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType, TracebackType
-from typing import NamedTuple, Protocol, Self
+from typing import Literal, NamedTuple, Protocol, Self
 
 from httk.workflow import _death, _fs
 from httk.workflow._job import MAX_JOB_BYTES
@@ -74,8 +74,10 @@ __all__ = [
     "OwnerLost",
     "OwnerRecord",
     "RecoveryReport",
+    "RecoverySealFailed",
     "Release",
     "ReleasedJobError",
+    "StepRefused",
     "attest_dead",
     "check_placement",
     "claim",
@@ -177,6 +179,60 @@ class OwnerDeclaredDead(OwnerLost):
 
 class ReleasedJobError(WorkflowError):
     """An :class:`OwnedJob` handle was used after its job was released or discarded."""
+
+
+class RecoverySealFailed(_fs.SyncFailed):
+    """The seal recovery makes before anything else failed (plan WORKFLOW_LOCAL_COMMANDS amendment 27): nothing was
+    returned, reconciled or removed, so the dead owner stays recoverable and the next probe retries. Any other error of
+    a recovery, after it began to move things, propagates as it always has."""
+
+
+class StepRefused(WorkflowError):
+    """A batched step met what only the serial path handles (a planted ``logs/`` or ``runlog.jsonl``); the job is
+    served serially instead (plan WORKFLOW_LOCAL_COMMANDS amendment 26)."""
+
+
+#: The two kinds of owner obligation (plan WORKFLOW_LOCAL_COMMANDS amendment 26): ``owner`` gates the removal of
+#: ``owner.json`` (moves out of ``owned/<owner-id>/``, their destinations, the trash, ``tmp/``); ``exposure`` gates
+#: one job's exposure to a successor (its state replace, its request unlinks).
+type ObligationKind = Literal["owner", "exposure"]
+
+
+@dataclass
+class _Obligation:
+    """One directory that may hold an entry change no seal has covered yet.
+
+    :param kind: Its kind.
+    :param directory: The directory.
+    :param job: The handle whose step it is, or ``None``.
+    :param identity: The ``(st_dev, st_ino)`` of the descriptor the owner retains of a shared directory for the seal
+        (the directory found at the path when the obligation was registered), or ``None`` to seal by path.
+    :param finished: The owner's finish count once the mutation finished (however it ended), else ``None``.
+    """
+
+    kind: ObligationKind
+    directory: Path
+    job: "OwnedJob | None"
+    identity: tuple[int, int] | None
+    finished: int | None = None
+
+
+#: Written durably beside ``owner.json`` before an owner's first batched mutation (plan WORKFLOW_LOCAL_COMMANDS
+#: amendment 27): only the recovery of such an owner seals every placement directory. A dot name, so that ``gc``
+#: removes it with the tombstone; it never ends in ``.tmp``, so that the sweep of write temporaries leaves it.
+_BATCHED_MARKER = ".batched"
+
+
+def _io_sync(workspace: "KernelWorkspace") -> object:
+    # The io.sync setting as stored now (a workspace that has no settings, as the kernel's test doubles, is auto).
+    reader = getattr(workspace, "io_sync", None)
+    return reader() if callable(reader) else "auto"
+
+
+def _io_workers(workspace: "KernelWorkspace") -> int:
+    # The io.workers setting (1 for a workspace that has no settings).
+    workers = getattr(workspace, "io_workers", 1)
+    return workers if isinstance(workers, int) and not isinstance(workers, bool) and workers > 0 else 1
 
 
 class JobName(NamedTuple):
@@ -719,6 +775,19 @@ class Owner:
         # before owner.json goes (plan WORKFLOW_TRANSFER_SESSION §7.11, T6a).
         self._unsealed = False
         self._flights = 0
+        # Obligations (plan WORKFLOW_LOCAL_COMMANDS §4.10, amendments 10, 16, 26): directories a batched step may
+        # have changed without an fsync, registered before the mutation and cleared only by a seal that started
+        # after it finished. The serial paths register none. Guarded by the lock, as is the latch below.
+        self._obligations: dict[int, _Obligation] = {}
+        self._obligation_ids = itertools.count()
+        self._finishes = 0
+        # A descriptor of each shared directory an obligation names, by the identity of the directory opened, with
+        # how many obligations hold it.
+        self._retained: dict[tuple[int, int], list[int]] = {}
+        # Set once a batch holds a job with an obligation (or explicitly): __exit__ then gives nothing back.
+        self._latched = False
+        # Whether this owner wrote its batched marker (amendment 27).
+        self._batched = False
 
     def __enter__(self) -> Self:
         """Return the owner."""
@@ -731,7 +800,9 @@ class Owner:
         """Close on a normal exit; on an interrupt, return quiescent jobs first; otherwise touch nothing.
 
         While a pooled operation is still in flight (:meth:`enter_flight`) nothing is touched either: that is a
-        fail-stop, leaving every owned job for recovery.
+        fail-stop, leaving every owned job for recovery. On an exception or interrupt, obligations are sealed first
+        (:meth:`seal_obligations`); when that fails, or while the owner is :attr:`latched`, nothing is given back
+        and ``owner.json`` stays (fail-stop; plan WORKFLOW_LOCAL_COMMANDS amendment 16).
 
         :param exc_type: The exception type, if any.
         :param exc: The exception, if any.
@@ -739,7 +810,7 @@ class Owner:
         """
 
         with self._lock:
-            flights, held = self._flights, list(self._held.values())
+            flights, held, obliged = self._flights, list(self._held.values()), bool(self._obligations)
         if flights:
             _LOGGER.warning(
                 "owner %s exits with %d operations in flight; its jobs are left for recovery", self.owner_id, flights
@@ -747,6 +818,21 @@ class Owner:
             return
         if exc_type is None:
             self.close()
+            return
+        if obliged:
+            try:
+                self.seal_obligations()
+            except Exception:
+                _LOGGER.warning(
+                    "owner %s could not seal its obligations; its jobs are left for recovery",
+                    self.owner_id,
+                    exc_info=True,
+                )
+                return
+        with self._lock:
+            latched = self._latched
+        if latched:
+            _LOGGER.warning("owner %s exits latched; its jobs are left for recovery", self.owner_id)
             return
         if not issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
             # Fail-stop (§5.2): an error leaves every owned job for recovery once this process is proven dead.
@@ -929,16 +1015,23 @@ class Owner:
                     self._retired_while_building.discard(path)
 
     def close(self) -> None:
-        """Return unheld owned jobs, reconcile scratch and remove this owner's directories when nothing is left.
+        """Seal the obligations, return unheld owned jobs, reconcile scratch and remove this owner's directories
+        when nothing is left.
 
-        :raises httk.workflow.errors.WorkflowError: While this process holds jobs or has operations in flight, or
-            when owned jobs remain.
+        The obligations are sealed first (:meth:`seal_obligations`), before anything else is touched.
+
+        :raises httk.workflow.errors.WorkflowError: While this process holds jobs, has operations in flight or
+            obligations whose mutation has not finished, or when owned jobs remain.
+        :raises OSError: When the seal fails (:class:`~httk.workflow._fs.SyncFailed`); ``owner.json`` stays.
         """
 
+        self.seal_obligations()
         with self._lock:
-            holding, flights = len(self._held), self._flights
+            holding, flights, unfinished = len(self._held), self._flights, len(self._obligations)
         if holding or flights:
             raise WorkflowError(f"owner {self.owner_id} still holds {holding} jobs, {flights} operations in flight")
+        if unfinished:
+            raise WorkflowError(f"owner {self.owner_id} has {unfinished} obligations whose mutation has not finished")
         # §5.2 self-healing: jobs in owned/<self>/ this process never held go back unchanged; nothing launches.
         for ref in self.owned():
             self.adopt_owned(ref).give_back()
@@ -964,6 +1057,8 @@ class Owner:
             with self._lock:
                 self._unsealed = False
         if not kept and not list_names(launches):
+            # Whether or not this process knows it wrote one (a marker whose directory fsync failed is there too).
+            _remove_batched_marker(self.path, durable=workspace.durable)
             _fs.remove_file(_fs.loc(self.path / "owner.json"), durable=workspace.durable)
             _fs.remove_file(_fs.loc(self.path / "heartbeat.json"), durable=workspace.durable)
             _fs.remove_empty_dir(_fs.loc(launches))
@@ -980,14 +1075,40 @@ class Owner:
 
         The tree is moved into this owner's ``trash`` scratch first, so a crash mid-removal leaves an owner-named
         scratch that close or recovery reconciles; the trash scratch itself goes through the ``tmp`` root. Single
-        files use :func:`httk.workflow._fs.remove_file`.
+        files use :func:`httk.workflow._fs.remove_file`. The composition of :meth:`trash_tree` and
+        :func:`httk.workflow._fs.remove_trashed`.
 
         :param path: The tree, such as an entry inside one of this owner's scratch directories.
         :param durable: Make the move into the trash durable (in a durable workspace); see :meth:`discard_scratch`. A
             move that is not durable leaves ``tmp/`` to be sealed by :meth:`close` before the owner record goes.
         """
 
+        _fs.remove_trashed(self.trash_tree(path, durable=durable))
+
+    def trash_tree(
+        self,
+        path: Path | _fs.Loc,
+        *,
+        durable: bool = True,
+        commit: _fs.Commit | None = None,
+        job: "OwnedJob | None" = None,
+    ) -> _fs.Loc:
+        """Move a directory tree only this owner can move into its trash scratch: the first step of
+        :meth:`discard_tree`, after which :func:`httk.workflow._fs.remove_trashed` removes it.
+
+        :param path: The tree.
+        :param durable: As for :meth:`discard_tree`.
+        :param commit: Record the move's directories in this collector instead of fsyncing them, after registering
+            them as ``owner`` obligations (:meth:`obliged`); ``tmp/`` is then left for :meth:`close` to seal too.
+        :param job: The handle whose step this is (it latches the owner), with *commit*.
+        :return: The tree's trash name.
+        :raises ValueError: For an anchored *path* with *commit*.
+        """
+
         target = path if isinstance(path, _fs.Loc) else _fs.loc(path)
+        if commit is not None and target.at is not None:
+            # Its directory is a descriptor no obligation could retain by identity: batched trashing takes paths.
+            raise ValueError(f"a batched trash move takes a path, not an anchored location: {target.path}")
         with self._lock:
             trash = self._trash
             itself = target.at is None and target.path == trash
@@ -1005,15 +1126,250 @@ class Owner:
         else:
             trash_dir = trash
         durable = self.workspace.durable and durable
-        if self.workspace.durable and (itself or not durable):
+        if self.workspace.durable and (itself or not durable or commit is not None):
             # Unsealed from the rename on: the trash's own rename is sealed only once its fsync of tmp/ succeeded.
             with self._lock:
                 self._unsealed = True
-        _fs.discard(target, trash_dir=trash_dir, durable=durable)
-        if itself and durable:
+        if commit is None:
+            trashed = _fs.trash(target, trash_dir=trash_dir, durable=durable)
+        else:
+            with self.obliged([target.path.parent, trash_dir], kind="owner", job=job):
+                trashed = _fs.trash(target, trash_dir=trash_dir, durable=False, commit=commit)
+        if itself and durable and commit is None:
             # That fsync of tmp/ also sealed every earlier non-durable move out of it.
             with self._lock:
                 self._unsealed = False
+        return trashed
+
+    # -- obligations (plan WORKFLOW_LOCAL_COMMANDS §4.10, amendments 10, 16, 20, 26) ------------------------------
+
+    @property
+    def latched(self) -> bool:
+        """Whether a batch holds (or held) a job with an obligation: :meth:`__exit__` then gives nothing back."""
+
+        with self._lock:
+            return self._latched
+
+    def latch(self) -> None:
+        """Set the fail-stop latch: from now on an exceptional exit gives nothing back and keeps ``owner.json``."""
+
+        with self._lock:
+            self._latched = True
+
+    def unlatch(self) -> None:
+        """Clear the latch once the batch's cleanup has decided every held job, sealing every obligation first.
+
+        :raises httk.workflow.errors.WorkflowError: While an obligation's mutation has not finished; the latch stays.
+        :raises OSError: When the seal fails; the latch stays.
+        """
+
+        self.seal_obligations()
+        with self._lock:
+            if self._obligations:
+                raise WorkflowError(f"owner {self.owner_id} has obligations whose mutation has not finished")
+            self._latched = False
+
+    @contextlib.contextmanager
+    def obliged(
+        self, directories: Iterable[Path], *, kind: ObligationKind, job: "OwnedJob | None" = None
+    ) -> Iterator[None]:
+        """Register one obligation per directory before a batched mutation; mark them finished after it.
+
+        Conservatively, each says "this directory may have an unsealed change" from before the mutation on; it is
+        marked finished however the mutation ended (it may have happened even when it raised), and only a seal
+        that starts after that clears it (:meth:`seal_obligations`, :meth:`commit`, or a serial step's own fsync of
+        the directory). A shared directory (any outside *job*'s directory) is sealed through a descriptor retained
+        from now on where it exists, by the identity of the directory opened; a job-private one by path. An
+        obligation of a handle latches the owner. The first registration writes the owner's batched marker
+        (plan WORKFLOW_LOCAL_COMMANDS amendment 27) durably first. In a workspace that is not durable nothing is
+        registered.
+
+        :param directories: The directories whose entries the mutation may change.
+        :param kind: ``owner`` or ``exposure``.
+        :param job: The handle whose step it is, or ``None``.
+        :return: A context manager around the mutation.
+        :raises ValueError: For an unknown kind.
+        """
+
+        if kind not in ("owner", "exposure"):
+            raise ValueError(f"an obligation is of kind owner or exposure, not {kind!r}")
+        ids: list[int] = []
+        if self.workspace.durable:
+            self.mark_batched()
+            paths = list(dict.fromkeys(Path(item) for item in directories))
+            identities = {
+                path: self._retain(path) if job is None or not path.is_relative_to(job.path) else None for path in paths
+            }
+            with self._lock:
+                for path in paths:
+                    ids.append(identifier := next(self._obligation_ids))
+                    self._obligations[identifier] = _Obligation(kind, path, job, identities[path])
+                if job is not None:
+                    self._latched = True
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._finishes += bool(ids)
+                for identifier in ids:
+                    if (obligation := self._obligations.get(identifier)) is not None:
+                        obligation.finished = self._finishes
+
+    def mark_batched(self) -> None:
+        """Write this owner's batched marker durably, once, before its first batched mutation (plan
+        WORKFLOW_LOCAL_COMMANDS amendment 27): the recovery of a dead owner so marked also seals every placement
+        directory. Nothing in a workspace that is not durable.
+        """
+
+        with self._lock:
+            if self._batched or not self.workspace.durable:
+                return
+        record = _encode({"owner_id": self.owner_id, "batched_at": _now()})
+        _fs.write_file(_fs.loc(self.path / _BATCHED_MARKER), record, durable=True)
+        with self._lock:
+            self._batched = True
+
+    def _retain(self, path: Path) -> tuple[int, int] | None:
+        # Keep a descriptor of the directory at *path* for the seal, counted by its identity; None when it cannot be
+        # opened (it is then sealed by path, whose seal fails on anything but absence).
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            return None
+        try:
+            status = os.fstat(descriptor)
+        except OSError:
+            os.close(descriptor)
+            return None
+        identity = (status.st_dev, status.st_ino)
+        with self._lock:
+            if (entry := self._retained.get(identity)) is None:
+                self._retained[identity] = [descriptor, 1]
+                return identity
+            entry[1] += 1
+        os.close(descriptor)
+        return identity
+
+    def _finished_obligations(self) -> tuple[list[int], dict[object, Path | int]]:
+        # The obligations whose mutation has finished, and the distinct directories to seal for them: a duplicate of
+        # each retained descriptor (by identity), which the caller closes, or a path (by path).
+        targets: dict[object, Path | int] = {}
+        try:
+            with self._lock:
+                ids = [identifier for identifier, item in self._obligations.items() if item.finished is not None]
+                for identifier in ids:
+                    obligation = self._obligations[identifier]
+                    if obligation.identity is None:
+                        targets.setdefault(obligation.directory, obligation.directory)
+                    elif obligation.identity not in targets:
+                        targets[obligation.identity] = os.dup(self._retained[obligation.identity][0])
+        except BaseException:
+            _close_descriptors(targets.values())
+            raise
+        return ids, targets
+
+    def _clear(self, ids: Iterable[int]) -> None:
+        # Drop sealed obligations; a retained descriptor no obligation holds any more is closed.
+        closing = []
+        with self._lock:
+            for identifier in ids:
+                obligation = self._obligations.pop(identifier, None)
+                if obligation is None or obligation.identity is None:
+                    continue
+                entry = self._retained[obligation.identity]
+                entry[1] -= 1
+                if not entry[1]:
+                    closing.append(self._retained.pop(obligation.identity)[0])
+        _close_descriptors(closing)
+
+    def _mark(self) -> int:
+        # The finish count now: a serial step's fsync that starts after this seals what had finished by then.
+        with self._lock:
+            return self._finishes
+
+    def _sealed_by(self, directories: Iterable[Path], mark: int) -> None:
+        # A serial step fsynced *directories* (by path) after *mark*: the obligations there that had finished by
+        # then are sealed. One retained by descriptor only while the path still names the directory it retained.
+        # HEAD's _fsync_parent skips a parent a pruner removed; clearing then is sound for the same reason it is
+        # there: an rmdir succeeds only on an empty directory, so every entry a step of ours put there has left it by
+        # a later owner's move, which that owner makes durable; nothing of ours is left in it to seal.
+        with self._lock:
+            if not self._obligations:
+                return
+        wanted: dict[Path, tuple[int, int] | None] = {}
+        for directory in directories:
+            try:
+                status = os.lstat(directory)
+                wanted[directory] = (status.st_dev, status.st_ino)
+            except OSError:
+                wanted[directory] = None
+        with self._lock:
+            ids = [
+                identifier
+                for identifier, item in self._obligations.items()
+                if item.finished is not None
+                and item.finished <= mark
+                and item.directory in wanted
+                and (item.identity is None or item.identity == wanted[item.directory])
+            ]
+        self._clear(ids)
+
+    def pinned(self, job: "OwnedJob") -> bool:
+        """Whether *job* has an ``exposure`` obligation no seal has cleared (an unsealed earlier-phase step).
+
+        :param job: The handle.
+        :return: Whether it may not leave ``owned/`` yet.
+        """
+
+        with self._lock:
+            return any(item.kind == "exposure" and item.job is job for item in self._obligations.values())
+
+    def seal_obligations(self) -> None:
+        """Fsync the directory of every obligation whose mutation has finished, then clear them.
+
+        Each distinct directory once: through its retained descriptor (one per directory identity), or by path
+        (gone: its nearest existing ancestor; :func:`httk.workflow._fs.seal_directory`). All or nothing: nothing is
+        cleared when an fsync fails.
+
+        :raises OSError: When an fsync fails (:class:`~httk.workflow._fs.SyncFailed` for a seal by path).
+        :raises httk.workflow._fs.UnsafePath: When a directory sealed by path is a symlink or not a directory.
+        """
+
+        ids, targets = self._finished_obligations()
+        if not ids:
+            return
+        try:
+            for target in targets.values():
+                if isinstance(target, int):
+                    os.fsync(target)
+                else:
+                    _fs.seal_directory(target)
+        finally:
+            _close_descriptors(targets.values())
+        self._clear(ids)
+
+    def commit(self, commit: _fs.Commit) -> None:
+        """Run *commit*'s commit point with every finished obligation's directory recorded in it, then clear those
+        obligations: a phase's commit point that also seals the owner's obligations.
+
+        :param commit: The entered collector of the phase.
+        :raises OSError: When the commit fails (:class:`~httk.workflow._fs.SyncFailed`); nothing is cleared.
+        """
+
+        ids, targets = self._finished_obligations()
+        try:
+            for target in targets.values():
+                commit.directory(target)
+        finally:
+            _close_descriptors(targets.values())
+        commit.commit()
+        self._clear(ids)
+
+
+def _close_descriptors(items: Iterable[object]) -> None:
+    for item in items:
+        if isinstance(item, int):
+            os.close(item)
 
 
 def _owned_refs(directory: Path, owner_id: str) -> list[JobRef]:
@@ -1060,6 +1416,10 @@ class OwnedJob:
         self._attempt: str | None = None
         self._retired: set[str] = set()
         self._released = False
+        # Where move_to_trash moved the job, and whether the handle was retired as discarded (retire_discarded): only
+        # then does it unlink the job's request files without holding the job.
+        self._trashed: _fs.Loc | None = None
+        self._discarded = False
         # Where a release or give-back moved the job out of owned/ (None until then, and after discard or extract).
         self.moved_to: JobRef | None = None
         # Read while quiescent (at claim or adoption): a later attempt may rewrite or replace job.json.
@@ -1102,7 +1462,24 @@ class OwnedJob:
     def write_state(self, doc: StateDoc) -> None:
         """Replace ``state.json``; applied request ids whose files this handle deleted are dropped.
 
+        The composition of :meth:`stage_state` and :meth:`replace_state`, each fsyncing inline.
+
         :param doc: The document.
+        :raises OwnerLost: When the job directory is gone.
+        :raises ValueError: When *doc* names another job.
+        """
+
+        self.replace_state(self.stage_state(doc))
+
+    def stage_state(self, doc: StateDoc, *, commit: _fs.Commit | None = None) -> _fs.Staged:
+        """Write ``.state.json.<t>.tmp`` beside ``state.json``: the first step of :meth:`write_state` (plan
+        WORKFLOW_LOCAL_COMMANDS §5 amendment 14).
+
+        Applied request ids whose files this handle deleted are dropped from *doc* first.
+
+        :param doc: The document.
+        :param commit: Record the temporary's writing descriptor in this collector instead of fsyncing it.
+        :return: The staged temporary, for :meth:`replace_state`.
         :raises OwnerLost: When the job directory is gone.
         :raises ValueError: When *doc* names another job.
         """
@@ -1114,11 +1491,40 @@ class OwnedJob:
             # §5.3: ids whose files are gone need no skipping any more.
             applied = tuple(item for item in doc.applied_requests if item not in retired)
             doc = dataclasses.replace(doc, applied_requests=applied)
+        target = _fs.loc(self.path / "state.json")
+        if commit is not None:
+            self.owner.mark_batched()
         try:
-            _fs.write_file(_fs.loc(self.path / "state.json"), encode_state(doc), durable=self.owner.workspace.durable)
+            return _fs.stage_file(target, encode_state(doc), durable=self.owner.workspace.durable, commit=commit)
         except FileNotFoundError:
             self._present()
             raise
+
+    def replace_state(self, staged: _fs.Staged, *, commit: _fs.Commit | None = None) -> None:
+        """Rename a staged ``state.json`` temporary onto ``state.json``: the second step of :meth:`write_state`.
+
+        With *commit*, the job directory is an ``exposure`` obligation of this handle from before the rename until
+        a seal clears it (:meth:`Owner.obliged`), and is recorded in *commit* instead of fsynced.
+
+        :param staged: What :meth:`stage_state` returned.
+        :param commit: The phase's collector, or ``None`` to fsync inline.
+        :raises OwnerLost: When the job directory is gone.
+        """
+
+        self._present()
+        owner, durable = self.owner, self.owner.workspace.durable
+        mark = owner._mark()
+        try:
+            if commit is None:
+                _fs.replace_staged(staged, durable=durable)
+            else:
+                with owner.obliged([self.path], kind="exposure", job=self):
+                    _fs.replace_staged(staged, durable=False, commit=commit)
+        except FileNotFoundError:
+            self._present()
+            raise
+        if commit is None and durable:
+            owner._sealed_by([self.path], mark)
 
     def append_log(self, event: str, /, **detail: object) -> None:
         """Append one line to ``logs/runlog.jsonl``.
@@ -1129,17 +1535,66 @@ class OwnedJob:
         :raises ValueError: For an empty event or a detail that shadows a fixed member.
         """
 
+        self.append_log_line(event, detail)
+
+    def append_log_line(self, event: str, detail: Mapping[str, object], *, commit: _fs.Commit | None = None) -> None:
+        """Append one line to ``logs/runlog.jsonl``: the step of :meth:`append_log` (plan WORKFLOW_LOCAL_COMMANDS §5
+        amendment 14).
+
+        Without *commit* it is :meth:`append_log` (a planted ``logs`` or ``runlog.jsonl`` is removed and recreated,
+        the line fsynced on its writing descriptor). With *commit*, a planted entry refuses the step
+        (:class:`StepRefused`, amendment 26); ``logs/`` and the run log are created where missing, and the writing
+        descriptor and the directories that gained an entry are recorded in *commit* instead of fsynced.
+
+        :param event: The event name.
+        :param detail: Further JSON members of the line.
+        :param commit: The phase's collector, or ``None`` to fsync inline.
+        :raises OwnerLost: When the job directory is gone.
+        :raises ValueError: For an empty event or a detail that shadows a fixed member.
+        :raises StepRefused: With *commit*, for a planted ``logs`` or ``runlog.jsonl``.
+        """
+
         self._present()
         if not event or {"at", "event", "owner_id"} & detail.keys():
             raise ValueError("a run-log line needs an event and may not override at/event/owner_id")
         line = _encode({"at": _now(), "event": event, "owner_id": self.owner.owner_id, **detail}) + b"\n"
-        descriptor = self.open_log("runlog.jsonl")
+        if commit is not None:
+            self.owner.mark_batched()
+        descriptor = self.open_log("runlog.jsonl") if commit is None else self._open_log_step(commit)
         try:
             _fs.write_all(descriptor, line)
-            if self.owner.workspace.durable:
+            if commit is not None:
+                commit.file(descriptor)
+            elif self.owner.workspace.durable:
                 os.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+    def _open_log_step(self, commit: _fs.Commit) -> int:
+        # open_log("runlog.jsonl") for a batched step: a planted entry refuses it, and what gained an entry (the job
+        # directory where logs/ was created, logs/ where the run log was) is recorded in the collector.
+        self._present()
+        logs = self.path / "logs"
+        mode = _lstat_mode(logs)
+        if mode is not None and not stat.S_ISDIR(mode):
+            raise StepRefused(f"{logs} is not a real directory: the job is served serially")
+        directory = _fs.open_dir_under(self.path, "logs", create=True, mode=0o777, durable=False)
+        try:
+            if mode is None:
+                commit.directory(self.path)
+            existing = _lstat_mode(Path("runlog.jsonl"), directory)
+            if existing is not None and not stat.S_ISREG(existing):
+                raise StepRefused(f"{logs}/runlog.jsonl is not a regular file: the job is served serially")
+            descriptor = _fs.open_append(_fs.anchored(directory, "runlog.jsonl"), durable=False)
+            if existing is None:
+                try:
+                    commit.directory(directory)
+                except BaseException:
+                    os.close(descriptor)
+                    raise
+            return descriptor
+        finally:
+            os.close(directory)
 
     def open_log(self, name: str) -> int:
         """Open ``logs/<name>`` for appending, after making ``logs/`` and the file trusted, plain entries.
@@ -1246,6 +1701,8 @@ class OwnedJob:
     def release(self, doc: StateDoc, release: Release) -> JobRef:
         """The release rule: record the release, delete applied requests, move to ``jobs/<state>/<placement>/``.
 
+        The composition of :meth:`write_state`, :meth:`unlink_requests` and :meth:`move_out`, each fsyncing inline.
+
         :param doc: The document to record (``release_to`` and ``applied_requests`` are added).
         :param release: Where to and which requests were applied.
         :return: The released job's new reference.
@@ -1257,15 +1714,98 @@ class OwnedJob:
         self._present()
         placement = self.placement()
         self.write_state(doc.with_release(release))
-        directory = _requests_dir(self.owner.workspace)
-        for request_id in release.applied_requests:
-            _fs.remove_file(
-                _fs.loc(directory / f"{self.job_id}.{request_id}.json"), durable=self.owner.workspace.durable
-            )
+        self.unlink_requests(f"{self.job_id}.{request_id}.json" for request_id in release.applied_requests)
         return self._move_out(release.state, placement, release.priority)
+
+    def unlink_requests(self, names: Iterable[str], *, commit: _fs.Commit | None = None) -> None:
+        """Unlink request files of this job from ``requests/``: a step of :meth:`release` and :meth:`discard` (plan
+        WORKFLOW_LOCAL_COMMANDS §5 amendment 14).
+
+        While the handle holds the job it must still be there (a recovered job's requests are its successor's);
+        once :meth:`retire_discarded` retired it, the requests of the deleted job are unlinked without it. With
+        *commit*, ``requests/`` is an obligation from before the first unlink (``exposure`` of this handle while it
+        holds the job, ``owner`` after a discard) and is recorded in *commit* instead of fsynced.
+
+        :param names: The file names, ``<job-uuid>.<request-uuid>.json``, of this job.
+        :param commit: The phase's collector, or ``None`` to fsync ``requests/`` after each unlink.
+        :raises OwnerLost: When the held job directory is gone.
+        :raises ReleasedJobError: When the handle was retired otherwise than by :meth:`retire_discarded`.
+        """
+
+        held = not self._discarded
+        if held:
+            self._live()
+            self._present()
+        names = list(names)
+        if not names:
+            return
+        owner, durable = self.owner, self.owner.workspace.durable
+        directory = _requests_dir(owner.workspace)
+        if commit is None:
+            mark = owner._mark()
+            for name in names:
+                _fs.remove_file(_fs.loc(directory / name), durable=durable)
+            if durable:
+                owner._sealed_by([directory], mark)
+            return
+        with owner.obliged([directory], kind="exposure" if held else "owner", job=self if held else None):
+            for name in names:
+                _fs.remove_file(_fs.loc(directory / name), durable=False, commit=commit)
+
+    def already_applied(self, request_id: str) -> bool:
+        """Whether *request_id* is among the applied requests of the held, authoritative ``state.json`` (plan
+        WORKFLOW_LOCAL_COMMANDS §5 amendment 21): an applied leftover is never applied again.
+
+        :param request_id: The request UUID.
+        :return: Whether the job's state records it as applied.
+        :raises httk.workflow.errors.FormatError: If ``state.json`` is damaged (see :meth:`read_state`).
+        :raises httk.workflow._fs.UnsafePath: If ``state.json`` is not a regular file.
+        :raises OwnerLost: When the job directory is gone.
+        """
+
+        self._present()
+        request_id = canonical_uuid(request_id, "request_id")
+        doc = self.read_state()
+        if doc is None:
+            self._present()  # no state.json because the job is gone is not "never applied"
+            return False
+        return request_id in doc.applied_requests
+
+    def move_to_trash(self, *, commit: _fs.Commit | None = None) -> _fs.Loc:
+        """Move the quiescent job into the owner's trash scratch: the step of :meth:`discard` that removes it from
+        ``owned/`` (plan WORKFLOW_LOCAL_COMMANDS §5 amendment 14); the handle stays until the caller retires it.
+
+        :param commit: Record the move's directories in this collector instead of fsyncing them (``owner``
+            obligations of this handle).
+        :return: The job's trash name, for :func:`httk.workflow._fs.remove_trashed`.
+        :raises OwnerLost: When the job directory is gone.
+        :raises httk.workflow.errors.WorkflowError: While an attempt runs, or the handle has an unsealed step.
+        """
+
+        self._live()
+        self.require_quiescent()
+        self._unpinned()
+        self._present()
+        self._trashed = self.owner.trash_tree(self.path, commit=commit, job=self if commit is not None else None)
+        return self._trashed
+
+    def retire_discarded(self) -> None:
+        """Retire the handle of a job :meth:`move_to_trash` moved into the trash: the job is deleted, and only its
+        request files remain to be unlinked (:meth:`unlink_requests`).
+
+        :raises httk.workflow.errors.WorkflowError: When the job was not moved into the trash by this handle.
+        """
+
+        if self._trashed is None:
+            raise WorkflowError(f"{self.job_key} was not moved into the trash: it is not discarded")
+        self._discarded = True
+        self._retire()
 
     def discard(self) -> None:
         """Delete the job (the ``delete`` request), its exchange index entry and its request files.
+
+        The composition of the exchange index drop, :meth:`move_to_trash`, the tree removal and
+        :meth:`unlink_requests`, each fsyncing inline.
 
         :raises OwnerLost: When the job directory is gone.
         """
@@ -1284,13 +1824,10 @@ class OwnedJob:
             indexed = exchange_index(self.owner.workspace, doc.exchange_name)
             if indexed is not None:
                 drop_exchange_index(self.owner, doc.exchange_name, self.job_id, indexed[2])
-        self._present()
-        self.owner.discard_tree(self.path)
-        self._retire()
+        _fs.remove_trashed(self.move_to_trash())
+        self.retire_discarded()
         directory = _requests_dir(self.owner.workspace)
-        for name in list_names(directory):
-            if _request_id(name, self.job_id) is not None:
-                _fs.remove_file(_fs.loc(directory / name), durable=self.owner.workspace.durable)
+        self.unlink_requests(name for name in list_names(directory) if _request_id(name, self.job_id) is not None)
 
     def extract(self, destination: Path) -> None:
         """Move the quiescent job into a bundle being built in this owner's scratch, and retire the handle.
@@ -1300,13 +1837,15 @@ class OwnedJob:
 
         :param destination: A fresh path strictly below one of this owner's scratch directories,
             ``tmp/<owner-id>.<purpose>.<token>/``, whose parent exists.
-        :raises httk.workflow.errors.WorkflowError: While an attempt runs, or after the handle was released.
+        :raises httk.workflow.errors.WorkflowError: While an attempt runs, after the handle was released, or while
+            it has a step no seal has made durable yet.
         :raises ValueError: When *destination* is not below this owner's scratch, exists, or has no parent.
         :raises OwnerLost: When the job directory or the destination's parent is gone.
         """
 
         self._live()
         self.require_quiescent()
+        self._unpinned()
         destination = Path(destination)
         tmp = _tmp(self.owner.workspace)
         # Lexical: the scratch is owner-private, so a path below its name cannot lead anywhere else.
@@ -1416,14 +1955,53 @@ class OwnedJob:
             return None
         return target
 
+    def _unpinned(self) -> None:
+        # The fail-stop latch (plan WORKFLOW_LOCAL_COMMANDS amendment 16): a job leaves owned/ only once every step
+        # of its earlier phases is sealed.
+        if self.owner.pinned(self):
+            raise WorkflowError(f"{self.job_key} has a step no seal has made durable yet: it stays held")
+
     def _move_out(self, state: str, placement: PurePosixPath, priority: int) -> JobRef:
-        target = _state_dir(self.owner.workspace, state, placement) / format_job_name(
+        return self.move_out(state, placement, priority)
+
+    def move_out(
+        self, state: str, placement: PurePosixPath, priority: int, *, commit: _fs.Commit | None = None
+    ) -> JobRef:
+        """Move the job out of ``owned/`` to ``jobs/<state>/<placement>/`` under a fresh name and retire the
+        handle: the last step of :meth:`release` and :meth:`give_back` (plan WORKFLOW_LOCAL_COMMANDS §5 amendment 14).
+
+        With *commit*, ``owned/<owner-id>/``, the destination and every ancestor of it the move may create are
+        ``owner`` obligations of this handle from before the move, recorded in *commit* instead of fsynced.
+
+        :param state: The unowned state.
+        :param placement: The job's placement.
+        :param priority: The priority of the new name.
+        :param commit: The phase's collector, or ``None`` to fsync inline.
+        :return: The new reference.
+        :raises OwnerLost: When the job directory is gone.
+        :raises httk.workflow.errors.WorkflowError: While an attempt runs, or the handle has an unsealed step of an
+            earlier phase.
+        :raises httk.workflow._fs.UnsafePath: When a placement component is a symlink or not a directory.
+        """
+
+        self.require_quiescent()
+        self._unpinned()
+        owner, durable = self.owner, self.owner.workspace.durable
+        target = _state_dir(owner.workspace, state, placement) / format_job_name(
             self.job_key, priority, _fs.fresh_token()
         )
         # §5.3 step 5: move_owned decides by the source alone, so a vanished source must be caught first.
         self._present()
-        check_placement(self.owner.workspace, state, placement)
-        _fs.move_owned(_fs.loc(self.path), _fs.loc(target), durable=self.owner.workspace.durable)
+        check_placement(owner.workspace, state, placement)
+        if commit is None:
+            mark = owner._mark()
+            _fs.move_owned(_fs.loc(self.path), _fs.loc(target), durable=durable)
+            if durable:
+                owner._sealed_by([self.path.parent, target.parent], mark)
+        else:
+            changed = [self.path.parent, *_entry_directories(target.parent)]
+            with owner.obliged(changed, kind="owner", job=self):
+                _fs.move_owned(_fs.loc(self.path), _fs.loc(target), durable=False, commit=commit)
         self._retire()
         self.moved_to = JobRef.from_path(target, state=state, placement=placement)
         return self.moved_to
@@ -1435,10 +2013,12 @@ class OwnedJob:
         commit intent, which the next claimant's reconcile must still see (§5.4).
 
         :return: The reference after the move.
-        :raises httk.workflow.errors.WorkflowError: While an attempt runs, or if the job is no longer owned.
+        :raises httk.workflow.errors.WorkflowError: While an attempt runs, if the job is no longer owned, or while
+            the handle has a step no seal has made durable yet (the fail-stop latch).
         """
 
         self.require_quiescent()
+        self._unpinned()
         doc = self.read_state()
         if (pending := self._pending(doc)) is not None and doc is not None:
             return self.release(doc, pending)
@@ -1451,6 +2031,17 @@ class OwnedJob:
                 self.owner._retired_while_building.add(self.path)
             if self.owner._held.get(self.path) is self:
                 del self.owner._held[self.path]
+
+
+def _entry_directories(directory: Path) -> list[Path]:
+    # The directories whose entries a move into *directory* may change: it and each missing ancestor (created on
+    # the way), down from the deepest existing ancestor, which gains the first created one.
+    found = [directory]
+    current = directory
+    while _lstat_mode(current) is None and current != current.parent:
+        current = current.parent
+        found.append(current)
+    return found[::-1]
 
 
 def _request_id(name: str, job_id: str) -> str | None:
@@ -1990,14 +2581,21 @@ def _prune_placement(workspace: KernelWorkspace, state: str, placement: PurePosi
             return
 
 
-def claim(workspace: KernelWorkspace, owner: Owner, ref: JobRef) -> OwnedJob | None:
+def claim(
+    workspace: KernelWorkspace, owner: Owner, ref: JobRef, *, commit: _fs.Commit | None = None
+) -> OwnedJob | None:
     """Try to take an unowned job into ``owned/<owner-id>/``.
 
     A won claim from ``ready/`` then removes the placement directories it emptied, never ``jobs/ready/`` itself.
 
+    With *commit* it is the batched claim step (plan WORKFLOW_LOCAL_COMMANDS §5 amendment 14): both directories
+    (and that of a created ``owned/<owner-id>/``) are ``owner`` obligations from before the move, recorded in
+    *commit* instead of fsynced, and the pruning is left to the caller (amendment 26: after the release moves).
+
     :param workspace: The workspace.
     :param owner: The claiming owner.
     :param ref: An unowned reference.
+    :param commit: The phase's collector, or ``None`` to fsync inline.
     :return: The quiescent handle, or ``None`` when another actor moved the job first.
     :raises ValueError: For an owned reference (I3).
     :raises httk.workflow.errors.FormatError: If the won job's ``job.json`` is unreadable; the job stays owned.
@@ -2009,9 +2607,17 @@ def claim(workspace: KernelWorkspace, owner: Owner, ref: JobRef) -> OwnedJob | N
     name = format_job_name(ref.job_key, ref.priority, _fs.fresh_token(), ref.state)
     target = _owned_dir(workspace, owner.owner_id) / name
     # §5.3 settle=0: a win misjudged as lost stays in owned/<self>/, where self-healing finds it (§5.4).
-    if _fs.move_once(_fs.loc(ref.path), _fs.loc(target), durable=workspace.durable) is _fs.Moved.LOST:
+    if commit is None:
+        mark = owner._mark()
+        moved = _fs.move_once(_fs.loc(ref.path), _fs.loc(target), durable=workspace.durable)
+        if moved is _fs.Moved.WON and workspace.durable:
+            owner._sealed_by([ref.path.parent, target.parent], mark)
+    else:
+        with owner.obliged([ref.path.parent, *_entry_directories(target.parent)], kind="owner"):
+            moved = _fs.move_once(_fs.loc(ref.path), _fs.loc(target), durable=False, commit=commit)
+    if moved is _fs.Moved.LOST:
         return None
-    if ref.state == "ready" and ref.placement is not None:
+    if commit is None and ref.state == "ready" and ref.placement is not None:
         _prune_placement(workspace, ref.state, ref.placement)
     # A job claimed from an unowned state has nothing running: recovery returns jobs only after DEAD.
     return owner.adopt_owned(JobRef.from_path(target, state=OWNED, owner_id=owner.owner_id))
@@ -2077,12 +2683,20 @@ def recover(workspace: KernelWorkspace, owner: Owner, dead_owner_id: str) -> Rec
     is an ``rmdir`` or the removal of a private copy. ``dead.json`` stays. In a
     durable workspace ``tmp/`` is fsynced before the dead owner's record goes:
     it may have died between a rename out of ``tmp/`` and the fsync sealing it.
+    Before anything else, a durable workspace is sealed conservatively (plan
+    WORKFLOW_LOCAL_COMMANDS amendments 15 and 27): the dead owner may have died
+    between any rename or unlink of its and the commit point sealing it. A seal
+    that fails fails the recovery: nothing is returned, reconciled or removed.
 
     :param workspace: The workspace.
     :param owner: The recovering owner.
     :param dead_owner_id: The owner to recover.
     :return: What this call did.
-    :raises httk.workflow.errors.WorkflowError: Without a tombstone, or when entries keep appearing.
+    :raises httk.workflow.errors.WorkflowError: Without a tombstone, or when entries keep appearing (an
+        :class:`~httk.workflow._fs.UnsafePath` when a directory to seal is a symlink or not a directory).
+    :raises RecoverySealFailed: When the recovery seal fails, before anything was moved: the recovery did not
+        finish, and the owner stays recoverable.
+    :raises OSError: When a later step fails (a move's fsync after its rename, say), as before L3a.
     :raises ValueError: For a malformed id or recovering oneself.
     """
 
@@ -2093,6 +2707,8 @@ def recover(workspace: KernelWorkspace, owner: Owner, dead_owner_id: str) -> Rec
     if not _fs.exists(_fs.loc(dead_dir / "dead.json")):
         raise WorkflowError(f"owner {dead_owner_id} has no tombstone; recovery requires dead.json")
     owned_dir, launches = _owned_dir(workspace, dead_owner_id), dead_dir / "launches"
+    if workspace.durable:
+        _seal_recovery(workspace, dead_owner_id)
     returned: list[JobRef] = []
     quarantined: list[Path] = []
     taken: list[Path] = []
@@ -2115,6 +2731,7 @@ def recover(workspace: KernelWorkspace, owner: Owner, dead_owner_id: str) -> Rec
             # The dead owner may have died between a rename out of tmp/ (its trash's, or a non-durable discard) and
             # the fsync that seals it, leaving no scratch here to take: tmp/ is sealed before its record goes.
             _seal_tmp(workspace)
+        _remove_batched_marker(dead_dir, durable=workspace.durable)
         _fs.remove_file(_fs.loc(dead_dir / "owner.json"), durable=workspace.durable)
         _fs.remove_file(_fs.loc(dead_dir / "heartbeat.json"), durable=workspace.durable)
         # Write temporaries of a writer that died (the owner, or a prober attesting) go too; dead.json stays.
@@ -2189,6 +2806,69 @@ def _dead_scratch(workspace: KernelWorkspace, dead_owner_id: str) -> list[str]:
         for name in list_names(_tmp(workspace))
         if (parts := _SCRATCH.fullmatch(name)) and parts[1] == dead_owner_id
     ]
+
+
+def _seal_recovery(workspace: KernelWorkspace, dead_owner_id: str) -> None:
+    """Seal every entry change the dead owner may have left unsealed, before recovery exposes, reconciles or removes
+    anything (plan WORKFLOW_LOCAL_COMMANDS amendment 27).
+
+    For every dead owner: ``requests/``, ``owned/<dead>/``, each job directory held there (a batched state replace
+    may be unsealed in it), each of its ``tmp/<dead>.*`` scratch directories and ``tmp/``, at O(held jobs). Only for
+    one whose batched marker exists, also each unowned state's directory and every placement directory below it,
+    at O(placements): a serial owner seals its moves inline. One ``syncfs`` per filesystem where the protocol
+    predicate holds (:func:`httk.workflow._fs.seal_directories`). Every directory is inspected strictly: an error
+    other than absence fails the seal, and with it this recovery.
+
+    :param workspace: The workspace.
+    :param dead_owner_id: The dead owner.
+    :raises RecoverySealFailed: When the seal fails or a directory cannot be inspected.
+    :raises httk.workflow._fs.UnsafePath: When a directory to seal is a symlink or not a directory.
+    """
+
+    try:
+        _seal_recovery_directories(workspace, dead_owner_id)
+    except OSError as exc:
+        raise RecoverySealFailed(exc.errno, f"the recovery seal of owner {dead_owner_id} failed: {exc}") from exc
+
+
+def _seal_recovery_directories(workspace: KernelWorkspace, dead_owner_id: str) -> None:
+    owned, tmp = _owned_dir(workspace, dead_owner_id), _tmp(workspace)
+    directories = [_requests_dir(workspace), owned]
+    directories += [owned / name for name in list_names(owned) if _strict_directory(owned / name)]
+    directories += [tmp / name for name in _dead_scratch(workspace, dead_owner_id) if _strict_directory(tmp / name)]
+    directories.append(tmp)
+    if _strict_exists(_owner_dir(workspace, dead_owner_id) / _BATCHED_MARKER):
+        for state in UNOWNED_STATES:
+            root = _state_dir(workspace, state)
+            if _strict_directory(root):
+                directories += [root, *sorted(_placements_bottom_up(root))]
+    _fs.seal_directories(directories, _io_sync(workspace), workers=_io_workers(workspace))
+
+
+def _remove_batched_marker(owner_dir: Path, *, durable: bool) -> None:
+    # The batched marker goes with the owner record (close, recovery); an absent one costs nothing (no fsync).
+    marker = _fs.loc(owner_dir / _BATCHED_MARKER)
+    if _fs.exists(marker):
+        _fs.remove_file(marker, durable=durable)
+
+
+def _strict_status(path: Path) -> os.stat_result | None:
+    # lstat that answers None only for absence; any other error is a seal error, never "not there".
+    try:
+        return os.lstat(path)
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ESTALE):
+            return None
+        raise _fs.SyncFailed(exc.errno, f"cannot inspect {path} to seal it: {exc.strerror}") from exc
+
+
+def _strict_directory(path: Path) -> bool:
+    status = _strict_status(path)
+    return status is not None and stat.S_ISDIR(status.st_mode)
+
+
+def _strict_exists(path: Path) -> bool:
+    return _strict_status(path) is not None
 
 
 def _seal_tmp(workspace: KernelWorkspace) -> None:

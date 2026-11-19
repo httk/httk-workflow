@@ -885,6 +885,16 @@ class TaskManager:
                 # A concurrent recoverer finished first, or entries keep appearing: the next probe retries.
                 _LOGGER.debug("recovery of owner %s did not finish: %s", owner_id, exc)
                 continue
+            except _kernel.RecoverySealFailed as exc:
+                # The recovery seal failed before anything moved: nothing was exposed, the dead owner stays recoverable
+                # and the next probe retries (plan WORKFLOW_LOCAL_COMMANDS amendment 27). A later failure propagates.
+                self._report_anomaly(
+                    f"recover:{owner_id}",
+                    f"recovery of dead owner {owner_id} did not finish; it is retried at the next probe: {exc}",
+                    self._event("owner_recovery_failed", dead_owner=owner_id),
+                    level=logging.WARNING,
+                )
+                continue
             _LOGGER.warning(
                 "recovered dead owner %s: %d job(s) returned, %d quarantined",
                 owner_id,

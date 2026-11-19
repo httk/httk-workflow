@@ -21,7 +21,7 @@ import pytest
 from httk.core.identity import ensure_identity_key, write_identity_config
 
 import v3_helpers as v3
-from httk.workflow import Workspace, _kernel, _requests, _store, removal
+from httk.workflow import Workspace, _fs, _kernel, _requests, _store, removal
 from httk.workflow._state import Release, StateDoc
 from httk.workflow.errors import FormatError, WorkflowError
 from httk.workflow.introspection import _reading
@@ -847,20 +847,21 @@ def _normalized(paths: Sequence[str], root: Path) -> list[str]:
 
 @pytest.fixture
 def fsyncs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Record the path of every ``fsync`` and ``fdatasync`` descriptor, in call order."""
+    """Record the path of every ``fsync``, ``fdatasync`` and ``syncfs`` (``syncfs:<path>``) descriptor, in call
+    order."""
 
     recorded: list[str] = []
-    for name in ("fsync", "fdatasync"):
-        original = getattr(os, name)
+    for name, prefix, owner in (("fsync", "", os), ("fdatasync", "", os), ("_syncfs", "syncfs:", _fs)):
+        original = getattr(owner, name)
 
-        def wrapper(descriptor: int, _original: Callable[[int], None] = original) -> None:
+        def wrapper(descriptor: int, _original: Callable[[int], None] = original, _prefix: str = prefix) -> None:
             try:
-                recorded.append(os.readlink(f"/proc/self/fd/{descriptor}"))
+                recorded.append(_prefix + os.readlink(f"/proc/self/fd/{descriptor}"))
             except OSError:
-                recorded.append("<unknown>")
+                recorded.append(_prefix + "<unknown>")
             _original(descriptor)
 
-        monkeypatch.setattr(os, name, wrapper)
+        monkeypatch.setattr(owner, name, wrapper)
     return recorded
 
 

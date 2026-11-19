@@ -23,6 +23,7 @@ import shutil
 import stat
 import sys
 import tarfile
+import threading
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ __all__ = [
     "SYNC_ERRORS",
     "SYNC_SETTINGS",
     "Barrier",
+    "Commit",
     "CrossDevice",
     "Delivered",
     "DeliveryUncertain",
@@ -48,6 +50,7 @@ __all__ = [
     "Loc",
     "MoveFailed",
     "Moved",
+    "Staged",
     "SyncErrors",
     "SyncFailed",
     "SyncStrategy",
@@ -76,16 +79,23 @@ __all__ = [
     "open_append",
     "open_dir",
     "open_dir_under",
+    "protocol_mode",
     "publish_dir",
     "publish_record",
     "read_bounded",
     "read_tail",
     "remove_empty_dir",
     "remove_file",
+    "remove_trashed",
     "rename_probe",
+    "replace_staged",
     "resolve_sync",
+    "seal_directories",
+    "seal_directory",
     "set_fault_injector",
+    "stage_file",
     "sync_written",
+    "trash",
     "walk_untrusted",
     "write_all",
     "write_file",
@@ -295,7 +305,8 @@ class Fault(Protocol):
     def __call__(self, op: str, phase: str, src: Loc | None, dst: Loc | None) -> None:
         """Observe or interrupt one operation; raising simulates a crash at that point.
 
-        :param op: ``"rename"``, ``"write"``, ``"publish"`` or ``"remove"``.
+        :param op: ``"rename"``, ``"write"``, ``"publish"``, ``"remove"`` or ``"commit"`` (a :class:`Commit`'s
+            commit point, with neither source nor destination).
         :param phase: ``"before"``, ``"after"`` or ``"before_replace"``.
         :param src: The operation's source, if any.
         :param dst: The operation's destination, if any.
@@ -393,7 +404,7 @@ def _fsync_parents(src: Loc, dst: Loc) -> None:
         _fsync_parent(dst)
 
 
-def make_dirs(path: Path, *, durable: bool, mode: int = 0o777) -> None:
+def make_dirs(path: Path, *, durable: bool, mode: int = 0o777, commit: "Commit | None" = None) -> None:
     """Create *path* and its missing ancestors as real directories.
 
     A concurrent creation of the same directory is success. An ancestor removed
@@ -405,6 +416,8 @@ def make_dirs(path: Path, *, durable: bool, mode: int = 0o777) -> None:
     :param path: The absolute directory path.
     :param durable: fsync the parent of every directory created.
     :param mode: The permission bits of the created directories (before the umask).
+    :param commit: Record the parent of every directory created in this collector instead of fsyncing it
+        (*durable* is then not used).
     :raises UnsafePath: When the deepest existing ancestor, or a component created concurrently, is a symlink or
         not a directory.
     :raises MoveFailed: When concurrent removals defeat every attempt.
@@ -429,7 +442,9 @@ def make_dirs(path: Path, *, durable: bool, mode: int = 0o777) -> None:
                     if created is not None and not stat.S_ISDIR(created.st_mode):
                         raise UnsafePath(f"{directory} is a symlink or not a directory", "not_directory") from None
                     continue
-                if durable:
+                if commit is not None:
+                    commit.directory(directory.parent)
+                elif durable:
                     _fsync_parent(Loc(directory))
         except FileNotFoundError:
             # A pruner removed an ancestor between our mkdirs: walk again.
@@ -438,10 +453,22 @@ def make_dirs(path: Path, *, durable: bool, mode: int = 0o777) -> None:
     raise MoveFailed(f"could not create {path} in {_ATTEMPTS} rounds", errno.ENOENT)
 
 
-def _ensure_parent(dst: Loc, *, durable: bool) -> None:
+def _ensure_parent(dst: Loc, *, durable: bool, commit: "Commit | None" = None) -> None:
     # An anchored destination's parent is its descriptor, which exists.
     if dst.at is None:
-        make_dirs(dst.path.parent, durable=durable)
+        make_dirs(dst.path.parent, durable=durable, commit=commit)
+
+
+def _parent_of(target: Loc) -> Path | int:
+    # The directory whose entry *target* names, as a commit records it: its path, or an anchored one's descriptor.
+    return target.parent().path if target.at is None else target.at
+
+
+def _record_parents(commit: "Commit", src: Loc, dst: Loc) -> None:
+    # A move recorded instead of made durable: both directories whose entries it changed, once when they are one.
+    commit.directory(_parent_of(src))
+    if not _same_parent(src, dst):
+        commit.directory(_parent_of(dst))
 
 
 def _rename(src: Loc, dst: Loc) -> OSError | None:
@@ -461,7 +488,9 @@ def _rename(src: Loc, dst: Loc) -> OSError | None:
     return error
 
 
-def move_once(src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True) -> Moved:
+def move_once(
+    src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True, commit: "Commit | None" = None
+) -> Moved:
     """Move a contested entry to a fresh name that, once there, only the caller can move.
 
     When both names look absent, the move is lost: callers settle for zero seconds, because a win misjudged as
@@ -471,6 +500,8 @@ def move_once(src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True)
     :param dst: A fresh name (it contains a fresh token or an owner id); nothing may exist there yet.
     :param durable: Fsync both parent directories after a win.
     :param create_parents: Create *dst*'s missing ancestors; with ``False`` a missing parent fails the move.
+    :param commit: Record both parent directories (and those of created ancestors) in this collector instead of
+        fsyncing them (*durable* is then not used).
     :return: :attr:`Moved.WON` when *dst* was observed, else :attr:`Moved.LOST`.
     :raises ValueError: When *dst* already exists: an existing name would be observed as a win.
     :raises MoveFailed: When the source stayed in place after every attempt.
@@ -482,12 +513,14 @@ def move_once(src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True)
     error: OSError | None = None
     for _ in range(_ATTEMPTS):
         if create_parents:
-            _ensure_parent(dst, durable=durable)
+            _ensure_parent(dst, durable=durable, commit=commit)
         error = _rename(src, dst)
         if exists(dst):
             # dst exists: our rename happened even if rename() reported an error (NFS retransmit);
             # nobody else can create the fresh name.
-            if durable:
+            if commit is not None:
+                _record_parents(commit, src, dst)
+            elif durable:
                 _fsync_parents(src, dst)
             return Moved.WON
         if exists(src):
@@ -501,7 +534,9 @@ def move_once(src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True)
     ) from error
 
 
-def move_owned(src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True) -> None:
+def move_owned(
+    src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True, commit: "Commit | None" = None
+) -> None:
     """Move an entry only the caller can move, possibly replacing a file or symlink at *dst*.
 
     The outcome is decided by the source alone: *dst* may have existed before
@@ -512,6 +547,8 @@ def move_owned(src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True
         (a plain path follows a symlink planted on the way, and the created parents are checked only partly).
     :param durable: Fsync both parent directories after the move.
     :param create_parents: Create *dst*'s missing ancestors; with ``False`` a missing parent fails the move.
+    :param commit: Record both parent directories (and those of created ancestors) in this collector instead of
+        fsyncing them (*durable* is then not used).
     :raises MoveFailed: When the source stayed in place after every attempt; ``errno`` carries the last error.
     :raises CrossDevice: For a rename across filesystems.
     """
@@ -519,11 +556,13 @@ def move_owned(src: Loc, dst: Loc, *, durable: bool, create_parents: bool = True
     error: OSError | None = None
     for _ in range(_ATTEMPTS):
         if create_parents:
-            _ensure_parent(dst, durable=durable)
+            _ensure_parent(dst, durable=durable, commit=commit)
         error = _rename(src, dst)
         if not exists(src):
             # src gone: only we could move it, so the move happened even if rename() reported an error.
-            if durable:
+            if commit is not None:
+                _record_parents(commit, src, dst)
+            elif durable:
                 _fsync_parents(src, dst)
             return
         # src still here: the rename did not happen; retry (the parent may have been pruned).
@@ -644,15 +683,37 @@ def write_all(descriptor: int, data: bytes) -> None:
         view = view[written:]
 
 
-def write_file(dst: Loc, data: bytes, *, durable: bool, mode: int = 0o644) -> None:
-    """Replace the file *dst* atomically with *data* through a fresh temporary beside it.
+@dataclass(frozen=True)
+class Staged:
+    """A file :func:`stage_file` wrote beside its destination, which :func:`replace_staged` renames onto it.
 
-    One writer per path, or every writer writes equivalent content.
+    :param temporary: The fresh temporary ``.<name>.<token>.tmp`` beside *target*.
+    :param target: The file the temporary replaces.
+    :param identity: The temporary's ``(st_dev, st_ino)``, which decides a replace that reported an error.
+    """
 
-    :param dst: The file to write.
+    temporary: Loc
+    target: Loc
+    identity: tuple[int, int]
+
+
+def _unlink_temporary(temporary: Loc) -> None:
+    try:
+        os.unlink(temporary.path, dir_fd=temporary.at)
+    except FileNotFoundError:
+        pass
+
+
+def stage_file(dst: Loc, data: bytes, *, durable: bool, mode: int = 0o644, commit: "Commit | None" = None) -> Staged:
+    """Write *data* to a fresh temporary beside *dst*: the first step of :func:`write_file`.
+
+    :param dst: The file the temporary will replace.
     :param data: The complete new content.
-    :param durable: Fsync the file and its directory.
-    :param mode: The permission bits of a newly created file (before the umask).
+    :param durable: Fsync the temporary on its writing descriptor.
+    :param mode: The permission bits of the temporary (before the umask).
+    :param commit: Record the writing descriptor in this collector instead of fsyncing it (*durable* is then not
+        used).
+    :return: The staged temporary; the temporary is removed when this raises.
     """
 
     temporary = Loc(dst.path.with_name(f".{dst.name()}.{fresh_token()}.tmp"), dst.at)
@@ -661,10 +722,29 @@ def write_file(dst: Loc, data: bytes, *, durable: bool, mode: int = 0o644) -> No
         try:
             written = os.fstat(descriptor)
             write_all(descriptor, data)
-            if durable:
+            if commit is not None:
+                commit.file(descriptor)
+            elif durable:
                 os.fsync(descriptor)
         finally:
             os.close(descriptor)
+    except Exception:
+        _unlink_temporary(temporary)
+        raise
+    return Staged(temporary, dst, (written.st_dev, written.st_ino))
+
+
+def replace_staged(staged: Staged, *, durable: bool, commit: "Commit | None" = None) -> None:
+    """Rename a staged temporary onto its destination: the second step of :func:`write_file`.
+
+    :param staged: What :func:`stage_file` returned.
+    :param durable: Fsync the destination's directory after the replace.
+    :param commit: Record the destination's directory in this collector instead of fsyncing it (*durable* is then
+        not used).
+    """
+
+    temporary, dst = staged.temporary, staged.target
+    try:
         if _fault is not None:
             _fault("write", "before_replace", temporary, dst)
         try:
@@ -673,17 +753,31 @@ def write_file(dst: Loc, data: bytes, *, durable: bool, mode: int = 0o644) -> No
             # Our temporary's inode at dst means the replace happened (NFS retransmit); a missing
             # temporary alone proves nothing, since the whole directory may have been moved away.
             landed = lstat(dst)
-            if landed is None or (landed.st_dev, landed.st_ino) != (written.st_dev, written.st_ino):
+            if landed is None or (landed.st_dev, landed.st_ino) != staged.identity:
                 raise
             _LOGGER.debug("replace onto %s reported an error but took effect", dst.path)
     except Exception:
-        try:
-            os.unlink(temporary.path, dir_fd=temporary.at)
-        except FileNotFoundError:
-            pass
+        _unlink_temporary(temporary)
         raise
-    if durable:
+    if commit is not None:
+        commit.directory(_parent_of(dst))
+    elif durable:
         _fsync_parent(dst)
+
+
+def write_file(dst: Loc, data: bytes, *, durable: bool, mode: int = 0o644) -> None:
+    """Replace the file *dst* atomically with *data* through a fresh temporary beside it.
+
+    One writer per path, or every writer writes equivalent content. The composition of :func:`stage_file` and
+    :func:`replace_staged`.
+
+    :param dst: The file to write.
+    :param data: The complete new content.
+    :param durable: Fsync the file and its directory.
+    :param mode: The permission bits of a newly created file (before the umask).
+    """
+
+    replace_staged(stage_file(dst, data, durable=durable, mode=mode), durable=durable)
 
 
 def create_exclusive(dst: Loc, data: bytes = b"", *, durable: bool, mode: int = 0o600) -> int:
@@ -953,19 +1047,42 @@ def _remove_tree(target: Loc) -> None:
     raise OSError(errno.ENOTEMPTY, f"kept refilling during {_ATTEMPTS} removal passes", str(target.path))
 
 
+def trash(target: Loc, *, trash_dir: Path, durable: bool, commit: "Commit | None" = None) -> Loc:
+    """Move a caller-owned tree to a fresh trash name: the first step of :func:`discard`.
+
+    :param target: The location to discard; an anchored one is moved out of its descriptor's directory.
+    :param trash_dir: A directory on the same filesystem for the intermediate trash name.
+    :param durable: Make the move out of *target*'s directory durable.
+    :param commit: Record both directories of the move in this collector instead (*durable* is then not used).
+    :return: The trash name, for :func:`remove_trashed`.
+    """
+
+    trashed = loc(trash_dir / f"trash.{fresh_token()}")
+    move_owned(target, trashed, durable=durable, commit=commit)
+    return trashed
+
+
+def remove_trashed(trashed: Loc) -> None:
+    """Remove a tree :func:`trash` moved to its trash name, bottom-up: the second step of :func:`discard`.
+
+    :param trashed: The trash name.
+    """
+
+    _remove_tree(trashed)
+
+
 def discard(target: Loc, *, trash_dir: Path, durable: bool) -> None:
     """Remove a caller-owned tree: move it into the trash, then remove it bottom-up.
 
-    Symlinks are removed, never followed. An absent *target* is not an error.
+    Symlinks are removed, never followed. An absent *target* is not an error. The composition of :func:`trash` and
+    :func:`remove_trashed`.
 
     :param target: The location to discard; an anchored one is moved out of its descriptor's directory.
     :param trash_dir: A directory on the same filesystem for the intermediate trash name.
     :param durable: Make the move out of *target*'s directory durable.
     """
 
-    trash = loc(trash_dir / f"trash.{fresh_token()}")
-    move_owned(target, trash, durable=durable)
-    _remove_tree(trash)
+    remove_trashed(trash(target, trash_dir=trash_dir, durable=durable))
 
 
 def remove_empty_dir(target: Loc) -> bool:
@@ -986,11 +1103,13 @@ def remove_empty_dir(target: Loc) -> bool:
     return True
 
 
-def remove_file(target: Loc, *, durable: bool) -> None:
+def remove_file(target: Loc, *, durable: bool, commit: "Commit | None" = None) -> None:
     """Remove a file or symlink; an absent *target* counts as already removed.
 
     :param target: The entry to remove.
     :param durable: Fsync the parent directory after the removal.
+    :param commit: Record the parent directory in this collector instead of fsyncing it (*durable* is then not
+        used).
     :raises IsADirectoryError: When *target* is a directory.
     """
 
@@ -1001,7 +1120,9 @@ def remove_file(target: Loc, *, durable: bool) -> None:
     except FileNotFoundError:
         # Already removed: the outcome the caller wants.
         pass
-    if durable:
+    if commit is not None:
+        commit.directory(_parent_of(target))
+    elif durable:
         _fsync_parent(target)
 
 
@@ -2879,6 +3000,389 @@ def _off_device[P: Path | Loc | int](paths: Sequence[P], barrier: Barrier) -> di
         elif status.st_dev != device:
             found.setdefault(status.st_dev, []).append(path)
     return found
+
+
+# -- protocol commit points (plan WORKFLOW_LOCAL_COMMANDS §4.5, §4.6, amendments 6, 23, 24, 26) ---------------------
+
+
+def protocol_mode(path: Path, setting: object) -> SyncStrategy:
+    """Decide how a protocol commit point on the filesystem of *path* is made durable: ``syncfs`` or ``fsync``.
+
+    ``syncfs`` only when all of these hold: *setting* (``io.sync``) is ``auto`` or ``syncfs``; :func:`resolve_sync`
+    gives ``syncfs`` for ``auto`` there (the kernel, libc, ``syncfs`` working on that filesystem and the ZFS gate);
+    and the filesystem is not Lustre, whose ``syncfs`` does not commit on the servers. A forced ``io.sync=syncfs``
+    on any other filesystem type therefore does not make a protocol commit use ``syncfs``. It is not
+    :attr:`Barrier.strategy`, which a forced setting decides; and it is evaluated again after the prime
+    (:class:`Commit`), where an unsupported ``syncfs`` gives ``fsync``.
+
+    :param path: An existing directory on the filesystem.
+    :param setting: The ``io.sync`` value, read fresh by the caller.
+    :return: The protocol mode.
+    :raises OSError: When *path* cannot be examined.
+    """
+
+    if setting not in ("auto", "syncfs"):
+        return "fsync"
+    strategy, _reason, kind = _resolve_sync(path, "auto")
+    return "syncfs" if strategy == "syncfs" and kind != "lustre" else "fsync"
+
+
+def _fsync_or_fail(descriptor: int, what: object) -> None:
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise SyncFailed(exc.errno, f"cannot sync {what} to disk: {exc.strerror}") from exc
+
+
+#: The ``errno`` values that mean a sealed directory is gone (removed, a component replaced, or stale on NFS): only
+#: these stand it for its nearest existing ancestor. Any other error (``EACCES``, ``EIO``, ...) fails the seal.
+_ABSENT = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ESTALE})
+
+
+def _seal_target(path: Path) -> tuple[Path, os.stat_result]:
+    """The directory a seal of *path* fsyncs, examined without following a symlink, and its ``lstat``.
+
+    *path* itself while it exists; when it is gone (:data:`_ABSENT`), its nearest existing ancestor: an entry change
+    in a directory removed since is in that ancestor (the removal is an entry change there).
+
+    :param path: The absolute directory path.
+    :return: The directory to fsync and its ``lstat``.
+    :raises SyncFailed: When a candidate cannot be examined for another reason.
+    :raises UnsafePath: When the candidate found is a symlink or not a directory: a workspace's control and job
+        directories never are, and a seal never follows one.
+    """
+
+    current = Path(path)
+    while True:
+        try:
+            status = os.lstat(current)
+        except OSError as exc:
+            if exc.errno in _ABSENT and current != current.parent:
+                current = current.parent
+                continue
+            raise SyncFailed(exc.errno, f"cannot examine {current} to sync it to disk: {exc.strerror}") from exc
+        if stat.S_ISDIR(status.st_mode):
+            return current, status
+        kind: Literal["symlink", "not_directory"] = "symlink" if stat.S_ISLNK(status.st_mode) else "not_directory"
+        raise UnsafePath(f"{current} is a symlink or not a directory: it is never sealed through", kind)
+
+
+def seal_directory(path: Path) -> Path:
+    """Fsync a directory by path; when it is gone, its nearest existing ancestor (:func:`_seal_target`).
+
+    The directory is opened without following a symlink. One removed between its examination and its open is
+    examined again.
+
+    :param path: The absolute directory path.
+    :return: The directory that was fsynced.
+    :raises SyncFailed: When the fsync fails, or a directory cannot be examined or opened.
+    :raises UnsafePath: When the directory (or the ancestor standing for it) is a symlink or not a directory.
+    """
+
+    for _ in range(_ATTEMPTS):
+        target, _status = _seal_target(path)
+        try:
+            descriptor = os.open(target, _DIR_FLAGS)
+        except OSError as exc:
+            if exc.errno in _ABSENT:
+                continue  # removed since it was examined
+            raise SyncFailed(exc.errno, f"cannot open {target} to sync it to disk: {exc.strerror}") from exc
+        try:
+            _fsync_or_fail(descriptor, target)
+        finally:
+            os.close(descriptor)
+        return target
+    raise SyncFailed(errno.ENOENT, f"{path} and its ancestors kept disappearing during {_ATTEMPTS} seals")
+
+
+def seal_directories(directories: Sequence[Path], setting: object, *, workers: int = 1) -> None:
+    """Make every entry change in *directories* durable now, one ``syncfs`` per filesystem where the protocol
+    predicate holds (:func:`protocol_mode`), else one ``fsync`` per distinct directory.
+
+    Each directory that is gone stands for its nearest existing ancestor, found by the same no-follow walk that
+    gives its filesystem (:func:`_seal_target`); directories are distinct by that target's identity. Errors always
+    fail: ``io.sync_errors`` never applies to a protocol seal. A ``syncfs`` that is not supported there falls back
+    to the fsyncs.
+
+    :param directories: The directories, in the order their fsyncs are wanted.
+    :param setting: The ``io.sync`` value, read fresh by the caller.
+    :param workers: The most fsyncs run at once (``io.workers``).
+    :raises SyncFailed: When a ``syncfs`` or an fsync fails, or a directory cannot be examined or opened.
+    :raises UnsafePath: When a directory to seal is a symlink or not a directory.
+    """
+
+    groups: dict[int, dict[tuple[int, int], Path]] = {}
+    for item in directories:
+        target, status = _seal_target(item)
+        groups.setdefault(status.st_dev, {}).setdefault((status.st_dev, status.st_ino), target)
+    for device, members in groups.items():
+        paths = list(members.values())
+        if protocol_mode(paths[0], setting) == "syncfs":
+            try:
+                descriptor = os.open(paths[0], _DIR_FLAGS)
+            except OSError as exc:
+                raise SyncFailed(exc.errno, f"cannot open {paths[0]} to sync it to disk: {exc.strerror}") from exc
+            try:
+                _syncfs(descriptor)
+                continue
+            except OSError as exc:
+                if exc.errno not in _SYNCFS_UNSUPPORTED:
+                    raise SyncFailed(exc.errno, f"syncfs of {paths[0]} failed: {exc.strerror}") from exc
+                _syncfs_works[device] = False
+            finally:
+                os.close(descriptor)
+        run_ordered(seal_directory, paths, workers)
+
+
+#: One recorded file or directory of a :class:`Commit`: an owned duplicate descriptor, or a path.
+type _Record = int | Path
+
+
+class Commit:
+    """Collect what one phase of a batch writes, and make it durable at one commit point (plan
+    WORKFLOW_LOCAL_COMMANDS §4.5, §4.6, amendments 23, 24 and 26).
+
+    Entered before the phase's first write: the filesystems of *directories* (which must exist; grouped with
+    :func:`_off_device`) each get one :class:`Barrier`, opened and primed there, with ``errors="fail"`` whatever
+    ``io.sync_errors`` says, ``inline=True``, ``quiet=True`` and the derived setting: *setting* where the protocol
+    predicate holds there (:func:`protocol_mode`), else ``fsync``. A prime that finds ``syncfs`` not supported
+    makes that filesystem ``fsync`` before anything is written. Each filesystem then has one effective mode, its
+    barrier's :attr:`Barrier.strategy`. A collector of a workspace that is not *durable* opens nothing, records
+    nothing and syncs nothing.
+
+    The phase records what it changed: :meth:`file` a file it wrote (by its writing descriptor where it has one;
+    one record per file), :meth:`directory` a directory whose entries changed (never through a symlink). On a
+    ``syncfs`` filesystem nothing needs recording; on an ``fsync`` one the record is kept for the commit; on a
+    filesystem not opened at entry it is fsynced at once (inline, never a late prime). :meth:`commit` then makes the
+    phase durable: one ``syncfs`` per ``syncfs`` filesystem (each one opened at entry, recorded on or not), then the
+    recorded files (each on its writing descriptor, else by path through anchored, no-follow opens), then each
+    distinct recorded directory once (gone: its nearest existing ancestor; distinct by the identity of what is
+    actually fsynced), the files and then the directories pooled over *workers*. A commit clears only what was
+    recorded before it started; a failed one clears nothing. One commit runs at a time (a second waits). Kernel
+    obligations are sealed through ``Owner.commit``, which records their directories before it commits.
+
+    The fault injector (:func:`set_fault_injector`) is called with ``("commit", "before")`` as a commit starts and
+    ``("commit", "after")`` once it is durable, before anything is cleared: raising there simulates a crash or a
+    failed commit point.
+
+    :param directories: Every directory the batch will write in (for an entry still to be created, its parent);
+        the first one's filesystem is the first barrier's.
+    :param setting: The ``io.sync`` value, read fresh by the caller.
+    :param workers: The most fsyncs a commit runs at once (``io.workers``).
+    :param durable: Whether the workspace is durable; without, the collector does nothing.
+    :raises ValueError: Without directories.
+    """
+
+    def __init__(self, directories: Sequence[Path], setting: object, *, workers: int = 1, durable: bool = True) -> None:
+        if not directories:
+            raise ValueError("a commit collector needs the directories its batch writes in")
+        self.directories = tuple(Path(item) for item in directories)
+        self.setting = setting
+        self.workers = workers
+        self.durable = durable
+        #: The barrier of each filesystem opened at entry, by ``st_dev``, in the order they were opened.
+        self.barriers: dict[int, Barrier] = {}
+        self._lock = threading.Lock()
+        # Held by the one commit running: a commit's clearing assumes no other commit runs meanwhile.
+        self._committing = threading.Lock()
+        # The files are kept with their identity: one record per file while it waits for a commit.
+        self._files: list[tuple[tuple[int, int], _Record]] = []
+        self._directories: list[_Record] = []
+        self._entered = False
+
+    @property
+    def mode(self) -> SyncStrategy:
+        """``syncfs`` when every filesystem opened at entry commits with ``syncfs``, else ``fsync``."""
+
+        if self.barriers and all(barrier.strategy == "syncfs" for barrier in self.barriers.values()):
+            return "syncfs"
+        return "fsync"
+
+    def __enter__(self) -> Self:
+        if not self.durable:
+            self._entered = True
+            return self
+        try:
+            first = self._open(self.directories[0])
+            groups = _off_device(self.directories[1:], first)
+            if None in groups:
+                raise FileNotFoundError(errno.ENOENT, "a directory of the batch is missing", str(groups[None][0]))
+            for members in groups.values():
+                self._open(members[0])
+        except BaseException:
+            self._close()
+            raise
+        self._entered = True
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._close()
+
+    def _open(self, directory: Path) -> Barrier:
+        derived = self.setting if protocol_mode(directory, self.setting) == "syncfs" else "fsync"
+        barrier = Barrier(directory, derived, errors="fail", inline=True, quiet=True, workers=self.workers)
+        barrier.__enter__()
+        assert barrier.device is not None
+        self.barriers[barrier.device] = barrier
+        return barrier
+
+    def _close(self) -> None:
+        self._entered = False
+        for barrier in self.barriers.values():
+            barrier.__exit__(None, None, None)
+        self.barriers.clear()
+        with self._lock:
+            records = [record for _key, record in self._files] + self._directories
+            self._files, self._directories = [], []
+        for record in records:
+            if isinstance(record, int):
+                os.close(record)
+
+    def _identify(self, target: int | Path, *, directory: bool) -> os.stat_result:
+        # What a record names: a descriptor's fstat, a directory's seal target (no-follow, gone: its nearest existing
+        # ancestor), or a file's lstat.
+        try:
+            if isinstance(target, int):
+                return os.fstat(target)
+            if directory:
+                return _seal_target(target)[1]
+            return os.lstat(target)
+        except OSError as exc:
+            if isinstance(exc, SyncFailed):
+                raise
+            raise SyncFailed(exc.errno, f"cannot examine {target} to sync it to disk: {exc.strerror}") from exc
+
+    def _check(self) -> bool:
+        # Whether recording does anything (inside the context, in a durable workspace).
+        if not self._entered:
+            raise ValueError("a commit collector records only inside its context")
+        return self.durable
+
+    def file(self, target: int | Path) -> None:
+        """Record a file this phase wrote, on its writing descriptor where there is one.
+
+        A file already waiting for the next commit is not recorded again, unless a commit is running (whose
+        snapshot may predate this write).
+
+        :param target: The writing descriptor (duplicated; the caller still closes its own), or the file's path.
+        :raises ValueError: Outside the context.
+        :raises SyncFailed: When the file cannot be examined, or its inline fsync (a filesystem found late) fails.
+        :raises UnsafePath: When *target* is a path naming a symlink.
+        """
+
+        if not self._check():
+            return
+        status = self._identify(target, directory=False)
+        if not isinstance(target, int) and stat.S_ISLNK(status.st_mode):
+            raise UnsafePath(f"{target} is a symlink: a file is never synced through one", "symlink")
+        barrier = self.barriers.get(status.st_dev)
+        if barrier is not None and barrier.strategy == "syncfs":
+            return  # the next commit's syncfs of that filesystem covers it
+        if barrier is None:
+            _fsync_record(target)  # a filesystem found late: no prime, inline fsync now (§4.5)
+            return
+        key = (status.st_dev, status.st_ino)
+        # Check, duplicate and append as one step, so that concurrent records of one file keep one duplicate.
+        with self._lock:
+            if not self._committing.locked() and any(seen == key for seen, _record in self._files):
+                return
+            self._files.append((key, os.dup(target) if isinstance(target, int) else Path(target)))
+
+    def directory(self, target: int | Path) -> None:
+        """Record a directory whose entries this phase changed.
+
+        :param target: Its descriptor (duplicated; the caller still closes its own), or its path.
+        :raises ValueError: Outside the context.
+        :raises SyncFailed: When it cannot be examined, or its inline fsync (a filesystem found late) fails.
+        :raises UnsafePath: When *target* is a path naming a symlink or a non-directory.
+        """
+
+        if not self._check():
+            return
+        barrier = self.barriers.get(self._identify(target, directory=True).st_dev)
+        if barrier is not None and barrier.strategy == "syncfs":
+            return  # the next commit's syncfs of that filesystem covers it
+        if barrier is None:
+            _seal_record(target)  # a filesystem found late: no prime, inline fsync now (§4.5)
+            return
+        kept: _Record = os.dup(target) if isinstance(target, int) else Path(target)
+        with self._lock:
+            self._directories.append(kept)
+
+    def commit(self) -> None:
+        """Make everything recorded so far durable: the commit point of a phase (see the class).
+
+        :raises SyncFailed: When a ``syncfs`` or an fsync fails, or a directory cannot be examined; nothing is
+            cleared then.
+        :raises UnsafePath: When a recorded directory became a symlink or a non-directory.
+        :raises ValueError: Outside the context.
+        """
+
+        if not self._entered:
+            raise ValueError("a commit collector commits only inside its context")
+        if not self.durable:
+            return
+        with self._committing:
+            self._commit()
+
+    def _commit(self) -> None:
+        if _fault is not None:
+            _fault("commit", "before", None, None)
+        with self._lock:
+            files, directories = list(self._files), list(self._directories)
+        for barrier in self.barriers.values():
+            if barrier.strategy == "syncfs":
+                barrier.commit()
+        run_ordered(_fsync_record, [record for _key, record in files], self.workers)
+        # One fsync per directory actually sealed (its no-follow target, gone: its ancestor), however it was
+        # recorded: by path or descriptor, more than once.
+        distinct: dict[tuple[int, int], _Record] = {}
+        for record in directories:
+            if isinstance(record, int):
+                status = self._identify(record, directory=True)
+                distinct.setdefault((status.st_dev, status.st_ino), record)
+            else:
+                target, status = _seal_target(record)
+                distinct.setdefault((status.st_dev, status.st_ino), target)
+        run_ordered(_seal_record, list(distinct.values()), self.workers)
+        if _fault is not None:
+            _fault("commit", "after", None, None)
+        with self._lock:
+            del self._files[: len(files)]
+            del self._directories[: len(directories)]
+        for record in (*(record for _key, record in files), *directories):
+            if isinstance(record, int):
+                os.close(record)
+
+
+def _fsync_record(record: _Record) -> None:
+    # One recorded file: fsync on its (duplicated) writing descriptor, or by path through anchored, no-follow opens.
+    if isinstance(record, int):
+        _fsync_or_fail(record, f"descriptor {record}")
+        return
+    try:
+        parent = os.open(record.parent, _DIR_FLAGS)
+    except OSError as exc:
+        raise SyncFailed(exc.errno, f"cannot open {record.parent} to sync it to disk: {exc.strerror}") from exc
+    try:
+        try:
+            descriptor = os.open(record.name, _SOURCE_FLAGS, dir_fd=parent)
+        except OSError as exc:
+            raise SyncFailed(exc.errno, f"cannot open {record} to sync it to disk: {exc.strerror}") from exc
+        try:
+            _fsync_or_fail(descriptor, record)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
+
+
+def _seal_record(record: _Record) -> None:
+    # One recorded directory: fsync on its (duplicated) descriptor, or by path (gone: its nearest existing ancestor).
+    if isinstance(record, int):
+        _fsync_or_fail(record, f"descriptor {record}")
+    else:
+        seal_directory(record)
 
 
 #: The ``errno`` of an open below a tree that finds the mount point not reachable there without following a
