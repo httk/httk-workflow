@@ -164,6 +164,13 @@ def test_a_tree_written_before_its_barrier_is_never_primed() -> None:
 def test_under_ignore_an_unprimed_barrier_says_the_error_may_predate_the_landing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    real = _fs._filesystem_type
+
+    def not_zfs(path: Path, device: int) -> str | None:  # a ZFS host stands for a filesystem without its rules
+        kind = real(path, device)
+        return "ext4" if kind == "zfs" else kind
+
+    monkeypatch.setattr(_fs, "_filesystem_type", not_zfs)
     Syncfs(monkeypatch, {1: errno.EIO})
     with (
         caplog.at_level("WARNING", logger="httk.workflow._fs"),

@@ -1614,6 +1614,21 @@ def test_workflows_are_installed_before_the_first_adoption(
     assert events == ["install", "install", "adopt"]
 
 
+@pytest.fixture
+def not_zfs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ZFS host stands for another filesystem: on ZFS a ``syncfs`` barrier always fails on its own commit error,
+    ignoring ``io.sync_errors``, and job creation does not suggest that setting."""
+
+    real = _fs._filesystem_type
+
+    def not_zfs_type(path: Path, device: int) -> str | None:
+        kind = real(path, device)
+        return "ext4" if kind == "zfs" else kind
+
+    monkeypatch.setattr(_fs, "_filesystem_type", not_zfs_type)
+
+
+@pytest.mark.usefixtures("not_zfs")
 @pytest.mark.parametrize("failure", ["ignore", "unsupported-fail", "unsupported-ignore"])
 def test_the_sync_settings_of_a_session_pull(
     ssh: tuple[Path, Workspace, str, Workspace, str],

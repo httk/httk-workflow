@@ -451,6 +451,14 @@ def test_a_campaign_takes_one_barrier_primed_once_and_commits_before_each_job_s_
 
 
 def test_a_failed_commit_stops_the_campaign_at_that_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A ZFS host stands for another filesystem: on ZFS the remedy (io.sync_errors ignore) is not offered.
+    real = _fs._filesystem_type
+
+    def not_zfs(path: Path, device: int) -> str | None:  # a ZFS host stands for a filesystem without its rules
+        kind = real(path, device)
+        return "ext4" if kind == "zfs" else kind
+
+    monkeypatch.setattr(_fs, "_filesystem_type", not_zfs)
     ws = durable_workspace(tmp_path / "ws", "syncfs")
     install(ws, hooked_package(tmp_path / "package"))
     # The prime and the first job's commit succeed; the second job's commit reports an error since the first.

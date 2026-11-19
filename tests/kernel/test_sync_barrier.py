@@ -22,9 +22,11 @@ WORKERS = pytest.mark.parametrize("workers", [1, 8], ids=["sequential", "pooled"
 
 @pytest.fixture(autouse=True)
 def _fresh_caches(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test starts with an empty per-process cache of probe results."""
+    """Every test starts with an empty per-process cache of probe results, and no OpenZFS version is readable (so
+    ``auto`` gives ``fsync`` on ZFS whatever this host runs; ``tests/test_sync_zfs.py`` covers the ZFS gate)."""
 
     monkeypatch.setattr(_fs, "_syncfs_works", {})
+    monkeypatch.setattr(_fs, "_read_zfs_version", lambda: None)
 
 
 def kernel(monkeypatch: pytest.MonkeyPatch, release: str, system: str = "Linux") -> None:
@@ -128,7 +130,6 @@ def test_a_host_that_is_not_linux_resolves_to_fsync(tmp_path: Path, monkeypatch:
         ("ext4", "syncfs"),
         ("xfs", "syncfs"),
         ("tmpfs", "syncfs"),
-        ("zfs", "fsync"),
         ("nfs4", "fsync"),
         ("fuse.sshfs", "fsync"),
         ("overlay", "fsync"),
@@ -175,8 +176,8 @@ def test_a_mount_point_must_be_a_whole_component_prefix(tmp_path: Path, monkeypa
     landing = tmp_path / "database"
     landing.mkdir()
     kernel(monkeypatch, "6.8.0-45-generic")
-    mounts(monkeypatch, ("0:998", "/", "zfs"), ("0:999", str(tmp_path / "data"), "lustre"))
-    assert _fs.resolve_sync(landing, "auto") == ("fsync", "fsync (zfs is not vetted for auto)")
+    mounts(monkeypatch, ("0:998", "/", "btrfs"), ("0:999", str(tmp_path / "data"), "lustre"))
+    assert _fs.resolve_sync(landing, "auto") == ("fsync", "fsync (btrfs is not vetted for auto)")
 
 
 def test_an_unreadable_or_unmatched_mount_table_is_an_unknown_type(
@@ -427,7 +428,7 @@ def test_an_inline_commit_under_fsync_says_what_was_made_durable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     kernel(monkeypatch, "6.8.0-45-generic")
-    mounts(monkeypatch, (device_of(tmp_path), "/", "zfs"))
+    mounts(monkeypatch, (device_of(tmp_path), "/", "nfs4"))
     walks: list[int] = []
 
     def walk(anchor: int, **_options: Any) -> int:
@@ -438,7 +439,7 @@ def test_an_inline_commit_under_fsync_says_what_was_made_durable(
     with _fs.Barrier(tmp_path, "auto", inline=True) as barrier:
         barrier.commit(3, unit="bundle")
     assert walks == []
-    assert capsys.readouterr().err == "made 3 landed bundle(s) durable (fsync: zfs is not vetted for auto)\n"
+    assert capsys.readouterr().err == "made 3 landed bundle(s) durable (fsync: nfs4 is not vetted for auto)\n"
 
 
 def test_a_walk_whose_first_listing_fails_fails_the_commit_with_one_labelled_warning(

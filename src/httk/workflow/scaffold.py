@@ -2273,7 +2273,7 @@ def _commit_batch(
         )
         # A syncfs error may be anyone's on the filesystem; a walk's error is the named member's own.
         where = f" (syncing the {noun} {syncing})" if syncing and len(names) > 1 else ""
-        remedy = f"; {_SYNC_REMEDY}" if barrier.strategy == "syncfs" else ""
+        remedy = f"; {_SYNC_REMEDY}" if barrier.strategy == "syncfs" and barrier.filesystem != "zfs" else ""
         failed = _fs.SyncFailed(
             exc.errno,
             f"{what} not submitted, nothing was published: {exc.strerror}{where}; {before}{remedy}{stopped}",
@@ -2341,7 +2341,7 @@ def _commit_staged(barrier: _fs.Barrier | None, what: str, *, tree: Path | None 
         raise _fs.SyncFailed(
             exc.errno,
             f"{what} was not submitted, nothing was published: {exc.strerror}"
-            + (f"; {_SYNC_REMEDY}" if barrier.strategy == "syncfs" else ""),
+            + (f"; {_SYNC_REMEDY}" if barrier.strategy == "syncfs" and barrier.filesystem != "zfs" else ""),
         ) from exc
 
 

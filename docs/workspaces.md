@@ -116,13 +116,14 @@ once, which also flushes what was pending before) before the first file lands;
 it flushes other users' pending writes on that filesystem too, and Ctrl-C
 waits for it to finish. `fsync` synchronizes every file on its own, which
 costs one round trip a file on a shared filesystem. `auto` uses `syncfs` on
-Linux 5.8 or later for Lustre, ext4, XFS and tmpfs, and `fsync` elsewhere
-(older kernels report no write errors through `syncfs`); `syncfs` forces it on
-any filesystem type you vouch for, still falling back to `fsync` below Linux
-5.8 or where the call is not available (found by the first call on a
-filesystem, made before anything lands). tmpfs is never persistent, whatever
-the setting. A value other than the three is refused when set, and one stored
-otherwise counts as `fsync`; the setting is read afresh at every landing, so a
+Linux 5.8 or later for Lustre, ext4, XFS and tmpfs, on ZFS only with Linux
+5.17 or later and OpenZFS 2.4.0 or later, and `fsync` elsewhere (older kernels
+report no write errors through `syncfs`); `syncfs` forces it on any filesystem
+type you vouch for, still falling back to `fsync` below Linux 5.8 or where the
+call is not available (found by the first call on a filesystem, made before
+anything lands). tmpfs is never persistent, whatever the setting. A value
+other than the three is refused when set, and one stored otherwise counts as
+`fsync`; the setting is read afresh at every landing, so a
 running daemon sees a change at once, and a `--no-durable` workspace
 synchronizes nothing. Job creation (`job new`, campaigns, `job submit`),
 workflow installation and builds, and `job adopt PATH` of a bundle on the
@@ -142,10 +143,43 @@ seen it yet; when one is reported, nothing is taken, and the files may not be
 intact on disk: re-create them from their source before trying again, since a
 retry would not notice the loss.
 
+ZFS was first left to `fsync`: it never records a write error where `syncfs`
+looks for one (the filesystem's error sequence). A `syncfs` on ZFS always
+committed the dataset's whole intent log; from OpenZFS 2.4.0 it also returns
+that commit's error itself, which Linux passes on from 5.17 (5.8 to 5.16 take
+another, untraced path). On a suspended pool it then fails with `EIO`, where
+`fsync` waits until the pool returns (`failmode=wait`, the default). A
+command with no retry (`job new`, `job submit`, `job adopt PATH`, workflow
+installation) then fails where it used to wait and succeed, once the removal
+of what it staged, which also waits for the pool, is done. A transfer refuses
+that landing, removes it (waiting for the pool) and delivers it once more with
+every file synchronized on its own, so it can still succeed once the pool is
+back. OpenZFS
+2.1.16, 2.2.8 and 2.3.0 return success on a suspended pool, and 2.3.4 fails
+only when the pool is suspended already when it is called (a suspension
+during its commit is waited out and reported as success), so `auto` keeps
+`fsync` below 2.4.0, and also when `/sys/module/zfs/version` cannot be read
+or parsed; do not force `syncfs` on ZFS below that gate. The version is
+compared by its leading `major.minor.patch`, so a distribution build such as
+`2.4.1-1ubuntu5.1` counts as 2.4.1 (its own patches are not verified) and any
+later release is trusted as well. On ZFS a failed `syncfs` is always this
+landing's own failure, so `io.sync_errors ignore` (below) does not apply
+there. A ZFS `syncfs` also misses a failed write of pages written through
+`mmap` (a quota or a full pool), which `fsync` reports, so on ZFS `auto`
+synchronizes bundles and payloads written before httk ran file by file;
+files that an instantiate hook writes through `mmap` during `job new` are
+the accepted exception. When such a synchronization fails on ZFS because
+the pool was suspended, the message's advice to re-create the files is more
+than needed: ZFS keeps the data of a suspended pool and writes it once the
+pool is back. A
+`syncfs` covers only the filesystem it is called on: whatever is mounted inside
+a synced tree from another filesystem, a directory or a single file, is
+synchronized file by file.
+
 The command that runs `job transfer`, `job push` or `job pull` prints the
 strategy on standard error, unless `-q`: `syncing 120 landed file(s) to disk
 (syncfs: lustre, Linux 5.14)`, or `made 3 landed bundle(s) durable (fsync:
-zfs is not vetted for auto)` when every file was synchronized as it was
+zfs 2.2.2 is below 2.4.0)` when every file was synchronized as it was
 written. For a push, that is the destination's line, relayed with its name in
 front. When the synchronization fails, nothing of that landing is adopted.
 Where the landing was synchronized with one `syncfs` and `io.sync_errors` is
@@ -216,7 +250,7 @@ httk workspace settings set --key io.sync --value fsync default
 ```
 
 `io.sync_errors` (`fail`, the default, or `ignore`) sets what a write error
-that a `syncfs` reports does. `syncfs` cannot tell whose write failed: on a
+that a `syncfs` reports does, except on ZFS, where such an error always fails. `syncfs` cannot tell whose write failed: on a
 busy shared login node another user's late quota error (`EDQUOT`) on the same
 filesystem fails our landing too, which `fail` handles by the retries above.
 `ignore` trusts the writes that returned successfully: the landing is still

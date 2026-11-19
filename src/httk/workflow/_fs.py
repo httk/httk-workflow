@@ -2098,12 +2098,30 @@ SYNC_SETTINGS = ("auto", "syncfs", "fsync")
 SYNC_ERRORS = ("fail", "ignore")
 #: The filesystem types ``auto`` trusts ``syncfs`` on (Linux 5.8 or later): Lustre by the user's decision, the
 #: local journalling filesystems whose writeback errors reach the superblock, and tmpfs (no persistence either way).
+#: ZFS records no writeback error there, so it is trusted only past its own gate (:data:`_SYNCFS_ZFS_KERNEL`,
+#: :data:`_SYNCFS_ZFS_VERSION`).
 _SYNCFS_VETTED = frozenset({"lustre", "ext4", "xfs", "tmpfs"})
 #: The ``errno`` values of a ``syncfs`` that is not there or not allowed (seccomp): the strategy becomes ``fsync``.
 _SYNCFS_UNSUPPORTED = frozenset({errno.ENOSYS, errno.EPERM, errno.EINVAL})
 #: The oldest kernel whose ``syncfs`` reports a writeback error (recorded on the superblock since the open).
 _SYNCFS_KERNEL = (5, 8)
+#: The oldest kernel whose ``syncfs`` returns the error of the filesystem's own ``sync_fs``. ZFS reports a failed
+#: commit of its intent log only that way (below 5.17 its ``zpl_sync_fs`` records it with ``errseq_set``, a path
+#: nobody traced), never through the superblock's writeback errors.
+_SYNCFS_ZFS_KERNEL = (5, 17)
+#: The oldest OpenZFS whose ``sync_fs`` (``zfs_sync``) commits with ``ZIL_COMMIT_NOW`` and so returns ``EIO`` on a
+#: suspended pool, where ``fsync`` under ``failmode=wait`` blocks: traced in 2.4.0 and 2.4.1 (``zfs_vfsops.c``,
+#: ``zil.c``, ``txg.c``, ``zpl_super.c`` identical in both); 2.1.16, 2.2.8 and 2.3.0 return 0 there, and 2.3.4
+#: returns ``EIO`` only on a pool suspended before the call. A later release is trusted too, and a distribution's
+#: patched build is trusted by its upstream version (unverified). Its ``syncfs`` does not report a failed writeback
+#: of ``mmap``-dirtied pages (``fsync`` does), so a tree written before httk ran is walked file by file there
+#: (:class:`Barrier`); the accepted limit is an instantiate hook's ``mmap`` writes on a dataset at its quota, which
+#: a job-creation batch's ``syncfs`` commits without noticing a failure.
+_SYNCFS_ZFS_VERSION = (2, 4, 0)
 _MOUNTINFO = Path("/proc/self/mountinfo")
+#: A mountinfo record's ``major:minor``.
+_MOUNT_NUMBER = re.compile(r"\d+:\d+")
+_ZFS_VERSION = Path("/sys/module/zfs/version")
 
 type SyncStrategy = Literal["syncfs", "fsync"]
 #: What a barrier does when its ``syncfs`` commit reports a writeback error (``io.sync_errors``).
@@ -2123,9 +2141,11 @@ class SyncFailed(OSError):
 
 
 class SyncUnreadable(SyncFailed):
-    """A walk of strategy ``fsync`` could not list or open an entry (its permissions, its type, its depth).
+    """A walk could not list or open an entry (its permissions, its type, its depth).
 
-    No writeback error was reported: the entry, which the message names, was never synced.
+    The late walk of strategy ``fsync``, or after a ``syncfs`` the search of a tree written before httk ran for what
+    is mounted inside it from another filesystem (:func:`sync_written`). No writeback error was reported: the
+    entry, which the message names, was never synced.
     """
 
 
@@ -2148,7 +2168,8 @@ def _syncfs(descriptor: int) -> None:
     """Call ``syncfs`` on *descriptor*: write back and wait for every dirty page and inode of its filesystem.
 
     The call releases the GIL. From Linux 5.8 it reports a writeback error recorded on the filesystem since
-    *descriptor* was opened.
+    *descriptor* was opened, and from Linux 5.17 also the error of the filesystem's own ``sync_fs`` (ZFS's commit of
+    its intent log).
 
     :param descriptor: Any open descriptor on the filesystem.
     :raises OSError: With the call's ``errno``; ``ENOSYS`` when libc has no ``syncfs``.
@@ -2171,9 +2192,10 @@ def _uname() -> tuple[str, str]:
 
 
 def _read_mountinfo() -> str | None:
-    # This process's mount table, or None when it cannot be read (a seam for tests).
+    # This process's mount table, read as bytes (no newline translation) and decoded with surrogateescape, or None
+    # when it cannot be read (a seam for tests).
     try:
-        return _MOUNTINFO.read_text(encoding="utf-8", errors="surrogateescape")
+        return _MOUNTINFO.read_bytes().decode("utf-8", errors="surrogateescape")
     except OSError:
         return None
 
@@ -2184,9 +2206,76 @@ def _kernel_version(release: str) -> tuple[int, int] | None:
     return None if found is None else (int(found[1]), int(found[2]))
 
 
+def _read_zfs_version() -> str | None:
+    # The loaded OpenZFS module's version, or None when it cannot be read (a seam for tests).
+    try:
+        return _ZFS_VERSION.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _zfs_version(text: str) -> tuple[int, int, int] | None:
+    # The leading major.minor.patch of an OpenZFS version, a downstream suffix ignored ("2.4.1-1ubuntu5.1" ->
+    # (2, 4, 1)); None when it has none ("2.4", "zfs-2.4.1").
+    found = re.match(r"(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?!\d)", text)
+    return None if found is None else (int(found[1]), int(found[2]), int(found[3]))
+
+
+def _zfs_gate(kernel_version: tuple[int, int], kernel: str) -> tuple[SyncStrategy, str]:
+    # What auto gives on ZFS (no forced syncfs): syncfs only on Linux 5.17 or later with an OpenZFS module of at
+    # least _SYNCFS_ZFS_VERSION, read afresh; fsync, with the reason, otherwise.
+    if kernel_version < _SYNCFS_ZFS_KERNEL:
+        return "fsync", f"fsync (zfs on {kernel} is below 5.17)"
+    text = _read_zfs_version()
+    written = "" if text is None else text.strip()
+    if not written:
+        return "fsync", "fsync (the zfs version is unknown)"
+    version = _zfs_version(written)
+    if version is None:
+        return "fsync", f"fsync (the zfs version {written[:64]!r} is not recognized)"
+    shown = written.split()[0][:64]
+    if version < _SYNCFS_ZFS_VERSION:
+        return "fsync", f"fsync (zfs {shown} is below {'.'.join(map(str, _SYNCFS_ZFS_VERSION))})"
+    return "syncfs", f"syncfs (zfs {shown}, {kernel})"
+
+
 def _unescape(field: str) -> str:
     # mountinfo writes space, tab, newline and backslash in a mount point as a backslash and three octal digits.
     return re.sub(r"\\([0-7]{3})", lambda escape: chr(int(escape[1], 8)), field)
+
+
+def _mount_entries(text: str) -> list[tuple[str, PurePosixPath, str]] | None:
+    # The entries of a mountinfo text, in mount order: each mount's "major:minor", decoded mount point and type.
+    # Records are split on LF alone (the kernel escapes only space, tab, LF and backslash, so a mount point may hold
+    # VT, CR or U+2028 literally), and one record that does not parse makes the whole table uncertain: None.
+    entries: list[tuple[str, PurePosixPath, str]] = []
+    for line in text.split("\n"):
+        if not line:
+            continue
+        fields = line.split(" ")
+        if len(fields) < 10 or "-" not in fields[6:]:
+            return None
+        separator = fields.index("-", 6)
+        if separator + 3 > len(fields) or _MOUNT_NUMBER.fullmatch(fields[2]) is None or fields[4][:1] != "/":
+            return None
+        entries.append((fields[2], PurePosixPath(_unescape(fields[4])), fields[separator + 1]))
+    return entries
+
+
+def _containing_mount(entries: Sequence[tuple[str, PurePosixPath, str]], path: PurePosixPath) -> str | None:
+    # The "major:minor" of the mount *path* lies on: the entry with the longest mount point that is a path-component
+    # prefix of it, the last of equals (a later mount hides an earlier one at the same point); None when none is.
+    found: str | None = None
+    longest = -1
+    for number, point, _kind in entries:
+        if path.is_relative_to(point) and len(point.parts) >= longest:
+            found, longest = number, len(point.parts)
+    return found
+
+
+def _device_name(device: int) -> str:
+    # The "major:minor" of an st_dev, as mountinfo writes it.
+    return f"{os.major(device)}:{os.minor(device)}"
 
 
 def _filesystem_type(path: Path, device: int) -> str | None:
@@ -2198,24 +2287,16 @@ def _filesystem_type(path: Path, device: int) -> str | None:
     """
 
     text = _read_mountinfo()
-    if text is None:
+    entries = None if text is None else _mount_entries(text)
+    if entries is None:
         return None
-    wanted = f"{os.major(device)}:{os.minor(device)}"
+    wanted = _device_name(device)
     resolved = PurePosixPath(os.path.realpath(path))
     found: str | None = None
     longest = -1
-    for line in text.splitlines():
-        fields = line.split(" ")
-        if len(fields) < 7 or "-" not in fields[6:]:
-            continue
-        separator = fields.index("-", 6)
-        if separator + 1 >= len(fields):
-            continue
-        kind = fields[separator + 1]
-        if fields[2] == wanted:
-            found = kind
-            break
-        mount_point = PurePosixPath(_unescape(fields[4]))
+    for number, mount_point, kind in entries:
+        if number == wanted:
+            return kind
         if resolved.is_relative_to(mount_point) and len(mount_point.parts) > longest:
             found, longest = kind, len(mount_point.parts)
     return found
@@ -2226,30 +2307,39 @@ def resolve_sync(path: Path, setting: object) -> tuple[SyncStrategy, str]:
 
     *setting* is the ``io.sync`` value: ``auto`` gives ``syncfs`` only on Linux 5.8 or later, with libc's
     ``syncfs`` working on that filesystem (not refused by a prime or probe before) and a vetted filesystem type
-    (``lustre``, ``ext4``, ``xfs``, ``tmpfs``); ``syncfs`` forces it on any filesystem type, but still gives
-    ``fsync``, with one warning, below Linux 5.8, off Linux, or where ``syncfs`` does not work; ``fsync`` gives
-    ``fsync``; any other value gives ``fsync`` with one warning. The setting is the caller's fresh read; only the
-    filesystem type is read afresh from the mount table each time.
+    (``lustre``, ``ext4``, ``xfs``, ``tmpfs``), or ``zfs`` on Linux 5.17 or later with an OpenZFS module of at
+    least 2.4.0 (``/sys/module/zfs/version`` read afresh, compared by its leading ``major.minor.patch``; unreadable
+    or unrecognized gives ``fsync``); ``syncfs`` forces it on any filesystem type, but still gives ``fsync``, with
+    one warning, below Linux 5.8, off Linux, or where ``syncfs`` does not work; ``fsync`` gives ``fsync``; any other
+    value gives ``fsync`` with one warning. The setting is the caller's fresh read; only the filesystem type is read
+    afresh from the mount table each time.
 
     :param path: An existing directory on the filesystem written.
     :param setting: The ``io.sync`` value.
-    :return: The strategy and a short reason for display, such as ``"syncfs (lustre, Linux 5.14)"`` or
-        ``"fsync (zfs is not vetted for auto)"``.
+    :return: The strategy and a short reason for display, such as ``"syncfs (lustre, Linux 5.14)"``,
+        ``"fsync (nfs4 is not vetted for auto)"`` or ``"fsync (zfs 2.2.2 is below 2.4.0)"``.
     :raises OSError: When *path* cannot be examined.
     """
 
+    strategy, reason, _kind = _resolve_sync(path, setting)
+    return strategy, reason
+
+
+def _resolve_sync(path: Path, setting: object) -> tuple[SyncStrategy, str, str | None]:
+    # resolve_sync with the filesystem type it read (None when it was not read or is unknown): the barrier's own
+    # rules for ZFS and the protocol predicate (plan WORKFLOW_LOCAL_COMMANDS amendment 23) need it.
     if setting not in SYNC_SETTINGS:
         _LOGGER.warning("io.sync is %r, not one of auto, syncfs or fsync: using fsync", setting)
-        return "fsync", f"fsync (io.sync {setting!r} is not auto, syncfs or fsync)"
+        return "fsync", f"fsync (io.sync {setting!r} is not auto, syncfs or fsync)", None
     if setting == "fsync":
-        return "fsync", "fsync (io.sync is fsync)"
+        return "fsync", "fsync (io.sync is fsync)", None
     forced = setting == "syncfs"
     device = os.stat(path).st_dev
 
-    def fallback(why: str) -> tuple[SyncStrategy, str]:
+    def fallback(why: str) -> tuple[SyncStrategy, str, str | None]:
         if forced:
             _LOGGER.warning("io.sync is syncfs, but %s: using fsync", why)
-        return "fsync", f"fsync ({why})"
+        return "fsync", f"fsync ({why})", None
 
     system, release = _uname()
     if system != "Linux":
@@ -2266,12 +2356,14 @@ def resolve_sync(path: Path, setting: object) -> tuple[SyncStrategy, str]:
         return fallback("syncfs is not supported on this filesystem here")
     kind = _filesystem_type(path, device)
     if forced:
-        return "syncfs", f"syncfs (forced, {kind or 'unknown filesystem'}, {kernel})"
+        return "syncfs", f"syncfs (forced, {kind or 'unknown filesystem'}, {kernel})", kind
     if kind is None:
-        return "fsync", "fsync (the filesystem type is unknown)"
+        return "fsync", "fsync (the filesystem type is unknown)", None
+    if kind == "zfs":
+        return *_zfs_gate(version, kernel), kind
     if kind not in _SYNCFS_VETTED:
-        return "fsync", f"fsync ({kind} is not vetted for auto)"
-    return "syncfs", f"syncfs ({kind}, {kernel})"
+        return "fsync", f"fsync ({kind} is not vetted for auto)", kind
+    return "syncfs", f"syncfs ({kind}, {kernel})", kind
 
 
 def _prime(descriptor: int, device: int) -> Literal["clean", "failed", "unsupported"]:
@@ -2309,7 +2401,8 @@ def fsync_landing(anchor: int, *, label: str = "", workers: int = 1) -> int:
     """Fsync a landed tree after the fact: every regular file, then every directory bottom-up, then *anchor*.
 
     Each directory is opened ``O_DIRECTORY|O_NOFOLLOW`` relative to its parent's descriptor and each file through
-    an anchored ``O_NOFOLLOW|O_NONBLOCK`` open; symlinks and special files are skipped, never followed. A later
+    an anchored ``O_NOFOLLOW|O_NONBLOCK`` open; symlinks and special files are skipped, never followed. A directory
+    on another filesystem (a mount inside the tree) is walked like any other, each file fsynced on its own. A later
     opener than the writer misses a writeback error already reported to someone else or lost when the inode was
     evicted (the accepted limit of the strategy ``fsync`` for a landing another process wrote).
 
@@ -2494,6 +2587,20 @@ class Barrier:
     (:func:`fsync_landing`, with up to *workers* threads). Leaving without a commit syncs nothing. A running
     ``syncfs`` cannot be interrupted.
 
+    On ZFS (gated, see :func:`resolve_sync`) no writeback error reaches the superblock, so the prime has none to
+    consume, but it still flushes (a commit of the dataset's whole intent log, about 16 ms on a local pool); a
+    commit reports the result of its own commit of the intent log, with ``EIO`` on a suspended pool. That error is
+    never someone else's, so on ZFS a ``syncfs`` barrier always fails on it: *errors* becomes ``fail`` at the
+    entry, whatever ``io.sync_errors`` says. A ``syncfs`` on ZFS does not report a failed writeback of pages
+    dirtied through ``mmap`` (an ``fsync`` does), so under ``auto`` a *written* barrier on ZFS takes ``fsync``
+    and walks its trees file by file; a landing httk writes itself with ``write`` keeps ``syncfs`` (an
+    instantiate hook's ``mmap`` writes on a dataset at its quota are the accepted limit).
+
+    A ``syncfs`` covers only the filesystem of *anchor* (:attr:`device`; a bind mount of the same filesystem
+    included): a caller writing elsewhere covers those paths otherwise (:func:`_off_device` groups them by
+    filesystem), and a tree written before the barrier gets what is mounted inside it from another filesystem
+    fsynced file by file (:func:`sync_written`).
+
     The landings of one transfer (a transfer session's, a pull's, a local transfer's copies) pass the transfer's
     one *primed_devices* set: only the first barrier on a filesystem primes, and a prime that completed without an
     error records the filesystem's ``st_dev`` there, so the later barriers on it open their descriptor without a
@@ -2554,7 +2661,9 @@ class Barrier:
             raise ValueError("a tree written before its barrier is never primed")
         self.anchor = anchor
         self.setting = setting
+        #: The effective ``io.sync_errors``: *errors*, or ``fail`` once entered on ZFS under ``syncfs``.
         self.errors: SyncErrors = errors
+        self._errors: SyncErrors = errors
         self.inline = inline
         self.quiet = quiet
         self.prime = prime
@@ -2565,6 +2674,10 @@ class Barrier:
         self.reason = ""
         #: Whether this barrier primed at its entry.
         self.primed = False
+        #: The ``st_dev`` of the filesystem of *anchor*, which a ``syncfs`` commit covers (inside the context only).
+        self.device: int | None = None
+        #: The type of that filesystem, as the resolution read it (``None`` when it was not read or is unknown).
+        self.filesystem: str | None = None
         self._descriptor: int | None = None
 
     @property
@@ -2574,21 +2687,28 @@ class Barrier:
         return self.strategy == "fsync"
 
     def __enter__(self) -> Self:
-        self.strategy, self.reason = resolve_sync(self.anchor, self.setting)
+        self.strategy, self.reason, self.filesystem = _resolve_sync(self.anchor, self.setting)
+        self.errors = self._errors
+        if self.strategy == "syncfs" and self.filesystem == "zfs":
+            if self.written and self.setting != "syncfs":
+                # Its syncfs would miss a failed writeback of the tree's mmap-dirtied pages, which fsync reports.
+                self.strategy, self.reason = "fsync", "fsync (zfs, for a tree written before httk ran)"
+            else:
+                self.errors = "fail"  # the error is this commit's own: never trusted
         self._descriptor = os.open(self.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
-            if self.strategy == "syncfs" and self.prime:
-                device = os.fstat(self._descriptor).st_dev
-                if self.primed_devices is None or device not in self.primed_devices:
-                    primed = _prime(self._descriptor, device)
-                    if primed == "unsupported":
-                        if self.setting == "syncfs":
-                            _LOGGER.warning("io.sync is syncfs, but syncfs is not supported here: using fsync")
-                        self.strategy, self.reason = "fsync", "fsync (syncfs is not supported on this filesystem here)"
-                    else:
-                        self.primed = True
-                        if primed == "clean" and self.primed_devices is not None:
-                            self.primed_devices.add(device)
+            self.device = device = os.fstat(self._descriptor).st_dev
+            unprimed = self.primed_devices is None or device not in self.primed_devices
+            if self.strategy == "syncfs" and self.prime and unprimed:
+                primed = _prime(self._descriptor, device)
+                if primed == "unsupported":
+                    if self.setting == "syncfs":
+                        _LOGGER.warning("io.sync is syncfs, but syncfs is not supported here: using fsync")
+                    self.strategy, self.reason = "fsync", "fsync (syncfs is not supported on this filesystem here)"
+                else:
+                    self.primed = True
+                    if primed == "clean" and self.primed_devices is not None:
+                        self.primed_devices.add(device)
         except BaseException:
             self._close()
             raise
@@ -2598,6 +2718,7 @@ class Barrier:
         self._close()
 
     def _close(self) -> None:
+        self.device = None
         if self._descriptor is not None:
             descriptor, self._descriptor = self._descriptor, None
             os.close(descriptor)
@@ -2691,13 +2812,21 @@ class Barrier:
             error,
         )
 
-    def _walk(self, tree: "Path | Loc | None") -> None:
-        # The late walk of strategy fsync over *tree* (the anchor by default), logged once when it fails.
+    def _walk(self, tree: "Path | Loc | None", *, cover: Callable[[int, str], object] | None = None) -> None:
+        # The late walk of strategy fsync over *tree* (the anchor by default), or *cover* of it (its descriptor and
+        # label) after a syncfs, logged once when it fails.
         assert self._descriptor is not None
         label = str(self.anchor if tree is None else tree.path if isinstance(tree, Loc) else tree)
+
+        def walk(descriptor: int) -> None:
+            if cover is not None:
+                cover(descriptor, label)
+            else:
+                fsync_landing(descriptor, label=label, workers=self.workers)
+
         try:
             if tree is None:
-                fsync_landing(self._descriptor, label=label, workers=self.workers)
+                walk(self._descriptor)
                 return
             try:
                 if isinstance(tree, Loc):
@@ -2707,12 +2836,228 @@ class Barrier:
             except OSError as exc:
                 raise SyncUnreadable(exc.errno, f"cannot read {label} to sync it to disk: {exc.strerror}") from exc
             try:
-                fsync_landing(descriptor, label=label, workers=self.workers)
+                walk(descriptor)
             finally:
                 os.close(descriptor)
         except SyncFailed as exc:
             _LOGGER.warning("the sync barrier (%s) of %s failed: %s", self.reason, label, exc)
             raise
+
+
+def _off_device[P: Path | Loc | int](paths: Sequence[P], barrier: Barrier) -> dict[int | None, list[P]]:
+    """The directories of *paths* that a ``syncfs`` commit of *barrier* does not cover, grouped by filesystem.
+
+    Each is an existing directory that is about to be written in (for an entry still to be created, its parent):
+    a path or anchored location, examined with ``stat`` and so through a symlink, as :class:`Barrier` opens its
+    anchor, or an open descriptor (``fstat``). Those whose ``st_dev`` is not :attr:`Barrier.device` are returned
+    under their ``st_dev``; those that cannot be examined or are not directories under ``None``, not known to be
+    covered. A bind mount of the barrier's own filesystem has its ``st_dev`` and is covered.
+
+    :param paths: The directories, as paths, anchored locations or descriptors.
+    :param barrier: An entered barrier.
+    :return: The uncovered ones by ``st_dev`` (``None``: not examined), each list in the order of *paths*; empty
+        when the barrier covers them all.
+    :raises ValueError: Before the barrier's context is entered or after it is left.
+    """
+
+    device = barrier.device
+    if device is None:
+        raise ValueError("a barrier knows its filesystem only inside its context")
+    found: dict[int | None, list[P]] = {}
+    for path in paths:
+        try:
+            if isinstance(path, int):
+                status = os.fstat(path)
+            elif isinstance(path, Loc):
+                status = os.stat(path.path, dir_fd=path.at)
+            else:
+                status = os.stat(path)
+        except OSError:
+            status = None
+        if status is None or not stat.S_ISDIR(status.st_mode):
+            found.setdefault(None, []).append(path)
+        elif status.st_dev != device:
+            found.setdefault(status.st_dev, []).append(path)
+    return found
+
+
+#: The ``errno`` of an open below a tree that finds the mount point not reachable there without following a
+#: symlink (hidden by a later mount, or gone): nothing of the tree is there, so there is nothing to sync.
+_UNREACHABLE = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
+
+
+def _fsync_foreign(parent: int, name: str, device: int, *, label: str, workers: int) -> bool:
+    # Fsync the entry *name* of the directory *parent* when it is on another filesystem than *device*: a directory
+    # walked by fsync_landing, a regular file through an anchored O_NOFOLLOW|O_NONBLOCK descriptor once the opened
+    # object is checked to be one; anything else, an entry on *device* or one not reachable is left. Whether it was
+    # synced.
+    try:
+        mode = os.lstat(name, dir_fd=parent).st_mode
+        if stat.S_ISDIR(mode):
+            opened = os.open(name, _DIR_FLAGS, dir_fd=parent)
+        elif stat.S_ISREG(mode):
+            opened = os.open(name, _SOURCE_FLAGS, dir_fd=parent)
+        else:
+            return False  # a symlink or special file: nothing of its own to sync
+    except OSError as exc:
+        if exc.errno in _UNREACHABLE:
+            return False
+        raise _unreadable(exc.errno, label, exc.strerror) from exc
+    try:
+        status = os.fstat(opened)
+        if status.st_dev == device:
+            return False
+        if stat.S_ISDIR(status.st_mode):
+            fsync_landing(opened, label=label, workers=workers)
+            return True
+        if not stat.S_ISREG(status.st_mode):
+            return False
+        try:
+            os.fsync(opened)
+        except OSError as exc:
+            raise SyncFailed(exc.errno, f"cannot sync {label} to disk: {exc.strerror}") from exc
+        return True
+    finally:
+        os.close(opened)
+
+
+def _fsync_off_device(root: int, device: int, *, label: str, workers: int) -> int:
+    """Fsync, file by file, whatever lies below the tree *root* on another filesystem than *device*.
+
+    A ``syncfs`` on *device* covers the rest of the tree but not a filesystem mounted inside it. When *root* itself
+    is on another filesystem (replaced since it was examined), the whole tree is walked (:func:`fsync_landing`).
+    Otherwise the mount table is used where it provably describes *root*: its path (``/proc/self/fd``) must lead
+    back to *root*'s inode (``lstat``), the mount containing that path must have *root*'s ``st_dev``, and
+    ``/proc/self/mountinfo``, read after that path, must parse whole. Every mount point below the path, directory
+    or file, whose ``major:minor`` is not *device* is then reached component by component, each opened
+    ``O_NOFOLLOW`` relative to its parent, and synced when the opened object is on another filesystem
+    (:func:`_fsync_foreign`); one nested in a mounted directory already walked is covered by that walk, and one not
+    reachable that way (hidden by a later mount, gone) holds nothing of the tree. If the path or its inode changed
+    by the end, the table proves nothing. Without such proof (also: no readable table, a path outside this
+    process's root, a deleted one) every directory of the tree is listed instead and each entry's ``st_dev``
+    compared (directories and regular files; at most 256 levels deep). Every fsync goes through a fresh descriptor
+    (the late walk's accepted limit).
+
+    :param root: The tree's directory descriptor (left open).
+    :param device: The ``st_dev`` the barrier's ``syncfs`` covers.
+    :param label: The tree's path, for messages.
+    :param workers: The most fsyncs a walk of a mounted directory runs at once.
+    :return: How many mounted entries (directories or files) on another filesystem were synced.
+    :raises SyncUnreadable: When an entry cannot be listed or opened, or (listing) lies deeper than 256 levels.
+    :raises SyncFailed: When an fsync reports an error.
+    """
+
+    status = os.fstat(root)
+    if status.st_dev != device:
+        fsync_landing(root, label=label, workers=workers)
+        return 1
+    top = _proven_path(root, status)
+    text = None if top is None else _read_mountinfo()
+    mounts = None if text is None else _mount_entries(text)
+    if top is None or mounts is None or _containing_mount(mounts, top) != _device_name(status.st_dev):
+        return _walk_off_device(root, device, label=label, workers=workers)
+    covered = _device_name(device)
+    below = sorted(
+        {point for number, point, _kind in mounts if number != covered and point != top and point.is_relative_to(top)},
+        key=lambda point: (len(point.parts), point),
+    )
+    walked: list[PurePosixPath] = []
+    for point in below:
+        if any(point.is_relative_to(directory) for directory in walked):
+            continue  # inside a mounted directory that fsync_landing walked, mounts included
+        parts = point.relative_to(top).parts
+        try:
+            parent = _open_below(root, parts[:-1])
+        except OSError as exc:
+            if exc.errno in _UNREACHABLE:
+                continue
+            raise _unreadable(exc.errno, f"{label}/{PurePosixPath(*parts[:-1])}", exc.strerror) from exc
+        try:
+            if _fsync_foreign(parent, parts[-1], device, label=f"{label}/{PurePosixPath(*parts)}", workers=workers):
+                walked.append(point)
+        finally:
+            os.close(parent)
+    if _proven_path(root, status) != top:
+        # Moved or replaced while the table was used: what it said about the tree is not proven, so list it.
+        return len(walked) + _walk_off_device(root, device, label=label, workers=workers)
+    return len(walked)
+
+
+def _proven_path(root: int, status: os.stat_result) -> PurePosixPath | None:
+    # The path of the directory *root* (whose fstat is *status*) below this process's root: what /proc/self/fd
+    # names, when an lstat of it finds the same inode; None when there is none (unreachable, deleted, replaced).
+    try:
+        where = os.readlink(f"/proc/self/fd/{root}")
+        if not where.startswith("/") or where.endswith(" (deleted)"):
+            return None
+        found = os.lstat(where)
+    except OSError:
+        return None
+    if (found.st_dev, found.st_ino) != (status.st_dev, status.st_ino):
+        return None
+    return PurePosixPath(where)
+
+
+def _walk_off_device(root: int, device: int, *, label: str, workers: int) -> int:
+    # _fsync_off_device without a mount table: every directory on *device* is listed, and each entry that is a
+    # directory or a regular file has its st_dev compared; one on another filesystem is synced by _fsync_foreign
+    # (a directory walked whole, not listed here).
+    walked = 0
+    try:
+        listing = sorted(os.listdir(root))
+    except OSError as exc:
+        raise _unreadable(exc.errno, label, exc.strerror) from exc
+    # Each directory open below the root (the caller owns the root): its descriptor, path and names left.
+    pending: list[tuple[int, PurePosixPath, list[str]]] = [(root, PurePosixPath(), listing)]
+    try:
+        while pending:
+            directory, relative, names = pending[-1]
+            if not names:
+                pending.pop()
+                if directory != root:
+                    os.close(directory)
+                continue
+            name = names.pop()
+            path = relative / name
+            try:
+                status = os.lstat(name, dir_fd=directory)
+            except OSError as exc:
+                raise _unreadable(exc.errno, f"{label}/{path}", exc.strerror) from exc
+            if not stat.S_ISDIR(status.st_mode):
+                if stat.S_ISREG(status.st_mode) and status.st_dev != device:
+                    walked += _fsync_foreign(directory, name, device, label=f"{label}/{path}", workers=workers)
+                continue
+            if len(path.parts) > _LANDING_DEPTH:
+                raise _unreadable(errno.ELOOP, f"{label}/{path}", f"deeper than {_LANDING_DEPTH} levels")
+            if status.st_dev != device:
+                walked += _fsync_foreign(directory, name, device, label=f"{label}/{path}", workers=workers)
+                continue
+            try:
+                child = os.open(name, _DIR_FLAGS, dir_fd=directory)
+            except OSError as exc:
+                raise _unreadable(exc.errno, f"{label}/{path}", exc.strerror) from exc
+            try:
+                if os.fstat(child).st_dev != device:  # replaced since the lstat: walk it whole
+                    fsync_landing(child, label=f"{label}/{path}", workers=workers)
+                    walked += 1
+                    os.close(child)
+                    continue
+                listing = sorted(os.listdir(child))
+            except SyncFailed:
+                os.close(child)
+                raise
+            except OSError as exc:
+                os.close(child)
+                raise _unreadable(exc.errno, f"{label}/{path}", exc.strerror) from exc
+            except BaseException:
+                os.close(child)
+                raise
+            pending.append((child, path, listing))
+    finally:
+        for directory, _relative, _names in pending:
+            if directory != root:
+                os.close(directory)
+    return walked
 
 
 def sync_written(
@@ -2722,7 +3067,10 @@ def sync_written(
 
     Only the trees that are directories on the filesystem of *anchor* are synced (another filesystem's are copied
     by their caller, which fsyncs the copy): one ``syncfs`` on a descriptor opened on *anchor* now, with no prime,
-    for all of them, or under ``fsync`` a walk of each. No barrier could precede their first byte, so this is best
+    for all of them, or under ``fsync`` a walk of each. On ZFS ``auto`` gives ``fsync`` here (see :class:`Barrier`).
+    After a ``syncfs``, what is mounted inside each tree from another filesystem, which the ``syncfs`` does not
+    cover, is fsynced file by file through fresh descriptors (:func:`_fsync_off_device`, from the mount table where
+    it provably describes the tree, else from a listing of the tree). No barrier could precede their first byte, so this is best
     effort: a writeback error is reported only while nobody has seen it yet, and an unseen one of someone else on
     that filesystem fails the call too. An error cannot be attributed to one tree; once reported, it is seen, so
     the failed pages may read back intact from memory while not on disk: every tree must then be re-created from
@@ -2759,6 +3107,14 @@ def sync_written(
             # One syncfs for every tree; where it turns out not to be supported, the first tree is walked instead.
             barrier.commit(tree=synced[0])
             if barrier.strategy == "syncfs":
+                covered = barrier.device
+                assert covered is not None
+
+                def cover(root: int, label: str) -> None:
+                    _fsync_off_device(root, covered, label=label, workers=workers)
+
+                for tree in synced:
+                    barrier._walk(tree, cover=cover)  # what the syncfs did not cover
                 return synced
             pending = synced[1:]
         for tree in pending:

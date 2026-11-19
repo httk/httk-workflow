@@ -664,7 +664,8 @@ synced quietly before it is published:
   barrier could precede their first byte. Before anything is taken, one
   barrier with `prime=False, written=True` anchored on the control directory
   makes the whole batch durable (`sync_written`): one `syncfs` on a descriptor
-  opened now, or under `fsync` a walk of each bundle; where `syncfs` turns out
+  opened now, or under `fsync` a walk of each bundle (on ZFS, `auto` gives
+  `fsync` for such a barrier: see below); where `syncfs` turns out
   not to be supported at that commit, the bundles are walked instead (only
   `written` allows that fallback). A bundle on
   another filesystem is not synced here: the adoption copies it with inline
@@ -676,9 +677,12 @@ synced quietly before it is published:
   taken), and since a reported error is seen and the failed pages may then
   read back intact from memory while not on disk, a retry would not detect
   the loss: the message says to re-create the bundles from their source
-  before trying again. When a walk cannot read an entry (its permissions or
-  type), no write error was reported: the message names the entry instead
-  (`SyncUnreadable`). A bundle path the sync cannot reach (`ENOTDIR`,
+  before trying again (after a suspended pool on ZFS, which keeps the dirty
+  data of a suspended pool and writes it once the pool is back, that advice
+  is more than needed, but the message is the same). When a walk cannot read
+  an entry (its permissions, its type, or under `syncfs` a depth over 256
+  levels while it searches for mounts without a mount table), no write error
+  was reported: the message names the entry instead (`SyncUnreadable`). A bundle path the sync cannot reach (`ENOTDIR`,
   `EACCES`, ...) is skipped and reported by its own take; any other error of
   the batch sync fails the batch. Transfers adopt only their own holds and
   committed landings and say so (`adopt(..., synced=True)`); any other trusted
@@ -693,14 +697,99 @@ Linux 5.8 or later (whose `syncfs` reports a writeback error recorded on the
 filesystem since the descriptor was opened), with libc's `syncfs` available
 and working there, on a vetted filesystem type (`lustre`, `ext4`, `xfs`,
 `tmpfs`, read afresh from `/proc/self/mountinfo` by the `st_dev` of `anchor`,
-else by the longest mount point that is a path-component prefix of it);
+else by the longest mount point that is a path-component prefix of it), or on
+`zfs` past its gate (below);
 `syncfs` forces it on any filesystem type but still gives `fsync`, with a
 warning, below 5.8, off Linux or where `syncfs` is not available; `fsync`, and
 any invalid value (with a warning), give `fsync`.
 
+ZFS was left out at first because it records no writeback error on the
+superblock (`errseq`), which is what `syncfs` reports on the other types (a
+`syncfs` on ZFS has always committed the dataset's intent log; what 2.4.0
+adds is returning that commit's error).
+`auto` gives `syncfs` on `zfs` only on Linux 5.17 or later (`_SYNCFS_ZFS_KERNEL`)
+with an OpenZFS module of at least 2.4.0 (`_SYNCFS_ZFS_VERSION`), read afresh
+from `/sys/module/zfs/version` and compared by its leading `major.minor.patch`
+(`2.4.1-1ubuntu5.1` is 2.4.1); an unreadable or unrecognized version, an older
+one or an older kernel gives `fsync`, with the reason (`fsync (zfs 2.2.2 is
+below 2.4.0)`, `fsync (zfs on Linux 5.15 is below 5.17)`). On the gated
+versions `syncfs` reaches `zfs_sync`, which commits the dataset's whole
+intent log with `zil_commit_flags(..., ZIL_COMMIT_NOW)` and returns its error,
+and Linux 5.17 and later return the `sync_fs` error from `syncfs` (below 5.17
+OpenZFS records it with `errseq_set` instead, a path not traced). On a
+suspended pool that commit returns `EIO`, so the barrier fails and nothing is
+published (on ZFS whatever `io.sync_errors` says, see below), where `fsync`
+(`ZIL_COMMIT_FAILMODE`) under the default `failmode=wait` blocks until the
+pool returns. A command without a retry (job creation, `job submit`, `job
+adopt PATH`, the store) then fails, after its discard (which waits for the pool
+too), where it used to wait and succeed. A transfer's failed commit is
+answered by its retry: the landing is discarded once the pool lets it, and the
+fresh delivery with inline fsync (which waits for the pool) can succeed after
+the pool recovers. OpenZFS 2.1.16, 2.2.8 and
+2.3.0 return 0 on a suspended pool; 2.3.4 returns `EIO` only when the pool
+is suspended already when `syncfs` is called, and a suspension during its
+commit (`zil_commit`, `failmode=wait`) is waited out and returns 0. Traced:
+2.4.0 and 2.4.1 have identical `zfs_vfsops.c` (`zfs_sync`), `zpl_super.c`
+(`zpl_sync_fs`), `zil.c` (`zil_commit_flags`, `zil_commit_impl`) and `txg.c`
+(`txg_wait_synced_flags`). Accepted: a minimum version also trusts every
+later release, and a distribution's patches (Ubuntu's) are not verified. A
+forced `io.sync syncfs` on ZFS below the gate gets none of this: do not force
+it there.
+
+Two rules of the barrier hold on ZFS whenever its strategy is `syncfs`
+(`Barrier.filesystem` is `zfs`). The error of a ZFS `syncfs` is the result of
+this commit itself, never someone else's, so `errors` becomes `fail` at the
+entry: `io.sync_errors ignore` does not apply, and job creation does not
+suggest it after a failed commit. A ZFS `syncfs` does not report a failed
+writeback of pages dirtied through `mmap` (a quota or a full pool), which an
+`fsync` does (`zpl_fsync`, and `zfs_putpage` with `for_sync`), so under `auto`
+a `written` barrier (`sync_written`: operators' bundles, `job submit --move`
+payloads, trees another program wrote) takes `fsync` there and walks its
+trees file by file, as before; a forced `syncfs` keeps `syncfs`. Landings
+httk writes with `write()` keep `syncfs`. Accepted limit: files an
+instantiate hook writes in a job-creation batch are committed by that batch's
+`syncfs`, so a hook that writes through `mmap` on a dataset at its quota is
+not caught.
+
+A `syncfs` covers only the filesystem of the barrier's descriptor
+(`Barrier.device`, set only inside the context; a bind mount of the same
+filesystem has its `st_dev` and is covered, and the `EXDEV` backstop of renames
+stays). After its `syncfs`, `sync_written` therefore looks for what is
+mounted inside each tree from another filesystem. The mount table is used
+only where it provably describes the tree: the tree's path (`/proc/self/fd` of
+its open descriptor) must lead back to the same inode (`lstat`), not be
+deleted, and lie in a mount whose `major:minor` is the tree's own `st_dev`;
+`/proc/self/mountinfo` is then read (as bytes, split on LF alone, since a mount
+point may hold VT, CR or U+2028 literally, and mount points decoded as for the
+filesystem type; one record that does not parse makes the whole table
+uncertain), and the path and inode are checked again at the end. Each mount
+point below the tree's path whose `major:minor` is not the barrier's,
+directory or single file, is reached
+component by component with `O_NOFOLLOW` relative to the tree's descriptor,
+and when the opened object is on another filesystem, a directory is walked
+(`fsync_landing`) and a file fsynced once checked to be a regular file, each
+through fresh descriptors (the late walk's limit). A mount not reachable that
+way (hidden by a later mount, gone, or below a symlink) holds nothing of the
+tree; one below a directory that cannot be searched fails the sync
+(`SyncUnreadable`). A tree whose own root turns out to be on another
+filesystem when opened is walked whole. Whenever the table proves nothing
+(unreadable, uncertain, a path that changed meanwhile or leads elsewhere),
+every directory of the tree is listed instead, and each directory and regular file
+has its `st_dev` compared: a directory that cannot be listed, or a depth over
+256 levels, then fails the sync. A late walk under `fsync` covers what is
+mounted as any other entry. For L3, `_fs._off_device(paths, barrier)` groups
+the existing directories about to be written in (paths, anchored locations or
+descriptors, examined through symlinks as the barrier's anchor is) by the
+`st_dev` of those the barrier does not cover, with `None` for those that
+cannot be examined; it raises `ValueError` outside the barrier's context.
+`_fs._resolve_sync` also returns the filesystem type it read, for the protocol
+predicate.
+
 For `syncfs` the barrier opens `anchor` and calls `syncfs` once on that fresh
 descriptor, the *prime*: it flushes what was dirty already and consumes an
-unseen writeback error of someone else, so its error is logged and ignored;
+unseen writeback error of someone else, so its error is logged and ignored (on
+gated ZFS it has no such error to consume, but it still flushes: a commit of
+the dataset's intent log, about 16 ms on a local pool);
 `ENOSYS`, `EPERM` or `EINVAL` there make the strategy `fsync` for that
 filesystem for the rest of the process. The landings of one transfer prime
 once per filesystem: a transfer session's `stage` landings (the
@@ -771,7 +860,7 @@ it.
 
 A failed commit publishes nothing of the landing. A failed `syncfs` commit of
 a barrier whose policy is `fail` is retried once by the transfers (under
-`ignore` a writeback error does not fail, and an unsupported `syncfs` at a
+`ignore` a writeback error does not fail, except on ZFS, and an unsupported `syncfs` at a
 transfer's commit, primed or not, which still fails, is not retried; job
 creation, `job submit`, `job adopt PATH` and the store have no retry):
 
@@ -834,7 +923,8 @@ goes from the same relay), and a pull defers its own landings the same way:
 and the terminal are done, and the stage answers (the far side) or is queued
 (a pull) with the barrier still open. Only a barrier that resolved to
 `syncfs` is handed over: under `fsync` (`io.sync fsync`, or `auto` where it
-gives `fsync`, as on ZFS) every file was synced as it was written, the landing
+gives `fsync`, as on ZFS below its gate) every file was synced as it was
+written, the landing
 commits inline as before, and the stage holds no descriptor. The stage is
 `committed` once its first scan is taken, but `Stage.begin` refuses to adopt
 it until `Stage.sync` has committed that barrier successfully on the
@@ -846,9 +936,13 @@ found-id shortcut stays). Abandoning or closing the stage closes the
 descriptor: up to 8 open landing descriptors per session. `primed_devices` is
 still recorded only by a clean prime at the barrier's entry, so a later stage
 on the same filesystem opens unprimed and samples the error state at its
-`stage`; its commit, about a deadline later, reports every writeback error
-recorded on the filesystem since. One such error therefore usually fails every
-deferred stage open at that moment (a cascade, each retried in turn). The far
+`stage`; on a filesystem that records writeback errors on its superblock
+(errseq: ext4, XFS, Lustre), its commit, about a deadline later, reports every
+writeback error recorded on the filesystem since, so one such error usually
+fails every deferred stage open at that moment (a cascade, each retried in
+turn). On ZFS each commit reports only the result of its own commit of the
+intent log: a stage committed while the pool is suspended fails, and one
+committed after the pool returned succeeds, with no earlier error replayed. The far
 side's `adopt_staged` validates the token, workspace, ids and order before it
 consumes anything, then commits under the stall-exempt `sync` phase: a
 `CommitFailed` abandons the stage (its landing discarded) and only then releases

@@ -73,6 +73,18 @@ if argv[:2] == ["workflow", "transfer-session"]:
     if os.environ.get("HTTK_TEST_PROTOCOL"):  # an httk of another version: its hello and its check
         _transfer_session.TRANSFER_PROTOCOL = int(os.environ["HTTK_TEST_PROTOCOL"])
     failing = {int(item) for item in os.environ.get("HTTK_TEST_FAIL_SYNCFS", "").split(",") if item}
+    if os.environ.get("HTTK_TEST_NOT_ZFS"):  # a ZFS host stands for a filesystem where io.sync_errors ignore applies
+        _filesystem_type = _fs._filesystem_type
+
+        def not_zfs(path, device):
+            kind = _filesystem_type(path, device)
+            return "ext4" if kind == "zfs" else kind
+
+        _fs._filesystem_type = not_zfs
+    if os.environ.get("HTTK_TEST_ZFS"):  # a gated ZFS (OpenZFS 2.4.1 on Linux 7.0), whatever this host is
+        _fs._filesystem_type = lambda path, device: "zfs"
+        _fs._read_zfs_version = lambda: "2.4.1"
+        _fs._uname = lambda: ("Linux", "7.0.0")
     real_syncfs = _fs._syncfs
     calls = []
 
@@ -1068,6 +1080,7 @@ def test_no_retry_under_ignore(
     project, near, near_name, far, far_name = ssh
     far.configure_settings({"io.sync": "syncfs", "io.sync_errors": "ignore"})
     monkeypatch.setenv("HTTK_TEST_FAIL_SYNCFS", "2")  # the first barrier's commit, after its prime
+    monkeypatch.setenv("HTTK_TEST_NOT_ZFS", "1")
     requests = recorded_requests(monkeypatch)
     plan = jobs(near, 2)
     assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0

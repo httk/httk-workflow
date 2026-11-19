@@ -59,6 +59,13 @@ def receive_tar(workspace: Workspace, landing: Path, **options: Any) -> list[str
 @pytest.fixture(autouse=True)
 def _fresh_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_fs, "_syncfs_works", {})
+    # These are io.sync_errors ignore's tests: a ZFS host stands for a filesystem where it applies.
+    real = _fs._filesystem_type
+    monkeypatch.setattr(_fs, "_filesystem_type", lambda path, device: _not_zfs(real(path, device)))
+
+
+def _not_zfs(kind: str | None) -> str | None:
+    return "ext4" if kind == "zfs" else kind
 
 
 @pytest.fixture

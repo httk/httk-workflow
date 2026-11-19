@@ -249,13 +249,13 @@ def test_a_long_lived_workspace_reads_io_sync_afresh_at_each_barrier(
     far, _ = registered(tmp_path, "far")
     durable = Workspace(far.root)
     seen: list[object] = []
-    real = _fs.resolve_sync
+    real = _fs._resolve_sync
 
-    def resolve(path: Path, setting: object) -> tuple[_fs.SyncStrategy, str]:
+    def resolve(path: Path, setting: object) -> tuple[_fs.SyncStrategy, str, str | None]:
         seen.append(setting)
         return real(path, setting)
 
-    monkeypatch.setattr(_fs, "resolve_sync", resolve)
+    monkeypatch.setattr(_fs, "_resolve_sync", resolve)
     empty = io.BytesIO()
     tarfile.open(fileobj=empty, mode="w").close()
     for value in ("fsync", "syncfs", None):
@@ -603,7 +603,7 @@ def test_holds_on_another_filesystem_under_fsync_are_copied_with_an_fsync_of_eve
 ) -> None:
     source, source_name = registered(tmp_path, "a")
     target, target_name = registered(tmp_path, "b")
-    target.configure_settings({"io.sync": "fsync"})  # what auto gives on zfs, nfs, btrfs or below Linux 5.8
+    target.configure_settings({"io.sync": "fsync"})  # what auto gives on nfs, btrfs, ungated zfs or below Linux 5.8
     plan = jobs(source, 3)
     other_device(monkeypatch, target)
     events = Events(monkeypatch)

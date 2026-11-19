@@ -625,6 +625,21 @@ def test_a_staging_error_publishes_the_jobs_staged_before_it_and_is_raised(
     assert_nothing_left(ws)
 
 
+@pytest.fixture
+def not_zfs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ZFS host stands for another filesystem: on ZFS a ``syncfs`` barrier always fails on its own commit error,
+    ignoring ``io.sync_errors``, and job creation does not suggest that setting."""
+
+    real = _fs._filesystem_type
+
+    def not_zfs_type(path: Path, device: int) -> str | None:
+        kind = real(path, device)
+        return "ext4" if kind == "zfs" else kind
+
+    monkeypatch.setattr(_fs, "_filesystem_type", not_zfs_type)
+
+
+@pytest.mark.usefixtures("not_zfs")
 @pytest.mark.parametrize("earlier", [0, 2])
 def test_a_staging_error_whose_prefix_commit_fails_raises_sync_failed_chained_to_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, earlier: int
@@ -651,6 +666,7 @@ def test_a_staging_error_whose_prefix_commit_fails_raises_sync_failed_chained_to
     assert_nothing_left(ws)
 
 
+@pytest.mark.usefixtures("not_zfs")
 def test_a_failed_batch_commit_publishes_none_of_the_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ws = raw_workspace(tmp_path)
     events = Events(monkeypatch, syncfs_failures=[None, None, errno.EIO])
@@ -835,6 +851,7 @@ def test_job_submit_closes_a_batch_ten_seconds_after_its_first_payload(
     assert len(ready(ws)) == 3
 
 
+@pytest.mark.usefixtures("not_zfs")
 def test_job_submit_stops_at_a_failed_batch_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1130,6 +1147,7 @@ def test_job_submit_reports_a_copy_submitted_all_the_same(
     assert_nothing_left(ws)
 
 
+@pytest.mark.usefixtures("not_zfs")
 @pytest.mark.parametrize("strategy", ["syncfs", "fsync"])
 def test_a_single_copy_s_failed_commit_suggests_the_settings_only_under_syncfs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strategy: str
