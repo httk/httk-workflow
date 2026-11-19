@@ -19,7 +19,9 @@ A push's segments may be staged (``stage``: received, committed and the first sc
 adopted later on the same connection (``adopt_staged``, one token a request, in staging order; plan
 WORKFLOW_TRANSFER_SESSION §7.10). Tokens are connection-local; a ``bye`` (before it answers) or the end of the input
 abandons the stages whose adoption never began (their landings discarded); after a fatal op, or when the process
-ends otherwise, they are left to recovery, which discards them. While ``stage`` and ``adopt_staged`` run,
+ends otherwise, they are left to recovery, which discards them. A push's own stages defer their landing's sync commit
+to their ``adopt_staged`` (``defer_commit``; plan §7.11, T6c-lite); a commit failing there leaves a retry slot that
+only the next request may use (:func:`_stage`'s ``retry_of``). While ``stage`` and ``adopt_staged`` run,
 every directory they list (the settle's scans, the presence lookups, any placement) advances the current phase's
 count by one (``_kernel.listing_progress``), so that a slow listing of a large placement is not taken for a stall.
 
@@ -85,7 +87,8 @@ class Refused(Exception):
     """Raised by an op to refuse its request: the response is ``ok: false`` with *error* and *members*.
 
     The request is answered normally (its unread upload discarded, an open download aborted), and the session goes
-    on. Nothing may have changed when an op refuses.
+    on. Nothing may have changed when an op refuses, except for ``adopt_staged``'s ``sync_failed`` refusal, which
+    gave up the stage it consumed (see :func:`_adopt_staged`).
 
     :param error: Why the request was refused.
     :param **members: Further response members; ``ok`` and ``fatal`` are reserved.
@@ -122,6 +125,9 @@ class Request:
         self.session: dict[str, Any] = {} if session is None else session
         self._frames = frames
         self._download: StreamWriter | None = None
+        #: The retry slot the previous request left (:func:`_adopt_staged`), if any: only this request may use it
+        #: (:func:`_answer` takes it out of the session for every request).
+        self.retry_slot: _Slot | None = None
         self._lock = threading.Lock()
         self._phase: tuple[str, int | None] = (str(header.get("op")), None)
         self._discarding = False
@@ -303,6 +309,20 @@ class _Staged(NamedTuple):
     size: int
 
 
+class _Slot(NamedTuple):
+    """The retry slot a deferred stage's late ``sync_failed`` leaves (plan WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite
+    amendment): the consumed token and the transfer ids it was staged with. Only the very next request may use it:
+    a ``stage`` with ``retry_of`` naming that token, ``sync: fsync`` and exactly those ids, which then takes the
+    head of the staging order."""
+
+    token: str
+    transfer_ids: tuple[str, ...]
+
+
+#: The session state's key of the retry slot.
+_SLOT = "retry_slot"
+
+
 def _stages(request: Request) -> dict[str, _Staged]:
     """The session's staged segments not yet adopted, by token, in staging order."""
 
@@ -329,7 +349,8 @@ def _stage(request: Request) -> Mapping[str, Any]:
     ``adopt_staged`` (:func:`~httk.workflow.workflow_cli._job.stage_stream`; plan WORKFLOW_TRANSFER_SESSION §7.10).
 
     Header: ``workspace``, ``sync`` (``"fsync"`` or absent), ``transfer_ids`` (the bundles the upload carries, each
-    once, none staged already in this session) and ``bytes`` (their landed regular-file bytes). A header that breaks
+    once, none staged already in this session), ``bytes`` (their landed regular-file bytes), and optionally
+    ``defer_commit`` (a boolean) and ``retry_of`` (a token; see below). A header that breaks
     a rule, or a segment beyond the session's capacity (:data:`_STAGES` stages, :data:`_STAGED_BYTES` bytes counting
     the incoming declaration and the staged segments' actual landed bytes; ``capacity: true``; beyond the bytes,
     only a single bundle with nothing staged is admitted), is refused before the upload is used. The stage then
@@ -342,6 +363,17 @@ def _stage(request: Request) -> Mapping[str, Any]:
     so is an upload carrying other bundles than *transfer_ids*. Once an adopted stage of the session could not be
     closed (:func:`_adopt_staged`), every later ``stage`` is refused before its upload is used, with ``unclosed:
     true`` (not ``capacity``): the client stops staging on this connection, the segment's holds kept.
+
+    Plan WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite: with ``defer_commit: true`` (a push's own segments; never a relay's)
+    the answer comes after the extraction, the terminal's validation and the first scan, with the landing's sync
+    barrier left OPEN, its commit deferred to the stage's ``adopt_staged``: the stage is a refusal until its writes
+    have quiesced and its terminal is validated, and a first-scan error is fatal. Such a stage counts against the
+    capacity like any other; abandoning it closes its barrier's descriptor. Without the header (or with ``sync:
+    fsync``, whose inline fsync leaves the commit nothing to do) it commits before it answers. With ``retry_of`` (the
+    token of a deferred stage whose late commit failed), it is that segment's retry: only the very next request after
+    that answer may be one, with ``sync: fsync``, no ``defer_commit`` and exactly that stage's ``transfer_ids``; it is
+    staged at the HEAD of the staging order, so the next ``adopt_staged`` adopts it before any later stage. Any other
+    use of ``retry_of`` is refused before the upload is used, consuming nothing.
     """
 
     header = request.header
@@ -350,6 +382,8 @@ def _stage(request: Request) -> Mapping[str, Any]:
     sync = header.get("sync")
     if sync not in (None, "fsync"):
         raise Refused(f"stage takes sync fsync or none, not {sync!r}")
+    defer = _flag(header, "defer_commit")
+    retry_of = _text(header, "retry_of")
     transfer_ids = _texts(header, "transfer_ids")
     if not transfer_ids or len(set(transfer_ids)) != len(transfer_ids):
         raise Refused("stage needs transfer_ids, each once")
@@ -361,6 +395,17 @@ def _stage(request: Request) -> Mapping[str, Any]:
     upload = request.upload
     if upload is None:
         raise Refused("stage needs an upload")
+    if retry_of is not None:
+        # The retry of a deferred stage whose late commit failed (T6c-lite amendment): only right after that answer,
+        # with an fsync of every file, of exactly its bundles. Anything else consumes nothing.
+        if sync != "fsync" or defer:
+            raise Refused("a stage with retry_of takes sync fsync and no defer_commit; nothing of it was used")
+        slot = request.retry_slot
+        if slot is None or slot.token != retry_of or tuple(transfer_ids) != slot.transfer_ids:
+            raise Refused(
+                "retry_of names no segment this session may retry now (only the request right after its failed "
+                "commit may, with exactly its transfer ids); nothing of it was used"
+            )
     if _unclosed(request.session):
         # Not a capacity refusal: the client stops staging on this connection (its holds stay held).
         raise Refused(
@@ -391,16 +436,26 @@ def _stage(request: Request) -> Mapping[str, Any]:
             finish=upload.finish,
             progress=request.progress,
             primed_devices=_primed(request),
+            defer_commit=defer,
         )
     if stage is None:
         raise Refused(str(document["refused"]), document=document, returncode=2, stderr=stderr.getvalue())
     if document["bundles"] != sorted(transfer_ids):
-        # After the commit: fatal, its owner left for recovery (which discards the landing).
+        # After the commit (or the first scan of a deferred one): fatal, its owner left for recovery (which discards
+        # the landing).
         raise RuntimeError(f"the upload carried the bundles {document['bundles']}, not those its header named")
     # Admitted by the declared bytes; later admissions count what actually landed (hard-link copies included).
     landed = sum(_measure(bundle)[0] for bundle in stage.bundles)
     token = _fs.fresh_token()
-    stages[token] = _Staged(stage, stage.workspace.root.resolve(), tuple(transfer_ids), landed)
+    made = _Staged(stage, stage.workspace.root.resolve(), tuple(transfer_ids), landed)
+    if retry_of is None:
+        stages[token] = made
+    else:
+        # At the head of the staging order, where the failed stage was: adopted before any later stage.
+        later = list(stages.items())
+        stages.clear()
+        stages[token] = made
+        stages.update(later)
     return {
         "token": token,
         "transfer_ids": transfer_ids,
@@ -418,7 +473,13 @@ def _adopt_staged(request: Request) -> Mapping[str, Any]:
     Header: ``workspace``, ``token`` and ``transfer_ids``, which must name the session's oldest staged segment and
     what it was staged with; anything else (an unknown or consumed token, another workspace or other ids, another
     stage first, a workspace sealed since) is refused before anything is touched, and the stage stays. The token is
-    consumed once accepted:
+    consumed once accepted. A stage staged with ``defer_commit`` is then committed first, under the stall-exempt
+    ``sync`` phase (plan WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite): when its ``syncfs`` fails under
+    ``io.sync_errors`` ``fail``, the stage is abandoned (its landing discarded, its descriptor and owner closed),
+    its ids and its bytes stop counting, and the answer is ``ok: false`` with the refusal ``document`` (``bundles``
+    empty, ``workspace_id``, ``refused`` and ``sync_failed: true``), ``returncode`` 2 and ``stderr``; the very next
+    request may then be that segment's retry (``stage`` with ``retry_of``), and any other request gives that up. Any
+    other failure of the commit, or of that disposal, is fatal. Otherwise
     the response is the adoption ``document`` (as ``job adopt --json`` prints it, with ``workspace_id``), its
     ``returncode`` and the captured ``stderr``, and an error from then on is fatal,
     except one closing the stage after its adoption: that one is reported in ``stderr`` (a ``warning:`` line), the
@@ -449,12 +510,20 @@ def _adopt_staged(request: Request) -> Mapping[str, Any]:
         raise Refused(f"{exc}; nothing was adopted") from None
     if Path(root).resolve() != entry.root:
         raise Refused("the stage was made in another workspace; nothing was adopted")
-    from ._job import adopt_stage
+    from ._job import adopt_stage, sync_stage
 
-    del stages[token]  # consumed: from here on, an error is fatal
     with _captured() as stderr, _kernel.listing_progress(request.advance):
+        # A deferred commit first (the stall-exempt sync phase): from here on, an error is fatal.
+        refusal = sync_stage(entry.stage, progress=request.progress)
+        del stages[token]  # consumed; after a failed commit, only once its landing was disposed of
         # Closed inside the request (its ticker and capture): a close error is reported in stderr, never fatal.
-        document, returncode, unclosed = adopt_stage(entry.stage, progress=request.progress)
+        adopted = None if refusal is not None else adopt_stage(entry.stage, progress=request.progress)
+    if adopted is None:
+        assert refusal is not None
+        # The expected durability failure: nothing adopted, the stage gone. Its retry may follow, next, only.
+        request.session[_SLOT] = _Slot(token, entry.transfer_ids)
+        raise Refused(str(refusal["refused"]), document=refusal, returncode=2, stderr=stderr.getvalue())
+    document, returncode, unclosed = adopted
     if unclosed is not None:
         _unclosed(request.session).append(entry.stage)  # no later stage is admitted; closed once more at the end
     return {"document": document, "returncode": returncode, "stderr": stderr.getvalue()}
@@ -1380,6 +1449,8 @@ def _answer(ops: Mapping[str, Op], request: Request) -> dict[str, Any]:
     :raises TypeError: If the op returned no mapping or set a reserved member (fatal).
     """
 
+    # The retry slot is the next request's only: any other request than the retry drops it.
+    request.retry_slot = request.session.pop(_SLOT, None)
     name = request.header.get("op")
     op = ops.get(name) if isinstance(name, str) else None
     if op is None:

@@ -316,10 +316,11 @@ def test_a_failed_commit_is_delivered_again_from_the_same_relay_with_fsync(
     sources: list[tuple[str, bool]] = []
     real = transfer_cli._session_stage  # DST stages each segment (plan §7.10)
 
-    def session_stage(*arguments: Any) -> Any:
+    def session_stage(*arguments: Any, **options: Any) -> Any:
+        assert "defer_commit" not in options and not options.get("defer")  # a relay never defers its commit
         path = Path(arguments[4][0].path)
         sources.append((str(path.parent), path.is_dir()))
-        return real(*arguments)
+        return real(*arguments, **options)
 
     monkeypatch.setattr(transfer_cli, "_session_stage", session_stage)
     plan = jobs(ends.near, 3)

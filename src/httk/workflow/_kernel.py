@@ -1671,21 +1671,25 @@ def scan_first(
     return _first_scan(workspace, wanted, normalized, include_owned=include_owned, settle=True)
 
 
-def scan_final(workspace: KernelWorkspace, first: FirstScan) -> dict[str, JobRef]:
+def scan_final(workspace: KernelWorkspace, first: FirstScan, *, observe: bool = False) -> dict[str, JobRef]:
     """Complete the settled lookup *first* began: wait until its deadline, then list the jobs it missed once more,
     in a final scan (``owned/`` before and after the unowned states, fresh listings).
 
     Observations accumulate: a job the first scan found counts as found, even when the final scan would not see it
-    (it moved since; a fresh lookup re-settles such a miss, see :func:`httk.workflow._moving._presence`).
+    (it moved since; a fresh lookup re-settles such a miss, see :func:`httk.workflow._moving._presence`). When the
+    first scan found every job, nothing is listed again.
 
     :param workspace: The workspace.
     :param first: The first scan (:func:`scan_first`).
+    :param observe: Something happened since the first scan that the jobs it missed must be observed after (a
+        landing's deferred commit; plan WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite): they are listed once more even
+        when the first scan was final already (a deadline of zero).
     :return: The references either scan found, by job UUID (a later observation replaces an earlier one).
     """
 
     found = dict(first.found)
     missing = first.wanted - found.keys()
-    if first.final or not missing:
+    if not missing or (first.final and not observe):
         return found
     while (remaining := first.deadline - time.monotonic()) > 0:
         _pause(remaining)

@@ -837,8 +837,13 @@ kinds of failure differ:
   holds' segment, since those are delivered first: they are never taken back
   on an unknown outcome.
 
-After a retried `syncfs` failure every later segment of the session is
-synchronized file by file at once. Under `syncfs` only the first landing of a
+A push from a local workspace (and a pull, here) synchronizes a staged
+segment's landing only when it adopts it, before its second look (see *Staged
+segments*); a failure there gives the segment up and delivers it once more at
+once, with every file synchronized as it is written, adopted before any later
+segment; a remote-to-remote relay synchronizes at its stage. After a retried
+`syncfs` failure every later segment of the session is synchronized file by
+file at once. Under `syncfs` only the first landing of a
 session (and of a pull, or of a local transfer's copies) on a filesystem primes
 its sync barrier with a `syncfs` of its own; the later ones only commit. A
 writeback error recorded on that filesystem before such a landing began can
@@ -860,7 +865,9 @@ Rather than wait for that segment by segment, a push whose DST serves the
 `stage` and `adopt_staged` requests of a transfer session *stages* each
 segment: DST receives it into a landing scratch of its own (held by an owner of
 its own until the segment is adopted or given up), checks the stream's end,
-synchronizes the landing and takes the first look, and answers at once; the
+synchronizes the landing (a push's own segment: only when it is adopted, with
+the second look after that synchronization even at a zero deadline; a relayed
+one: now) and takes the first look, and answers at once; the
 push goes on copying the next segments and has each staged segment adopted
 (`adopt_staged`, one request a segment, in the order they were staged) once its
 deadline has passed, and the rest at the end of the command, across pages. A

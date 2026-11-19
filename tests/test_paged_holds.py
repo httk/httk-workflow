@@ -741,7 +741,14 @@ def test_a_push_s_fsync_after_a_failed_commit_sticks_across_pages(
     plan = jobs(near, 3)
     assert run(project, "--json", "-q", *selected(plan), near_name, f"cluster:{far_name}") == 0
     assert [outcome["status"] for outcome in json.loads(capsys.readouterr().out)["transfers"]] == ["adopted"] * 3
-    assert [header.get("sync") for header in adopts(requests)] == [None, "fsync", "fsync", "fsync"]
+    # The first page's commit, deferred to its adoption (plan §7.11, T6c-lite), fails there: staged once more at once
+    # with fsync as its retry; every page staged after that goes with fsync (with a positive deadline the second page
+    # may be staged, deferred, before the first is adopted).
+    stages = adopts(requests)
+    retry = next(index for index, header in enumerate(stages) if "retry_of" in header)
+    assert stages[retry]["transfer_ids"] == stages[0]["transfer_ids"] and len(stages) == 4
+    assert all(header.get("sync") is None for header in stages[:retry])
+    assert all(header.get("sync") == "fsync" for header in stages[retry:])
     assert_in(far, plan)
 
 

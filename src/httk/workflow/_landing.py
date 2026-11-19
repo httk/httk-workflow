@@ -21,7 +21,7 @@ from . import _fs
 from .errors import StreamAborted, TransferProtocolError
 from .workspace import Workspace
 
-__all__ = ["CommitFailed", "Progress", "StreamRefused", "receive_tar"]
+__all__ = ["CommitFailed", "DeferredCommit", "Progress", "StreamRefused", "receive_tar"]
 
 
 class StreamRefused(ValueError):
@@ -46,6 +46,61 @@ class CommitFailed(StreamRefused):
     (whose fsyncs no foreign error can fail) may succeed. The ``job adopt --json`` refusal document says so with
     ``"sync_failed": true``.
     """
+
+
+class DeferredCommit:
+    """The open sync barrier of a landing whose commit was deferred (:func:`receive_tar` with *defer_commit*; plan
+    WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite): the barrier's descriptor, opened (and primed, or not) before the
+    landing's first byte, stays open until :meth:`commit` or :meth:`close`, so its commit still reports any writeback
+    error recorded on the filesystem since that open, however much later it runs.
+
+    Its owner (a staged segment, :class:`~httk.workflow._moving.Stage`) commits it before anything of the landing is
+    adopted, and closes it when the stage is given up.
+
+    :param barrier: The entered barrier, which this object now owns.
+    :param count: How many regular files the landing's extraction wrote, for the commit's progress line.
+    """
+
+    def __init__(self, barrier: _fs.Barrier, count: int) -> None:
+        self._barrier: _fs.Barrier | None = barrier
+        self._count = count
+
+    @property
+    def open(self) -> bool:
+        """Whether the barrier's descriptor is still open (neither committed nor closed)."""
+
+        return self._barrier is not None
+
+    def commit(self) -> None:
+        """Make the landing durable now (:meth:`httk.workflow._fs.Barrier.commit`, on the descriptor opened before its
+        first byte), then close the descriptor, whatever the outcome.
+
+        :raises CommitFailed: When the barrier's ``syncfs`` commit failed under ``io.sync_errors`` ``fail``: a
+            writeback error on the landing's filesystem, possibly another user's, which a delivery with inline fsync
+            may not meet. Nothing of the landing may be published.
+        :raises httk.workflow._fs.SyncFailed: For any other failure of the commit (under ``ignore``, an unsupported
+            ``syncfs``). Nothing of the landing may be published.
+        :raises ValueError: When it was committed or closed already.
+        """
+
+        barrier = self._barrier
+        if barrier is None:
+            raise ValueError("a deferred commit runs once, and only before it is closed")
+        try:
+            barrier.commit(self._count)
+        except _fs.SyncFailed as exc:
+            if barrier.errors != "fail":
+                raise
+            raise CommitFailed(f"the landing could not be made durable, so nothing of it was used: {exc}") from exc
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        """Close the barrier's descriptor without a commit (nothing synced); a second call does nothing."""
+
+        barrier, self._barrier = self._barrier, None
+        if barrier is not None:
+            barrier.__exit__(None, None, None)
 
 
 #: A Python string literal at the start of a refusal's message: the member name the extraction quotes with ``!r``.
@@ -160,6 +215,7 @@ def receive_tar(
     progress: Progress | None = None,
     quiet: bool = False,
     primed_devices: set[int] | None = None,
+    defer_commit: Callable[[DeferredCommit], object] | None = None,
 ) -> list[str]:
     """Extract the tar *stream* into *landing* (created when absent): the top-level directories it carried, sorted.
 
@@ -173,7 +229,7 @@ def receive_tar(
     :param landing: The directory to extract into.
     :param stream: The binary tar stream, read once.
     :param barrier: The landing is what gets published (the far side of a push): in a durable workspace it is
-        made durable before this returns, through a :class:`~httk.workflow._fs.Barrier` entered before the first
+        made durable before this returns (unless *defer_commit* takes its commit), through a :class:`~httk.workflow._fs.Barrier` entered before the first
         member is extracted (``io.sync`` and ``io.sync_errors`` read afresh); a failed commit refuses the stream
         like a refused member. The ``install`` op leaves it off: its landing is copied into the store, not
         published.
@@ -194,6 +250,13 @@ def receive_tar(
     :param primed_devices: With *barrier*, the transfer's set of filesystems a barrier of it primed already (see
         :class:`~httk.workflow._fs.Barrier`): a transfer session's ``adopt`` and ``stage``, a pull's landings. The
         barrier then primes only the first landing on a filesystem; by default it always primes.
+    :param defer_commit: With *barrier*, in a durable workspace whose barrier resolves to the strategy ``syncfs``:
+        leave the barrier open instead of committing it, and hand it, as a :class:`DeferredCommit`, to this callable
+        once the stream is extracted and its terminal validated (*finish*), just before this returns; the callable
+        then owns it (plan WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite: a push's ``stage`` with ``defer_commit``, a
+        pull's landing). Nothing of the landing is durable until its :meth:`DeferredCommit.commit`. Under ``fsync``
+        (every file synced as it was written) the landing commits here as without it, and without a barrier (a
+        non-durable workspace) it is never called. Anything failing before the hand-over refuses the stream as without it, the barrier closed.
     :return: The names of the top-level directories the stream carried, sorted.
     :raises StreamRefused: For a malformed, aborted or cut stream, a refused member (naming its bundle) or a failed
         sync barrier (:class:`CommitFailed` when the barrier's ``syncfs`` commit failed under ``io.sync_errors``
@@ -224,22 +287,34 @@ def receive_tar(
         if barrier and workspace.durable:
             # --sync fsync only strengthens: inline fsync on the writing descriptors, which no foreign error fails.
             policy: tuple[object, _fs.SyncErrors] = ("fsync", "fail") if force_fsync else workspace.io_sync_policy()
-            with _fs.Barrier(
+            sync = _fs.Barrier(
                 landing, policy[0], errors=policy[1], inline=True, quiet=quiet, primed_devices=primed_devices
-            ) as sync:
+            ).__enter__()
+            deferred: DeferredCommit | None = None
+            try:
                 if force_fsync:
                     sync.reason = "fsync (--sync fsync)"
                 names, count = extract(durable=sync.fsync_inline)
                 if finish is not None:
                     finish()  # the stream is whole before anything of it is committed
-                try:
-                    # Inline, so no walk: only a syncfs commit can fail here, and under ignore only for an
-                    # unsupported syncfs, which a retry would not help.
-                    sync.commit(count)
-                except _fs.SyncFailed as exc:
-                    if sync.errors != "fail":
-                        raise
-                    raise CommitFailed(str(exc)) from exc
+                if defer_commit is not None and sync.strategy == "syncfs":
+                    # Handed over open: its owner commits it before anything of the landing is adopted. Only a
+                    # syncfs commit is worth deferring: under fsync every file was synced as it was written.
+                    handed = DeferredCommit(sync, count)
+                    defer_commit(handed)
+                    deferred = handed
+                else:
+                    try:
+                        # Inline, so no walk: only a syncfs commit can fail here, and under ignore only for an
+                        # unsupported syncfs, which a retry would not help.
+                        sync.commit(count)
+                    except _fs.SyncFailed as exc:
+                        if sync.errors != "fail":
+                            raise
+                        raise CommitFailed(str(exc)) from exc
+            finally:
+                if deferred is None:
+                    sync.__exit__(None, None, None)
         else:
             names, _count = extract(durable=False)
             if finish is not None:

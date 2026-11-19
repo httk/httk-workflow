@@ -108,6 +108,7 @@ from httk.workflow.models import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover
+    from httk.workflow._landing import DeferredCommit
     from httk.workflow.workspace import Workspace
 
 __all__ = [
@@ -1118,16 +1119,19 @@ def settle_first(workspace: "Workspace", bundles: Sequence[Path]) -> FirstSettle
     return FirstSettle(tuple(bundles), tuple(related), scan)
 
 
-def settle_final(workspace: "Workspace", first: FirstSettle) -> Settled:
+def settle_final(workspace: "Workspace", first: FirstSettle, *, observe: bool = False) -> Settled:
     """Complete the settle *first* began: wait until its deadline, take the final scan, and answer as
     :func:`settle_absent` does. The absent ids are those neither scan found.
 
     :param workspace: The workspace the bundles are adopted into.
-    :param first: The first scan (:func:`settle_first`), taken after the bundles were made durable.
+    :param first: The first scan (:func:`settle_first`), taken after the bundles were made durable, or before their
+        deferred commit.
+    :param observe: The bundles were committed after the first scan: the ids it missed are listed once more even at
+        a deadline of zero (:func:`~httk.workflow._kernel.scan_final`).
     :return: The absent job UUIDs, and the bundles to adopt one after another.
     """
 
-    found = _kernel.scan_final(workspace, first.scan)
+    found = _kernel.scan_final(workspace, first.scan, observe=observe)
     return Settled(frozenset(first.scan.wanted - found.keys()), _serial(first.bundles, list(first.related)))
 
 
@@ -1165,6 +1169,12 @@ class Stage:
     adoption began, a bundle taken into an ``adopt`` scratch is reconciled as for any adoption (its publication may
     complete later); what is still in the landing was never taken and is discarded with it.
 
+    A landing received with its commit deferred (plan WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite: a push's ``stage``
+    with ``defer_commit``, a pull's landing) is ``committed`` once its first scan is taken, before it is durable: the
+    stage owns the open barrier (:attr:`deferred`), which :meth:`sync` commits, and only once that commit succeeded
+    may its adoption begin (a failed one, or a barrier closed without one, never allows it); the final scan then observes the ids the first scan missed after that commit, even at a visibility
+    deadline of zero. Abandoning or closing the stage closes the barrier's descriptor.
+
     :param workspace: The adopting workspace.
     :param owner: The stage's own receiver owner, registered for it.
     :param landing: Its ``landing`` scratch, once made; ``None`` while it is not, and for the original holds of a
@@ -1176,7 +1186,14 @@ class Stage:
         self.owner = owner
         self.landing = landing
         self.state: StageState = "received"
+        #: The landing's open sync barrier while its commit is deferred (set before :meth:`commit`), until
+        #: :meth:`sync` commits it.
+        self.deferred: DeferredCommit | None = None
         self._first: FirstSettle | None = None
+        # The first scan was taken before the landing's (deferred) commit.
+        self._observe = False
+        # The deferred commit returned without an error (a failed or closed one never sets it).
+        self._durable = False
 
     @property
     def bundles(self) -> tuple[Path, ...]:
@@ -1193,8 +1210,36 @@ class Stage:
 
         if self.state != "received":
             raise ValueError(f"a {self.state} stage cannot be committed")
+        self._observe = self.deferred is not None
         self._first = settle_first(self.workspace, bundles)
         self.state = "committed"
+
+    @property
+    def synced(self) -> bool:
+        """Whether the landing is durable: it had no deferred commit, or that commit (:meth:`sync`) succeeded. A
+        deferred barrier that failed its commit, or was closed without one, never counts."""
+
+        return self.deferred is None or self._durable
+
+    def sync(self) -> bool:
+        """Commit the landing's deferred sync barrier (:meth:`~httk.workflow._landing.DeferredCommit.commit`) of a
+        ``committed`` stage, closing its descriptor whatever the outcome; nothing to do without one.
+
+        :return: Whether a deferred commit ran.
+        :raises httk.workflow._landing.CommitFailed: When its ``syncfs`` failed under ``io.sync_errors`` ``fail``:
+            the stage must be abandoned, nothing of it adopted.
+        :raises httk.workflow._fs.SyncFailed: For any other failure of the commit; likewise.
+        :raises ValueError: When the stage is not ``committed``.
+        """
+
+        if self.state != "committed":
+            raise ValueError(f"a {self.state} stage cannot be synced")
+        if self.synced:
+            return False
+        assert self.deferred is not None
+        self.deferred.commit()
+        self._durable = True  # only once the commit returned
+        return True
 
     def remaining(self) -> float:
         """Return the seconds until the stage matures (its final scan may start); zero once it has."""
@@ -1205,19 +1250,24 @@ class Stage:
         """Begin the adoption: wait out what is left of the visibility deadline, then take the final scan.
 
         :return: The settled absences of the bundles, for their adoptions (:func:`adopt`'s ``absent``).
-        :raises ValueError: When the stage is not ``committed``.
+        :raises ValueError: When the stage is not ``committed``, or its landing waits for its deferred commit.
         """
 
         if self.state != "committed" or self._first is None:
             raise ValueError(f"a {self.state} stage cannot be adopted")
+        if not self.synced:
+            raise ValueError("a stage whose landing is not durable yet cannot be adopted: sync it first")
         self.state = "adopting"
-        return settle_final(self.workspace, self._first)
+        # After a deferred commit, the ids the first scan missed are observed after it, even at a zero deadline.
+        return settle_final(self.workspace, self._first, observe=self._observe)
 
     def close(self) -> None:
         """End the stage: after its adoption (``adopted``), or abandoning it before (``abandoned``). What is left in
         its landing was never taken (an unstarted copy) and is discarded; the owner closes, reconciling any other
         scratch of it as usual. An error leaves the owner for recovery."""
 
+        if self.deferred is not None:
+            self.deferred.close()  # never committed: nothing of the landing was used
         if self.landing is not None:
             self.owner.discard_scratch(self.landing)
         self.owner.close()

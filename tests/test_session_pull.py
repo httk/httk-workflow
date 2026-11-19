@@ -889,9 +889,9 @@ def test_the_terminal_is_validated_before_the_commit_and_the_commit_before_any_a
     assert durable(project, "--json", *selected(plan), f"cluster:{far_name}", near_name) == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 2
     commit = events.index("commit")
-    # The opening echo's terminal, then the download's, validated before its landing is committed; the adoptions
-    # only after that commit.
-    assert events[:commit] == ["terminal", "terminal"] and "adopt" in events[commit:]
+    # The opening echo's terminal, then the download's, validated before its landing is committed (at its adoption,
+    # plan §7.11, T6c-lite: after the send's answer too); the adoptions only after that commit.
+    assert events[:2] == ["terminal", "terminal"] and "adopt" not in events[:commit] and "adopt" in events[commit:]
     assert_in(near, plan)
 
 
@@ -999,7 +999,9 @@ def test_a_failed_commit_is_fetched_once_more_with_an_fsync_of_every_file_and_la
     assert durable(project, "--json", *selected(plan), f"cluster:{far_name}", near_name) == 0
     captured = capsys.readouterr()
     assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 4
-    assert fsyncs == [False, True, True]
+    # The first landing's commit runs at its adoption (plan §7.11, T6c-lite): with a positive deadline the second
+    # segment may have been fetched (unsynchronized) before it, and the re-fetch follows the failure.
+    assert fsyncs == [False, True, True] or (DEADLINE and fsyncs == [False, False, True])
     assert same_requests(ops(requests), [*PAGE, "send", "send", "release", "send", "release"], DEADLINE)
     assert requests_in_order(requests)
     assert captured.err.count("again, with an fsync of every file") == 1
@@ -1023,14 +1025,21 @@ def test_a_second_failure_after_the_fsync_refetch_stops_the_pull_and_resume_adop
     plan = jobs(far, 2)
     assert durable(project, "--json", "-q", *selected(plan), f"cluster:{far_name}", near_name) == 1
     by_id = {outcome["transfer_id"]: outcome for outcome in outcomes(capsys)["transfers"]}
-    (asked,) = {header["names"][0] for header in sends(requests)}
+    asked = sends(requests)[0]["names"][0]
     later = next(name for name in by_id if name != asked)
     assert by_id[asked]["status"] == "failed" and "an fsync failed" in by_id[asked]["message"]
     assert by_id[later]["status"] == "failed"
-    assert "not delivered, since the transfer session stopped" in by_id[later]["message"]
     assert all("--resume" in outcome["message"] for outcome in by_id.values())
-    # The second segment was never asked for.
-    assert fsyncs == [False, True] and ops(requests) == [*PAGE, "send", "send"]
+    if fsyncs == [False, True]:
+        # The second segment was never asked for (its commit deferred to its adoption, the first one's failure came
+        # before it was fetched: always so with a zero deadline).
+        assert "not delivered, since the transfer session stopped" in by_id[later]["message"]
+        assert ops(requests) == [*PAGE, "send", "send"]
+    else:
+        # Fetched (unsynchronized) before the first one's adoption failed, then given up.
+        assert DEADLINE and fsyncs == [False, False, True]
+        assert "not adopted, since the transfer stopped" in by_id[later]["message"]
+        assert ops(requests) == [*PAGE, "send", "send", "send"]
     assert all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
     assert len(outgoing(far)) == 2 and landing_scratches(near) == []
     monkeypatch.setattr(_landing, "receive_tar", _REAL_RECEIVE)
@@ -1430,8 +1439,9 @@ def test_a_mixed_destination_resume_syncs_every_later_landing_file_by_file_after
     requests = recorded_requests(monkeypatch)
     assert durable(project, "--json", "-q", "--resume", f"cluster:{far_name}") == 0
     assert [outcome["status"] for outcome in outcomes(capsys)["transfers"]] == ["adopted"] * 2
-    # The first destination's landing again with an fsync of every file, and the other destination's directly.
-    assert fsyncs == [False, True, True]
+    # The first destination's landing again with an fsync of every file, and the other destination's directly (with a
+    # positive deadline it may have been fetched, unsynchronized, before the first one's commit failed at adoption).
+    assert fsyncs == [False, True, True] or (DEADLINE and fsyncs == [False, False, True])
     assert same_requests(ops(requests), ["holds_page", "send", "send", "release", "send", "release"], DEADLINE)
     assert requests_in_order(requests)
     assert_in(near, plans[near_name])

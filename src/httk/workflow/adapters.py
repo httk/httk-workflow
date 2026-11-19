@@ -222,7 +222,9 @@ REMOTE_TRANSFER_SESSION_COMMAND = ("httk", "workflow", "transfer-session")
 TRANSFER_SESSION_FORMAT = "httk-workflow-transfer-session"
 #: The transfer protocol: the ``format_version`` the transfer session's hello line names, and the ``protocol`` the
 #: client's first request carries. Both ends must speak exactly this one; there is no range and no optional op.
-TRANSFER_PROTOCOL = 2
+#: Version 3 (plan WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite) added a push's deferred commit (``stage`` with
+#: ``defer_commit``, committed by its ``adopt_staged``) and the retry slot of a late ``sync_failed`` (``retry_of``).
+TRANSFER_PROTOCOL = 3
 
 
 def probe_remote_workspace(

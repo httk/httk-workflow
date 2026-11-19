@@ -280,10 +280,15 @@ comes first (a hold larger than that is a segment of its own; a hold is never
 split). Each segment is its own delivery, with its own archive, landing,
 synchronization, adoption and answer, and its adopted holds are released at
 once after its adoption, so a failure late in a large push costs only the segments it reached.
-A segment is *staged* first (the `stage` request: received, synchronized and its
-jobs looked for once) and adopted with an `adopt_staged` request once the
+A segment is *staged* first (the `stage` request: received and its jobs
+looked for once) and adopted with an `adopt_staged` request once the
 destination's visibility deadline has passed since, while later segments are
-copied. At most 8 staged segments of about 32 GiB in all wait; while those
+copied. A push's own segment is synchronized to disk by its `adopt_staged`,
+first thing, before its jobs are looked for the second time and adopted (so
+about one deadline after it landed, when the system's own writeback has mostly
+run; earlier when the staged segments below fill up or the push ends); a
+segment relayed from a remote source is synchronized before its `stage`
+answers, so that its retry can go from the same relay. At most 8 staged segments of about 32 GiB in all wait; while those
 slots do not fill before the oldest one's deadline passes, a long push waits
 about one deadline in all rather than one a segment (see *Staged segments* in
 {doc}`workflow_cli`). A stop gives up the staged segments not yet adopted: the
@@ -292,7 +297,16 @@ sent, so they are never taken back). A
 push therefore costs one connection and one remote start in every case. A
 failed synchronization of a segment's landing is retried once, as for any push,
 and after that every later segment of the session is synchronized file by file
-at once. When the far side refuses one bundle's member, only that bundle is
+at once. When a push's own segment fails to synchronize in its `adopt_staged`,
+the destination gives it up and keeps one retry slot open for the very next
+request: the push stages the same bundles once more at once, with every file
+synchronized as it is written, as that segment's retry, which the destination
+puts first among its staged segments, and adopts it before any later one, so
+the adoption order holds (an explicitly selected child before its parent). Any
+other request gives the slot up. One write error usually fails every segment
+then staged without a file-by-file synchronization (up to 8), each retried so
+in turn; if a retry fails too, that segment's jobs stay held at the source for
+`--resume` (they were sent, so they are never taken back). When the far side refuses one bundle's member, only that bundle is
 refused (taken back when this run held it) and the rest of its segment is
 delivered once more without it; when it refuses a whole segment (an unknown or
 sealed workspace, a full quota, or, conservatively, a member it cannot attribute
@@ -323,9 +337,11 @@ before anything of it is adopted, and is adopted once the visibility deadline ha
 passed since its jobs were first looked for, while later fetches go on (one
 fetch is reserved before it is asked for; a fetch never splits a bundle, so one
 large bundle can take the staged bytes beyond their 32 GiB until it is
-adopted); the holds it adopted are released on the source right after. A failed synchronization of a landing is fetched once more,
-with every file synchronized as it is written, as every later fetch of the
-session then is. A hold the source cannot send (another actor released it, or
+adopted); the holds it adopted are released on the source right after. A
+landing is synchronized only when it is adopted, first thing; when that fails,
+it is discarded and fetched once more at once, with every file synchronized as
+it is written, as every later fetch of the session then is, and adopted before
+any later landing. A hold the source cannot send (another actor released it, or
 a file of it was replaced or changed size while it was read) fails alone and the
 rest of its segment is fetched once more without it. A source that dies or
 answers something else, or a refusal naming no hold (a full quota here, say),

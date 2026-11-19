@@ -1041,9 +1041,17 @@ def test_a_failed_commit_is_retried_in_its_segment_and_later_segments_fsync_dire
     assert run(project, "--json", *selected(plan), near_name, f"cluster:{far_name}") == 0
     captured = capsys.readouterr()
     assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 6
-    assert [header.get("sync") for header in adopts(requests)] == [None, "fsync", "fsync", "fsync"]
-    assert len({header["token"] for op, header in requests if op == "adopt_staged"}) == 3  # the refused stage: none
-    assert captured.err.count("could not make the delivery durable") == 1
+    # The first segment's commit, deferred to its adoption (plan §7.11, T6c-lite), fails there: it is staged once more
+    # at once with fsync as its retry (adopted before any later segment), and every segment staged after that fsyncs.
+    stages = adopts(requests)
+    retry = next(index for index, header in enumerate(stages) if "retry_of" in header)
+    assert stages[retry]["transfer_ids"] == stages[0]["transfer_ids"] and stages[retry]["sync"] == "fsync"
+    assert all(header.get("defer_commit") is True and "sync" not in header for header in stages[:retry])
+    assert all(header.get("sync") == "fsync" and "defer_commit" not in header for header in stages[retry:])
+    assert len(stages) == 4
+    # One adoption a stage: the failed one answered its late sync_failed.
+    assert len({header["token"] for op, header in requests if op == "adopt_staged"}) == 4
+    assert captured.err.count("could not make a staged segment durable") == 1
     commands = remote.commands()
     assert (len(commands), starts(commands)) == (1, 1)
     assert_in(far, plan)
@@ -1345,7 +1353,9 @@ def test_a_sync_failed_refusal_naming_a_bundle_is_retried_and_never_resent_witho
     plan = jobs(near, 2)
     calls: list[bool] = []
 
-    def session_stage(session: Any, src: Any, dst: Any, arguments: Any, holds: Any, size: int, fsync: bool) -> Any:
+    def session_stage(
+        session: Any, src: Any, dst: Any, arguments: Any, holds: Any, size: int, fsync: bool, **_options: Any
+    ) -> Any:
         calls.append(fsync)  # a stub answer, both times: a failed commit that also names a bundle
         refusal = {"bundles": [], "workspace_id": far.workspace_id, "refused": "syncfs failed", "sync_failed": True}
         return {**refusal, "bundle": holds[0].transfer_id}, ""

@@ -153,25 +153,38 @@ Where the landing was synchronized with one `syncfs` and `io.sync_errors` is
 error may be another user's on the same filesystem, which `syncfs` reports to
 everyone on it:
 
-- a push is delivered once more, the same bundles to a fresh landing at the
-  destination, where every file is synchronized as it is written (which
-  another user's error cannot fail). This is one more request on the push's
-  transfer session, per segment (the segment is staged once more, before
-  anything of it is adopted), and every later segment of the session is
-  then synchronized file by file at once. A
-  push from a remote workspace (remote to remote) delivers its relayed local
-  copies again rather than fetching them anew. If
-  that delivery is refused too, a push from a local workspace takes the jobs
-  it held itself back into the source (`not_moved`; run the transfer again),
-  and from a remote workspace its jobs stay held there (`job transfer
-  --resume`);
-- a pull is fetched once more into a fresh landing: one more request on the
-  pull's transfer session, per segment, with every file synchronized as it is
-  written here, as every later fetch of the session then is, only when needed.
-  If that fails too, the pull stops there (that segment and every later one
-  stay held at the source, and no later page of the selection is held); their
-  jobs stay held at the source, and `job transfer --resume` delivers them
-  again.
+- a push from a local workspace synchronizes each segment's landing only when
+  the destination adopts it, about one visibility deadline after it landed
+  (the destination answers the segment's upload at once, its landing still
+  unsynchronized, and synchronizes it first thing when it is asked to adopt
+  it), so that the system's own writeback has mostly run by then and a
+  storage hiccup has had time to clear; under `io.sync fsync` that changes
+  nothing (every file was synchronized as it was written). When that
+  synchronization fails, nothing of the segment is adopted, and it is
+  delivered once more at once, the same bundles to a fresh landing with every
+  file synchronized as it is written (which another user's error cannot fail),
+  and adopted before any later segment (so an explicitly selected child is
+  still adopted before its parent). One write error usually fails every
+  segment then waiting at the destination (up to 8), each delivered once more
+  in turn; every segment staged afterwards is synchronized file by file at
+  once. If a segment's second delivery is refused too, its jobs stay held at
+  the source for `job transfer --resume` (they were sent, so they are never
+  taken back);
+- a push from a remote workspace (remote to remote) synchronizes each segment
+  as it lands, and a failure is delivered once more from its relayed local
+  copies rather than fetched anew; this is one more request on the
+  destination's transfer session, per segment (the segment is staged once
+  more, before anything of it is adopted), and every later segment is then
+  synchronized file by file at once. If that delivery is refused too, its jobs
+  stay held at the source (`job transfer --resume`);
+- a pull synchronizes each landing here only when it adopts it, as a push
+  does; when that fails, the landing is discarded and fetched once more at once
+  into a fresh landing, with every file synchronized as it is written here (as
+  every later fetch of the session then is), and adopted before any later
+  landing. If that fails too, the pull stops there (that segment and every
+  later one stay held at the source, and no later page of the selection is
+  held); their jobs stay held at the source, and `job transfer --resume`
+  delivers them again.
 
 A failure is not retried otherwise. A destination (or, for a pull, this
 workspace) on `io.sync fsync`, whose per-file errors are exact, fails at once:

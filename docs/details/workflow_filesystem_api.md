@@ -775,11 +775,14 @@ a barrier whose policy is `fail` is retried once by the transfers (under
 transfer's commit, primed or not, which still fails, is not retried; job
 creation, `job submit`, `job adopt PATH` and the store have no retry):
 
-- the far side of a push refuses the stream (landing discarded, the refusal
+- a push's stage that commits before it answers (a relayed segment, or any
+  stage without `defer_commit`; a push from a local source defers its commit,
+  see *Deferred commits* below, whose late failure never takes anything back):
+  the far side refuses the stream (landing discarded, the refusal
   document answered). When the barrier's `syncfs` commit itself raised
   `SyncFailed` under `fail` (and for no other refusal), the refusal document
   carries `"sync_failed": true`. The client (`_adopt_with_retry`, a
-  `bool`-validated marker, acted on only in a refusal) stages the same bundles
+  `bool`-validated marker, acted on only in a stage's refusal) stages the same bundles
   once more on the same transfer session, from the same local directory (a
   remote source's relay copy, not fetched again), with `sync: fsync`, which
   forces the strategy `fsync` for that stage's barrier (inline fsync on the
@@ -792,8 +795,8 @@ creation, `job submit`, `job adopt PATH` and the store have no retry):
   top-level names the stream itself carried (collected by
   `extract_tar(top_level=)`). The second answer is the one answer the
   transfer processes (take-back of the holds a local source made in this run
-  after a refusal, release, and the destination's `workspace_id`); it is never
-  retried. A second answer reporting another `workspace_id` than the first
+  after a refusal of such a synchronous stage, release, and the destination's
+  `workspace_id`); it is never retried. A second answer reporting another `workspace_id` than the first
   one reported keeps the holds for `--resume`: as an unreadable answer when it
   is a refusal, and, when it is a stage, with a message saying that the
   segment was staged by that workspace, not the expected one (nothing of it is
@@ -805,18 +808,65 @@ creation, `job submit`, `job adopt PATH` and the store have no retry):
   attempt named none): a mismatch keeps the holds for `--resume` in the same
   way;
 - a pull over a transfer session (`_pull_over_session`) whose landing's
-  `syncfs` commit failed under `fail` (`_landing.CommitFailed`) discards the
-  landing and fetches that segment's request once more into a fresh landing
-  with `receive_tar(force_fsync=True)`, inline fsync on the writing
-  descriptors, which no foreign error can fail; every later request of the
-  session then goes so too, and a second failure (an inline fsync error, a
-  `StreamRefused` naming no bundle) stops the pull with that segment's holds and
-  every later one's kept at the source (`--resume` delivers them again). A
+  deferred `syncfs` commit failed under `fail` at its adoption
+  (`_landing.CommitFailed`, `_adopt_local_stage`) discards the landing and,
+  only once that disposal succeeded, fetches that request's holds once more
+  (`_repull`) into a fresh landing with `receive_tar(force_fsync=True)`,
+  inline fsync on the writing descriptors, which no foreign error can fail,
+  and adopts it before any later stage; every later request of the session
+  then goes so too. A disposal that fails keeps the holds at the source,
+  names the cleanup's error and stops the pull (a lost owner is fatal); a
+  second failure (an inline fsync error, a `StreamRefused` naming no bundle)
+  stops the pull with that request's holds and every later one's kept at the
+  source (`--resume` delivers them again). A
   remote-to-remote relay has no barrier (a temporary copy); its delivery
   follows the push rule;
 - landing copies are discarded and made once more with an fsync of every file
   (their sources are untouched), the chunk failing with its holds kept if that
   fails, while any other copy error fails the chunk at once.
+
+Deferred commits (transfer protocol 3, plan WORKFLOW_TRANSFER_SESSION §7.11,
+T6c-lite). A push from a local source sends `defer_commit: true` with each
+`stage` it does not synchronize file by file (a relay never does: its retry
+goes from the same relay), and a pull defers its own landings the same way:
+`receive_tar(defer_commit=...)` hands the entered barrier, as a
+`_landing.DeferredCommit`, to the stage (`Stage.deferred`) once the extraction
+and the terminal are done, and the stage answers (the far side) or is queued
+(a pull) with the barrier still open. Only a barrier that resolved to
+`syncfs` is handed over: under `fsync` (`io.sync fsync`, or `auto` where it
+gives `fsync`, as on ZFS) every file was synced as it was written, the landing
+commits inline as before, and the stage holds no descriptor. The stage is
+`committed` once its first scan is taken, but `Stage.begin` refuses to adopt
+it until `Stage.sync` has committed that barrier successfully on the
+descriptor opened before the landing's first byte (`Stage.synced` records
+that success: a failed commit, or a barrier closed without one, never allows
+the adoption); the final scan then observes the ids the first scan missed after the
+commit, even at a zero visibility deadline (`scan_final(observe=True)`; its
+found-id shortcut stays). Abandoning or closing the stage closes the
+descriptor: up to 8 open landing descriptors per session. `primed_devices` is
+still recorded only by a clean prime at the barrier's entry, so a later stage
+on the same filesystem opens unprimed and samples the error state at its
+`stage`; its commit, about a deadline later, reports every writeback error
+recorded on the filesystem since. One such error therefore usually fails every
+deferred stage open at that moment (a cascade, each retried in turn). The far
+side's `adopt_staged` validates the token, workspace, ids and order before it
+consumes anything, then commits under the stall-exempt `sync` phase: a
+`CommitFailed` abandons the stage (its landing discarded) and only then releases
+its ids and bytes, answers the `sync_failed` refusal document, and leaves a
+retry slot (the consumed token and its ids) that only the very next request may
+use: a `stage` with `retry_of` that token, `sync: fsync`, no `defer_commit` and
+exactly those ids, staged at the head of the staging order; any other request
+drops it, and any other `retry_of` is refused before the upload is used. The
+client re-delivers such a segment through `_late_retry` (never through the
+pending-stage queue) and adopts it before any later stage, holding every
+answer that names a workspace to the pinned one (another is an unknown
+outcome that stops the pair); a failed retry keeps its holds (they were sent,
+so they are never taken back). A pull re-fetches (`_repull`) only once the
+failed landing was discarded, and adopts at once; an interrupt between a
+pulled stage's removal from the queue and its adoption (the modifiability
+check, the deferred commit, a failed commit's disposal, the progress line)
+gives the stage up (landing, descriptor, owner) before it propagates. Any other failure of a deferred commit is
+fatal on the far side and stops a pull here, the holds kept.
 
 `syncfs` also flushes other users' dirty data of that filesystem on this node,
 a writeback error of another process on it during the landing fails the

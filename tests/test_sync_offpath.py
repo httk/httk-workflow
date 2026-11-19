@@ -290,9 +290,14 @@ def test_an_error_before_an_unprimed_landing_is_sync_failed_and_the_segment_retr
     assert run(project, "--json", *selected(plan), near_name, f"cluster:{far_name}") == 0
     captured = capsys.readouterr()
     assert [outcome["status"] for outcome in json.loads(captured.out)["transfers"]] == ["adopted"] * 6
-    # The second segment refused as sync_failed, staged once more with fsync, which then sticks.
-    assert [header.get("sync") for header in adopts(requests)] == [None, None, "fsync", "fsync"]
-    assert captured.err.count("could not make the delivery durable") == 1
+    # The second segment's commit (deferred to its adoption, plan §7.11, T6c-lite) refused as sync_failed: staged once
+    # more at once with fsync as its retry, which then sticks for every segment staged after it.
+    stages = adopts(requests)
+    retry = next(index for index, header in enumerate(stages) if "retry_of" in header)
+    assert stages[retry]["transfer_ids"] == stages[1]["transfer_ids"] and stages[retry]["sync"] == "fsync"
+    assert all(header.get("defer_commit") is True for header in stages[:retry])
+    assert all(header.get("sync") == "fsync" for header in stages[retry:]) and len(stages) == 4
+    assert captured.err.count("could not make a staged segment durable") == 1
     assert outgoing(near) == []
 
 

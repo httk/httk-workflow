@@ -2024,6 +2024,7 @@ def stage_stream(
     finish: Callable[[], object] | None = None,
     progress: _landing.Progress | None = None,
     primed_devices: set[int] | None = None,
+    defer_commit: bool = False,
 ) -> tuple[dict[str, object], _moving.Stage | None]:
     """Stage a tar stream of bundles for a later adoption (plan WORKFLOW_TRANSFER_SESSION §7.10, 1a): the
     transfer session's ``stage`` op.
@@ -2033,7 +2034,10 @@ def stage_stream(
     commit), and the first scan of the settle is taken (:meth:`~httk.workflow._moving.Stage.commit`). Until the
     commit any failure refuses the whole stream (after the landing is discarded and the owner closed), with the
     refusal document of :func:`_refusal`; an error after it escapes (the far side fails, its owner left for
-    recovery, which discards the landing).
+    recovery, which discards the landing). With *defer_commit* (plan WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite)
+    the landing's sync barrier is left open, owned by the stage, and committed only by :func:`sync_stage` before
+    its adoption: the stage is a refusal until its writes have quiesced and its terminal is validated, and its
+    first scan, taken before the commit, is fatal as without it.
 
     :param resolve: Returns the adopting workspace (checked to be modifiable); its error refuses the stream.
     :param stream: The binary tar stream.
@@ -2043,6 +2047,8 @@ def stage_stream(
     :param progress: Told the phases of :func:`~httk.workflow._landing.receive_tar`, then ``settle``.
     :param primed_devices: The transfer session's filesystems primed already (see
         :func:`~httk.workflow._landing.receive_tar`).
+    :param defer_commit: Leave the landing's sync commit to :func:`sync_stage` (nothing deferred in a non-durable
+        workspace, or under ``--sync fsync``, whose commit has nothing left to do).
     :return: ``({"bundles": names, "workspace_id"}, stage)``, the names the stream carried sorted; or the refusal
         document and ``None``.
     """
@@ -2056,6 +2062,11 @@ def stage_stream(
         )
         stage.landing = stage.owner.scratch("landing")
         landing = stage.landing / "outgoing"
+        owned = stage
+
+        def hand(deferred: _landing.DeferredCommit) -> None:
+            owned.deferred = deferred  # the stage owns the open barrier: abandoning it closes the descriptor
+
         bundles = _landing.receive_tar(
             workspace,
             landing,
@@ -2065,6 +2076,7 @@ def stage_stream(
             finish=finish,
             progress=progress,
             primed_devices=primed_devices,
+            defer_commit=hand if defer_commit and not force_fsync else None,
         )
     except _ERRORS as exc:
         if stage is not None:
@@ -2076,13 +2088,44 @@ def stage_stream(
     return {"bundles": bundles, "workspace_id": workspace.workspace_id}, stage
 
 
+def sync_stage(stage: _moving.Stage, *, progress: _landing.Progress | None = None) -> dict[str, object] | None:
+    """Commit a staged landing's deferred sync barrier (:meth:`~httk.workflow._moving.Stage.sync`) before its
+    adoption (plan WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite): the transfer session's ``adopt_staged`` op, first.
+
+    A failed ``syncfs`` commit under ``io.sync_errors`` ``fail`` (:class:`~httk.workflow._landing.CommitFailed`,
+    the expected durability failure) abandons the stage (its landing discarded, its descriptor and owner closed)
+    and answers the refusal document of :func:`_refusal`, with ``sync_failed``: nothing of the stage was adopted,
+    and the sender delivers it once more with ``--sync fsync``. A stage without a deferred commit has nothing to do.
+
+    :param stage: The committed stage.
+    :param progress: Told ``sync`` before the commit (a phase without a stall bound).
+    :return: ``None`` once the landing is durable (or was already); else the refusal document.
+    :raises httk.workflow._fs.SyncFailed: For any other failure of the commit (under ``ignore``, an unsupported
+        ``syncfs``), the stage left as it is (its owner for recovery, which discards the landing).
+    :raises Exception: Any error abandoning the stage after a failed commit (nothing of it adopted; its owner left for
+        recovery).
+    """
+
+    if stage.synced:
+        return None
+    if progress is not None:
+        progress("sync", None)
+    try:
+        stage.sync()
+    except _CommitFailed as exc:
+        stage.abandon()  # disposed of before the refusal is answered; an error here escapes
+        return _refusal(exc, stage.workspace)
+    return None
+
+
 def adopt_stage(
     stage: _moving.Stage, *, progress: _landing.Progress | None = None
 ) -> tuple[dict[str, object], int, Exception | None]:
     """Adopt a committed stage (:func:`stage_stream`) once its visibility deadline has run: the transfer session's
     ``adopt_staged`` op.
 
-    It waits out what is left of the deadline (``settle``), takes the final scan and adopts every bundle as
+    Its landing must be durable already (:func:`sync_stage` first, after a deferred commit). It waits out what is
+    left of the deadline (``settle``), takes the final scan and adopts every bundle as
     ``job adopt`` does, except that a bundle bound for another workspace is refused and discarded, then closes the stage.
     An error of the adoption escapes (the far side fails; its adoption is left to recovery). An error closing the
     stage after its adoption (its landing's discard, its owner's close) does not change the adoption: it is

@@ -1889,7 +1889,14 @@ def _stage_local(settled: "_Deliveries", holds: list[_moving.Hold]) -> None:
     _adopt_matured(pair)
 
 
-def _adopt_local_stage(settled: "_Deliveries", stage: _moving.Stage, holds: list[_moving.Hold], *, stop: bool) -> bool:
+def _adopt_local_stage(
+    settled: "_Deliveries",
+    stage: _moving.Stage,
+    holds: list[_moving.Hold],
+    *,
+    stop: bool,
+    late: Callable[[str], bool] | None = None,
+) -> bool:
     """Adopt a stage in this machine's DST once its deadline has run (:meth:`~httk.workflow._moving.Stage.begin`,
     :func:`_adopt_local` for each bundle), recording each hold's adoption entry in *settled*; the stage closes
     either way. A failed adoption fails the holds (some may be adopted: ``--resume`` reports those already
@@ -1898,10 +1905,21 @@ def _adopt_local_stage(settled: "_Deliveries", stage: _moving.Stage, holds: list
     stage that cannot be closed after its adoption keeps its adoption entries, says so in a ``warning:`` line and
     stops the pair (its owner is left for recovery), as a far side's session admits no further stage then.
 
+    A landing whose commit was deferred (a pull's; plan WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite) is committed
+    first (:meth:`~httk.workflow._moving.Stage.sync`). When that fails, the stage is given up (its landing discarded,
+    nothing of it adopted): a failed ``syncfs`` under ``io.sync_errors`` ``fail`` is handed to *late* (whose result
+    is returned) when given; otherwise, and for any other failure of the commit, its holds fail, held, and the
+    pair stops. *late* runs only once the landing was disposed of: when that disposal fails, the holds fail, held,
+    with the cleanup's error, and the pair stops (a lost owner is fatal). An interrupt before the adoption begins
+    (in the modifiability check, the deferred commit, a failed commit's disposal or the progress line) gives the
+    stage up (its landing discarded, a deferred barrier's descriptor closed, its owner closed) before it
+    propagates.
+
     :param settled: The deliveries of the stage's batch.
     :param stage: The committed stage.
     :param holds: Its holds, in the order of its bundles.
     :param stop: Stop the pair when the adoption fails.
+    :param late: Told why the deferred commit failed, after the stage was given up: delivers the holds again.
     :return: Whether the holds were adopted (each its own entry).
     """
 
@@ -1910,19 +1928,55 @@ def _adopt_local_stage(settled: "_Deliveries", stage: _moving.Stage, holds: list
     ids = [hold.transfer_id for hold in holds]
     failure: Exception | None = None
     adopted: list[dict[str, Any]] = []
+    resume = f"`httk job transfer --resume {src.locator} {dst.locator}`"
+    # From here until its adoption begins, the stage is no longer in the pair's queue (its adoption took it out): an
+    # interrupt gives it up here (its landing discarded, a deferred barrier's descriptor closed, its owner closed),
+    # also while a failed commit's landing is being disposed of (abandoning it again is safe).
     try:
-        require_cli_modifiable(workspace)  # as a far side's adopt_staged does, before anything is adopted
-    except _ERRORS as exc:
-        with contextlib.suppress(*_ERRORS):  # an owner that cannot close is left for recovery
+        try:
+            require_cli_modifiable(workspace)  # as a far side's adopt_staged does, before anything is adopted
+        except _ERRORS as exc:
+            with contextlib.suppress(*_ERRORS):  # an owner that cannot close is left for recovery
+                stage.abandon()
+            settled.fail(
+                holds,
+                f"not adopted: {dst.locator} cannot take it any more ({exc}); nothing of it was adopted: deliver it "
+                f"with {resume}",
+            )
+            settled.stopped = settled.stopped or f"{dst.locator}: {exc}"
+            return False
+        failed: Exception | None = None
+        try:
+            stage.sync()  # a deferred commit first; nothing to do otherwise
+        except _ERRORS as exc:
+            failed = exc
+        if failed is not None:
+            # Delivered again only once the landing was disposed of: a cleanup that fails keeps the holds and stops.
+            try:
+                stage.abandon()
+            except _kernel.OwnerLost:  # OwnerDeclaredDead included: this owner is no longer this process's
+                raise
+            except _ERRORS as cleanup:
+                settled.fail(
+                    holds,
+                    f"{failed}; nothing of it was adopted in {dst.locator}, and its landing could not be discarded "
+                    f"({cleanup}; left for recovery): deliver it with {resume}",
+                )
+                settled.stopped = settled.stopped or f"{dst.locator}: a landing could not be discarded: {cleanup}"
+                return False
+        else:
+            _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
+    except (KeyboardInterrupt, SystemExit):
+        with contextlib.suppress(Exception):  # an owner that cannot close is left for recovery
             stage.abandon()
-        settled.fail(
-            holds,
-            f"not adopted: {dst.locator} cannot take it any more ({exc}); nothing of it was adopted: deliver it "
-            f"with `httk job transfer --resume {src.locator} {dst.locator}`",
-        )
-        settled.stopped = settled.stopped or f"{dst.locator}: {exc}"
+        raise
+    if failed is not None:
+        # Disposed of: no longer this stage's to give up (the re-fetch is a stage of its own).
+        if late is not None and isinstance(failed, _landing.CommitFailed):
+            return late(str(failed))
+        settled.fail(holds, f"{failed}; nothing of it was adopted in {dst.locator}")
+        settled.stopped = settled.stopped or f"{dst.locator}: {failed}"
         return False
-    _say(arguments, f"adopting {len(ids)} bundle(s) in {dst.locator}")
     try:
         absent = stage.begin()
         sources = list(stage.bundles)
@@ -2788,10 +2842,14 @@ def _session_stage(
     holds: list[_moving.Hold],
     size: int,
     fsync: bool,
+    *,
+    defer: bool = False,
+    retry_of: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """One ``stage`` request of *holds* (*size* landed bytes) on *session* (plan §7.10): ``{"token", "workspace_id",
-    "matures_in", "bytes"}`` (the bytes that landed) once DST holds the segment committed and its first scan taken, or the checked refusal document
-    (see :func:`_checked_upload`); and the far side's standard error.
+    "matures_in", "bytes", "deferred"}`` (the bytes that landed; whether its commit was deferred) once DST holds the
+    segment committed (or, *deferred*, received with its commit left to its ``adopt_staged``) and its first scan
+    taken, or the checked refusal document (see :func:`_checked_upload`); and the far side's standard error.
 
     :param session: DST's open transfer session.
     :param src: The source end.
@@ -2800,6 +2858,10 @@ def _session_stage(
     :param holds: The segment's holds.
     :param size: Their landed regular-file bytes.
     :param fsync: Ask for ``--sync fsync``.
+    :param defer: Ask DST to defer the landing's commit to the stage's ``adopt_staged`` (``defer_commit``; plan
+        WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite): a push's own segments only, never a relay's.
+    :param retry_of: The token of the deferred stage of these same *holds* whose late commit failed: this stage is
+        its retry (``retry_of``, with *fsync*), staged at the head of DST's staging order.
     :return: The stage (or refusal) document and the far side's standard error.
     :raises _Capacity: When DST refused it for its capacity (nothing of it used).
     :raises _Unclosed: When DST stages nothing more on this session (nothing of it used).
@@ -2811,6 +2873,10 @@ def _session_stage(
     header: dict[str, Any] = {"workspace": dst.plain, "transfer_ids": ids, "bytes": size}
     if fsync:
         header["sync"] = "fsync"
+    if defer:
+        header["defer_commit"] = True
+    if retry_of is not None:
+        header["retry_of"] = retry_of
     response, aborted = _upload_holds(session, "stage", header, holds, src, dst, arguments)
     if response.get("ok") is False and response.get("capacity") is True and "document" not in response:
         raise _Capacity(str(response.get("error")))
@@ -2832,7 +2898,13 @@ def _session_stage(
     except (ValueError, TypeError, WorkflowError) as exc:
         detail = f"{dst.locator} gave no usable adoption report (the stage of a segment: {exc}){aborted}"
         raise _unknown_adoption(detail, src, dst, arguments) from None
-    document = {"token": token, "workspace_id": workspace_id, "matures_in": float(matures), "bytes": landed}
+    document = {
+        "token": token,
+        "workspace_id": workspace_id,
+        "matures_in": float(matures),
+        "bytes": landed,
+        "deferred": defer,
+    }
     return document, str(response.get("stderr", ""))
 
 
@@ -2842,25 +2914,48 @@ def _adopt_staged(
     holds: list[_moving.Hold],
     staged: dict[str, Any],
     err: str,
+    *,
+    size: int,
 ) -> None:
-    """Adopt the segment of *holds* DST staged (*staged*: its token and workspace id; *err* its ``stage``'s standard
-    error) with one ``adopt_staged`` request, and settle it: the answer must be the adoption of exactly those
-    bundles in the pinned workspace, else the outcome is unknown (the holds stay held, the pair stops). A refusal
-    (DST answered without adopting anything: an unknown token, a workspace sealed since) keeps the holds held and
-    stops the pair too. The adopted holds are released at once; a source session that failed in that release stops
-    the pair before anything more is adopted.
+    """Adopt the segment of *holds* DST staged (*staged*: its token, workspace id and whether its commit was
+    deferred; *err* its ``stage``'s standard error) with one ``adopt_staged`` request, and settle it: the answer must
+    be the adoption of exactly those bundles in the pinned workspace, else the outcome is unknown (the holds stay
+    held, the pair stops). A refusal (DST answered without adopting anything: an unknown token, a workspace sealed
+    since) keeps the holds held and stops the pair too. The adopted holds are released at once; a source session
+    that failed in that release stops the pair before anything more is adopted.
+
+    A deferred stage (plan WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite) may instead be refused because its commit
+    failed (a validated ``sync_failed`` refusal of the pinned workspace: nothing of it adopted, its landing gone):
+    it is then delivered once more at once, with an fsync of every file, and adopted before any later stage
+    (:func:`_late_retry`, *size* its landed bytes).
     """
 
     src, dst, arguments = settled.src, settled.dst, settled.arguments
     ids = [hold.transfer_id for hold in holds]
     header = {"workspace": dst.plain, "token": staged["token"], "transfer_ids": ids}
+    # The adoption document, or (a deferred stage's failed commit) the refusal that asks for its retry.
+    document: dict[str, Any] = {}
+    late: dict[str, Any] | None = None
     try:
         try:
             response = session.request("adopt_staged", header)
         except SessionFailed as exc:
             detail = f"the transfer session to {dst.locator} failed while it adopted a staged segment: {exc}"
             raise _unknown_adoption(detail, src, dst, arguments) from None
-        if response.get("ok") is False and "document" not in response:
+        if response.get("ok") is False and "document" in response and staged.get("deferred") is True:
+            # Only a deferred stage's failed commit is refused with a document: anything else is unusable.
+            try:
+                late = _checked_adoption(response.get("document"), ids)
+                if "refused" not in late or late.get("sync_failed") is not True:
+                    raise ValueError("a refusal of a staged segment that is not its failed commit")
+                if late.get("bundle") is not None or late.get("stream_aborted", False) is not False:
+                    raise ValueError("a failed commit naming a bundle or an incomplete stream")
+                if late.get("workspace_id") != staged["workspace_id"]:
+                    raise ValueError(f"a failed commit answered by workspace {late.get('workspace_id')}")
+            except (ValueError, TypeError, WorkflowError) as exc:
+                detail = f"{dst.locator} gave no usable adoption report of a staged segment ({exc})"
+                raise _unknown_adoption(detail, src, dst, arguments) from None
+        elif response.get("ok") is False and "document" not in response:
             # Refused before anything was touched (the far side's rule): the stage stays there, unadopted.
             error = str(response.get("error"))
             refusal = f"{dst.locator} refused to adopt a staged segment: {error}"
@@ -2871,16 +2966,17 @@ def _adopt_staged(
             )
             settled.stopped = settled.stopped or refusal
             return
-        try:
-            if response.get("ok") is not True:
-                raise ValueError(str(response.get("error", "not adopted")))
-            document = _checked_adoption(response.get("document"), ids, exact=True)
-            if "refused" in document:
-                raise ValueError("a refusal after the stage")
-        except (ValueError, TypeError, WorkflowError) as exc:
-            detail = f"{dst.locator} gave no usable adoption report of a staged segment ({exc})"
-            raise _unknown_adoption(detail, src, dst, arguments) from None
-        if (answered := document["workspace_id"]) != staged["workspace_id"]:
+        if late is None:
+            try:
+                if response.get("ok") is not True:
+                    raise ValueError(str(response.get("error", "not adopted")))
+                document = _checked_adoption(response.get("document"), ids, exact=True)
+                if "refused" in document:
+                    raise ValueError("a refusal after the stage")
+            except (ValueError, TypeError, WorkflowError) as exc:
+                detail = f"{dst.locator} gave no usable adoption report of a staged segment ({exc})"
+                raise _unknown_adoption(detail, src, dst, arguments) from None
+        if late is None and (answered := document["workspace_id"]) != staged["workspace_id"]:
             # The jobs arrived, but in another workspace than the one the stage was made in: nothing is released.
             raise RuntimeError(
                 f"{dst.locator} adopted the jobs into workspace {answered}, not the expected workspace "
@@ -2892,12 +2988,98 @@ def _adopt_staged(
         settled.fail(holds, str(exc))
         settled.stopped = settled.stopped or str(exc).split(";", 1)[0]
         return
+    if late is not None:
+        # Before anything later is adopted: this segment again, at once, and adopted first.
+        _late_retry(session, settled, holds, staged, size, str(late["refused"]))
+        return
     done = settled.settle(holds, document)
     _relay(dst, arguments, err + str(response.get("stderr", "")))
     settled.release(done)
     if settled.session is not None and not settled.session.is_open:
         # SRC failed while it released: nothing more is adopted (the queued stages are abandoned, held on SRC).
         settled.stopped = settled.stopped or f"{src.locator}: the transfer session failed while releasing"
+
+
+def _late_retry(
+    session: TransferSession,
+    settled: "_Deliveries",
+    holds: list[_moving.Hold],
+    staged: dict[str, Any],
+    size: int,
+    reason: str,
+) -> None:
+    """Deliver once more the segment of *holds* whose deferred stage (*staged*) DST refused in its ``adopt_staged``
+    because its commit failed (*reason*), and adopt it, before any later stage is adopted (plan
+    WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite and its amendment).
+
+    The retry is a ``stage`` (:func:`_deliver_segment`, *size* its landed bytes) with an fsync of every file and
+    ``retry_of`` the failed stage's token, which DST stages at the head of its staging order, then its own
+    ``adopt_staged`` (:func:`_adopt_staged`): driven directly, never through :func:`_push_segment` or
+    :func:`_make_room`, which could adopt a later stage first. Every later segment of the pair is then synchronized
+    file by file (sticky). It is the segment's only retry: when it fails too, its holds stay held (they were sent, so
+    they are never taken back, and its refusal never settles anything else), with the ``--resume`` remedy; a second
+    failed commit, or an incomplete stream of this side, leaves the pair going on (as a second failure of a
+    segment's commit always does), anything else stops it. Every answer naming a workspace is first held to the
+    pinned one: another is an unknown outcome, which stops the pair with the holds kept.
+
+    :param session: DST's open transfer session.
+    :param settled: The batch's deliveries.
+    :param holds: The segment's holds.
+    :param staged: The failed stage's document (its token and pinned ``workspace_id``).
+    :param size: The holds' landed regular-file bytes.
+    :param reason: Why its commit failed, as DST said.
+    """
+
+    src, dst, arguments = settled.src, settled.dst, settled.arguments
+    resume = f"`httk job transfer --resume {src.locator} {dst.locator}`"
+    settled.fsync = True  # every later segment of the pair goes so
+    _say(
+        arguments,
+        f"{dst.locator} could not make a staged segment durable ({reason}); delivering {len(holds)} bundle(s) "
+        "again, with an fsync of every file, before any later segment is adopted",
+    )
+    failed = f"not adopted: its staged copy in {dst.locator} could not be made durable ({reason}), and"
+    try:
+        document, err = _deliver_segment(session, settled, holds, None, size, True, retry_of=staged["token"])
+        # Every answer naming a workspace is held to the pin before it is classified (as in _adopt_with_retry): another
+        # one is an unknown outcome, which stops the pair with the holds kept.
+        answered = document.get("workspace_id")
+        if answered is not None and answered != staged["workspace_id"]:
+            if "token" in document:
+                raise RuntimeError(
+                    f"{dst.locator} staged the segment's retry in workspace {answered}, not the expected workspace "
+                    f"{staged['workspace_id']}; nothing of it was adopted, and its holds stay held on {src.locator}: "
+                    f"check which workspace {dst.locator} names, then deliver it with {resume}"
+                )
+            detail = (
+                f"{dst.locator} answered the retry of a staged segment as workspace {answered}, its stage as "
+                f"{staged['workspace_id']}"
+            )
+            raise _unknown_adoption(detail, src, dst, arguments)
+    except (_Capacity, _Unclosed) as exc:
+        settled.fail(holds, f"{failed} its delivery again was refused ({exc}): deliver it with {resume}")
+        settled.stopped = settled.stopped or f"{dst.locator}: the retry of a staged segment was refused"
+        return
+    except _ERRORS as exc:
+        settled.fail(holds, str(exc))
+        settled.stopped = settled.stopped or str(exc).split(";", 1)[0]
+        return
+    if "token" not in document:
+        # Refused: nothing of it adopted. Its holds were sent, so they stay held (never taken back), each classified
+        # as the segment's (this run's, or an earlier run's with the conditional remedy), and this refusal settles
+        # nothing else.
+        refused = f"{dst.locator}: {document['refused']}"
+        for hold in holds:
+            if hold.transfer_id in settled.fresh:
+                settled.fail(
+                    [hold], f"{failed} its delivery again was refused too ({refused}): deliver it with {resume}"
+                )
+            else:
+                settled.fail([hold], settled.earlier(hold, refused, document), complete=True)
+        if not document.get("sync_failed") and not document.get("stream_aborted"):
+            settled.stopped = settled.stopped or f"{dst.locator}: {document['refused']}"
+        return
+    _adopt_staged(session, settled, holds, document, err, size=size)
 
 
 def _abandon_staged(
@@ -3170,15 +3352,23 @@ def _deliver_segment(
     base: Path | None,
     size: int,
     fsync: bool,
+    *,
+    retry_of: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """One delivery of a segment for :func:`_adopt_with_retry`: its stage (:func:`_session_stage`, *size* its landed
     bytes; the bundles uploaded from *base*, a remote SRC's relay, when given; DST names the stage's landing itself),
-    recording in *settled* that the session now goes with ``--sync fsync``."""
+    recording in *settled* that the session now goes with ``--sync fsync``. A push's own segment (no *base*) not
+    synchronized file by file asks DST to defer its commit to its adoption (plan WORKFLOW_TRANSFER_SESSION §7.11,
+    T6c-lite); a relay's never does (its retry goes from the same relay, §7.9). *retry_of* makes it the retry of a
+    deferred stage whose late commit failed (:func:`_late_retry`)."""
 
     settled.fsync = settled.fsync or fsync  # a retry after a failed commit: the rest go so too
+    defer = base is None and not fsync and retry_of is None
     if base is not None:
         holds = [replace(hold, path=str(base / hold.transfer_id)) for hold in holds]
-    return _session_stage(session, settled.src, settled.dst, settled.arguments, holds, size, fsync)
+    return _session_stage(
+        session, settled.src, settled.dst, settled.arguments, holds, size, fsync, defer=defer, retry_of=retry_of
+    )
 
 
 def _push_over_session(session: TransferSession, deliveries: list[list[_moving.Hold]], settled: _Deliveries) -> None:
@@ -3197,7 +3387,9 @@ def _push_over_session(session: TransferSession, deliveries: list[list[_moving.H
     that segment's holds and every later one's stay held for ``--resume``. A staged segment's outcome is final only
     after its adoption and release (its refusals are the ``stage`` request's, ruled as above); a stop abandons the staged segments not yet adopted,
     their holds kept for ``--resume`` (they were sent: never taken back), and a lost ``adopt_staged`` answer is an
-    unknown outcome of its segment.
+    unknown outcome of its segment. Each segment's landing commit is deferred to its ``adopt_staged`` (plan §7.11,
+    T6c-lite); one failing there is delivered once more at once and adopted before any later segment
+    (:func:`_late_retry`).
     """
 
     src, dst, arguments = settled.src, settled.dst, settled.arguments
@@ -3302,7 +3494,7 @@ def _push_segment(
                 settled,
                 document["bytes"],  # what landed there, as DST counts it
                 mature_at,
-                partial(_adopt_staged, session, settled, holds, document, err),
+                partial(_adopt_staged, session, settled, holds, document, err, size=size),
                 partial(_abandon_staged, settled, holds, where),
             )
             _stage_pending(pair, stage)
@@ -3341,13 +3533,19 @@ def _receive_part(
     fsync: bool,
     *,
     relay: bool = False,
+    stage: _moving.Stage | None = None,
 ) -> tuple[str, Any]:
     """One ``send`` request of a pull's segment (or of what is left of it) on *session*, received into *landing* in
     the local DST (or, with *relay*, in a relay on the way to a remote DST): what happened, and what it is about.
+    Given the *stage* the landing belongs to (and without *fsync*), the landing's commit is deferred: its open sync
+    barrier is handed to the stage, which commits it before its adoption (plan WORKFLOW_TRANSFER_SESSION §7.11,
+    T6c-lite); abandoning the stage closes it.
 
     The download is extracted into *landing* (:func:`httk.workflow._landing.receive_tar`, the trust boundary), its
     terminal validated, and the landing made durable (a sync barrier entered before its first byte; with *fsync*
-    every file synchronized as it is written instead) before the far side's answer is read. A relay is extracted by
+    every file synchronized as it is written instead) before the far side's answer is read, unless the *stage* takes
+    the commit (see above). Every caller of a local DST gives its stage, so no failed commit is answered here (one
+    would count as a refusal naming no hold). A relay is extracted by
     the same rules and its terminal validated, but nothing is synchronized (:func:`_extract_relay`). SRC may carry
     only a prefix of *holds* (it closes a request at :data:`_SEGMENT_BYTES` or :data:`_SEGMENT_MEMBERS`); its answer
     must name exactly what arrived.
@@ -3358,8 +3556,8 @@ def _receive_part(
     :param landing: The landing directory, which must not exist yet.
     :param fsync: Synchronize every file as it is written.
     :param relay: *landing* is a relay (see above).
+    :param stage: The stage *landing* belongs to, which then takes the landing's deferred commit (see above).
     :return: ``("received", sent)`` (the transfer ids that arrived, a prefix of *holds*, in *landing*);
-        ``("sync", reason)`` (the landing's ``syncfs`` commit failed under ``io.sync_errors`` ``fail``);
         ``("refused", (ids, reason, gone))`` (SRC could not send those holds, *gone* the ones it no longer has, or
         this side refused one's member); ``("failed", reason)`` (this side refused the stream naming no hold);
         ``("systemic", reason)`` (SRC refused the request naming no hold); ``("unknown", reason)`` (the session
@@ -3386,7 +3584,8 @@ def _receive_part(
         if workspace is None:
             received[:] = _extract_relay(landing, stream)
             return
-        # The terminal is validated (stream.finish) before the commit, and the commit precedes the answer.
+        # The terminal is validated (stream.finish) before the commit, and the commit precedes the answer, unless
+        # the stage takes it (deferred to its adoption).
         received[:] = _landing.receive_tar(
             workspace,
             landing,
@@ -3396,7 +3595,12 @@ def _receive_part(
             finish=stream.finish,
             quiet=arguments.quiet,
             primed_devices=settled.pair.primed_devices,
+            defer_commit=None if stage is None or fsync else hand,
         )
+
+    def hand(deferred: _landing.DeferredCommit) -> None:
+        assert stage is not None
+        stage.deferred = deferred  # the stage owns the open barrier: abandoning it closes the descriptor
 
     cause: BaseException | None = None
     try:
@@ -3417,8 +3621,6 @@ def _receive_part(
         if isinstance(cause, _landing.StreamRefused) and cause.stream_aborted:
             session.close()  # it aborted the download all the same: a far side out of step is asked nothing more
             return "unknown", f"{src.locator} aborted the download of a send it answered as complete: {cause}"
-        if isinstance(cause, _landing.CommitFailed):
-            return "sync", str(cause)
         if isinstance(cause, _landing.StreamRefused) and cause.bundle in ids:
             return "refused", ([cause.bundle], f"refused in {where}: {cause}", [])
         return "failed", f"the copy from {src.locator} was refused in {where}: {cause}"
@@ -3432,21 +3634,29 @@ def _receive_part(
 
 
 def _pull_part(
-    source: "_SourceSession", settled: _Deliveries, holds: list[_moving.Hold], fsync: bool
+    source: "_SourceSession",
+    settled: _Deliveries,
+    holds: list[_moving.Hold],
+    fsync: bool,
+    *,
+    direct: bool = False,
 ) -> tuple[str, Any]:
     """Fetch a prefix of *holds* from a remote SRC over a pull's transfer session (*source*) into the landing of a
-    new stage in the local DST (plan §7.10, 1a): its own owner and ``landing`` scratch, the landing made durable, and
+    new stage in the local DST (plan §7.10, 1a): its own owner and ``landing`` scratch, the landing received (made
+    durable at once with *fsync*; otherwise its commit deferred to the stage's adoption, plan §7.11, T6c-lite), and
     only once SRC's answer is validated too (the exact prefix it sent), the first scan of its settle; the stage is
-    then queued on the pair (inside the same guard, so an interrupt always reaches it). Anything else discards the
-    landing and closes the stage's owner.
+    then queued on the pair (inside the same guard, so an interrupt always reaches it), or, *direct*, adopted at
+    once (:func:`_adopt_pulled`, a late retry's: never queued behind, or after, another stage). Anything else
+    discards the landing and closes the stage's owner.
 
     :param source: The pull's transfer session to SRC.
     :param settled: The batch's deliveries.
     :param holds: The holds to fetch, in order.
     :param fsync: Synchronize every landed file as it is written.
-    :return: ``("staged", sent)``: the transfer ids that arrived, staged and queued; or what :func:`_receive_part`
-        says went wrong (nothing staged); ``("failed", reason)`` also when no landing could be made before the request
-        (the owner or its scratch), a local refusal naming no hold.
+    :param direct: Adopt the stage at once rather than queue it.
+    :return: ``("staged", sent)``: the transfer ids that arrived, staged and queued (or adopted, *direct*); or what
+        :func:`_receive_part` says went wrong (nothing staged); ``("failed", reason)`` also when no landing could be
+        made before the request (the owner or its scratch), a local refusal naming no hold.
     :raises WorkflowError: Or another error of the CLI's kinds, when the first scan failed (nothing adopted).
     """
 
@@ -3472,12 +3682,16 @@ def _pull_part(
     landing = stage.landing / "outgoing"
     queued = False
     try:
-        outcome = _receive_part(session, settled, holds, landing, fsync)
+        outcome = _receive_part(session, settled, holds, landing, fsync, stage=stage)
         if outcome[0] == "received":
             sent: list[str] = outcome[1]
             # Only after the download's terminal and SRC's answer (the exact prefix sent) were validated.
             stage.commit([landing / transfer_id for transfer_id in sent])
             part = holds[: len(sent)]
+            if direct:
+                queued = True  # adopted here, outside the queue: the adoption closes the stage itself
+                _adopt_pulled(source, settled, stage, part)
+                return "staged", sent
             pending = _PendingStage(
                 part,
                 settled,
@@ -3503,17 +3717,78 @@ def _adopt_pulled(
     source: "_SourceSession", settled: _Deliveries, stage: _moving.Stage, holds: list[_moving.Hold]
 ) -> None:
     """Adopt a pull's stage in the local DST once its deadline has run (:func:`_adopt_local_stage`) and release its
-    adopted holds on SRC over the pull's transfer session; a session that failed while releasing stops the pull."""
+    adopted holds on SRC over the pull's transfer session; a session that failed while releasing stops the pull.
+    When the landing's deferred commit fails, its holds are fetched once more at once (:func:`_repull`), before
+    any later stage is adopted."""
 
     src = settled.src
     session = source.get()
     assert session is not None
-    if not _adopt_local_stage(settled, stage, holds, stop=False):
+    if not _adopt_local_stage(settled, stage, holds, stop=False, late=partial(_repull, source, settled, holds)):
         return
     ids = [hold.transfer_id for hold in holds]
     settled.release([key for key in ids if settled.entries[key]["status"] in _DELIVERED])
     if not session.is_open:
         settled.stopped = settled.stopped or f"{src.locator}: the transfer session failed while releasing"
+
+
+def _repull(source: "_SourceSession", settled: _Deliveries, holds: list[_moving.Hold], reason: str) -> bool:
+    """Fetch once more the holds of a pull's stage whose deferred commit failed (*reason*; the stage given up, nothing
+    of it adopted), each fetch into a fresh landing with every file synchronized as it is written (as every later
+    fetch of the session then is) and adopted at once, before any later stage is adopted (plan
+    WORKFLOW_TRANSFER_SESSION §7.11, T6c-lite). Unless the pair stopped meanwhile (the holds then stay held on SRC).
+    It is the stage's only retry, ruled as a failed commit's re-fetch in :func:`_pull_over_session`: holds SRC cannot
+    send (or that this side refuses) fail and the rest is not fetched again; anything else stops the pull, the
+    holds left held on SRC.
+
+    :param source: The pull's transfer session to SRC.
+    :param settled: The batch's deliveries.
+    :param holds: The stage's holds, in order.
+    :param reason: Why its commit failed.
+    :return: ``False``: the stage itself adopted nothing (the re-fetch settles the holds).
+    """
+
+    src, dst, arguments = settled.src, settled.dst, settled.arguments
+    resume = f"`httk job transfer --resume {src.locator} {dst.locator}`"
+    if settled.stopped is not None:
+        settled.fail(
+            holds, f"not adopted: {reason}; and the transfer stopped ({settled.stopped}): deliver it with {resume}"
+        )
+        return False
+    _say(
+        arguments,
+        f"copying {len(holds)} bundle(s) from {src.locator} again, with an fsync of every file, before any later "
+        f"segment is adopted: {reason}",
+    )
+    source.fsync = True
+    pending = holds
+    while pending:
+        try:
+            kind, detail = _pull_part(source, settled, pending, True, direct=True)
+        except _ERRORS as exc:
+            settled.fail(pending, str(exc))
+            settled.stopped = settled.stopped or str(exc)
+            return False
+        if kind == "staged":
+            pending = pending[len(detail) :]
+            if pending and settled.stopped is not None:
+                settled.fail(pending, f"not delivered, since {settled.stopped}; deliver it with {resume}")
+                return False
+            continue
+        if kind == "refused":
+            offenders, why, gone = detail
+            _fail_offenders(settled, [hold for hold in pending if hold.transfer_id in offenders], why, gone)
+            left = [hold for hold in pending if hold.transfer_id not in offenders]
+            message = (
+                f"not fetched: a hold fetched again after a failed commit was refused ({offenders[0]}: {why}); it "
+                f"stays held on {src.locator}: --resume retries it"
+            )
+            settled.fail(left, message, complete=True)
+            return False
+        settled.stopped = settled.stopped or str(detail)
+        settled.fail(pending, f"{detail}; nothing of it was adopted in {dst.locator}; deliver it with {resume}")
+        return False
+    return False
 
 
 def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settled: _Deliveries) -> None:
@@ -3522,7 +3797,8 @@ def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settle
     Segments close at :data:`_SEGMENT_BUNDLES`; SRC closes each ``send`` request at :data:`_SEGMENT_BYTES` of landed
     bytes or :data:`_SEGMENT_MEMBERS` archive members (it measures the bundles), so a segment may take several
     requests, each a prefix of what is left of it. Each request has its own landing, staged in the local DST
-    (:func:`_pull_part`, plan §7.10: durable, SRC's answer validated, the first scan of its settle taken) and adopted
+    (:func:`_pull_part`, plan §7.10: received, SRC's answer validated, the first scan of its settle taken; under the
+    ``syncfs`` strategy its commit is deferred to its adoption, plan §7.11, T6c-lite) and adopted
     once the visibility deadline has run from that scan, between later requests (at most :data:`_STAGES` stages and
     :data:`_STAGED_BYTES` landed bytes wait, the incoming request counted at :data:`_SEGMENT_BYTES` (it may carry one
     bundle more, which then exceeds the bytes until it is adopted); the pair adopts the
@@ -3530,9 +3806,11 @@ def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settle
     after its adoption, over the session. A stop abandons the stages not yet adopted (their landings discarded,
     their holds kept on SRC). Per segment:
 
-    - a failed ``syncfs`` commit of a landing (``io.sync_errors`` ``fail``) fetches it once more into a fresh landing
-      with every file synchronized as it is written, as every later request of the session then is (for every
-      destination of the command); a second failure stops the pull as below;
+    - a landing whose deferred ``syncfs`` commit fails at its adoption (``io.sync_errors`` ``fail``) is discarded and
+      fetched once more at once (:func:`_repull`) into a fresh landing with every file synchronized as it is
+      written, as every later request of the session then is (for every destination of the command), and adopted
+      before any later stage; a second failure stops the pull as below (as does a landing that cannot be
+      discarded);
     - holds SRC cannot send (gone from it, or changed while they were read), or whose member this side refuses, fail
       and the rest of the segment is fetched once more without them; after a second such refusal the rest of the
       segment is not fetched (held on SRC; a head-of-line limit until ``--resume``);
@@ -3567,7 +3845,7 @@ def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settle
         which = f" (segment {number} of {len(segments)})" if len(segments) > 1 else ""
         _say(arguments, f"copying {len(segment)} bundle(s) from {src.locator}{which}")
         pending: list[_moving.Hold] = segment
-        retried = resent = False
+        resent = False
         while pending:
             # One fetch reserved: SRC closes it at _SEGMENT_BYTES, or one bundle beyond (never split; documented).
             _make_room(settled.pair, _SEGMENT_BYTES)
@@ -3582,12 +3860,6 @@ def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settle
             if kind == "staged":
                 pending = pending[len(detail) :]
                 _adopt_matured(settled.pair)
-            elif kind == "sync" and not retried:
-                _say(
-                    arguments,
-                    f"copying {len(pending)} bundle(s) from {src.locator} again, with an fsync of every file: {detail}",
-                )
-                retried = source.fsync = True
             elif kind == "refused":
                 offenders, reason, gone = detail
                 _fail_offenders(settled, [hold for hold in pending if hold.transfer_id in offenders], reason, gone)
@@ -3603,9 +3875,8 @@ def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settle
                 resent = True
             else:
                 # SRC refused naming no hold, the session failed, SRC answered something else, this side refused the
-                # stream naming no hold (an inline fsync failing after the re-fetch among them), or no landing could
-                # be made; a second failed commit is not expected after the re-fetch, whose files are fsynced inline,
-                # and stops as well.
+                # stream naming no hold (an inline fsync failing among them), or no landing could be made. A landing's
+                # commit runs at its adoption (deferred) or inline with fsync, so no fetch answers a failed commit.
                 settled.stopped = str(detail)
                 settled.fail(pending, f"{detail}; nothing of it was adopted in {dst.locator}; deliver it with {resume}")
                 break

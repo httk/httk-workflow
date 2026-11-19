@@ -750,7 +750,7 @@ def test_a_refused_adoption_relays_nothing(
     plan = jobs(near, 1)
     refused = {"bundles": [], "workspace_id": far.workspace_id, "refused": "refused the stream: injected"}
 
-    def stage(*_arguments: Any) -> tuple[dict[str, Any], str]:
+    def stage(*_arguments: Any, **_options: Any) -> tuple[dict[str, Any], str]:
         return dict(refused), FAR_SIDE_STDERR  # a segment refused whole, over the push's transfer session
 
     monkeypatch.setattr(transfer_cli, "_session_stage", stage)
