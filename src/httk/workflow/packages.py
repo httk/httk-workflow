@@ -26,7 +26,9 @@ from ._slots import validate_interface
 from ._util import validate_inputs
 from .errors import FormatError
 from .models import (
+    BUDGET_LIMITS,
     RESERVED_WORKFLOW_ENVIRONMENT_PREFIX,
+    RetryPolicy,
     environment_variable_name,
     normalize_resources,
     runner_command_reference,
@@ -817,6 +819,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             "settings",
             "outputs",
             "resources",
+            "retry_policy",
             "steps",
             "requires",
             "calls",
@@ -957,6 +960,19 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         normalize_resources(resources, "[workflow.resources]")
     except FormatError as exc:
         raise _error(root, str(exc)) from exc
+    retry_policy: RetryPolicy | None = None
+    if "retry_policy" in workflow:
+        if recognize is not None:
+            raise _error(root, "a [workflow.recognize] package never runs, so it has no [workflow.retry_policy]")
+        if language_name == "httk-v1":
+            raise _error(root, f"[workflow.retry_policy] is implied by format {language_name!r} (its attempts option)")
+        table = _table(workflow["retry_policy"], "[workflow.retry_policy]", root)
+        _unknown(table, {*BUDGET_LIMITS, "retry_on"}, "[workflow.retry_policy]", root)
+        try:
+            # An empty table declares nothing, exactly as an absent one.
+            retry_policy = RetryPolicy.from_mapping(table) if table else None
+        except FormatError as exc:
+            raise _error(root, str(exc).replace("retry_policy", "[workflow.retry_policy]", 1)) from exc
     step_resources = _validate_steps(
         _table(workflow["steps"], "[workflow.steps]", root) if "steps" in workflow else None,
         steps,
@@ -1134,6 +1150,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         alias=alias,
         steps=steps,
         seal_succeeded=seal_succeeded,
+        retry_policy=retry_policy,
         summary=description,
         inputs=inputs,
         instantiate=lang is not None or instantiate_file is not None,

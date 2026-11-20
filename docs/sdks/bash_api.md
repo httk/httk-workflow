@@ -374,7 +374,7 @@ this attempt's.
 | `--placement PATH` | where the child is created; `<this job's placement>/<this job's key>.children` by default, or this job's placement with workspace setting `children.placement=flat` |
 | `--tag TAG`, `--name NAME` | override what the child is called |
 | `--priority N`, `--claim-pool POOL`, `--capability NAME` | override how the child is scheduled |
-| `--retry-on CODE`, `--max-attempts-per-activation N`, `--max-total-attempts N`, `--max-activations N` | the child's retry policy |
+| `--retry-on CODE`, `--max-attempts-per-activation N`, `--max-total-attempts N`, `--max-activations N` | the child's retry policy; with none of them, the spawning job's |
 | `--resources @FILE.json` | the child's requested resources (`maxtime` and `mintime` as Slurm duration strings) |
 | `--step-resources @FILE.json` | the child's per-step resource requirements (time labels as Slurm duration strings) |
 
@@ -524,7 +524,12 @@ the program's output is forwarded live, in arrival order, to the inherited
 stdout or stderr while only bounded tails are retained in the report. Explicit
 output paths remain authoritative instead of being duplicated to the inherited
 streams. An explicit output file is truncated when the run starts, so a retry in a
-persistent workdir never inherits the previous run's output.
+persistent workdir never inherits the previous run's output. A `SIGTERM` or
+`SIGINT` the bridge receives stops the program's process group, and the bridge
+then ends by that signal without writing the report (status 128 + the signal
+number). A runner under `httk_workflow_main` waits for the command it is
+running, then ends by the same signal and publishes nothing, so a drained or
+cancelled runner ends without an outcome.
 
 A checker spec has format `httk-workflow-checker-spec`, format version 2, an
 `argv` string array, and optional `required` and `sources` fields. Each source

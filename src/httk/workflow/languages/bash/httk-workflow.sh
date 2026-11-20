@@ -16,11 +16,13 @@
 # exactly one published outcome.
 HTTK_WORKFLOW_BASH_API_VERSION=2
 
-# The declared step set of this process, the handler being dispatched, and the
-# file the step subshell records its failing command in. All three are private.
+# The declared step set of this process, the handler being dispatched, the
+# file the step subshell records its failing command in, and the stop signal
+# (TERM or INT) received while the step ran. All four are private.
 _httk_workflow_steps=()
 _httk_workflow_step_name=
 _httk_workflow_trace_file=
+_httk_workflow_stop_signal=
 
 # Describe mode must distinguish a runner that never registered itself from a
 # runner that merely printed something other than its JSON description. Install
@@ -176,6 +178,13 @@ _httk_workflow_trace() {
 _httk_workflow_step_exit() {
     local code=$?
     trap - EXIT
+    if [ -n "$_httk_workflow_stop_signal" ]; then
+        # A stop (drain, cancel, maxtime) publishes nothing: end by the signal, so
+        # the manager classifies the attempt.
+        trap - TERM INT
+        kill -s "$_httk_workflow_stop_signal" "$BASHPID"
+        exit "$code"
+    fi
     if [ "$code" -ne 0 ]; then
         _httk_workflow_bridge abort \
             --exception ShellError \
@@ -225,12 +234,24 @@ httk_workflow_main() {
     _httk_workflow_step_name=step_$step
     _httk_workflow_trace_file=${HTTK_WORKFLOW_CONTROL_DIR:-.}/runner-trace.log
     rm -f "$_httk_workflow_trace_file"
+    # A trapped stop signal waits for the foreground command (a supervised program
+    # being stopped by the bridge), so neither shell dies before that is done; then
+    # both end by the signal. The subshell is not run in a condition, which would
+    # switch off `set -e` inside the step.
+    trap 'trap - TERM INT; kill -s TERM "$BASHPID"' TERM
+    trap 'trap - TERM INT; kill -s INT "$BASHPID"' INT
     (
+        trap '_httk_workflow_stop_signal=TERM; exit 143' TERM
+        trap '_httk_workflow_stop_signal=INT; exit 130' INT
         trap '_httk_workflow_step_exit' EXIT
         set -E
         trap '_httk_workflow_trace' ERR
         "$_httk_workflow_step_name"
     )
+    local status=$?
+    # ponytail: a runner's own TERM/INT traps around httk_workflow_main are reset, not restored.
+    trap - TERM INT
+    return "$status"
 }
 
 httk_workflow_context() {

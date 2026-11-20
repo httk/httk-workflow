@@ -10,6 +10,7 @@ file that survives rotation.
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -347,3 +348,52 @@ def test_captures_truncate_unless_appending(tmp_path: Path) -> None:
     assert out.read_text(encoding="utf-8") == "second\n"
     ProcessSupervisor().run([sys.executable, "-c", "print('third')"], stdout_path=out, append=True)
     assert out.read_text(encoding="utf-8") == "second\nthird\n"
+
+
+def _signal_when_running(pid_file: Path, target: int, signum: int) -> threading.Thread:
+    """Send *signum* to *target* once the supervised sleeper has written its pid."""
+
+    def send() -> None:
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() or not pid_file.read_text(encoding="utf-8").strip():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        os.kill(target, signum)
+
+    thread = threading.Thread(target=send, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_a_stop_signal_is_redelivered_to_the_callers_handler(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.out"
+    received: list[int] = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, frame: received.append(signum))
+    try:
+        sender = _signal_when_running(pid_file, os.getpid(), signal.SIGTERM)
+        report = ProcessSupervisor().run(
+            [sys.executable, _script(tmp_path, "sleeper.py", _SLEEPER)], stdout_path=pid_file, termination_grace=1
+        )
+        sender.join()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert received == [signal.SIGTERM]
+    assert report.termination == f"signal_{int(signal.SIGTERM)}"
+    assert not _alive(int(pid_file.read_text(encoding="utf-8").strip()))
+
+
+def test_a_stop_signal_ends_a_default_disposition_process_after_the_group(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.out"
+    code = (
+        "import sys\nfrom httk.workflow.supervision import ProcessSupervisor\n"
+        f"ProcessSupervisor().run([sys.executable, {_script(tmp_path, 'sleeper.py', _SLEEPER)!r}], "
+        f"stdout_path={str(pid_file)!r}, termination_grace=1)\n"
+        "print('returned')\n"
+    )
+    source = str(Path(__file__).resolve().parents[1] / "src")
+    environment = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [source, os.environ.get("PYTHONPATH")]))}
+    process = subprocess.Popen([sys.executable, "-c", code], env=environment, stdout=subprocess.PIPE)
+    _signal_when_running(pid_file, process.pid, signal.SIGTERM).join()
+    output, _ = process.communicate(timeout=20)
+    assert process.returncode == -signal.SIGTERM and b"returned" not in output
+    assert not _alive(int(pid_file.read_text(encoding="utf-8").strip()))

@@ -267,8 +267,8 @@ class ChildSpec:
 
     A child of a :class:`ChildSpec` runs the spawning job's installed workflow
     (another workflow is started with :meth:`Attempt.call`). Everything not given
-    follows the spawning job: its claim pool, its priority, its resources and
-    its sealing. The child therefore differs from its parent in exactly what the
+    follows the spawning job: its claim pool, its priority, its resources, its
+    retry policy and its sealing. The child therefore differs from its parent in exactly what the
     campaign varies, which is normally only *step* and *parameters*.
 
     :param step: The first step the child runs.
@@ -283,10 +283,14 @@ class ChildSpec:
         omitted; ``maxtime`` and ``mintime`` are Slurm duration strings.
     :param step_resources: Per-step resources requested by the child, or the parent's without
         ``mintime`` when omitted; time labels are spelled as in *resources*.
-    :param maximum_attempts_per_activation: The child's per-activation attempt budget.
-    :param maximum_total_attempts: The child's total attempt budget.
-    :param maximum_activations: The child's activation budget.
-    :param retry_on: Failure codes eligible for manager-detected retry.
+    :param maximum_attempts_per_activation: The child's per-activation attempt budget, or the parent's
+        policy when all four retry fields are omitted; ``1`` gives a child of a retrying parent no retries.
+    :param maximum_total_attempts: The child's total attempt budget, or the parent's policy when all four
+        retry fields are omitted.
+    :param maximum_activations: The child's activation budget, or the parent's policy when all four retry
+        fields are omitted.
+    :param retry_on: Failure codes eligible for manager-detected retry, or the parent's policy when all
+        four retry fields are omitted.
     """
 
     step: str
@@ -338,6 +342,21 @@ class ChildSpec:
                 for step, requirement in self.step_resources.items()
             }
         resources, step_resources = cap_maxtime(resources, step_resources, maxtime_cap)
+        attempts, total, activations, retry_on = (
+            self.maximum_attempts_per_activation,
+            self.maximum_total_attempts,
+            self.maximum_activations,
+            self.retry_on,
+        )
+        if attempts is None and total is None and activations is None and not retry_on:
+            # Nothing given: the child runs the parent's workflow, so the parent's policy describes it too.
+            policy = parent.retry_policy
+            attempts, total, activations = (
+                policy.maximum_attempts_per_activation,
+                policy.maximum_total_attempts,
+                policy.maximum_activations,
+            )
+            retry_on = tuple(sorted(policy.retry_on))
         return JobSpec(
             name=self.name or f"{parent.name}: {self.step} ({label})",
             workflow_id=workflow[0],
@@ -347,10 +366,10 @@ class ChildSpec:
             priority=parent.priority if self.priority is None else self.priority,
             claim_pool=parent.claim_pool if self.claim_pool is None else self.claim_pool,
             required_capabilities=self.required_capabilities,
-            maximum_attempts_per_activation=self.maximum_attempts_per_activation,
-            maximum_total_attempts=self.maximum_total_attempts,
-            maximum_activations=self.maximum_activations,
-            retry_on=self.retry_on,
+            maximum_attempts_per_activation=attempts,
+            maximum_total_attempts=total,
+            maximum_activations=activations,
+            retry_on=retry_on,
             resources=resources,
             step_resources=step_resources,
             parameters=dict(self.parameters),

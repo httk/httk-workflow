@@ -402,9 +402,16 @@ A signal during a drain the deadline started, or a second signal during a
 signal drain, kills the attempts and exits immediately; the jobs it still holds
 are recovered once its death is proven. An attempt the drain stopped that
 published no outcome fails with `owner_lost` (an unclean restart, retried only
-if `retry_policy.retry_on` lists it), unless it had already exceeded its
+if `retry_policy.retry_on` lists it; a package declares it in
+[`[workflow.retry_policy]`](workflow_packages.md#workflowretry_policy)), unless it had already exceeded its
 `maxtime`, which stays `timeout`; an outcome the runner publishes on `SIGTERM`
-wins as usual. After a drain the manager prints
+wins as usual. A runner whose program runs under `ProcessSupervisor` (the
+`httk.codes.<code>` run helpers, `httk_workflow_run`) ends by the `SIGTERM`
+itself once the program is stopped, so it publishes none. During a stop (a
+drain, a cancel, a `maxtime` stop) the manager waits for the attempt's whole
+process group, also after the runner itself has exited, until the stop's grace
+ends and it sends `SIGKILL`; the attempt is committed only once the group is
+gone. After a drain the manager prints
 `drained (<reason>): N attempt(s) left for recovery` instead of the idle
 summary.
 
@@ -540,7 +547,9 @@ Each time label resolves on its own (dynamic requirement, then step, then
 job). A manager enforces `maxtime`: an attempt still running `maxtime` seconds
 after its launch gets `SIGTERM`, then `SIGKILL` after the cancellation grace
 (10 s), and fails with the reserved code `timeout` unless it published an
-outcome meanwhile; `retry_policy.retry_on` can list `timeout`. The attempt is
+outcome meanwhile; `retry_policy.retry_on` (declared in
+[`[workflow.retry_policy]`](workflow_packages.md#workflowretry_policy)) can list
+`timeout`. The attempt is
 told when the `SIGTERM` comes: the context member `deadline`,
 `HTTK_WORKFLOW_DEADLINE` and `Attempt.deadline`. A spawned child never inherits
 `mintime`, and its `maxtime` is capped at the spawning attempt's.

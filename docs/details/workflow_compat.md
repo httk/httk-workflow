@@ -226,7 +226,8 @@ the full store.
 
 #### Resources per job
 
-Every child inherits the package's `[workflow.resources]`. A table under the
+Every child inherits the package's `[workflow.resources]`, and the parent's
+retry policy (`[workflow.retry_policy]`). A table under the
 runner options sets resources per jobflow job:
 
 ```toml
@@ -457,7 +458,10 @@ signal to the attempt does not reach. When `psutil` is installed (custodian
 requires it), a `SIGTERM` or `SIGINT` to a running job is forwarded to every
 such descendant group; every such group is killed after a
 grace period, including members that outlive their leader, before the job
-itself stops.
+itself stops. On an unconfined manager that dies hard (no drain), that VASP can
+outlive the attempt until the allocation ends, so a retried attempt may briefly
+share `run/exec` with it; confined launches and the end of a Slurm allocation
+stop it.
 
 ### httk-v1 package
 
@@ -481,7 +485,7 @@ file = "collect.py"
 
 The directory must contain an executable `ht_steps` or `ht_run`, possibly as
 `.template`. `taskset` selects the claim pool and `attempts` sets the v1 retry
-budget. The realization keeps a persistent `ht.run.current`. The built-in `v1_runner.py`
+budget, so the format refuses `[workflow.retry_policy]`. The realization keeps a persistent `ht.run.current`. The built-in `v1_runner.py`
 runs like any other runner, with no v1-specific manager or capability.
 {doc}`/details/v1_compatibility` covers the environment entries and legacy
 runtime behavior.

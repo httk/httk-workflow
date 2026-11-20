@@ -48,7 +48,8 @@ and the other settings it reads (`settings`),
 hooks that run at instantiation and collection (`[workflow.instantiate]`,
 `[workflow.collect]`), curated postprocess scripts
 (`[workflow.postprocess.NAME]`), a build step for compiled runners
-(`[workflow.build]`), the other workflows it calls (`[workflow.calls]`), and
+(`[workflow.build]`), the other workflows it calls (`[workflow.calls]`), the
+retry policy of its jobs (`[workflow.retry_policy]`), and
 minimum distribution versions (`requires`). Hooks and scripts are executables
 in any language that exchange JSON envelopes.
 

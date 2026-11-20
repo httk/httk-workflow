@@ -2169,6 +2169,32 @@ def test_enter_relocates_a_parent_renamed_before_it_is_anchored(tmp_path: Path) 
 
 
 @NEEDS_JOBFLOW
+def test_enter_starts_from_an_empty_exec_and_fails_when_it_cannot_empty_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def relocate(attempts: int) -> None:
+        raise AssertionError("the parent is located once")
+
+    stub, events = _spooled_child(tmp_path, tmp_path / "parent", relocate)
+    stale = tmp_path / "child" / "exec" / "WAVECAR"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("stale", encoding="utf-8")
+    jobflow_runner.enter(cast(Attempt, stub))
+    assert events == [("succeeded", "")] and not stale.exists()
+
+    stale.write_text("stale", encoding="utf-8")
+    events.clear()
+    stub.fail = lambda code, message, **members: events.append((code, message))
+
+    def refuse(path: object) -> None:
+        raise PermissionError("cannot remove")
+
+    monkeypatch.setattr(jobflow_runner.shutil, "rmtree", refuse)
+    jobflow_runner.enter(cast(Attempt, stub))
+    assert events == [("jobflow.job_failed", "PermissionError: cannot remove")] and stale.exists()
+
+
+@NEEDS_JOBFLOW
 def test_enter_reads_through_the_anchor_after_the_parent_is_renamed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

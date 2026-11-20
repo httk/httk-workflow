@@ -12,7 +12,7 @@ from httk.core.digests import tree_digest
 from attempt_fixtures import new_job
 from httk.workflow import Workspace, _kernel, _store, compat, scaffold
 from httk.workflow._job import JobDefinition
-from httk.workflow.models import MAXIMUM_DECLARATIONS_BYTES
+from httk.workflow.models import MAXIMUM_DECLARATIONS_BYTES, RetryPolicy
 from httk.workflow.packages import (
     load_workflow_package,
     parse_workflow_manifest,
@@ -1092,3 +1092,58 @@ def test_settings_declare_keys_and_environment_entries_count(tmp_path: Path) -> 
 def test_settings_refuse_ill_formed_repeated_and_engine_keys(tmp_path: Path, settings: str, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         parse_workflow_manifest(_package(tmp_path / "invalid", _with_settings(settings)))
+
+
+def test_retry_policy_table_parses_to_the_provider(tmp_path: Path) -> None:
+    table = '\n[workflow.retry_policy]\nretry_on = ["owner_lost", "timeout"]\nmaximum_attempts_per_activation = 3\n'
+    provider = parse_workflow_manifest(_package(tmp_path / "declared", _MANIFEST + table))
+    assert provider.retry_policy == RetryPolicy(3, None, None, frozenset({"owner_lost", "timeout"}))
+    assert parse_workflow_manifest(_package(tmp_path / "absent")).retry_policy is None
+    empty = _MANIFEST + "\n[workflow.retry_policy]\n"
+    assert parse_workflow_manifest(_package(tmp_path / "empty", empty)).retry_policy is None
+    scalar = _MANIFEST.replace("[workflow.runner]", "retry_policy = 3\n\n[workflow.runner]")
+    with pytest.raises(ValueError, match=r"\[workflow\.retry_policy\] must be a table"):
+        parse_workflow_manifest(_package(tmp_path / "scalar", scalar))
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "retry_on = []\nretries = 2\n",
+        "maximum_attempts_per_activation = true\n",
+        "maximum_total_attempts = 0\n",
+        'retry_on = "owner_lost"\n',
+        "retry_on = [1]\n",
+        'retry_on = [""]\n',
+    ],
+)
+def test_retry_policy_table_refuses_ill_formed_members(tmp_path: Path, table: str) -> None:
+    manifest = _MANIFEST + f"\n[workflow.retry_policy]\n{table}"
+    with pytest.raises(ValueError, match=r"\[workflow\.retry_policy"):
+        parse_workflow_manifest(_package(tmp_path / "invalid", manifest))
+
+
+def test_retry_policy_table_is_refused_where_jobs_never_take_it(tmp_path: Path) -> None:
+    table = '\n[workflow.retry_policy]\nretry_on = ["owner_lost"]\n'
+    recognize = _MANIFEST.replace(
+        "[workflow.runner]\nsteps = [\"start\"]\n",
+        '[workflow.recognize]\nfile = "recognize.py"\npriority = 1\nrequires = ["OUTCAR"]\n',
+    )
+    recognize = recognize.replace('[workflow.instantiate]\nfile = "instantiate.py"\n', "")
+    package = _package(tmp_path / "recognize", recognize + table)
+    (package / "recognize.py").write_text("def recognize(directory):\n    return None\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[workflow\.retry_policy\]"):
+        parse_workflow_manifest(package)
+    (package / "httk_workflow.toml").write_text(recognize, encoding="utf-8")
+    assert parse_workflow_manifest(package).retry_policy is None
+
+    v1 = tmp_path / "v1"
+    v1.mkdir()
+    (v1 / "ht_steps").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (v1 / "ht_steps").chmod(0o755)
+    manifest = '[workflow]\nname = "tests.v1"\n\n[workflow.runner]\nformat = "httk-v1"\n'
+    (v1 / "httk_workflow.toml").write_text(manifest + table, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[workflow\.retry_policy\] is implied by format 'httk-v1'"):
+        parse_workflow_manifest(v1)
+    (v1 / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
+    assert parse_workflow_manifest(v1).retry_policy is None

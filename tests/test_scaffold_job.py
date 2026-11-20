@@ -16,7 +16,7 @@ import pytest
 from httk.workflow import Workspace, _kernel, new_job, scaffold_job
 from httk.workflow._job import JobDefinition
 from test_job_creation import install
-from test_scaffold import _relax_package
+from test_scaffold import _RELAX_MANIFEST, _relax_package
 
 _POSCAR = """silicon
 1.0
@@ -105,3 +105,23 @@ def test_scaffold_job_writes_what_new_job_submits(workspace: Workspace, structur
     assert from_new_job["id"] == submitted.job_id
     assert from_scaffold.pop("id") != from_new_job.pop("id")
     assert from_scaffold == from_new_job
+
+
+def test_new_job_writes_the_declared_retry_policy(workspace: Workspace, structure: Path, tmp_path: Path) -> None:
+    manifest = _RELAX_MANIFEST.replace('name = "tests.relax"', 'name = "tests.relax.retry"') + (
+        '\n[workflow.retry_policy]\nretry_on = ["timeout", "owner_lost"]\n'
+        "maximum_attempts_per_activation = 3\nmaximum_activations = 5\n"
+    )
+    install(workspace, _relax_package(tmp_path / "retry", manifest))
+    plain = new_job(workspace, "tests.relax", files={"POSCAR": structure}, tag="plain")
+    declared = new_job(workspace, "tests.relax.retry", files={"POSCAR": structure}, tag="declared")
+
+    def policy(payload: Path) -> object:
+        return json.loads((payload / "job.json").read_text(encoding="utf-8"))["retry_policy"]
+
+    assert policy(plain.payload) == {"retry_on": []}
+    assert policy(declared.payload) == {
+        "maximum_attempts_per_activation": 3,
+        "maximum_activations": 5,
+        "retry_on": ["owner_lost", "timeout"],
+    }

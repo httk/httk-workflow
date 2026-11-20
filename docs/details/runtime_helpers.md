@@ -445,7 +445,12 @@ apply.
 `a.run(argv, timeout=...)` runs an argv array in the workdir and terminates
 its whole process group on timeout. `ProcessSupervisor` adds streamed
 stdout/stderr, followed-file monitoring, process-group timeout handling, and
-versioned executable checkers. A checker receives
+versioned executable checkers. A `SIGTERM` or `SIGINT` that reaches the runner
+during `ProcessSupervisor.run` stops the program's process group, and is then
+re-delivered to the runner: under the default disposition the runner ends by
+it, without an outcome, so a manager drain becomes `owner_lost` and a `maxtime`
+stop `timeout`. A runner that installed its own handler first gets that handler
+called, and the report back with termination `signal_N`. A checker receives
 `httk-workflow-checker-event` version 2 JSON lines and emits
 `httk-workflow-checker-result` version 2 JSON lines. Commands and checker
 commands are always argument arrays; the API does not reproduce the *httk* v1

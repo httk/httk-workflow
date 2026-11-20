@@ -1890,8 +1890,11 @@ class TaskManager:
                 continue
             if _attempt_process.process_group_alive(local.process.pid):
                 # A process the runner left in its group may still write the job: the job is quiescent only
-                # once the whole group is gone.
-                _attempt_process.terminate_process(local.process.pid, signal.SIGKILL)
+                # once the whole group is gone. During a stop (cancel, maxtime, drain) the group may still be
+                # finishing it, e.g. a bridge stopping its supervised program: its kill deadline ends it.
+                stopping = local.timeout_kill_at is not None or (local.interrupted and self._drain_kill_at is not None)
+                if not stopping:
+                    _attempt_process.terminate_process(local.process.pid, signal.SIGKILL)
                 continue
             try:
                 self._finish_attempt(local, return_code)
@@ -2032,11 +2035,12 @@ class TaskManager:
         changed = False
         now = time.monotonic()
         for local in self._running.values():
-            if local.process.poll() is not None:
-                continue
             if local.timeout_kill_at is not None and now >= local.timeout_kill_at:
+                # Also after the leader exited: the rest of its group may still be stopping.
                 local.timeout_kill_at = None
                 _attempt_process.terminate_process(local.process.pid, signal.SIGKILL)
+                continue
+            if local.process.poll() is not None:
                 continue
             if local.maxtime is None or local.timed_out or local.cancel is not None:
                 continue
@@ -2252,9 +2256,11 @@ class TaskManager:
         signalled = 0
         for local in self._running.values():
             _manager_launches.signal_all(self, local, signal_number, "the manager is stopping")
-            if local.process.poll() is not None:
-                continue
+            exited = local.process.poll() is not None
+            # Also after the leader exited: the rest of its group may still be stopping.
             _attempt_process.terminate_process(local.process.pid, signal_number)
+            if exited:
+                continue
             # An attempt a drain stops without an outcome is lost to the manager, not failed by itself.
             local.interrupted = True
             signalled += 1

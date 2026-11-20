@@ -548,6 +548,15 @@ class ProcessSupervisor:
     ) -> ProcessReport:
         """Run one command to completion and return its structured report.
 
+        On the main thread, ``SIGTERM`` and ``SIGINT`` stop the command's process
+        group; once it is reaped and the previous handlers are restored, the first
+        such signal is re-delivered to this process. Under the default disposition
+        the process then ends by that signal (``SIGINT`` raises
+        :class:`KeyboardInterrupt`), so a runner stopped by a manager drain or at
+        ``maxtime`` ends without an outcome. A handler the caller installed
+        beforehand is invoked instead; when it returns, the report is returned with
+        termination ``signal_N``. Off the main thread no handler is installed.
+
         :param argv: Supply the command and arguments.
         :param timeout: Stop the command after this interval.
         :param cwd: Select the command working directory.
@@ -832,6 +841,9 @@ class ProcessSupervisor:
                         _LOGGER.debug("an output handle could not be closed", exc_info=True)
             for restore_signum, handler in previous_handlers.items():
                 signal.signal(restore_signum, handler)
+            if received_signal and previous_handlers:
+                # The stop was meant for this process: re-deliver it now the group is gone.
+                signal.raise_signal(received_signal[0])
 
         assert process is not None
         return ProcessReport(

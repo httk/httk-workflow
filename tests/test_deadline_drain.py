@@ -8,9 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from httk.workflow import TaskManager, Workspace, _manager_scheduling
+from httk.workflow import TaskManager, Workspace, _manager_scheduling, _store
 from httk.workflow.manager import NotIdleError
-from test_manager_scheduling import _doc, _drive_until, _drive_until_running, _failure, _job, _post, _state
+from httk.workflow.scaffold import new_job
+from test_manager_scheduling import _doc, _drive_until, _drive_until_running, _failure, _install, _job, _post, _state
+from v3_helpers import cli_owner
+from v3_helpers import find as _job_ref
 from v3_helpers import workspace as initialize_workspace
 
 pytestmark = [pytest.mark.timing, pytest.mark.xdist_group("heartbeat-timing")]
@@ -69,6 +72,24 @@ def test_deadline_drain_retries_owner_lost_without_claiming_it_again(tmp_path: P
     attempt = _doc(workspace, job_id).attempt
     assert attempt is not None and attempt["ordinal"] == 2 and attempt["started_at"] is None
     assert census.ready_blocked == {"time": {"drain_point": 1}}
+
+
+def test_a_manifest_retry_policy_restarts_a_drained_job_until_its_budget_ends(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "workspace")
+    table = '[workflow.retry_policy]\nretry_on = ["owner_lost"]\nmaximum_attempts_per_activation = 2\n'
+    _install(workspace, tmp_path / "package", _SLEEP, workflow=table)
+    job_id = new_job(workspace, "tests.scheduling", tag="drained").job_id
+    with _manager(workspace, ends_in=3.0) as manager:
+        manager.run_until_idle(timeout=1.0, drain_grace_seconds=0.5)
+    assert _state(workspace, job_id) == "ready"
+    attempt = _doc(workspace, job_id).attempt
+    assert attempt is not None
+    assert (attempt["ordinal"], attempt["reason"], attempt["unclean"]) == (2, "owner_lost", True)
+    # A fresh allocation runs the retry, which is drained again: the per-activation budget of 2 is spent.
+    with _manager(workspace, ends_in=3.0) as manager:
+        manager.run_until_idle(timeout=1.0, drain_grace_seconds=0.5)
+    assert _state(workspace, job_id) == "failed"
+    assert _failure(workspace, job_id)["code"] == "retry_exhausted"
 
 
 def test_deadline_drain_in_serve_returns_on_its_own(tmp_path: Path) -> None:
@@ -214,3 +235,85 @@ def test_operator_cancel_during_a_timeout_grace_ends_cancelled(tmp_path: Path) -
         _post(workspace, job_id, "cancel")
         _drive_until(workspace, manager, job_id, {"cancelled", "failed"})
     assert _state(workspace, job_id) == "cancelled"
+
+
+#: The leader dies at once on SIGTERM; a member it left in its group takes a second to stop, then records when.
+_LINGERING_MEMBER = r"""
+import subprocess
+member = (
+    "import signal, sys, time\n"
+    "from pathlib import Path\n"
+    "def stop(*_):\n"
+    "    time.sleep(1)\n"
+    "    Path('stopped').write_text(repr(time.time()))\n"
+    "    sys.exit(0)\n"
+    "signal.signal(signal.SIGTERM, stop)\n"
+    "Path('member-up').write_text('up')\n"
+    "time.sleep(60)\n"
+)
+subprocess.Popen([sys.executable, "-c", member], cwd=os.environ["HTTK_WORKFLOW_WORKDIR"])
+while not Path("member-up").exists():
+    time.sleep(0.01)
+time.sleep(60)
+"""
+
+
+@pytest.mark.parametrize("stop", ["drain", "cancel"])
+def test_a_stop_waits_for_the_group_after_its_leader_exits(tmp_path: Path, stop: str) -> None:
+    workspace, job_id = _submit(tmp_path, _LINGERING_MEMBER)
+    if stop == "drain":
+        with _manager(workspace, ends_in=3.0) as manager:
+            manager.run_until_idle(timeout=1.0, drain_grace_seconds=5.0)
+        assert _failure(workspace, job_id)["code"] == "owner_lost"
+    else:
+        with TaskManager(workspace, cancel_grace_seconds=5.0, heartbeat_interval=0.01) as manager:
+            _drive_until_running(manager)
+            deadline = time.monotonic() + 10.0
+            while not (_job_ref(workspace, job_id).path / "run" / "member-up").exists():
+                assert time.monotonic() < deadline
+                manager.tick()
+                time.sleep(0.02)
+            _post(workspace, job_id, "cancel")
+            _drive_until(workspace, manager, job_id, {"cancelled"})
+    ref = _job_ref(workspace, job_id)
+    # The member stopped by itself, before the commit: it was not SIGKILLed when the leader exited.
+    stopped = float((ref.path / "run" / "stopped").read_text(encoding="utf-8"))
+    assert (ref.path / "state.json").stat().st_mtime >= stopped
+
+
+_BASH_RUNNER = """#!/usr/bin/env bash
+set -euo pipefail
+source "$HTTK_WORKFLOW_BASH_API"
+httk_workflow_runner tests.bash.drain start
+step_start() {
+    httk_workflow_run --report report.json -- bash -c 'echo $$ >program.pid; exec sleep 30'
+    httk_workflow_succeed
+}
+httk_workflow_main
+"""
+
+
+def test_a_drained_bash_runner_publishes_nothing_and_its_program_is_stopped(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "workspace")
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "httk_workflow.toml").write_text(
+        '[workflow]\nname = "tests.bash.drain"\n[workflow.runner]\nsteps = ["start"]\n'
+        '[workflow.retry_policy]\nretry_on = ["owner_lost"]\n',
+        encoding="utf-8",
+    )
+    (package / "run").write_text(_BASH_RUNNER, encoding="utf-8")
+    (package / "run").chmod(0o755)
+    with cli_owner(workspace) as owner:
+        _store.install(workspace, owner, package)
+    job_id = new_job(workspace, "tests.bash.drain", tag="bash").job_id
+    with _manager(workspace, ends_in=4.0) as manager:
+        manager.run_until_idle(timeout=1.0, drain_grace_seconds=5.0)
+    ref = _job_ref(workspace, job_id)
+    assert ref.state == "ready"
+    attempt = _doc(workspace, job_id).attempt
+    assert attempt is not None and attempt["reason"] == "owner_lost"
+    assert "no_outcome" not in (ref.path / "state.json").read_text(encoding="utf-8")
+    program = int((ref.path / "run" / "program.pid").read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(program, 0)

@@ -95,6 +95,7 @@ and output relationships are all validated before a provider is returned.
 | `declaration_uri` | no | String `$id` for the generated or external workflow declaration. |
 | `declaration_file` | no | Relative regular-file member containing an externally authored OPTIMADE-format workflow declaration JSON. |
 | `resources` | no | Default resource requirements: a table mapping resource labels to non-negative integers, or to Slurm duration strings for `maxtime` and `mintime`. |
+| `retry_policy` | no | The retry policy every job of the package is created with; see [`[workflow.retry_policy]`](#workflowretry_policy). |
 | `steps` | no | Per-step resource overrides. Valid only with an executable runner, and only for names in its declared `steps` list. |
 | `calls` | no | The sub-workflows this one calls: a `[workflow.calls]` table mapping an alias to a workflow name or commit-pinned git URI. |
 | `settings` | no | The workspace settings the workflow reads, as a list of unique dotted names outside *httk-workflow*'s namespaces; see [`settings`](#settings). |
@@ -112,6 +113,10 @@ requires = ["httk-workflow>=2.2.0"]
 [workflow.resources]
 procs = 4
 mem = 4096
+
+[workflow.retry_policy]
+retry_on = ["owner_lost"]
+maximum_attempts_per_activation = 3
 
 [workflow.steps.relax.resources]
 procs = 8
@@ -231,6 +236,55 @@ Here `relax` and `analyse` override the defaults. The manager's advertised
 capacities decide whether each activation fits. The time labels resolve one by
 one rather than as a whole table, so `relax` keeps the 24-hour `maxtime`; they
 are never counted against a manager's capacity.
+
+### `[workflow.retry_policy]`
+
+The table declares the retry policy of every job created from the package:
+
+```toml
+[workflow.retry_policy]
+retry_on = ["owner_lost"]
+maximum_attempts_per_activation = 3
+# maximum_total_attempts = 10
+# maximum_activations = 50
+```
+
+Its keys are the four members of the `job.json` `retry_policy`, written there
+unchanged: `retry_on`, an array of nonempty failure codes, and the limits
+`maximum_attempts_per_activation`, `maximum_total_attempts` and
+`maximum_activations`, each an integer of at least 1. An absent limit is
+unbounded. Without the table, or with an empty one, a job retries nothing.
+
+`retry_on` lists codes of manager-detected failures (see
+[Exit without an outcome](workflow_filesystem_api.md#exit-without-an-outcome)).
+The usual declaration is `retry_on = ["owner_lost"]` with
+`maximum_attempts_per_activation`, which restarts a job whose manager died, or
+drained it at the end of its allocation. A failure a runner publishes with
+`retryable: true` is retried whatever `retry_on` says, within the same budgets.
+`timeout` and `process_failure` can be listed too, but a plain re-run usually
+repeats them. A runner that launches its program with `ProcessSupervisor` (the
+`httk.codes.<code>` run helpers) ends without an outcome on a drain, so its job
+is retried under `retry_on = ["owner_lost"]`; a runner that publishes an
+outcome on `SIGTERM` is not.
+
+A retry is a new attempt of the same step in the same job directory. Nothing
+the ended attempt wrote there is removed; the new attempt is told through
+`is_unclean_restart` (`HTTK_WORKFLOW_UNCLEAN_RESTART=1`). Declare `owner_lost`
+only for a workflow whose every step can be started again over the files a
+killed attempt left. When an unconfined manager dies hard (killed or crashed,
+not drained), recovery does not stop the dead attempt's processes, which may
+still run when the retry starts in the same directory; under confinement
+(`manager.confine`) or once the batch allocation has ended this cannot happen.
+
+`httk job request set_budget` raises the limits of an existing job (see
+{doc}`/restarting_jobs`); its `retry_on` cannot change, and `set_workflow` keeps
+the job's original `retry_policy`, since `job.json` is not rewritten. A child started with
+`Attempt.call` takes the called workflow's declared policy. A spawned child,
+which runs the same workflow, takes its parent's policy unless its `ChildSpec`
+gives any retry field. `format = "httk-v1"` refuses the table, because its
+`attempts` option sets the policy; `format = "jobflow"` always gives its jobs
+unlimited activations, so `maximum_activations` has no effect there. A
+`[workflow.recognize]` package never runs and refuses the table.
 
 ### `[workflow.runner]`: executable form
 

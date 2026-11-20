@@ -366,6 +366,14 @@ def _input_members(values: object) -> set[str]:
     return members
 
 
+def _remove(path: Path) -> None:
+    """Remove *path*, a directory tree, file or symlink, if it exists; a failed removal raises."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
 def _stage_directory_inputs(anchor: int, members: Iterable[str], root: Path) -> None:
     """Copy staged directory inputs from the parent's anchored ``files/inputs`` into this child's *root*.
 
@@ -382,7 +390,7 @@ def _stage_directory_inputs(anchor: int, members: Iterable[str], root: Path) -> 
     for member in sorted(members):
         port, basename = member.split("/")
         target = root / port / basename
-        shutil.rmtree(target, ignore_errors=True)
+        _remove(target)
         try:
             port_directory = _fs.open_dir_under(anchor, f"{STAGED_DIRECTORY}/{port}")
             try:
@@ -1111,7 +1119,7 @@ def _enter(a: Attempt, parent: Any, anchor: int) -> None:
         blob_store.connect()
         baseline_blobs.update((name, str(item.get("blob_uuid"))) for item in blob_store.query())
     exec_dir = a.workdir / "exec"
-    shutil.rmtree(exec_dir, ignore_errors=True)
+    _remove(exec_dir)
     exec_dir.mkdir(parents=True, exist_ok=True)
     with chdir(exec_dir), _forwarded_stop_signals():
         response = job.run(store=store)

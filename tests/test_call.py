@@ -16,6 +16,7 @@ from httk.core import FileRecord
 from httk.core.storage import content_id
 
 from attempt_fixtures import (
+    CALL_SUB_RUNNER,
     assert_called,
     every_job,
     fabricate,
@@ -222,3 +223,21 @@ def test_call_refuses_an_undeclared_or_uninstalled_workflow(tmp_path: Path) -> N
         attempt.call("sub", label="sub")
     assert not list(attempt.control.glob("outcome.tmp.*"))
     assert not list(attempt.control.glob("call.*"))
+
+
+def test_a_called_child_takes_the_called_workflows_retry_policy(tmp_path: Path) -> None:
+    table = '\n[workflow.retry_policy]\nretry_on = ["owner_lost"]\nmaximum_total_attempts = 4\n'
+    callee = package(tmp_path / "sub", "tests.sub", ["run_sub"], runner=CALL_SUB_RUNNER, extra=table)
+    fabricated = fabricate(tmp_path / "caller", step="start", calls={"sub": callee})
+    # The caller retries differently: its own policy is not the child's.
+    job_json = fabricated.payload / "job.json"
+    document = json.loads(job_json.read_text(encoding="utf-8"))
+    document["retry_policy"] = {"maximum_attempts_per_activation": 9, "retry_on": ["timeout"]}
+    job_json.write_text(json.dumps(document), encoding="utf-8")
+
+    reference = Attempt.initialize(fabricated.environment).call("sub", label="sub")
+    (staged,) = fabricated.control.glob(f"outcome.tmp.*/children/jobs/{reference.job_key}/job.json")
+    assert json.loads(staged.read_text(encoding="utf-8"))["retry_policy"] == {
+        "maximum_total_attempts": 4,
+        "retry_on": ["owner_lost"],
+    }

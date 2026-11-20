@@ -258,6 +258,8 @@ def _attempt(
     context_resources: dict[str, int] | None = None,
     deadline: int | None = None,
     workflow: tuple[str, str] = ("local:tests.sdk", "tests.sdk"),
+    retry_on: tuple[str, ...] = (),
+    maximum_attempts_per_activation: int | None = None,
 ) -> Attempt:
     """Bind one attempt of a fabricated job, without a manager; *workflow* is the launched installation."""
 
@@ -274,6 +276,8 @@ def _attempt(
             environment=environment or {},
             resources=resources or {},
             step_resources=step_resources or {},
+            retry_on=retry_on,
+            maximum_attempts_per_activation=maximum_attempts_per_activation,
         ),
     )
     control = payload / f"attempts/{uuid.uuid4()}"
@@ -327,6 +331,30 @@ def test_child_spec_inherits_job_resource_requirements(tmp_path: Path) -> None:
     spec = child._job_spec(attempt.job, ("local:tests.sdk", "tests.sdk"), "child")
     assert spec.resources == {"procs": 2}
     assert spec.step_resources == {"start": {"mem": 1024}}
+
+
+def test_spawned_child_inherits_the_retry_policy_unless_its_spec_gives_one(tmp_path: Path) -> None:
+    def policies(attempt: Attempt, *specs: ChildSpec) -> list[object]:
+        for index, spec in enumerate(specs):
+            attempt.spawn(spec, label=f"child-{index}")
+        (draft,) = attempt.control.glob("outcome.tmp.*")
+        jobs = [json.loads(path.read_text(encoding="utf-8")) for path in draft.glob("children/jobs/*/job.json")]
+        return [job["retry_policy"] for job in sorted(jobs, key=lambda job: job["tag"])]
+
+    retrying = _attempt(
+        tmp_path / "retrying", step="start", retry_on=("timeout", "owner_lost"), maximum_attempts_per_activation=3
+    )
+    assert policies(
+        retrying,
+        ChildSpec(step="start"),
+        ChildSpec(step="start", maximum_attempts_per_activation=1),
+        ChildSpec(step="start", retry_on=("process_failure",)),
+    ) == [
+        {"maximum_attempts_per_activation": 3, "retry_on": ["owner_lost", "timeout"]},
+        {"maximum_attempts_per_activation": 1, "retry_on": []},
+        {"retry_on": ["process_failure"]},
+    ]
+    assert policies(_attempt(tmp_path / "plain", step="start"), ChildSpec(step="start")) == [{"retry_on": []}]
 
 
 def test_spawned_child_runs_the_launched_installation_not_job_json(tmp_path: Path) -> None:

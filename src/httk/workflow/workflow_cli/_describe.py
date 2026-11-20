@@ -25,7 +25,7 @@ from .._durations import TIME_RESOURCES, format_duration
 from .._manager_scheduling import bound_workflows, effective_workflow
 from ..adapters import probe_remote_workspace, resolve_remote, run_adapter
 from ..introspection import iter_jobs, read_job, read_state
-from ..models import WORKSPACE_DIRECTORY
+from ..models import BUDGET_LIMITS, WORKSPACE_DIRECTORY
 from ..packages import installed_plugin_workflow_owners, installed_plugin_workflows
 from ..registry import WorkspaceBinding
 from ..scaffold import (
@@ -219,6 +219,18 @@ def _description(workflow: ResolvedWorkflow, source_document: Mapping[str, objec
         "initial_step": workflow.initial_step,
         "resources": dict(workflow.resources),
         "step_resources": {step: dict(resources) for step, resources in workflow.step_resources.items()},
+        "retry_policy": (
+            None
+            if workflow.retry_policy is None
+            else {
+                **{
+                    name: getattr(workflow.retry_policy, name)
+                    for name in BUDGET_LIMITS
+                    if getattr(workflow.retry_policy, name) is not None
+                },
+                "retry_on": sorted(workflow.retry_policy.retry_on),
+            }
+        ),
         "build": (
             {
                 "present": True,
@@ -349,6 +361,7 @@ def _render_text(description: Mapping[str, object]) -> str:
                 if step_resources
                 else ""
             ),
+            f"retry_policy: {_value(description['retry_policy'])}" if description["retry_policy"] else "",
             "steps:",
         ]
     )

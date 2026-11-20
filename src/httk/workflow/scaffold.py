@@ -82,6 +82,7 @@ from .errors import DuplicateTagError, FormatError, WorkflowError
 from .models import (
     JOB_WORKFLOW_DIRECTORY,
     LOGS_DIRECTORY,
+    RetryPolicy,
     _reserved_payload_member,
     ensure_step_known,
     expand_runner_command,
@@ -237,6 +238,8 @@ class WorkflowProvider:
     :param step_resources: Declare per-step resource requirements, time labels spelled as in *resources*.
     :param seal_succeeded: Seal a succeeded job of it (``[workflow.runner] seal_succeeded``); ``None``
         leaves it to the workspace setting.
+    :param retry_policy: Give the ``retry_policy`` every job of it is created with
+        (``[workflow.retry_policy]``); ``None`` declares none.
     :param summary: Describe the workflow for callers.
     :param inputs: Map input names to payload destinations or hook handling.
     :param instantiate: Indicate that the workflow has an instantiate hook.
@@ -278,6 +281,7 @@ class WorkflowProvider:
     resources: Mapping[str, int | str] = field(default_factory=dict)
     step_resources: Mapping[str, Mapping[str, int | str]] = field(default_factory=dict)
     seal_succeeded: bool | None = None
+    retry_policy: RetryPolicy | None = None
     summary: str = ""
     inputs: Mapping[str, str | None] = field(default_factory=dict)
     instantiate: bool = False
@@ -640,6 +644,7 @@ class ResolvedWorkflow:
     :param steps: Preserve the steps the runner provides.
     :param resources: Preserve the default resource requirement, time labels in seconds.
     :param step_resources: Preserve per-step resource requirements, time labels in seconds.
+    :param retry_policy: Preserve the declared job retry policy, ``None`` when none is declared.
     :param packaged: Preserve the packaged runner file name when applicable.
     :param runner_package: Preserve the package containing packaged members.
     :param registration_id: Preserve the registration id when applicable.
@@ -682,6 +687,7 @@ class ResolvedWorkflow:
     steps: tuple[str, ...] = ()
     resources: Mapping[str, int] = field(default_factory=dict)
     step_resources: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
+    retry_policy: RetryPolicy | None = None
     packaged: str | None = None
     runner_package: str | None = None
     registration_id: str | None = None
@@ -1125,6 +1131,7 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
         steps=provider.steps,
         resources=resources,
         step_resources=step_resources,
+        retry_policy=provider.retry_policy,
         packaged=None if provider.directory is not None else provider.runner_file,
         registration_id=provider.workflow_id,
         summary=provider.summary,
@@ -1224,6 +1231,7 @@ def resolve_workflow(
                 inputs=provider.inputs,
                 resources=resources,
                 step_resources=step_resources,
+                retry_policy=provider.retry_policy,
                 instantiate=provider.instantiate,
                 declarations=provider.declarations,
                 collector=provider.collector,
@@ -3827,6 +3835,7 @@ def _build_payload(
     if installed.embedded:
         _place_embedded(installed, destination, durable=durable)
         frozen_embedded = {key: value for key, value in installed.record.items() if key != "build"}
+    retry_policy = installed.provider().retry_policy or RetryPolicy(None, None, None, frozenset())
     spec = JobSpec(
         name=name or f"{installed.name}: {tag or 'job'}",
         workflow_id=installed.id,
@@ -3850,6 +3859,10 @@ def _build_payload(
         declarations=_merge_provenance_declaration(workflow.declarations, provenance),
         declared=declared_member,
         seal_succeeded=installed.provider().seal_succeeded,
+        maximum_attempts_per_activation=retry_policy.maximum_attempts_per_activation,
+        maximum_total_attempts=retry_policy.maximum_total_attempts,
+        maximum_activations=retry_policy.maximum_activations,
+        retry_on=tuple(sorted(retry_policy.retry_on)),
         staged_files=_staged_entries(
             destination,
             [*user_files, *(member for member in workflow.inputs.values() if member is not None)],
