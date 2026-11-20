@@ -85,6 +85,7 @@ from ..models import (
 )
 from ..registry import WorkspaceBinding
 from ..removal import (
+    RemovalOutcome,
     RemovalReport,
     RequestOutcome,
     _post_and_serve,
@@ -1721,22 +1722,32 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     return 0
 
 
-def _print_removal_report(refs: Sequence[JobRef], report: RemovalReport) -> int:
-    """Print job removal outcomes and return 1 when one was refused (a queued delete is not refused)."""
+def _print_removal_outcomes(outcomes: Sequence[RemovalOutcome]) -> None:
+    """Print one line per job removal outcome, as the outcomes become known."""
 
-    refused = False
-    for ref, outcome in zip(refs, report.outcomes, strict=True):
+    for outcome in outcomes:
         if outcome.removed:
-            print(f"{outcome.job_key}\t{outcome.kind}\tremoved")
+            # A deleted job's reason says what is left of it (its tree left for workspace gc), if anything.
+            print(
+                f"{outcome.job_key}\t{outcome.kind}\tremoved"
+                + ("" if outcome.reason is None else f"\t{outcome.reason}")
+            )
         elif outcome.request is not None and outcome.request.status == "queued":
             print(f"{outcome.job_key}\t{outcome.kind}\tqueued\t{outcome.reason}")
         elif outcome.request is not None and outcome.request.status == "uncertain":
-            refused = True
             print(f"{outcome.job_key}\t{outcome.kind}\tuncertain\t{outcome.reason}")
         else:
-            refused = True
             print(f"{outcome.job_key}\t{outcome.kind}\trefused\t{outcome.reason}")
+
+
+def _removal_status(report: RemovalReport) -> int:
+    """Print the removal summary and return 1 when a job was refused (a queued delete is not refused)."""
+
     print(f"removed {report.removed_count} of {len(report.outcomes)} job(s)")
+    refused = any(
+        not outcome.removed and (outcome.request is None or outcome.request.status != "queued")
+        for outcome in report.outcomes
+    )
     return 1 if refused else 0
 
 
@@ -1804,7 +1815,8 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
     refs = _resolve_selectors(workspace, context.cwd, arguments.jobs, index)
     if not (arguments.force or arguments.confirmed or _confirm_job_delete([(ref.job_key, ref.state) for ref in refs])):
         return 1
-    return _print_removal_report(refs, _remove_jobs(workspace, refs, index))
+    # Each chunk's outcomes are printed once served, and those known when the command stops before it propagates.
+    return _removal_status(_remove_jobs(workspace, refs, index, report=_print_removal_outcomes))
 
 
 def handle_job_recover(arguments: argparse.Namespace, context: CLIContext) -> int:

@@ -420,9 +420,11 @@ of the job's run, labelled by its payload-relative path (see
 
 After a batch, one final stderr line reports `submitted N jobs`. If a batch
 fails partway, it instead reports `submitted and reported N of M jobs before
-failing` and exits `2`; the error's notes, printed after it, name a job that
-was submitted too without being reported (one named complete before a
-failure, which the command's close publishes). In a batch, `--tag` becomes a
+failing` and exits `2`; the error's notes, printed after it, name by id the
+jobs that were submitted too without being reported (a batch of eight or
+more is submitted as a whole before its jobs are reported), those named
+complete but not published yet (the command's close or recovery publishes
+them), and any whose durability is unresolved. In a batch, `--tag` becomes a
 *prefix* combined with each item's derived tag (`run7-si2o`); for a single
 job, `--tag` is the whole tag.
 
@@ -555,6 +557,29 @@ and withdraws only the requests of jobs it still holds. Under `io.sync`
 `fsync`, on Lustre or any other filesystem without the predicate, in a
 workspace that is not durable, and for runs shorter than eight jobs, every job
 is served one at a time as before.
+
+`job delete` (and `job request delete`) is batched the same way. A job whose
+delete applies is moved into the command owner's trash scratch at its own
+commit point, after the claims and run-log lines (and after every job of the
+batch whose delete is dropped, such as a `ready` one, was released back); only
+once that move is durable are its tree removed and its request files unlinked,
+at one last commit point. The delete of an exchange-origin job, whose exchange
+index entry goes first, is finished alone after its claim, and the
+waiting-parent check holds as before. A failed commit point or an interrupt
+before a job's trash move gives it back with its request withdrawn; a job
+already moved into the trash is finished, unless its move cannot be made
+durable (reported "moved to trash, durability unresolved"): then the command
+stops with its jobs and trash held for recovery, which disposes of the trash.
+When the final request unlinks cannot be made durable either, the command
+stops the same way (reported "job deleted; its request unlink is not yet
+durable"), and recovery makes them durable before anything else. A deleted
+job's tree that cannot be removed (a persistent permission error, say) is left
+in the control `tmp/` as `trash.<token>` for `workspace gc`, and its line says
+so. The outcomes known when a command stops are printed, in input order,
+before the error. Known limit, as for the serial delete: a crash after a job's
+trash move is durable and before its request unlinks are can leave request
+files that name the deleted job id; a job later restored under that id would
+receive them.
 
 `job delete`, `job seal`, `job unseal`, `job detach` and `job unlock` use the
 same immediate serving path, in the same batches with the same withdrawal, and

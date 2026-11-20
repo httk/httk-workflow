@@ -1792,6 +1792,12 @@ class OwnedJob:
         self._trashed = self.owner.trash_tree(self.path, commit=commit, job=self if commit is not None else None)
         return self._trashed
 
+    @property
+    def trashed(self) -> _fs.Loc | None:
+        """Where :meth:`move_to_trash` moved the job, or ``None`` before it returned."""
+
+        return self._trashed
+
     def retire_discarded(self) -> None:
         """Retire the handle of a job :meth:`move_to_trash` moved into the trash: the job is deleted, and only its
         request files remain to be unlinked (:meth:`unlink_requests`).

@@ -3,7 +3,8 @@
 A local ``job request`` of a Release or Drop action serves each contiguous run of at least eight eligible jobs as one
 batch: post (C0, A), claim (B), run-log lines and state temporaries (C1), state replaces (C2), request unlinks (D1) and
 release moves (D2), each phase made durable by one commit point. Everything else stays on the serial path, in input
-order: fsync mode, short runs, Discard, every other action and every ineligible job. Here: the opt-in and the
+order: fsync mode, short runs, every other action and every ineligible job (batched Discard, phase L3c, is in
+``test_batched_discard``). Here: the opt-in and the
 eligibility, outcome parity with the serial path over a mixed chunk, and the recorded call order per phase. The failure
 table, interrupts and the crash matrix are in ``test_batched_release_failures``.
 """
@@ -110,7 +111,7 @@ def test_a_chunk_of_eligible_jobs_is_one_batch(
     assert not any((workspace.jobs / "ready").iterdir())
 
 
-@pytest.mark.parametrize("setting", ["fsync", "below eight", "not durable", "prime unsupported", "delete"])
+@pytest.mark.parametrize("setting", ["fsync", "below eight", "not durable", "prime unsupported"])
 def test_everything_else_stays_serial(
     tmp_path: Path, syncfs: None, batches: Batches, monkeypatch: pytest.MonkeyPatch, setting: str
 ) -> None:
@@ -133,9 +134,6 @@ def test_everything_else_stays_serial(
     elif setting == "prime unsupported":
         # The prime finds syncfs not supported there: that filesystem is fsync mode, and the chunk goes serial.
         monkeypatch.setattr(_fs, "_syncfs", lambda descriptor: (_ for _ in ()).throw(OSError(38, "no syncfs")))
-    elif setting == "delete":
-        refs = [_at(workspace, ref, "cancelled") for ref in refs]
-        action = "delete"
     outcomes = _cancel(workspace, refs, action)
     assert [outcome.status for outcome in outcomes] == ["applied"] * len(refs)
     assert batches.runs == [] and batches.serial == [ref.job_id for ref in refs]

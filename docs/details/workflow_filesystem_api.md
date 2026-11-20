@@ -601,7 +601,32 @@ synced quietly before it is published:
   published. The batch is committed once, then each job's `build/` is renamed
   to `job/` and submitted and the job is yielded, in order (the scratch
   reconciler publishes a `job/` after a crash, so only a durable payload is
-  ever named so; a committed `build/` is discarded like any other). Every
+  ever named so; a committed `build/` is discarded like any other). A batch
+  of at least eight jobs (`_BATCH_MIN`), none moving inputs, under a `syncfs`
+  barrier and the protocol predicate (`syncfs` mode after the prime of one
+  `_fs.Commit` per command, `errors="fail"`) is published in phases instead:
+  every check that can refuse a submit (the `build/` present, the `job.json`
+  header, `check_placement`, the target's name and parent; tags were checked
+  as each job was staged) for the whole batch, then every `build/`→`job/`
+  rename and one commit (P1), then every rename into `jobs/ready/` and one
+  commit (P2), and only then the yields; the scratches' `rmdir` follows P2.
+  Both directories of every rename, and `tmp/` for the `rmdir`, are owner
+  obligations from before it (the owner is marked batched). A refusal falls
+  back to the per-job publication, which publishes the jobs before the
+  refused one and raises as without batching. A failed P1 leaves the `job/`
+  entries to the owner's close (`_finish_submit`); a failed P2 is resealed
+  directory by directory, once (each submit's destination directory and its
+  ancestors are registered again right after its rename, so a placement
+  pruned and recreated meanwhile is sealed as the new directory); a failed
+  reseal latches the owner at once, keeps `owner.json` and reports the jobs
+  unresolved. `OwnerLost` (a recoverer took a scratch), in the check or after
+  P1, is no refusal: publication stops, the owner latches, and its close is
+  skipped, leaving everything to recovery. Once a batch's renames to
+  `job/` have started, every job of it named `job/` is submitted, yielded or
+  not; an error, interrupt, closed generator or error thrown in at a yield
+  reports by id the jobs submitted but not yielded, named but not published,
+  and unresolved. `batch=1`, a job that moves inputs, smaller batches and
+  fsync mode keep the per-job publication unchanged. Every
   `syncfs` on the one descriptor reports a writeback error recorded since the
   previous one, so each commit covers its batch's writes. Under `fsync` the
   staged copies, prepared documents, embedded workflow and `job.json` are
@@ -1140,13 +1165,19 @@ refuse), and an owner holding such a job is latched: an exception or interrupt
 inside its context seals every obligation (all or nothing) and gives nothing
 back, leaving every job for recovery. The serial paths register no obligation,
 and a workspace that is not durable registers and syncs nothing. The batched
-steps serve local `job request` and `job detach` runs of at least eight jobs whose request ends
-in a release or a drop, in `syncfs` mode only (`removal._Batching`): one
+steps serve local `job request`, `job detach` and `job delete` runs of at least eight jobs
+whose request ends in a release, a drop or a delete, in `syncfs` mode only (`removal._Batching`): one
 collector per batch of up to 256 jobs, primed before its first write, and one
 commit point per phase (the posts' data, their renames, the claims, the run-log
 lines and state temporaries, the state replaces, the request unlinks, the
 release moves); the claims' placement pruning waits until after the moves.
-Discards, every other action and fsync mode stay serial.
+Local deletes batch too: after the release phases of the jobs whose delete is
+dropped, the discarded jobs' trash moves (`OwnedJob.move_to_trash`, `owner`
+obligations of `owned/<O>/` and the trash scratch) end at their own commit
+point, and only then are the trashed trees removed, the handles retired
+(`retire_discarded`) and the jobs' request files unlinked (`owner` obligations
+of `requests/`), at a last commit point. Exchange-origin deletes, every other
+action and fsync mode stay serial.
 
 `recoverable_owners` lists every owner with a readable `owner.json`, plus
 every tombstoned owner that again holds jobs, launches or scratch (a falsely

@@ -75,7 +75,8 @@ class RemovalOutcome:
     :param job_key: The job key.
     :param kind: The state it was found in.
     :param removed: Whether it was deleted.
-    :param reason: Why not, if it was not.
+    :param reason: Why not, if it was not; for a deleted job, what is left of it, if anything (its tree left for
+        workspace gc).
     :param request: The immediate request observation, when deletion was requested.
     """
 
@@ -1490,12 +1491,24 @@ def _seal_withdrawals(workspace: "Workspace", pending: Sequence[tuple[str, str]]
 type _Prepare = Callable[[], tuple[JobRef, Mapping[str, object]] | RequestOutcome]
 
 
-# -- batched Release and Drop chunks (plan WORKFLOW_LOCAL_COMMANDS §2 L3, §4-§6, phase L3b) --------------------------
+# -- batched Release, Drop and Discard chunks (plan WORKFLOW_LOCAL_COMMANDS §2 L3, §4-§6, phases L3b, L3c) ------------
 
-#: The actions whose effect is a Release or a Drop: the only ones a local chunk batches (plan WORKFLOW_LOCAL_COMMANDS
-#: amendments 8 and 14, L3b). ``delete`` (Discard), ``seal``, ``unseal``, ``unlock`` and ``eject`` are served serially.
+#: The actions whose effect is a Release, a Drop or (``delete``) a Discard: the only ones a local chunk batches (plan
+#: WORKFLOW_LOCAL_COMMANDS amendments 8 and 14, L3b and L3c). ``seal``, ``unseal``, ``unlock`` and ``eject`` are served
+#: serially, as is the delete of an exchange-origin job (evicted after the claim).
 _BATCHABLE = frozenset(
-    {"cancel", "pause", "continue", "restart", "override_step", "set_priority", "set_budget", "set_workflow", "detach"}
+    {
+        "cancel",
+        "pause",
+        "continue",
+        "restart",
+        "override_step",
+        "set_priority",
+        "set_budget",
+        "set_workflow",
+        "detach",
+        "delete",
+    }
 )
 #: The fewest eligible jobs a contiguous run batches; a shorter run, and a chunk with fewer candidates, is served
 #: serially (§2 L3, F-M9).
@@ -1510,7 +1523,7 @@ _COMMIT_ERRORS = (OSError, _fs.UnsafePath)
 class _CommitFailed(Exception):
     """A batch's commit point failed: the failure table decides every job the batch still holds.
 
-    :param phase: The phase whose commit point failed (``B``, ``C1``, ``C2``, ``D1`` or ``D2``).
+    :param phase: The phase whose commit point failed (``B``, ``C1``, ``C2``, ``D1``, ``D2``, ``D′`` or ``D″``).
     :param error: What failed it.
     """
 
@@ -1544,8 +1557,8 @@ class _FailStop(_Stopped):
 
 
 class _Halt(Exception):
-    """A finish of the batch moved a job out of ``owned/`` but could not make the move durable (amendment 20): the
-    batch fail-stops before any further work."""
+    """A finish or a trash move of the batch moved a job out of ``owned/`` but could not make the move durable
+    (amendment 20): the batch fail-stops before any further work."""
 
 
 @dataclass(eq=False)
@@ -1567,6 +1580,8 @@ class _Member:
     handle: OwnedJob | None = None
     #: The error of a claim that may have won the job with a damaged ``job.json`` (quarantined after B).
     claim_error: Exception | None = None
+    #: Whether its effect is a Discard (it goes on to D′ and D″, and has no state write); else a Release or a Drop.
+    discard: bool = False
     #: The document to release with, the release, the outcome once it is durable, and the run-log lines of C1.
     final: StateDoc | None = None
     target: Release | None = None
@@ -1575,15 +1590,21 @@ class _Member:
     staged: _fs.Staged | None = None
     #: Whether the batch began writing its ``request_applied`` record of the request (it may be in the run log).
     logged: bool = False
-    #: The last batched step begun: ``claimed``, ``logged``, ``replacing``, ``unlinking``, ``moving``.
+    #: The last batched step begun: ``claimed``, ``logged``, then ``replacing``, ``unlinking``, ``moving`` (a Release or
+    #: a Drop) or ``trashing``, ``trashed`` (its trash move returned), ``deleted`` (its tree removed and its handle
+    #: retired), ``unlinking``, ``unlinked`` (a Discard).
     step: str = "claimed"
     #: Whether the job left the batch: decided, finished serially, or held after a step of its failed.
     out: bool = False
 
 
 class _Batch:
-    """Serve one contiguous run of eligible jobs as a batch: phases B, C1, C2, D1 and D2, each ended by one commit
-    point of *commit* (``Owner.commit``), then the pruning of the placements the claims emptied.
+    """Serve one contiguous run of eligible jobs as a batch: phases B and C1 for every job, C2, D1 and D2 for the
+    Release and Drop jobs, then D′ and D″ for the Discard jobs (plan WORKFLOW_LOCAL_COMMANDS amendment 9), each ended
+    by one commit point of *commit* (``Owner.commit``), then the pruning of the placements the claims emptied.
+
+    A Discard job's request file is touched only once its trash move is sealed at D′, and no tree is unlinked before
+    that seal; a phase no job of the run needs is skipped with its commit point.
 
     :param workspace: The workspace.
     :param owner: The command's CLI owner.
@@ -1628,16 +1649,27 @@ class _Batch:
                 self.phase = "C1"
                 self._log(self._active())
                 self._seal("C1")
-                self.phase = "C2"
-                self._replace(self._active())
-                self._seal("C2")
-                self.phase = "D1"
-                self._unlink(self._active())
-                self._seal("D1")
-                self.phase = "D2"
-                self._move(self._active())
-                self._seal("D2")
-                self._released(self._active())
+                if self._releasing():
+                    self.phase = "C2"
+                    self._replace(self._releasing())
+                    self._seal("C2")
+                    self.phase = "D1"
+                    self._unlink(self._releasing())
+                    self._seal("D1")
+                    self.phase = "D2"
+                    self._move(self._releasing())
+                    self._seal("D2")
+                    self._released(self._releasing())
+                if self._discarding():
+                    # Only now, every Release and Drop job decided, do the Discard jobs leave owned/ (amendment 9).
+                    self.phase = "D′"
+                    self._trash(self._discarding())
+                    self._seal("D′")
+                    if self._discarding():
+                        self.phase = "D″"
+                        self._delete(self._discarding())
+                        self._seal("D″")
+                        self._deleted(self._discarding())
             except _CommitFailed as failure:
                 with _pool.DeferredInterrupts():
                     self._settle(partial(self._row, failure.phase, failure.error, self._active()))
@@ -1670,6 +1702,12 @@ class _Batch:
 
     def _active(self) -> list[_Member]:
         return [member for member in self.members if member.handle is not None and not member.out]
+
+    def _releasing(self) -> list[_Member]:
+        return [member for member in self._active() if not member.discard]
+
+    def _discarding(self) -> list[_Member]:
+        return [member for member in self._active() if member.discard]
 
     def _decide(self, member: _Member, outcome: RequestOutcome) -> None:
         self.progress.results[member.request_id] = outcome
@@ -1800,7 +1838,7 @@ class _Batch:
             self._decide(member, self._uncertain(member, str(error)))
 
     def _admitted(self, member: _Member, names: Sequence[str]) -> bool:
-        """Whether *member* stays in the batch, its effect a Release or a Drop."""
+        """Whether *member* stays in the batch, its effect a Release, a Drop or a non-exchange Discard."""
 
         handle, request_id = member.handle, member.request_id
         assert handle is not None
@@ -1823,9 +1861,11 @@ class _Batch:
             return False  # the serial code meets it again and decides
         if request is None or request.request_id != request_id or request.action not in _BATCHABLE:
             return False
+        # The origin as state.json records it while the job is held, as OwnedJob.discard reads it.
+        origin = None if doc is None else doc.origin
         if doc is None or doc.activation is None:
             doc = (doc or StateDoc.empty(handle.job_id)).next_activation(job.initial_step, "initial")
-        # As apply_requests() decides it, with the same refusal checks.
+        # As apply_requests() decides it, with the same refusal checks (delete's waiting-parent check among them).
         installations: dict[str, _store.Installed | None] = {}
         workspace, current, payload = self.workspace, doc, handle.path
         try:
@@ -1852,6 +1892,14 @@ class _Batch:
             detail["dropped"] = effect.reason
             target = Release(handle.from_state, handle.from_priority, (request_id,))
             outcome = RequestOutcome(handle.job_id, request_id, "refused", effect.reason, handle.from_state)
+        elif isinstance(effect, _requests.Discard):
+            if origin == "exchange":
+                return False  # its exchange index entry goes first: served serially (amendment 8)
+            # As apply_requests() records and observes it; OwnedJob.discard writes no state.
+            member.discard = True
+            member.outcome = RequestOutcome(handle.job_id, request_id, "applied", "job deleted")
+            member.lines = [("request_applied", {"detail": detail})]
+            return True
         else:
             return False
         # As release() records it.
@@ -1897,11 +1945,12 @@ class _Batch:
         self.progress.results[request_id] = outcome
 
     def _log(self, members: Sequence[_Member]) -> None:
-        """C1: the run-log lines and the state temporary of each job, recorded in the collector."""
+        """C1: the run-log lines of each job and the state temporary of each Release or Drop job, recorded in the
+        collector."""
 
         for member in members:
-            handle, current, final, target = member.handle, member.current, member.final, member.target
-            assert handle is not None and current is not None and final is not None and target is not None
+            handle, current = member.handle, member.current
+            assert handle is not None and current is not None
             member.step = "logged"
             try:
                 # Not "started" (L1's withdrawal boundary) yet: the batch holds the job from B on, so its request
@@ -1910,7 +1959,10 @@ class _Batch:
                 member.logged = True  # the next line is its request_applied record
                 for event, detail in member.lines:
                     handle.append_log_line(event, detail, commit=self.commit)
-                member.staged = handle.stage_state(final.with_release(target), commit=self.commit)
+                if not member.discard:
+                    final, target = member.final, member.target
+                    assert final is not None and target is not None
+                    member.staged = handle.stage_state(final.with_release(target), commit=self.commit)
             except _kernel.OwnerLost:
                 raise
             except _STEP_ERRORS as exc:
@@ -1970,7 +2022,7 @@ class _Batch:
     def _seal(self, phase: str) -> None:
         """End *phase* at its commit point, interrupts deferred around it.
 
-        :param phase: The phase (``B``, ``C1``, ``C2``, ``D1`` or ``D2``).
+        :param phase: The phase (``B``, ``C1``, ``C2``, ``D1``, ``D2``, ``D′`` or ``D″``).
         :raises _CommitFailed: When the commit point failed; an interrupt meanwhile is delivered first, the failure
             recorded for its cleanup.
         """
@@ -2012,6 +2064,160 @@ class _Batch:
                     "to": member.outcome.state,
                 },
             )
+
+    def _trash(self, members: Sequence[_Member]) -> None:
+        """D′: move each Discard job into the owner's trash scratch (``owned/<owner-id>/`` and the trash ``owner``
+        obligations of its handle), recorded in the collector.
+
+        Each move and its bookkeeping run with interrupts deferred, so that an interrupt finds every job still held
+        or moved with its trash name known. A move that failed without its rename is an unapplied job's failure
+        (withdrawn while held); one whose rename happened but whose fsync failed fail-stops (amendment 20).
+
+        :param members: The Discard jobs.
+        :raises _Halt: When a move's rename happened but its durability is unresolved, or a withdrawal failed.
+        """
+
+        for member in members:
+            handle = member.handle
+            assert handle is not None
+            member.step = "trashing"
+            error: BaseException | None = None
+            with _pool.DeferredInterrupts():
+                try:
+                    handle.move_to_trash(commit=self.commit)
+                except _kernel.OwnerLost:
+                    raise
+                except _STEP_ERRORS as exc:
+                    error = exc
+                else:
+                    member.step = "trashed"
+                    self.progress.started.add(member.request_id)  # its trash move happened (amendment 22)
+            if error is None:
+                continue
+            if self._trash_moved(handle):
+                self._trash_unresolved(member, error)
+                raise _Halt from error
+            self._unapplied_failure(member, error)
+
+    def _delete(self, members: Sequence[_Member]) -> None:
+        """After the D′ seal: remove each trashed tree and retire its handle, then unlink every request file of the
+        deleted jobs that one listing of ``requests/`` shows (``owner`` obligations, recorded in the collector), as
+        :meth:`~httk.workflow._kernel.OwnedJob.discard` does. Idempotent per job (its step), for the cleanup.
+
+        A tree that cannot be removed stays in the trash scratch, which the owner's close or recovery discards; the
+        job is deleted all the same. A job whose request files cannot be unlinked is ``uncertain``.
+
+        :param members: The trash-moved Discard jobs.
+        """
+
+        assert "D′" in self.sealed  # no tree unlink and no request unlink of a Discard job before the D′ seal
+        for member in members:
+            handle = member.handle
+            assert handle is not None
+            trashed = handle.trashed
+            if member.step not in ("trashing", "trashed") or trashed is None:
+                continue
+            try:
+                _fs.remove_trashed(trashed)
+            except (OSError, _fs.UnsafePath) as exc:
+                self._left_for_gc(member, trashed, exc)
+            handle.retire_discarded()
+            member.step = "deleted"
+        unlinking = [member for member in members if not member.out and member.step in ("deleted", "unlinking")]
+        if not unlinking:
+            return
+        directory = _kernel._requests_dir(self.workspace)
+        try:
+            names = _kernel.list_names(directory)
+        except OSError as exc:
+            for member in unlinking:
+                self._decide(member, self._uncertain(member, f"job deleted; its requests were not unlinked: {exc}"))
+            return
+        for member in unlinking:
+            handle = member.handle
+            assert handle is not None
+            member.step = "unlinking"
+            try:
+                handle.unlink_requests(
+                    [name for name in names if _kernel._request_id(name, handle.job_id) is not None], commit=self.commit
+                )
+            except _STEP_ERRORS as exc:
+                self._decide(member, self._uncertain(member, f"job deleted; its requests were not unlinked: {exc}"))
+                continue
+            member.step = "unlinked"
+
+    def _left_for_gc(self, member: _Member, trashed: _fs.Loc, error: BaseException) -> None:
+        """A deleted job's tree that cannot be removed (a persistent error) leaves this owner's trash for ``tmp/``
+        under a ``trash.<token>`` name, which workspace gc removes once aged, so that the owner's close does not meet
+        it again; the job is reported deleted, its tree left for workspace gc. The rename is sealed by close's seal of
+        ``tmp/`` (or, should this owner die first, its trash is recovery's as before).
+
+        When that hand-off fails too, the tree stays in this owner's trash, for its close or, should close fail on
+        it (keeping ``owner.json``), its recovery; the job is reported deleted with that residue. Either way the
+        deletion goes on: the handle is retired and the requests unlinked.
+        """
+
+        handle = member.handle
+        assert handle is not None
+        tmp = _kernel._tmp(self.workspace)
+        try:
+            left = _fs.trash(trashed, trash_dir=tmp, durable=False)
+        except (OSError, _fs.UnsafePath, _fs.MoveFailed) as exc:
+            _LOGGER.warning(
+                "deleted %s; its tree could not be removed (%s) or handed to workspace gc (%s) and stays in this "
+                "owner's trash for its close or recovery",
+                handle.job_key,
+                error,
+                exc,
+            )
+            note = f"job deleted; its tree stays in this owner's trash for close or recovery: {error}"
+        else:
+            _LOGGER.warning(
+                "deleted %s; its tree could not be removed (%s) and is left for workspace gc at %s",
+                handle.job_key,
+                error,
+                left.path,
+            )
+            note = f"job deleted; its tree is left for workspace gc: {error}"
+        member.outcome = dataclasses.replace(
+            member.outcome or RequestOutcome(handle.job_id, member.request_id, "applied", ""), explanation=note
+        )
+
+    def _deleted(self, members: Iterable[_Member]) -> None:
+        """After D″ (or its row): each of *members* is deleted durably; its outcome is the serial one."""
+
+        for member in members:
+            if member.out:
+                continue
+            assert member.outcome is not None and member.handle is not None and member.step == "unlinked"
+            self._decide(member, member.outcome)
+            _LOGGER.info("deleted %s (request %s)", member.handle.job_key, member.request_id)
+
+    def _trash_moved(self, handle: OwnedJob) -> bool:
+        """Whether a trash move that raised had moved the job out of ``owned/`` while its handle stayed registered
+        without its trash name: the rename happened, its fsync did not (amendment 20)."""
+
+        return handle.trashed is None and not os.path.lexists(handle.path) and self.owner.holds(handle.ref)
+
+    def _trash_unresolved(self, member: _Member, error: BaseException | str) -> None:
+        """Amendment 20, for a trash move: the handle stays registered with the move's obligations (the owner
+        latches), and the job is reported "moved to trash, durability unresolved"; never withdrawn."""
+
+        self.stopped = True
+        self.owner.latch()
+        self.progress.unresolved.add(member.request_id)
+        self._decide(member, self._uncertain(member, f"moved to trash, durability unresolved: {error}"))
+
+    def _finish_trashed(self, members: Sequence[_Member]) -> None:
+        """Finish trash-moved Discard jobs: through the D′ commit point (unless made), the tree and request unlinks,
+        and D″; on a failed commit point, its row. Never left unfinished unless a seal fails (then fail-stop)."""
+
+        if not self._through("D′", members):
+            return
+        self._delete(members)
+        if not self._through("D″", [member for member in members if not member.out]):
+            return
+        self._deleted(members)
 
     def _end(self) -> None:
         """Record every claimed job's move in the index, prune the placements the claims emptied (amendment 26:
@@ -2142,6 +2348,8 @@ class _Batch:
             if handle.moved_to is not None:
                 self.progress.unresolved.add(member.request_id)
                 self._decide(member, self._uncertain(member, "moved, durability unresolved: the batch stopped"))
+            elif member.discard and handle.trashed is not None:
+                self._trash_unresolved(member, "the batch stopped")
             else:
                 self._decide(member, self._uncertain(member, "the job stays held for recovery: the batch stopped"))
 
@@ -2200,9 +2408,15 @@ class _Batch:
         self._give_back(members, outcome)
 
     def _row(self, phase: str, error: BaseException, members: Sequence[_Member]) -> None:
-        """The failure table (amendments 11, 17-20) for the failed commit point of *phase*, for *members*."""
+        """The failure table (amendments 11, 17-20) for the failed commit point of *phase*, for *members*.
+
+        Up to and including D2, a Discard job is unapplied (amendment 19, mixed chunks): withdrawn while held, then
+        given back; it never goes on to D′.
+        """
 
         failed = f"{error}"
+        releasing = [member for member in members if not member.discard]
+        discarding = [member for member in members if member.discard]
         if phase in ("B", "C1"):
             # B: the claims sealed by directory before anything goes back; C1: the temporaries go too (E1, E2).
             self._return(members, lambda member: self._uncertain(member, failed))
@@ -2234,7 +2448,7 @@ class _Batch:
             except _COMMIT_ERRORS as exc:
                 self._stop(members, f"{exc}; the job stays held for recovery")
                 return
-            for position, member in enumerate(members):
+            for position, member in enumerate(releasing):
                 handle, target = member.handle, member.target
                 assert handle is not None and target is not None
                 placement = handle.placement()
@@ -2242,12 +2456,53 @@ class _Batch:
                 if not self._finish(
                     member, partial(handle.move_out, target.state, placement, target.priority), destination
                 ):
-                    self._stop(members[position + 1 :], "the job stays held for recovery: an earlier finish failed")
+                    self._stop(
+                        [*releasing[position + 1 :], *discarding],
+                        "the job stays held for recovery: an earlier finish failed",
+                    )
                     return
                 assert member.outcome is not None
                 self._decide(member, member.outcome)
+            self._return(discarding, lambda member: self._uncertain(member, failed))
+        elif phase == "D2":
+            # The moves only need their seal.
+            try:
+                self.owner.seal_obligations()
+            except _kernel.OwnerLost:
+                raise
+            except _COMMIT_ERRORS as exc:
+                for member in releasing:
+                    self.progress.unresolved.add(member.request_id)
+                self._stop(releasing, f"moved, durability unresolved: {exc}")
+                self._stop(discarding, f"{exc}; the job stays held for recovery")
+                return
+            self._released(releasing)
+            self._return(discarding, lambda member: self._uncertain(member, failed))
+        elif phase == "D′":
+            # owned/<owner-id>/ and the trash, resealed by directory; then the trash path finishes the jobs.
+            trashed = [member for member in members if self._applied(member)]
+            try:
+                self.owner.seal_obligations()
+            except _kernel.OwnerLost:
+                raise
+            except _COMMIT_ERRORS as exc:
+                # Fail-stop: the trash scratch stays, owner.json stays; recovery's scratch reconciliation disposes
+                # of the trash, sealed first by its per-owner seal.
+                for member in trashed:
+                    self.progress.unresolved.add(member.request_id)
+                self._stop(trashed, f"moved to trash, durability unresolved: {exc}")
+                self._stop(members, f"{exc}; the job stays held for recovery")
+                return
+            self.sealed.add("D′")
+            self._finish_trashed(trashed)
+            if not self.stopped:
+                others = [member for member in members if not member.out]
+                self._return(others, lambda member: self._uncertain(member, failed))
         else:
-            # D2: the moves only need their seal.
+            # D″: the deleted jobs' request unlinks, resealed by directory. When that fails too, fail-stop with the
+            # obligations kept: a request a machine crash brings back could delete a job later restored under the same
+            # id, so the owner latches and keeps owner.json, and recovery's per-owner seal (amendment 27) makes the
+            # unlinks durable before anything else.
             try:
                 self.owner.seal_obligations()
             except _kernel.OwnerLost:
@@ -2255,17 +2510,24 @@ class _Batch:
             except _COMMIT_ERRORS as exc:
                 for member in members:
                     self.progress.unresolved.add(member.request_id)
-                self._stop(members, f"moved, durability unresolved: {exc}")
+                self._stop(members, f"job deleted; its request unlink is not yet durable: {exc}")
                 return
-            self._released(members)
+            self._deleted(members)
 
     def _interrupted(self) -> None:
         """Amendment 12: after a commit point failed, the failure table; otherwise finish the applied jobs through
-        the remaining commit points, then return the unapplied ones (:meth:`_return`: withdrawn first, only after B
-        is sealed)."""
+        the remaining commit points (a trash-moved Discard job through D′ and D″), then return the unapplied ones
+        (:meth:`_return`: withdrawn first, only after B is sealed), a Discard job before its trash move among them."""
 
         if self.failed is not None:
             self._row(*self.failed, self._active())
+            return
+        cut = [member for member in self._discarding() if member.handle and self._trash_moved(member.handle)]
+        if cut:
+            # A trash move whose rename happened without its bookkeeping (never under deferred interrupts): fail-stop.
+            for member in cut:
+                self._trash_unresolved(member, "the move was interrupted")
+            self._halted()
             return
         applied = [member for member in self._active() if self._applied(member)]
         unapplied = [member for member in self._active() if not self._applied(member)]
@@ -2273,8 +2535,13 @@ class _Batch:
             self.progress.started.add(member.request_id)
         if self.phase == "B" and not self._through("B", self._active()):
             return
-        if self.phase in ("C2", "D1", "D2") and applied:
-            self._finish_applied(applied)
+        releasing = [member for member in applied if not member.discard]
+        if self.phase in ("C2", "D1", "D2") and releasing:
+            self._finish_applied(releasing)
+        if self.stopped:
+            return
+        if trashed := [member for member in applied if member.discard]:
+            self._finish_trashed(trashed)
         if self.stopped:
             return
         self._return([member for member in unapplied if not member.out], lambda member: None)
@@ -2305,8 +2572,12 @@ class _Batch:
         self._released(applied)
 
     def _applied(self, member: _Member) -> bool:
-        """Whether the job's state replace happened (amendment 22): it is finished, never given back."""
+        """Whether the job's state replace (a Discard job's trash move) happened (amendment 22): it is finished,
+        never given back."""
 
+        if member.discard:
+            # Its trash name known: the move returned (an interrupt right after it is delivered before the step).
+            return member.handle is not None and member.handle.trashed is not None
         if member.step in ("claimed", "logged"):
             return False
         if member.step == "replacing":
@@ -2380,7 +2651,7 @@ def _runs(eligible: Sequence[bool]) -> list[tuple[bool, range]]:
 
 
 class _Batching:
-    """The batched serving of one local command's chunks (plan WORKFLOW_LOCAL_COMMANDS phase L3b).
+    """The batched serving of one local command's chunks (plan WORKFLOW_LOCAL_COMMANDS phases L3b and L3c).
 
     A chunk is batched only in a durable workspace, in ``syncfs`` mode on every filesystem it touches (the protocol
     predicate, after the prime), and when a contiguous run of at least :data:`_BATCH_MIN` candidates can qualify:
@@ -2526,9 +2797,11 @@ class _Batching:
 
         workspace = self.workspace
         requests = workspace.control / "requests"
+        tmp = _kernel._tmp(workspace)  # the trash scratch of D′
         try:
             _fs.make_dirs(requests, durable=True)
-            directories = [requests, workspace.jobs]
+            _fs.make_dirs(tmp, durable=True)
+            directories = [requests, workspace.jobs, tmp]
             for state in (*_kernel.UNOWNED_STATES, _kernel.OWNED):
                 if os.path.isdir(workspace.jobs / state):
                     directories.append(workspace.jobs / state)
@@ -2622,10 +2895,10 @@ def _post_and_serve(
     propagates to the owner, which gives its jobs back as before. Requests left armed by a SIGKILL, or a signal the
     CLI does not handle, are at most one chunk's.
 
-    A command whose *action* is a Release or a Drop (:data:`_BATCHABLE`) batches its chunks where it can (plan
-    WORKFLOW_LOCAL_COMMANDS phase L3b, :class:`_Batching`): in a durable workspace in ``syncfs`` mode, each contiguous
-    run of at least :data:`_BATCH_MIN` eligible jobs makes each phase durable with one ``syncfs`` per filesystem;
-    everything else is served as before, in input order.
+    A command whose *action* is a Release, a Drop or a ``delete`` (:data:`_BATCHABLE`) batches its chunks where it can
+    (plan WORKFLOW_LOCAL_COMMANDS phases L3b and L3c, :class:`_Batching`): in a durable workspace in ``syncfs`` mode,
+    each contiguous run of at least :data:`_BATCH_MIN` eligible jobs makes each phase durable with one ``syncfs`` per
+    filesystem; everything else (an exchange-origin delete among it) is served as before, in input order.
 
     :param workspace: The local workspace.
     :param posts: The jobs and their preparations, in input order.
@@ -2839,20 +3112,47 @@ def remove_jobs(workspace: "Workspace", refs: Iterable[JobRef], *, force: bool =
     return _remove_jobs(workspace, refs, LocationIndex(workspace))
 
 
-def _remove_jobs(workspace: "Workspace", refs: Iterable[JobRef], index: LocationIndex) -> RemovalReport:
-    """Remove as :func:`remove_jobs` does, through the command's location index *index*."""
+def _removal_outcome(ref: JobRef, outcome: RequestOutcome) -> RemovalOutcome:
+    """One selected job's removal outcome: deleted, with what is left of it if anything, or why not."""
+
+    applied = outcome.status == "applied"
+    left = applied and outcome.explanation != "job deleted"
+    return RemovalOutcome(
+        ref.job_key, ref.state, applied, outcome.explanation if not applied or left else None, outcome
+    )
+
+
+def _remove_jobs(
+    workspace: "Workspace",
+    refs: Iterable[JobRef],
+    index: LocationIndex,
+    report: Callable[[Sequence[RemovalOutcome]], None] | None = None,
+) -> RemovalReport:
+    """Remove as :func:`remove_jobs` does, through the command's location index *index*.
+
+    *report* is called with each chunk's outcomes in input order once it is served, and with those known when the
+    command stops (a failure or an interrupt), before that propagates, as ``job request`` reports them.
+    """
 
     selected = list(refs)
+    position = 0
+
+    def reporting(observed: Sequence[RequestOutcome]) -> None:
+        # Each chunk's (or the known part of the stopped chunk's) outcomes, in input order; a job without an outcome
+        # yet is skipped, and a chunk never holds one job twice.
+        nonlocal position
+        removals: list[RemovalOutcome] = []
+        for outcome in observed:
+            while position < len(selected) and selected[position].job_id != outcome.job_id:
+                position += 1
+            if position < len(selected):
+                removals.append(_removal_outcome(selected[position], outcome))
+                position += 1
+        if report is not None:
+            report(removals)
+
     with _kernel.register_owner(workspace, kind="cli", label="job delete", allocation=None, advertised={}) as owner:
-        observed = _request_jobs(workspace, owner, selected, "delete", "job delete", copy=True, index=index)
-    outcomes = [
-        RemovalOutcome(
-            ref.job_key,
-            ref.state,
-            outcome.status == "applied",
-            None if outcome.status == "applied" else outcome.explanation,
-            outcome,
+        observed = _request_jobs(
+            workspace, owner, selected, "delete", "job delete", copy=True, index=index, report=reporting
         )
-        for ref, outcome in zip(selected, observed, strict=True)
-    ]
-    return RemovalReport(tuple(outcomes))
+    return RemovalReport(tuple(_removal_outcome(ref, outcome) for ref, outcome in zip(selected, observed, strict=True)))
