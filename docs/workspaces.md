@@ -134,7 +134,13 @@ a batch closes at 256 jobs, once 10 seconds have passed since its first job
 (checked between jobs, so a slow instantiate hook delays it), and at the end of
 the input, and a job that moves inputs (`--input-move-from-job`) has a batch of
 its own. Creating N jobs thus costs one `syncfs` per batch plus one (600 jobs
-cost 4 when each batch fills within 10 seconds). The library's `new_jobs`
+cost 4 when each batch fills within 10 seconds) for the payloads; where `syncfs`
+is trusted for the workspace's own protocol steps (a vetted local filesystem,
+`io.sync` not `fsync`), a batch of eight jobs or more is then named complete
+and submitted with one more `syncfs` each (plus one per command), instead of
+three fsyncs per job. Once a batch's jobs start being named complete, each of
+them is submitted even when it is not reported (an error or interrupt names
+those by id). The library's `new_jobs`
 publishes each job before it asks for the next item (N + 1 `syncfs`) unless
 it is given `batch=`. Bundles and `job submit --move` payloads that were
 written before httk ran are synced together as they are, so a write error

@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from .compat import LanguageRequest
     from .seals import Release
 
-from . import _fs, _kernel
+from . import _fs, _kernel, _pool
 from ._durations import cap_maxtime
 from ._embedded import embedded_digest, embedded_id
 from ._job import JobDefinition
@@ -153,6 +153,10 @@ _BATCH_JOBS = 256
 _BATCH_SECONDS = 10.0
 #: The clock of :data:`_BATCH_SECONDS`.
 _clock = time.monotonic
+#: The fewest jobs a :func:`new_jobs` batch publishes with batched renames (plan WORKFLOW_LOCAL_COMMANDS L4): one
+#: commit point for all ``build/``->``job/`` renames (P1) and one for all submit renames (P2), in ``syncfs`` protocol
+#: mode only. A smaller batch, ``batch=1`` and a job that moves inputs are published job by job.
+_BATCH_MIN = 8
 #: How a failed sync commit at job creation or ``job submit`` ends its message.
 _SYNC_REMEDY = (
     "on a node where writeback errors of other users are frequent, set io.sync fsync (every file is synced on its "
@@ -1712,12 +1716,26 @@ def new_jobs(
     have passed since its first job was staged (checked between items, so a
     blocking input or a slow hook delays it), at the end of *items*, and around a
     job that moves inputs (``move_inputs``), which has a batch of its own.
-    Exactly the yielded jobs are submitted, and a job whose payload was named
-    ``job/`` before a failure: closing the iterator, an interrupt, or a failure
-    discards the other jobs staged and not yet yielded (moving their moved inputs
-    back). An error while staging a job submits the jobs staged before it, then
-    is raised. In a non-durable workspace each job is submitted as soon as it is
-    staged.
+    Exactly the yielded jobs are submitted, and every job whose payload was named
+    ``job/``: closing the iterator, an interrupt, or a failure discards the other
+    jobs staged and not yet yielded (moving their moved inputs back). An error
+    while staging a job submits the jobs staged before it, then is raised. In a
+    non-durable workspace each job is submitted as soon as it is staged.
+
+    A batch of at least eight jobs, none of which moves inputs, is published with
+    batched renames where the protocol predicate gives ``syncfs`` mode (a vetted
+    local filesystem, ``io.sync`` not ``fsync``): every check that can refuse a
+    submit runs for the whole batch first, then every payload is named ``job/``
+    and committed once, then every job is submitted into ``jobs/ready/`` and
+    committed once, and only then are the jobs yielded. Once a batch's renames to
+    ``job/`` have started, every job of the batch named ``job/`` is submitted,
+    whether or not it is yielded (the owner's close or recovery publishes one that
+    was not published yet). Closing the iterator, an interrupt, a failure, or an
+    error thrown in at a yield therefore reports by id the jobs submitted and not
+    yielded, those named ``job/`` and not published yet, and those whose
+    durability is unresolved (a commit and its reseal failed: the owner is then
+    kept for recovery), as an exception note, or a warning logged for a closed
+    iterator.
 
     :param workspace: Provide the workspace receiving the jobs.
     :param workflow: Select the installed workflow, or a runner file to install.
@@ -1752,7 +1770,8 @@ def new_jobs(
         ``"refuse"``; the jobs before it stay submitted.
     :raises httk.workflow._fs.SyncFailed: If a batch could not be made durable: none of its jobs was submitted,
         those of the batches before it were, and the message says how many (chained to the error that closed the
-        batch early, if any).
+        batch early, if any); or when a batched publication's commit and its reseal failed after its renames (its
+        notes name every job by what happened to it).
     :raises ValueError: If the workflow is not installed (and *install* is false), or workflow,
         inputs, placement, job settings, call slot bindings, *duplicate_tag* or *batch* are invalid.
 
@@ -1780,6 +1799,10 @@ def new_jobs(
     # cleanup's below until they are published (a job is pending from the moment it is appended).
     pending: list[_Staged] = []
     current: list[_InputMove] = []
+    # The command's protocol collector of batched publications (entered at the first batch that qualifies), or
+    # False once the protocol predicate refused it; and whether a failed reseal keeps the owner for recovery.
+    protocol: _fs.Commit | Literal[False] | None = None
+    failstop = False
     try:
         if embed_workflow:
             if install:
@@ -1824,6 +1847,122 @@ def new_jobs(
             )
             return _Staged(job, scratch, moves, created=not moving)
 
+        def scaffolded(staged: _Staged, ref: _kernel.JobRef) -> ScaffoldedJob:
+            job = staged.job
+            return ScaffoldedJob(
+                job_id=job.id,
+                job_key=job.job_key,
+                tag=job.tag,
+                placement=job.placement,
+                payload=ref.path,
+                ref=ref,
+                workflow=job.workflow_id,
+                workflow_name=job.workflow_name,
+                initial_step=job.initial_step,
+                warnings=prepared.warnings,
+            )
+
+        def collector() -> _fs.Commit | None:
+            # The protocol collector of batched publication, entered (and primed) once, before the first batched
+            # rename; None (for the rest of the command) unless the protocol predicate gives syncfs mode after the
+            # prime (plan WORKFLOW_LOCAL_COMMANDS amendments 6 and 23).
+            nonlocal protocol
+            if protocol is None:
+                protocol = False
+                tmp = _kernel._tmp(workspace)
+                setting = _kernel._io_sync(workspace)
+                try:
+                    if _fs.protocol_mode(tmp, setting) == "syncfs":
+                        entered = synced.enter_context(
+                            _fs.Commit(
+                                [tmp, workspace.jobs], setting, workers=_kernel._io_workers(workspace), durable=True
+                            )
+                        )
+                        if entered.mode == "syncfs":
+                            protocol = entered
+                except (OSError, WorkflowError) as exc:
+                    _LOGGER.debug("job creation publishes job by job: %s", exc)
+            return protocol or None
+
+        def batched() -> _fs.Commit | None:
+            # Batched renames only for a batch of at least _BATCH_MIN jobs (so never with batch=1) none of which moved
+            # inputs, under a syncfs barrier and the protocol predicate; otherwise today's per-job path.
+            if (
+                batch == 1
+                or len(pending) < _BATCH_MIN
+                or any(staged.moves for staged in pending)
+                or barrier is None
+                or barrier.strategy != "syncfs"
+            ):
+                return None
+            return collector()
+
+        def publish_batched(commit: _fs.Commit) -> Generator[ScaffoldedJob, None, bool]:
+            # Plan WORKFLOW_LOCAL_COMMANDS L4: every check that can refuse a submit first, for the whole batch (a
+            # refusal publishes job by job, as without batching, which refuses the same job after the ones before
+            # it); then P1 (every build/ named job/, committed), P2 (every job/ submitted, committed), and only then
+            # the yields. Once the renames have started, every job of the batch named job/ is submitted, yielded or
+            # not: an error, an interrupt or a closed iterator reports by id those submitted and not reported, those
+            # named and not published yet (the owner's close or recovery publishes them) and those whose
+            # durability is unresolved.
+            nonlocal submitted, failstop
+            try:
+                _check_batch(workspace, owner, commit, pending)
+            except _kernel.OwnerLost:
+                # A recoverer took this owner's scratch: nothing more is published, and the owner's close (which
+                # would publish what it finds named job/) is left to recovery.
+                owner.latch()
+                failstop = True
+                raise
+            except Exception as exc:
+                _LOGGER.debug("a batch check refused a job; publishing job by job: %s", exc)
+                return False
+            publication = _Publication(list(pending))
+            try:
+                try:
+                    with _pool.DeferredInterrupts():
+                        _publish_batch(workspace, owner, commit, publication)
+                except _kernel.OwnerLost:
+                    owner.latch()
+                    failstop = True
+                    raise
+                except BaseException:
+                    # Reseal by directory whatever was renamed, unless P2's own reseal ran already (one reseal, never
+                    # retried); a failed reseal keeps the owner (and its jobs) for recovery, and the jobs renamed are
+                    # reported unresolved (amendment 25).
+                    if not publication.resealed:
+                        try:
+                            with _pool.DeferredInterrupts():
+                                owner.seal_obligations()
+                        except Exception:
+                            publication.unresolved = True
+                            owner.latch()
+                    if publication.unresolved:
+                        _LOGGER.warning("the jobs of a batch could not be made durable; the owner is kept for recovery")
+                        failstop = True
+                    raise
+                pending.clear()  # every job is published: none is the cleanup's any more
+                for staged in publication.jobs:
+                    assert staged.ref is not None
+                    if tags is not None and staged.job.tag is not None:
+                        tags.add(staged.ref, staged.job.tag)
+                for staged in publication.jobs:
+                    assert staged.ref is not None
+                    publication.yielded += 1
+                    submitted += 1
+                    yield scaffolded(staged, staged.ref)
+            except BaseException as exc:
+                note = publication.note(submitted)
+                if note is not None:
+                    if isinstance(exc, GeneratorExit):
+                        _LOGGER.warning("closed before reporting every job it submitted: %s", note)
+                    else:
+                        exc.add_note(note)
+                        if not isinstance(exc, Exception):
+                            _LOGGER.warning("interrupted before reporting every job it submitted: %s", note)
+                raise
+            return True
+
         def publish(cause: Exception | None = None) -> Generator[ScaffoldedJob, None, None]:
             # Close the batch: one commit, then each job renamed to job/ and submitted in order, and yielded. A
             # failed commit (chained to *cause*, the staging error that closed the batch) or publication leaves the
@@ -1842,6 +1981,8 @@ def new_jobs(
                 created=[staged.scratch for staged in pending if staged.created],
             )
             reserved.clear()
+            if (commit := batched()) is not None and (yield from publish_batched(commit)):
+                return
             while pending:
                 staged = pending[0]
                 try:
@@ -1878,18 +2019,7 @@ def new_jobs(
                     _drop_markers(workspace, moved)
                     _fs.remove_empty_dir(_fs.loc(staged.scratch))
                 submitted += 1
-                yield ScaffoldedJob(
-                    job_id=job.id,
-                    job_key=job.job_key,
-                    tag=job.tag,
-                    placement=job.placement,
-                    payload=ref.path,
-                    ref=ref,
-                    workflow=job.workflow_id,
-                    workflow_name=job.workflow_name,
-                    initial_step=job.initial_step,
-                    warnings=prepared.warnings,
-                )
+                yield scaffolded(staged, ref)
 
         iterator = iter(items)
         while True:
@@ -1980,8 +2110,10 @@ def new_jobs(
 
             _evict_modules(snapshot)  # the instantiate hook modules of the snapshot discarded below
         # Publishes a job named job/ whose submission failed, then discards the scratch of each job never named so
-        # (keeping one holding a moved file that cannot go back), then the owner record.
-        owner.close()
+        # (keeping one holding a moved file that cannot go back), then the owner record; unless a batch's reseal
+        # failed: then the owner, latched, and its owner.json stay for recovery (fail-stop).
+        if not failstop:
+            owner.close()
 
 
 def submit_payload(
@@ -2170,6 +2302,8 @@ class _Staged:
     :param ref: The published reference, once it is.
     :param created: Its scratch was made by :meth:`~httk.workflow._kernel.Owner.creation_scratch`: the batch's
         commit makes its entry in ``tmp/`` durable.
+    :param target: Where a batched publication submits it in ``jobs/ready/`` (:func:`_check_batch`), once checked.
+    :param placement: Its placement as its ``job.json`` gives it, once checked.
     """
 
     job: JobDefinition
@@ -2177,6 +2311,8 @@ class _Staged:
     moves: list[_InputMove]
     ref: _kernel.JobRef | None = None
     created: bool = False
+    target: Path | None = None
+    placement: PurePosixPath | None = None
 
 
 def _release(moves: list[_InputMove]) -> None:
@@ -2215,6 +2351,184 @@ def _settle(workspace: Workspace, staged: _Staged) -> bool:
         return False
     _release(staged.moves)
     return True
+
+
+@dataclass(eq=False)
+class _Publication:
+    """The accounting of one batch of :func:`new_jobs` published with batched renames (plan WORKFLOW_LOCAL_COMMANDS
+    L4.2): which of its jobs are staged, named ``job/``, published and yielded.
+
+    Whether a job is named or published is read from the filesystem when it is reported (:meth:`groups`), so that a
+    rename an error or interrupt cut off is accounted as it happened; *yielded* counts the jobs handed out, in order.
+
+    :param jobs: The staged jobs of the batch, in input order.
+    :param started: The first ``build/``->``job/`` rename has started: every job named ``job/`` is submitted from then
+        on, yielded or not.
+    :param yielded: How many of *jobs*, from the first, were yielded.
+    :param resealed: P2's commit failed and its one reseal by directory ran (:func:`_publish_batch`): no other
+        handler reseals again.
+    :param unresolved: A commit point and the reseal by directory after it failed: the renamed jobs' durability is
+        unresolved, and the owner is kept (latched) for recovery.
+    """
+
+    jobs: list[_Staged]
+    started: bool = False
+    yielded: int = 0
+    resealed: bool = False
+    unresolved: bool = False
+
+    def groups(self) -> tuple[list[str], list[str], int, list[str]]:
+        """The batch's jobs not yielded, by what happened to them.
+
+        :return: The keys of those published (in ``jobs/ready/``), of those named ``job/`` but not published (the
+            owner's close or recovery publishes them), how many are still ``build/`` (not submitted), and the keys of
+            the rest (the scratch is gone: a recoverer took it, or the job has moved on).
+        """
+
+        published: list[str] = []
+        named: list[str] = []
+        unnamed = 0
+        unknown: list[str] = []
+        for staged in self.jobs[self.yielded :]:
+            if staged.ref is not None:
+                published.append(staged.job.job_key)
+            elif _fs.exists(_fs.loc(staged.scratch / "build")):
+                unnamed += 1
+            elif _fs.exists(_fs.loc(staged.scratch / "job")):
+                named.append(staged.job.job_key)
+            elif staged.target is not None and _fs.exists(_fs.loc(staged.target)):
+                published.append(staged.job.job_key)
+            else:
+                unknown.append(staged.job.job_key)
+        return published, named, unnamed, unknown
+
+    def note(self, reported: int) -> str | None:
+        """The report of the batch's jobs that were not yielded, by id, or ``None`` when there is nothing to report.
+
+        :param reported: How many jobs the command reported (yielded) as submitted, this batch's included.
+        :return: The note.
+        """
+
+        published, named, unnamed, unknown = self.groups()
+        parts = [f"{reported} job(s) of this command were reported as submitted"]
+        if published:
+            parts.append(f"{len(published)} more were submitted but not reported: {', '.join(published)}")
+        if named:
+            parts.append(
+                f"{len(named)} were named complete but not published yet, which the owner's close or recovery "
+                f"publishes: {', '.join(named)}"
+            )
+        if unknown:
+            parts.append(f"{len(unknown)} were left to the recovery of this command's owner: {', '.join(unknown)}")
+        if self.unresolved and (published or named):
+            parts.append(
+                f"the durability of {len(published) + len(named)} of them is unresolved (a commit and its reseal "
+                f"failed), so this command's owner is kept for recovery: {', '.join(published + named)}"
+            )
+        if unnamed:
+            parts.append(f"{unnamed} staged job(s) were not submitted")
+        return "; ".join(parts) if len(parts) > 1 else None
+
+
+def _check_batch(workspace: Workspace, owner: _kernel.Owner, commit: _fs.Commit, jobs: Sequence[_Staged]) -> None:
+    """Run every check that can refuse a submit, for the whole batch, before its first ``build/``->``job/`` rename.
+
+    Each job's ``build/`` is present, its ``job.json`` header reads (as :func:`httk.workflow._kernel.submit` reads
+    it), its placement passes :func:`~httk.workflow._kernel.check_placement`, and its fresh name in ``jobs/ready/``
+    is chosen (:attr:`_Staged.target`); then each target parent is created, its created entries owner obligations
+    recorded in *commit*. Tags and duplicate tags were checked as each job was staged.
+
+    :param workspace: The workspace.
+    :param owner: The command's owner.
+    :param commit: The command's protocol collector.
+    :param jobs: The batch.
+    :raises httk.workflow._kernel.OwnerLost: When a job's ``build/`` is gone.
+    :raises httk.workflow.errors.FormatError: When a header is unreadable.
+    :raises httk.workflow._fs.UnsafePath: When a placement component is not a real directory.
+    :raises OSError: When a target parent cannot be created.
+    """
+
+    for staged in jobs:
+        build = staged.scratch / "build"
+        if not _fs.exists(_fs.loc(build)):
+            raise _kernel.OwnerLost(f"{build} of owner {owner.owner_id} is gone")
+        header = _kernel._read_header(build)
+        _kernel.check_placement(workspace, "ready", header.placement)
+        name = _kernel.format_job_name(header.job_key, header.priority, _fs.fresh_token())
+        staged.target = _kernel._state_dir(workspace, "ready", header.placement) / name
+        staged.placement = header.placement
+    for parent in dict.fromkeys(staged.target.parent for staged in jobs if staged.target is not None):
+        with owner.obliged(_kernel._entry_directories(parent), kind="owner"):
+            _fs.make_dirs(parent, durable=False, commit=commit)
+
+
+def _publish_batch(workspace: Workspace, owner: _kernel.Owner, commit: _fs.Commit, publication: _Publication) -> None:
+    """Publish a checked batch (:func:`_check_batch`) with one commit point per phase (plan WORKFLOW_LOCAL_COMMANDS
+    L4.1, amendments 13 and 25); its payloads were committed by the batch commit (P0) already.
+
+    P1: every ``build/`` is renamed to ``job/``, then committed. P2: every ``job/`` is renamed into ``jobs/ready/``,
+    then committed; when that commit fails, every directory is resealed on its own, here and only here, and a failed
+    reseal marks the batch unresolved and latches the owner at once. Both directories of every rename are owner
+    obligations from before it, and so is ``tmp/`` for the scratches' ``rmdir`` after P2, which the next commit
+    point (or the owner's close) seals. A submit rename's destination directory and its ancestors up to
+    ``jobs/ready/`` are registered once more right after the rename: a placement pruned and recreated meanwhile is
+    a new directory, sealed on its own (by its identity), not through a descriptor of the old one; this also runs when
+    the move raises after its rename, and when it cannot complete the batch is unresolved and the owner latched.
+
+    :param workspace: The workspace.
+    :param owner: The command's owner.
+    :param commit: The command's protocol collector (``syncfs`` mode).
+    :param publication: The batch; :attr:`_Publication.started` is set before the first rename,
+        :attr:`_Publication.resealed` once P2's reseal ran, and :attr:`_Publication.unresolved` when it failed.
+    :raises httk.workflow._kernel.OwnerLost: When a job's ``job/`` is gone (a recoverer took the scratch).
+    :raises OSError: When a rename, P1, or P2 and its reseal fail.
+    """
+
+    jobs = publication.jobs
+    scratches = [staged.scratch for staged in jobs]
+    ready = _kernel._state_dir(workspace, "ready")
+    publication.started = True
+    with owner.obliged(scratches, kind="owner"):
+        for staged in jobs:
+            _fs.move_owned(
+                _fs.loc(staged.scratch / "build"), _fs.loc(staged.scratch / "job"), durable=False, commit=commit
+            )
+    owner.commit(commit)  # P1
+    for staged in jobs:
+        staging, target = staged.scratch / "job", staged.target
+        assert target is not None and staged.placement is not None
+        # As _kernel.submit: the staging is private, so its absence means a recoverer took it.
+        if not _fs.exists(_fs.loc(staging)):
+            raise _kernel.OwnerLost(f"{staging} of owner {owner.owner_id} is gone")
+        try:
+            with owner.obliged([staged.scratch, *_kernel._entry_directories(target.parent)], kind="owner"):
+                _fs.move_owned(_fs.loc(staging), _fs.loc(target), durable=False, commit=commit)
+        finally:
+            # The directories the job landed in, as they are now (recreated after a prune, they are new ones), also
+            # when the move raised after its rename; when they cannot be registered, the owner is kept for recovery.
+            try:
+                landed = [target.parent, *(parent for parent in target.parent.parents if parent.is_relative_to(ready))]
+                with owner.obliged(landed, kind="owner"):
+                    pass
+            except BaseException:
+                publication.unresolved = True
+                owner.latch()
+                raise
+        staged.ref = _kernel.JobRef.from_path(target, state="ready", placement=staged.placement)
+    try:
+        owner.commit(commit)  # P2
+    except OSError as exc:
+        _LOGGER.warning("the commit of %d submitted jobs failed (%s): resealing their directories", len(jobs), exc)
+        publication.resealed = True
+        try:
+            owner.seal_obligations()
+        except BaseException:
+            publication.unresolved = True
+            owner.latch()
+            raise
+    with owner.obliged([_kernel._tmp(workspace)], kind="owner"):
+        for staged in jobs:
+            _fs.remove_empty_dir(_fs.loc(staged.scratch))
 
 
 def _commit_batch(

@@ -115,6 +115,8 @@ def test_600_jobs_cost_one_syncfs_per_batch_and_each_commit_precedes_its_batch_s
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ws = raw_workspace(tmp_path)
+    # The per-job publication of each batch (the batched renames, test_batched_publish, add their own commit points).
+    monkeypatch.setattr(scaffold_module, "_BATCH_MIN", LARGE + 1)
     events = Events(monkeypatch)
     jobs = list(new_jobs(ws, "tests.raw", iter(tagged(600)), batch=256))
     assert [job.tag for job in jobs] == [f"j{index}" for index in range(600)] and len(ready(ws)) == 600
