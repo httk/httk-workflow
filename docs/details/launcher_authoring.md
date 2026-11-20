@@ -332,7 +332,7 @@ stdout:
 | `nodes[].gpu_ids` | no | One non-empty device id per GPU, `gpus` entries |
 | `nodes[].gpu_variable` | with `gpu_ids` | The environment variable the ids belong in, such as `CUDA_VISIBLE_DEVICES` |
 | `nodes[].local` | no | Whether this is the manager's host, default `false`; at most one node may set it to `true` |
-| `resources` | no | Extra non-negative integer capacities; not `procs`, `mem`, `gpus`, `nodes`, `maxtime` or `mintime` |
+| `resources` | no | Extra non-negative integer capacities; not `procs`, `mem`, `gpus`, `nodes`, `maxtime`, `mintime` or `warntime` |
 
 CPU sets of different slots on one node must be disjoint, and GPU IDs on that
 node must be unique. The same CPU numbers or GPU IDs may occur on different

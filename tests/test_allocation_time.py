@@ -109,6 +109,43 @@ publish("succeed")
     assert seen == {"context": int(end_time - 100), "env": str(int(end_time - 100))}
 
 
+def test_attempt_stop_warning_is_the_deadline_minus_warntime(tmp_path: Path) -> None:
+    workspace = initialize_workspace(tmp_path / "workspace")
+    now = time.time()
+    with TaskManager(workspace, end_time=now + 600, deadline_margin=100) as manager:
+        drain = int(now + 500)
+        assert manager._attempt_deadline({"warntime": 300}) == drain
+        assert manager._attempt_stop_warning(drain, {"warntime": 300}) == drain - 300
+        assert manager._attempt_stop_warning(drain, {}) is None
+        assert manager._attempt_stop_warning(drain, {"warntime": 0}) is None
+        assert manager._attempt_stop_warning(drain, {"warntime": drain + 1}) == 0
+    with TaskManager(workspace) as manager:
+        timed = manager._attempt_deadline({"maxtime": 3600, "warntime": 60})
+        assert timed is not None
+        assert manager._attempt_stop_warning(timed, {"maxtime": 3600, "warntime": 60}) == timed - 60
+        assert manager._attempt_stop_warning(manager._attempt_deadline({"warntime": 60}), {"warntime": 60}) is None
+
+
+def test_step_warntime_reaches_the_attempt_as_its_stop_warning(tmp_path: Path) -> None:
+    body = """
+Path(os.environ["HTTK_WORKFLOW_WORKDIR"], "seen.json").write_text(json.dumps({
+    "deadline": context["deadline"],
+    "stop_warning": context["stop_warning"],
+    "env": os.environ.get("HTTK_WORKFLOW_STOP_WARNING"),
+}))
+publish("succeed")
+"""
+    workspace = initialize_workspace(tmp_path / "workspace")
+    job_id = _job(workspace, tmp_path, body, tag="warned", step_resources={"only": {"warntime": 300}})
+    end_time = time.time() + 600
+    with TaskManager(workspace, end_time=end_time, deadline_margin=100, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=20.0)
+    assert _state(workspace, job_id) == "succeeded"
+    seen = json.loads((find(workspace, job_id).path / "run" / "seen.json").read_text())
+    assert seen["deadline"] == int(end_time - 100)
+    assert seen["stop_warning"] == seen["deadline"] - 300 and seen["env"] == str(seen["stop_warning"])
+
+
 def test_manager_json_records_end_time_and_resources_and_introspection_shows_them(tmp_path: Path) -> None:
     workspace = initialize_workspace(tmp_path / "workspace")
     end_time = time.time() + 3600

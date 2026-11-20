@@ -257,6 +257,7 @@ def _attempt(
     step_resources: dict[str, dict[str, int]] | None = None,
     context_resources: dict[str, int] | None = None,
     deadline: int | None = None,
+    stop_warning: int | None = None,
     workflow: tuple[str, str] = ("local:tests.sdk", "tests.sdk"),
     retry_on: tuple[str, ...] = (),
     maximum_attempts_per_activation: int | None = None,
@@ -301,6 +302,7 @@ def _attempt(
             "settings": settings or {},
             "resources": context_resources or {},
             "deadline": deadline,
+            "stop_warning": stop_warning,
         }
     )
     attempt_environment = {
@@ -318,6 +320,12 @@ def _attempt(
 def test_attempt_deadline_reads_the_context(tmp_path: Path) -> None:
     assert _attempt(tmp_path / "none", step="start").deadline is None
     assert _attempt(tmp_path / "set", step="start", deadline=1_900_000_000).deadline == 1_900_000_000
+
+
+def test_attempt_stop_warning_reads_the_context(tmp_path: Path) -> None:
+    assert _attempt(tmp_path / "none", step="start", deadline=1_900_000_000).stop_warning is None
+    warned = _attempt(tmp_path / "set", step="start", deadline=1_900_000_300, stop_warning=1_900_000_000)
+    assert warned.stop_warning == 1_900_000_000
 
 
 def test_child_spec_inherits_job_resource_requirements(tmp_path: Path) -> None:

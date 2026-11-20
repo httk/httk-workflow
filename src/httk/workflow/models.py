@@ -175,9 +175,9 @@ def validate_resources(value: object, name: str = "resources") -> dict[str, int]
     """Validate one quantitative resource-requirement mapping in protocol form.
 
     Resource names are protocol labels and values are opaque non-negative
-    integers, except the reserved time labels ``maxtime`` and ``mintime``,
-    which are seconds: ``maxtime`` is at least 1 and ``mintime`` is at most
-    ``maxtime`` when one mapping holds both.  The protocol assigns no units or
+    integers, except the reserved time labels ``maxtime``, ``mintime`` and
+    ``warntime``, which are seconds: ``maxtime`` is at least 1 and ``mintime``
+    is at most ``maxtime`` when one mapping holds both.  The protocol assigns no units or
     meanings to other names.
 
     :param value: The resource mapping to validate.
@@ -205,7 +205,7 @@ def validate_resources(value: object, name: str = "resources") -> dict[str, int]
 def normalize_resources(value: object, name: str = "resources") -> dict[str, int]:
     """Convert one authored resource mapping to protocol form.
 
-    The time labels ``maxtime`` and ``mintime`` must be Slurm ``--time``
+    The time labels ``maxtime``, ``mintime`` and ``warntime`` must be Slurm ``--time``
     strings and become seconds; other values pass through unchanged.
 
     :param value: The authored resource mapping.

@@ -456,6 +456,40 @@ called, and the report back with termination `signal_N`. A checker receives
 commands are always argument arrays; the API does not reproduce the *httk* v1
 exit-code and `ht.nextstep` interface.
 
+A monitor can also wind a program down at the attempt's stop warning (see
+[`warntime`](taskmanager.md#winding-down-before-the-deadline)). Monitors receive
+a `"tick"` event every second; this one creates a stop file the program polls,
+once, on the first tick at or after `a.stop_warning`:
+
+```python
+import time
+
+from httk.workflow.codes import ProcessSupervisor
+
+
+def stop_file_monitor(a):
+    requested = False
+
+    def monitor(event):
+        nonlocal requested
+        warning = a.stop_warning
+        if not requested and event.event == "tick" and warning is not None and time.time() >= warning:
+            (a.workdir / "STOP").touch()
+            requested = True
+        return ()
+
+    return monitor
+
+
+@run.step
+def simulate(a):
+    report = ProcessSupervisor(monitors=[stop_file_monitor(a)]).run(["simulate"], cwd=a.workdir)
+    if report.returncode == 0 and (a.workdir / "STOP").exists():
+        (a.workdir / "STOP").unlink()
+        a.advance("simulate", resources={"mintime": "10:00"})  # resume under a later manager
+    ...
+```
+
 Native Bash runners use the same protocol through {doc}`/sdks/bash_api`.
 
 ## Simulation-code helpers

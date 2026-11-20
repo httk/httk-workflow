@@ -446,8 +446,8 @@ def _resources(values: Sequence[str]) -> dict[str, int | str] | None:
     for item in values:
         key, separator, text = item.partition("=")
         refusal = (
-            f"a resource must be spelled NAME=VALUE (an integer, or a Slurm duration for maxtime and mintime), "
-            f"not {item!r}"
+            "a resource must be spelled NAME=VALUE (an integer, or a Slurm duration for maxtime, mintime "
+            f"and warntime), not {item!r}"
         )
         if not separator or not key or not text:
             raise _Refused(refusal)

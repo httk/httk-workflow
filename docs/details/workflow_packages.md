@@ -94,7 +94,7 @@ and output relationships are all validated before a provider is returned.
 | `description` | no | Human-readable summary and generated declaration description. |
 | `declaration_uri` | no | String `$id` for the generated or external workflow declaration. |
 | `declaration_file` | no | Relative regular-file member containing an externally authored OPTIMADE-format workflow declaration JSON. |
-| `resources` | no | Default resource requirements: a table mapping resource labels to non-negative integers, or to Slurm duration strings for `maxtime` and `mintime`. |
+| `resources` | no | Default resource requirements: a table mapping resource labels to non-negative integers, or to Slurm duration strings for `maxtime`, `mintime` and `warntime`. |
 | `retry_policy` | no | The retry policy every job of the package is created with; see [`[workflow.retry_policy]`](#workflowretry_policy). |
 | `steps` | no | Per-step resource overrides. Valid only with an executable runner, and only for names in its declared `steps` list. |
 | `calls` | no | The sub-workflows this one calls: a `[workflow.calls]` table mapping an alias to a workflow name or commit-pinned git URI. |
@@ -209,8 +209,11 @@ target of a fixed call must give every slot a default.
 
 `[workflow.resources]` maps validated resource labels to non-negative,
 non-boolean integers; units are opaque. The reserved time labels `maxtime`
-(the time limit of one attempt) and `mintime` (the least remaining allocation
-time a manager needs to start one) are instead Slurm `--time` strings: `M`,
+(the time limit of one attempt), `mintime` (the least remaining allocation
+time a manager needs to start one) and `warntime` (how long before its deadline
+an attempt is told to wind down; it sets the attempt's
+[stop warning](taskmanager.md#winding-down-before-the-deadline) and sends no
+signal) are instead Slurm `--time` strings: `M`,
 `M:S`, `H:M:S`, `D-H`, `D-H:M`, or `D-H:M:S`, so `"30"` is 30 minutes and
 `"2-12"` is 60 hours. Integers are refused for them, and `job.json` stores
 seconds. A Python `WorkflowProvider(resources=..., step_resources=...)` takes the

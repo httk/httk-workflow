@@ -170,6 +170,23 @@ httk_workflow_runner {workflow} {" ".join(steps)}
 """
 
 
+def test_context_serves_the_deadline_and_the_stop_warning(tmp_path: Path) -> None:
+    body = """step_start() {
+    httk_workflow_context deadline >deadline.txt
+    httk_workflow_context stop_warning >warning.txt
+    httk_workflow_succeed
+}"""
+    for name, deadline, warning in (("warned", 1_900_000_300, 1_900_000_000), ("plain", None, None)):
+        fixture = _fixture(tmp_path, step="start", name=name)
+        context = json.loads(fixture.environment["HTTK_WORKFLOW_CONTEXT"])
+        context.update(deadline=deadline, stop_warning=warning)
+        fixture.environment["HTTK_WORKFLOW_CONTEXT"] = json.dumps(context)
+        completed = fixture.run(_runner("start", body=body))
+        assert completed.returncode == 0, completed.stderr
+        assert (fixture.workdir / "deadline.txt").read_text() == ("" if deadline is None else f"{deadline}\n")
+        assert (fixture.workdir / "warning.txt").read_text() == ("" if warning is None else f"{warning}\n")
+
+
 def test_a_workflow_name_outside_the_charset_is_refused(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, step="go")
     completed = fixture.run(

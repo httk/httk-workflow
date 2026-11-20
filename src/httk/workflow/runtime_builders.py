@@ -742,7 +742,7 @@ class OutcomeDraft:
         :param message: Attach an optional human-readable message.
         :param runner_steps: Record the runner steps available to the manager.
         :param resources: Set the requirement of the next activation for ``advance`` or ``wait``;
-            ``maxtime`` and ``mintime`` are Slurm duration strings.
+            ``maxtime``, ``mintime`` and ``warntime`` are Slurm duration strings.
         :return: The authoritative published outcome path.
         :raises FileExistsError: If an outcome is already published.
         :raises ValueError: If the action's required details are invalid.

@@ -46,6 +46,7 @@ def attempt_context(
     settings: Mapping[str, Any],
     resources: Mapping[str, int],
     deadline: int | None,
+    stop_warning: int | None,
     binding: Mapping[str, Any] | None,
     workflow: Mapping[str, str],
 ) -> dict[str, object]:
@@ -70,6 +71,7 @@ def attempt_context(
     :param settings: The effective workspace settings.
     :param resources: The attempt's resource reservation.
     :param deadline: The epoch second the attempt must finish by, or ``None``.
+    :param stop_warning: The epoch second the attempt should wind down from, or ``None``.
     :param binding: The context binding, or ``None`` for an attempt without a placement.
     :param workflow: The launched installation's ``{id, name}``: the job's effective workflow, which spawned
         children and calls follow.
@@ -107,6 +109,7 @@ def attempt_context(
         "settings": settings,
         "resources": dict(resources),
         "deadline": deadline,
+        "stop_warning": stop_warning,
         **({} if binding is None else {"binding": binding}),
     }
 
@@ -121,6 +124,7 @@ def runner_environment(
     workdir: Path,
     durable: bool,
     deadline: int | None,
+    stop_warning: int | None,
     binding_environment: Mapping[str, str],
     code_variables: Mapping[str, str],
     data_dir: Path | None,
@@ -141,6 +145,7 @@ def runner_environment(
     :param workdir: The attempt's working directory.
     :param durable: The workspace durability mode.
     :param deadline: The epoch second the attempt must finish by, or ``None``.
+    :param stop_warning: The epoch second the attempt should wind down from, or ``None``.
     :param binding_environment: The binding, GPU and launch-client variables.
     :param code_variables: The installed codes' Bash API variables.
     :param data_dir: The job's data directory, or ``None`` to leave ``HTTK_WORKFLOW_DATA_DIR`` unset.
@@ -164,6 +169,9 @@ def runner_environment(
     environment.pop("HTTK_WORKFLOW_DEADLINE", None)
     if deadline is not None:
         environment["HTTK_WORKFLOW_DEADLINE"] = str(deadline)
+    environment.pop("HTTK_WORKFLOW_STOP_WARNING", None)
+    if stop_warning is not None:
+        environment["HTTK_WORKFLOW_STOP_WARNING"] = str(stop_warning)
     for variable in (
         "HTTK_WORKFLOW_NODELIST",
         "HTTK_WORKFLOW_NODEFILE",

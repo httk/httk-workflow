@@ -53,6 +53,8 @@ class AttemptContext:
     :param raw: Preserve the complete decoded context.
     :param deadline: Record the epoch second at which the manager stops the
         attempt, or ``None`` when it has no time limit.
+    :param stop_warning: Record the epoch second from which the attempt should
+        wind down, or ``None`` when it has no deadline or no ``warntime``.
     :param binding: Record the nodes, slots, nodefile and launch prefix the
         attempt was given, or ``None`` when its manager has no node inventory.
     """
@@ -87,10 +89,15 @@ class AttemptContext:
     workflow_id: str
     workflow_name: str
     raw: Mapping[str, Any]
-    #: The epoch second at which the manager stops this attempt, present exactly
-    #: when the attempt runs under a ``maxtime``, otherwise ``None``. The member
-    #: is required.
+    #: The epoch second at which the manager stops this attempt: the earlier of
+    #: its start plus its ``maxtime`` and the manager's drain start, or ``None``
+    #: when it has neither. The member is required.
     deadline: int | None = None
+    #: The epoch second from which this attempt should wind down: its deadline
+    #: minus its resolved ``warntime``, at least 0, or ``None`` when it has no
+    #: deadline or no ``warntime``. It may already be past at launch. The
+    #: member is optional on read.
+    stop_warning: int | None = None
     #: The ``nodes`` (host, procs, gpus and, when placed, mem), ``nodefile``,
     #: ``file`` (the full ``binding.json`` with per-node ``cpus`` and
     #: ``gpu_ids``) and, when one applies, ``launch`` prefix this attempt was
@@ -192,6 +199,7 @@ class AttemptContext:
             workflow_name=workflow["name"],
             raw=value,
             deadline=optional_integer("deadline"),
+            stop_warning=optional_integer("stop_warning"),
             binding=binding,
         )
 

@@ -233,8 +233,8 @@ class WorkflowProvider:
     :param initial_step: Select the default starting step.
     :param alias: Provide an alternate registered name.
     :param steps: Declare the steps the runner provides.
-    :param resources: Declare the default resource requirement; ``maxtime`` and ``mintime`` are Slurm
-        duration strings such as ``"24:00:00"``.
+    :param resources: Declare the default resource requirement; ``maxtime``, ``mintime`` and ``warntime``
+        are Slurm duration strings such as ``"24:00:00"``.
     :param step_resources: Declare per-step resource requirements, time labels spelled as in *resources*.
     :param seal_succeeded: Seal a succeeded job of it (``[workflow.runner] seal_succeeded``); ``None``
         leaves it to the workspace setting.

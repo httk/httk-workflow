@@ -1258,7 +1258,7 @@ exchange bundle rewrites the client's ids and `claim.pool` before publication
 | `priority` | `0`–`999` | The submitted priority. |
 | `claim` | `{pool, required_capabilities}` | Eligibility labels; pool `default` needs no routing. A pool `exchange-<16 hex>` is an exchange pool (§Adopt). |
 | `retry_policy` | `{maximum_attempts_per_activation?, maximum_total_attempts?, maximum_activations?, retry_on?}` | Budgets (absent is unbounded) and the manager-detected failure codes that are retried. |
-| `resources`, `step_resources` | objects | Requirements per job and per step; `maxtime`/`mintime` are seconds. |
+| `resources`, `step_resources` | objects | Requirements per job and per step; `maxtime`/`mintime`/`warntime` are seconds. |
 | `parameters`, `declarations`, `declared`, `environment` | objects | Workflow inputs and metadata, opaque to the protocol. |
 | `parent` | `{workspace_id, job_id, job_key, placement, activation_id, spawn_id}` or `null` | The spawning job. |
 | `seal_succeeded` | boolean or `null` | Whether a succeeded job is sealed; `null` defers to the `seal.succeeded` setting. |

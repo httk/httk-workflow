@@ -1164,8 +1164,13 @@ else:
 
 
 def test_time_resources_are_never_counted_against_capacity(tmp_path: Path) -> None:
-    for capacity, resources in (({"procs": 1}, {"maxtime": 3600, "procs": 1}), ({}, {"maxtime": 60})):
-        name = "procs" if capacity else "empty"
+    cases: tuple[tuple[dict[str, int], dict[str, int]], ...] = (
+        ({"procs": 1}, {"maxtime": 3600, "procs": 1, "warntime": 300}),
+        ({}, {"maxtime": 60}),
+        ({}, {"warntime": 60}),
+    )
+    for index, (capacity, resources) in enumerate(cases):
+        name = f"case-{index}"
         workspace = initialize_workspace(tmp_path / f"workspace-{name}")
         job_id = _job(workspace, tmp_path / name, _SUCCEED, tag="timed", resources=resources)
         with TaskManager(workspace, resources=capacity, heartbeat_interval=0.01) as manager:
@@ -1190,15 +1195,15 @@ else:
         body,
         tag="per-label",
         initial_step="first",
-        resources={"maxtime": 3600},
-        step_resources={"first": {"procs": 1}, "second": {"maxtime": 1200, "procs": 1}},
+        resources={"maxtime": 3600, "warntime": 300},
+        step_resources={"first": {"procs": 1}, "second": {"maxtime": 1200, "procs": 1, "warntime": 60}},
     )
     with TaskManager(workspace, resources={"procs": 2}, maximum_workers=1, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=30.0)
     assert {record["step"]: record["resources"] for record in _attempt_records(workspace, job_id)} == {
-        "first": {"maxtime": 3600, "procs": 1},
-        "second": {"maxtime": 1200, "procs": 1},
-        "third": {"maxtime": 600, "mintime": 60, "procs": 1},
+        "first": {"maxtime": 3600, "procs": 1, "warntime": 300},
+        "second": {"maxtime": 1200, "procs": 1, "warntime": 60},
+        "third": {"maxtime": 600, "mintime": 60, "procs": 1, "warntime": 300},
     }
 
 

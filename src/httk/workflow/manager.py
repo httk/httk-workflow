@@ -1654,6 +1654,7 @@ class TaskManager:
             if confinement is not None:
                 check_job_placement(job.placement)
             deadline = self._attempt_deadline(requirement)
+            stop_warning = self._attempt_stop_warning(deadline, requirement)
             # The runner launch's record directory exists before the gate (without process.json a probe counts it
             # dead); it also holds the trusted nodefile of the launch prefix.
             launch_dir = self.owner.launch_dir(attempt_id, "0")
@@ -1701,6 +1702,7 @@ class TaskManager:
                 settings=settings,
                 resources=requirement,
                 deadline=deadline,
+                stop_warning=stop_warning,
                 binding=binding,
                 workflow={"id": installed.id, "name": installed.name},
             )
@@ -1713,6 +1715,7 @@ class TaskManager:
                 workdir=workdir,
                 durable=self.workspace.durable,
                 deadline=deadline,
+                stop_warning=stop_warning,
                 binding_environment=binding_environment,
                 code_variables=code_environment(),
                 data_dir=payload / "data",
@@ -2021,6 +2024,13 @@ class TaskManager:
         if self.drain_start is not None:
             candidates.append(int(self.drain_start))
         return min(candidates, default=None)
+
+    @staticmethod
+    def _attempt_stop_warning(deadline: int | None, requirement: Mapping[str, int]) -> int | None:
+        """Return the epoch second an attempt should wind down from: *deadline* minus its ``warntime``, or ``None``."""
+
+        warntime = requirement.get("warntime", 0)
+        return None if deadline is None or not warntime else max(0, deadline - warntime)
 
     def _enforce_deadlines(self) -> bool:
         """Stop every local attempt that has run longer than its ``maxtime``: ``SIGTERM``, then ``SIGKILL``.

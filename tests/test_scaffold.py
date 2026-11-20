@@ -71,6 +71,9 @@ def test_resource_requirements_reject_invalid_values(value: object) -> None:
 )
 def test_protocol_time_resources_are_seconds_within_bounds(value: object, message: str) -> None:
     assert validate_resources({"maxtime": 60, "mintime": 60}) == {"maxtime": 60, "mintime": 60}
+    # warntime is not cross-checked: alone, zero, or beyond maxtime are all valid.
+    assert validate_resources({"warntime": 0}) == {"warntime": 0}
+    assert validate_resources({"maxtime": 60, "warntime": 120}) == {"maxtime": 60, "warntime": 120}
     with pytest.raises(FormatError, match=message):
         validate_resources(value)
 
@@ -86,6 +89,9 @@ def test_authored_time_resources_are_slurm_durations() -> None:
             normalize_resources({"maxtime": value})
     with pytest.raises(FormatError, match="Slurm duration"):
         normalize_resources({"mintime": "1.5"})
+    assert normalize_resources({"warntime": "5:00"}) == {"warntime": 300}
+    with pytest.raises(FormatError, match="Slurm duration"):
+        normalize_resources({"warntime": 300})
     with pytest.raises(FormatError, match="must not exceed"):
         normalize_resources({"maxtime": "1:00", "mintime": "2:00"})
 

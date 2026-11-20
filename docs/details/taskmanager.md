@@ -535,8 +535,9 @@ two at a time because of the two `matlab_license_slots`.
 
 ### Time requirements
 
-`maxtime` (the time limit of one attempt) and `mintime` (the least remaining
-allocation time needed to start one) are reserved labels. Jobs declare them as
+`maxtime` (the time limit of one attempt), `mintime` (the least remaining
+allocation time needed to start one) and `warntime` (how long before its
+deadline an attempt should wind down) are reserved labels. Jobs declare them as
 Slurm `--time` strings, such as `maxtime = "24:00:00"` in a manifest,
 `resources={"maxtime": "2:00:00"}` from the SDK, or `--resource maxtime=2:00:00`
 from the Bash bridge; `job.json` and the attempt context hold seconds. They are
@@ -566,6 +567,24 @@ instead; see {doc}`launchers`.
 `workspace owners` and `job why` show each manager's time left. At the drain
 point the manager [drains](#draining) and exits. An allocation end that has
 passed is never evidence of death on its own.
+
+### Winding down before the deadline
+
+A step that can stop early and resume later declares `warntime`, for example
+`[workflow.steps.run.resources] warntime = "5:00"`. Each attempt with a
+deadline (the earlier of its start plus `maxtime` and the drain point) and a
+resolved `warntime` above zero gets a stop warning: the deadline minus
+`warntime`, at least 0, as the context member `stop_warning`,
+`HTTK_WORKFLOW_STOP_WARNING`, `Attempt.stop_warning` and
+`httk_workflow_context stop_warning`. It may already be in the past at launch.
+Without a known allocation end and without `maxtime` there is no deadline and
+no warning. The manager sends no signal and does nothing else with it: the
+step polls it, for example from a
+[supervisor monitor](runtime_helpers.md#running-processes), and
+a step that stops in time publishes `advance` (optionally with a `mintime`, so
+a manager about to drain does not pick it up) for a later manager to resume. A
+step still running at its deadline is stopped as before: `timeout` at its
+`maxtime`, `owner_lost` at the drain point. `warntime` never gates a start and is never counted against capacity.
 
 ### Allocations
 

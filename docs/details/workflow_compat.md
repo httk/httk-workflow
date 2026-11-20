@@ -248,7 +248,7 @@ procs = 4
 
 Keys are `fnmatch` globs over the jobflow job name (case-sensitive), tried in
 manifest order; values are validated like `[workflow.resources]`, with
-`maxtime`/`mintime` as Slurm durations. When no glob matches, the job's
+`maxtime`/`mintime`/`warntime` as Slurm durations. When no glob matches, the job's
 `JobConfig.manager_config["httk"]["resources"]` table applies (settable per job
 with `Flow.update_config` or a `config` override); a malformed table there fails
 the parent with `jobflow.resources_invalid`. The table found overlays the

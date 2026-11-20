@@ -108,6 +108,7 @@ def test_manifest_resource_requirements_reach_provider_and_job(tmp_path: Path) -
         ("[workflow.resources]\nmaxtime = \"1:00:60\"\n", "Slurm duration"),
         ("[workflow.resources]\nmaxtime = \"1:00\"\nmintime = \"2:00\"\n", "must not exceed"),
         ("[workflow.steps.start.resources]\nmintime = 60\n", "Slurm duration"),
+        ("[workflow.steps.start.resources]\nwarntime = 300\n", "Slurm duration"),
     ],
 )
 def test_manifest_resource_requirements_reject_bad_declarations(tmp_path: Path, extra: str, message: str) -> None:
@@ -131,7 +132,7 @@ def _time_package(root: Path, maxtime: str) -> Path:
         '[workflow]\nname = "test.resources"\n'
         '[workflow.runner]\nsteps = ["start", "finish"]\n'
         f'[workflow.resources]\nmaxtime = "{maxtime}"\nmintime = "30"\nprocs = 2\n'
-        '[workflow.steps.finish.resources]\nmaxtime = "2-0"\n',
+        '[workflow.steps.finish.resources]\nmaxtime = "2-0"\nwarntime = "5:00"\n',
         encoding="utf-8",
     )
     return root
@@ -142,13 +143,13 @@ def test_manifest_time_resources_are_slurm_durations_stored_as_seconds(tmp_path:
     workspace = Workspace.initialize(tmp_path / "workspace")
     definition = JobDefinition.from_path(new_job(workspace, package, tag="timed").payload / "job.json")
     assert definition.resources == {"maxtime": 3600, "mintime": 1800, "procs": 2}
-    assert definition.step_resources == {"finish": {"maxtime": 172800}}
+    assert definition.step_resources == {"finish": {"maxtime": 172800, "warntime": 300}}
 
     # A called child (scaffold_job under Attempt.call) is capped by its caller's maxtime.
     (tmp_path / "called").mkdir()
     called = scaffold_job(workspace, package, tmp_path / "called", maxtime_cap=600)
     assert called.resources == {"maxtime": 600, "mintime": 600, "procs": 2}
-    assert called.step_resources == {"finish": {"maxtime": 600}}
+    assert called.step_resources == {"finish": {"maxtime": 600, "warntime": 300}}
 
     # Equivalent spellings make byte-identical job definitions.
     digests = set()

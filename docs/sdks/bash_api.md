@@ -197,7 +197,8 @@ step composed lives in shell state, so the subshell costs a step nothing.
 | `$HTTK_WORKFLOW_STEP` | the step this attempt runs |
 | `$HTTK_WORKFLOW_WORKDIR`, `$HTTK_WORKFLOW_JOB_DIR`, `$HTTK_WORKFLOW_DATA_DIR` | absolute paths: the persistent `run/` workdir, the job directory, and its `data/`, which exists once a transaction put something there |
 | `$HTTK_WORKFLOW_DURABLE` | `1` on a storage-durable workspace, `0` otherwise |
-| `httk_workflow_context deadline`, `$HTTK_WORKFLOW_DEADLINE` | the epoch second at which the manager stops this attempt; only when the attempt has a `maxtime`, otherwise the call exits 1 and the variable is unset |
+| `httk_workflow_context deadline`, `$HTTK_WORKFLOW_DEADLINE` | the epoch second at which the manager stops this attempt: the earlier of its start plus its `maxtime` and the manager's drain start; with neither, the call prints nothing and the variable is unset |
+| `httk_workflow_context stop_warning`, `$HTTK_WORKFLOW_STOP_WARNING` | the epoch second from which this attempt should wind down: its deadline minus its `warntime`, at least 0; without a deadline or a `warntime`, the call prints nothing and the variable is unset |
 | `httk_workflow_context binding`, `$HTTK_WORKFLOW_NODELIST`, `$HTTK_WORKFLOW_NODEFILE`, `$HTTK_WORKFLOW_LAUNCH` | the nodes, nodefile and launch prefix the attempt was given: the context object (its `file` member names `binding.json`, which adds per-node `gpu_ids` and `cpus`), the comma-separated hosts, the nodefile path (one host line per processor slot), and the shell-quoted launch prefix (such as `srun ...`, or in a confined attempt the launch client that has the manager start the ranks; set only when one applies; run it with `eval` when it may hold quoted words); only when the manager has a node inventory, otherwise the call exits 1 and the variables are unset |
 
 A step starts in its workdir, so ordinary relative paths are workdir paths.
@@ -375,7 +376,7 @@ this attempt's.
 | `--tag TAG`, `--name NAME` | override what the child is called |
 | `--priority N`, `--claim-pool POOL`, `--capability NAME` | override how the child is scheduled |
 | `--retry-on CODE`, `--max-attempts-per-activation N`, `--max-total-attempts N`, `--max-activations N` | the child's retry policy; with none of them, the spawning job's |
-| `--resources @FILE.json` | the child's requested resources (`maxtime` and `mintime` as Slurm duration strings) |
+| `--resources @FILE.json` | the child's requested resources (`maxtime`, `mintime` and `warntime` as Slurm duration strings) |
 | `--step-resources @FILE.json` | the child's per-step resource requirements (time labels as Slurm duration strings) |
 
 To start a different workflow, use `httk_workflow_call`.
@@ -421,8 +422,8 @@ When the condition can no longer be met the job advances to `--on-impossible` if
 one is named, and fails with `dependency_failure` otherwise. Add
 `--resource NAME=VALUE` one or more times to `httk_workflow_advance` or
 `httk_workflow_gather` to set the next activation's resource requirement. A
-value is an integer, except for the reserved time labels `maxtime` and
-`mintime`, which take a Slurm duration such as `--resource maxtime=1:30:00`
+value is an integer, except for the reserved time labels `maxtime`, `mintime`
+and `warntime`, which take a Slurm duration such as `--resource maxtime=1:30:00`
 (`M`, `M:S`, `H:M:S`, `D-H`, `D-H:M`, or `D-H:M:S`).
 
 ### Data and workdir changes

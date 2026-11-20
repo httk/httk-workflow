@@ -280,7 +280,7 @@ class ChildSpec:
     :param claim_pool: The child's claim pool, or the parent's when omitted.
     :param required_capabilities: Capabilities required by the child.
     :param resources: Resources requested by the child, or the parent's without ``mintime`` when
-        omitted; ``maxtime`` and ``mintime`` are Slurm duration strings.
+        omitted; ``maxtime``, ``mintime`` and ``warntime`` are Slurm duration strings.
     :param step_resources: Per-step resources requested by the child, or the parent's without
         ``mintime`` when omitted; time labels are spelled as in *resources*.
     :param maximum_attempts_per_activation: The child's per-activation attempt budget, or the parent's
@@ -638,6 +638,16 @@ class Attempt:
         """Return the epoch second at which the manager stops this attempt, or None when it has no time limit."""
 
         return self.context.deadline
+
+    @property
+    def stop_warning(self) -> int | None:
+        """Return the epoch second from which this attempt should wind down, or None.
+
+        It is the attempt's deadline minus its resolved ``warntime``, and None when it has no deadline or no
+        ``warntime``.
+        """
+
+        return self.context.stop_warning
 
     @property
     def binding(self) -> Mapping[str, Any] | None:
@@ -1592,8 +1602,8 @@ class Attempt:
         :param step: The next registered step.
         :param state: State members to merge before publication.
         :param priority: The priority of the new activation, when changed.
-        :param resources: The requirement of the new activation, when changed; ``maxtime`` and
-            ``mintime`` are Slurm duration strings such as ``"1:30:00"``.
+        :param resources: The requirement of the new activation, when changed; ``maxtime``,
+            ``mintime`` and ``warntime`` are Slurm duration strings such as ``"1:30:00"``.
         :return: The path of the published outcome.
         :raises RuntimeError: If this attempt already published an outcome.
         """
@@ -1631,8 +1641,8 @@ class Attempt:
         :param on_impossible: The step to run when the condition cannot be met.
         :param rejoin: Labels of children observed by an earlier join activation.
         :param priority: The priority of the join activation, when changed.
-        :param resources: The requirement of the join activation, when changed; ``maxtime`` and
-            ``mintime`` are Slurm duration strings such as ``"1:30:00"``.
+        :param resources: The requirement of the join activation, when changed; ``maxtime``,
+            ``mintime`` and ``warntime`` are Slurm duration strings such as ``"1:30:00"``.
         :return: The path of the published wait outcome.
         :raises ValueError: If no children were spawned, reused or rejoined, a rejoined label is unknown or names
             a child already joined, or a named step is invalid.

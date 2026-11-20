@@ -1,14 +1,14 @@
 """The reserved time resource labels and their Slurm ``--time`` spelling.
 
-``maxtime`` and ``mintime`` are job requirements in integer seconds in the
-protocol. Every authoring surface spells them as Slurm ``--time`` strings, so
+``maxtime``, ``mintime`` and ``warntime`` are job requirements in integer
+seconds in the protocol. Every authoring surface spells them as Slurm ``--time`` strings, so
 a bare number is never ambiguous between seconds and minutes.
 """
 
 import re
 from collections.abc import Mapping
 
-TIME_RESOURCES: frozenset[str] = frozenset({"maxtime", "mintime"})
+TIME_RESOURCES: frozenset[str] = frozenset({"maxtime", "mintime", "warntime"})
 
 _DURATION = re.compile(r"(?:([0-9]+)-)?([0-9]+)(?::([0-9]+))?(?::([0-9]+))?")
 _FORMS = "M, M:S, H:M:S, D-H, D-H:M or D-H:M:S, with seconds below 60, minutes below 60 after H:, and hours below 24 after D-"

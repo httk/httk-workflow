@@ -31,6 +31,7 @@ def _context(**overrides: Any) -> dict[str, object]:
         "settings": {"code.command": "run"},
         "resources": {"cores": 1},
         "deadline": None,
+        "stop_warning": None,
         "binding": None,
         "workflow": {"id": "local:demo", "name": "demo"},
         **overrides,
@@ -48,6 +49,7 @@ def _environment(context: dict[str, object], **overrides: Any) -> dict[str, str]
         "workdir": Path("/w/jobs/project/job/work"),
         "durable": True,
         "deadline": None,
+        "stop_warning": None,
         "binding_environment": {},
         "code_variables": {"HTTK_WORKFLOW_VASP_BASH_API": "/vasp.sh"},
         "data_dir": None,
@@ -66,6 +68,7 @@ def test_minimal_context() -> None:
     assert context["is_restart"] is False
     assert context["attempt_reason"] == "claim"
     assert context["deadline"] is None
+    assert context["stop_warning"] is None
     assert "binding" not in context
     assert _context(attempt_ordinal=2, attempt_reason="retry")["is_restart"] is True
 
@@ -80,6 +83,17 @@ def test_binding_and_deadline_only_when_given() -> None:
     plain = _environment(_context())
     assert "HTTK_WORKFLOW_DEADLINE" not in plain
     assert "HTTK_WORKFLOW_NODELIST" not in plain
+
+
+def test_stop_warning_only_when_given() -> None:
+    context = _context(deadline=1234, stop_warning=934)
+    assert context["stop_warning"] == 934
+    environment = _environment(context, deadline=1234, stop_warning=934)
+    assert environment["HTTK_WORKFLOW_STOP_WARNING"] == "934"
+    # A manager's own inherited value never leaks into an attempt without one.
+    inherited = {"PATH": "/usr/bin", "HTTK_WORKFLOW_STOP_WARNING": "1", "HTTK_WORKFLOW_DEADLINE": "2"}
+    plain = _environment(_context(), base=inherited)
+    assert "HTTK_WORKFLOW_STOP_WARNING" not in plain and "HTTK_WORKFLOW_DEADLINE" not in plain
 
 
 def test_environment_variables() -> None:
