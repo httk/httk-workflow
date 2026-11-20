@@ -1139,7 +1139,14 @@ obligation never leaves `owned/<O>/` (`give_back`, the move out and `extract`
 refuse), and an owner holding such a job is latched: an exception or interrupt
 inside its context seals every obligation (all or nothing) and gives nothing
 back, leaving every job for recovery. The serial paths register no obligation,
-and a workspace that is not durable registers and syncs nothing.
+and a workspace that is not durable registers and syncs nothing. The batched
+steps serve local `job request` and `job detach` runs of at least eight jobs whose request ends
+in a release or a drop, in `syncfs` mode only (`removal._Batching`): one
+collector per batch of up to 256 jobs, primed before its first write, and one
+commit point per phase (the posts' data, their renames, the claims, the run-log
+lines and state temporaries, the state replaces, the request unlinks, the
+release moves); the claims' placement pruning waits until after the moves.
+Discards, every other action and fsync mode stay serial.
 
 `recoverable_owners` lists every owner with a readable `owner.json`, plus
 every tombstoned owner that again holds jobs, launches or scratch (a falsely

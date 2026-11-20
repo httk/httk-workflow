@@ -1223,6 +1223,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
             owner=owner,
             index=index,
             report=_print_outcomes,
+            action=arguments.action,
         )
         unlocked = not ancestors or not _unlock_ancestors(workspace, owner(), ancestors, arguments.reason, index)
     if any(outcome.status in {"refused", "uncertain"} for outcome in outcomes) or not unlocked:

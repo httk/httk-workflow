@@ -524,6 +524,38 @@ uncertain result. `--wait` is valid only for `pause`; it waits for
 queued pauses and exits `0` only when each reaches `paused`. A superseded,
 dropped or timed-out pause exits `1`. `--timeout SECONDS` requires `--wait`.
 
+In a durable workspace whose filesystems are all in `syncfs` mode (the protocol
+predicate: `io.sync` is `auto` or `syncfs`, `auto` resolves to `syncfs` there
+after the prime, and the filesystem is not Lustre), a `job request` (or `job
+detach`) whose action ends in a release or a drop (`cancel`, `pause`, `set_priority`,
+`set_budget`, `set_workflow`, `detach`, `continue`, `restart`,
+`override_step`) serves each contiguous run of at least eight eligible jobs of
+a batch as one: the posts, the claims, the run-log lines with the state
+temporaries, the state replaces, the request unlinks and the release moves
+each end at one commit point, a `syncfs` per filesystem, instead of fsyncs per
+job. A job is eligible when its request is its only request file, it is not
+linked as parent or child to another job of the command, and, once claimed, it
+needs no reconciliation, its request was not applied already, its `logs/` is
+plain and its request files are unchanged; any other job is served as before,
+in input order (one that fails a check after its claim is finished at once,
+still held). A batch has none of this unless a run of eight such jobs (none
+with a request file yet) exists before anything is posted; otherwise the batch
+of jobs is posted and served exactly as before. Each job keeps the order of its
+own durable steps and the outcome the serial path gives it. A failed commit
+point finishes every job whose state was replaced and gives back the others,
+their requests withdrawn while the command still holds them (a
+`request_withdrawn` line follows the run log's `request_applied`), reports
+every outcome and stops the command, withdrawing its unserved requests; an
+interrupt does the same, and so does a job whose own step fails before its
+state is replaced (it stays held, `uncertain`). When a seal, a required
+withdrawal or one of these finishes fails, or a job
+was moved but its move could not be made durable (reported "moved, durability
+unresolved"), the command stops after reporting, its jobs held for recovery,
+and withdraws only the requests of jobs it still holds. Under `io.sync`
+`fsync`, on Lustre or any other filesystem without the predicate, in a
+workspace that is not durable, and for runs shorter than eight jobs, every job
+is served one at a time as before.
+
 `job delete`, `job seal`, `job unseal`, `job detach` and `job unlock` use the
 same immediate serving path, in the same batches with the same withdrawal, and
 print one concise line per job: done, or the `queued`, `refused` or `uncertain`

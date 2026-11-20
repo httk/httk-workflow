@@ -9,11 +9,13 @@ request``, ``job delete``, ``job seal``, ``job unseal`` and ``job detach`` take 
 waiting for a manager.
 """
 
+import contextlib
 import dataclasses
 import json
 import logging
 import os
 import re
+import stat
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -22,7 +24,7 @@ from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, cast
 
-from . import _fs, _joins, _kernel, _moving, _requests, _store
+from . import _fs, _joins, _kernel, _moving, _pool, _requests, _store
 from ._job import JobDefinition
 from ._kernel import JobRef, ListingCache, LocationIndex, OwnedJob, Release
 from ._manager_scheduling import current_step, effective_workflow
@@ -848,18 +850,12 @@ def serve(
         the claim, or its ``state.json`` is unreadable).
     """
 
-    from .gc import quarantine_damaged
-
     owned: OwnedJob | None = None
     try:
         try:
             owned = _kernel.claim(workspace, owner, ref)
         except (FormatError, _fs.UnsafePath, OSError) as exc:
-            reason = f"job.json is damaged: {exc}"
-            moved = quarantine_damaged(cast("Workspace", workspace), owner, ref.job_id, reason)
-            raise WorkflowError(
-                f"quarantined {ref.job_key}: {reason}" if moved else f"cannot claim {ref.job_key}: {exc}"
-            ) from exc
+            raise _claim_failure(workspace, owner, ref, exc) from exc
         if owned is None:
             return False
         return _serve_claimed(workspace, owner, ref, owned, only=only, outcomes=outcomes)
@@ -867,6 +863,18 @@ def serve(
         if (serving := _SERVING.get()) is not None:
             # Where this command moved the job, or that its place is no longer known: the index's next answer.
             serving.index.moved(ref.job_id, owned)
+
+
+def _claim_failure(
+    workspace: _kernel.KernelWorkspace, owner: _kernel.Owner, ref: JobRef, exc: Exception
+) -> WorkflowError:
+    """Quarantine a job whose claim was won with a damaged ``job.json``; the error :func:`serve` raises for it."""
+
+    from .gc import quarantine_damaged
+
+    reason = f"job.json is damaged: {exc}"
+    moved = quarantine_damaged(cast("Workspace", workspace), owner, ref.job_id, reason)
+    return WorkflowError(f"quarantined {ref.job_key}: {reason}" if moved else f"cannot claim {ref.job_key}: {exc}")
 
 
 def _serve_claimed(
@@ -942,13 +950,30 @@ def _serve_one(
         claimed = serve(workspace, owner, current, only={request_id}, outcomes=observed)
     except (WorkflowError, OSError, _fs.UnsafePath) as exc:
         return RequestOutcome(ref.job_id, request_id, "uncertain", str(exc)), True
+    result = _observed_outcome(workspace, ref, request_id, index, claimed=claimed, observed=observed)
     if observed:
         # Queued only when the job needs a manager's reconciliation first, which every later request waits for too.
-        return observed[-1], observed[-1].status == "queued"
+        return result, result.status == "queued"
+    return result, result.status not in _SETTLED
+
+
+def _observed_outcome(
+    workspace: _kernel.KernelWorkspace,
+    ref: JobRef,
+    request_id: str,
+    index: LocationIndex,
+    *,
+    claimed: bool,
+    observed: Sequence[RequestOutcome],
+) -> RequestOutcome:
+    """The outcome of serving one request: the last effect observed, else what the job's history proves."""
+
+    if observed:
+        return observed[-1]
     result = _history_outcome(workspace, ref, request_id, index)
     if not claimed and result.status == "uncertain" and index.present(ref.job_id):
         result = dataclasses.replace(result, status="queued", explanation="another owner claimed the job first")
-    return result, result.status not in _SETTLED
+    return result
 
 
 @dataclass
@@ -963,6 +988,8 @@ class _Progress:
     results: dict[str, RequestOutcome] = field(default_factory=dict)
     started: set[str] = field(default_factory=set)
     serving: str | None = None
+    #: Requests whose job a batch moved out of ``owned/`` without making the move durable: never withdrawn.
+    unresolved: set[str] = field(default_factory=set)
 
 
 #: The snapshot a CLI command is serving now, if any: :func:`serve`, :func:`apply_requests` and :func:`refusal` record
@@ -979,14 +1006,29 @@ def _order_snapshot(workspace: "Workspace", job_ids: Iterable[str]) -> dict[str,
     can show an applied request retired (plan WORKFLOW_LOCAL_COMMANDS §4.2).
     """
 
-    directory = workspace.control / "requests"
+    return _snapshot(workspace, job_ids)[1]
+
+
+def _listed(workspace: "Workspace", job_ids: Iterable[str]) -> dict[str, list[str]]:
+    """The names the glob ``<job-uuid>.*.json`` matches in one listing of ``requests/``, for each job."""
+
     listed: dict[str, list[str]] = {job_id: [] for job_id in job_ids}
-    for name in _kernel.list_names(directory):
+    for name in _kernel.list_names(workspace.control / "requests"):
         # A job UUID holds no dot: the glob's "<job-uuid>." is the name up to its first dot.
         job_id, _dot, rest = name.partition(".")
         names = listed.get(job_id)
         if names is not None and rest.endswith(".json"):
             names.append(name)
+    return listed
+
+
+def _snapshot(
+    workspace: "Workspace", job_ids: Iterable[str]
+) -> tuple[dict[str, list[str]], dict[str, list[_requests.Request] | None]]:
+    """The order snapshot (:func:`_order_snapshot`), with the names of each job's request files it was taken from."""
+
+    directory = workspace.control / "requests"
+    listed = _listed(workspace, job_ids)
     snapshots: dict[str, list[_requests.Request] | None] = {}
     for job_id, names in listed.items():
         if len(names) > _SNAPSHOT_LIMIT:
@@ -994,7 +1036,7 @@ def _order_snapshot(workspace: "Workspace", job_ids: Iterable[str]) -> dict[str,
             continue
         found = [request for name in names if (request := _parse(directory / name)) is not None]
         snapshots[job_id] = sorted(found, key=_order)
-    return snapshots
+    return listed, snapshots
 
 
 def _serve_snapshot(
@@ -1113,19 +1155,26 @@ def _held_for_withdrawal(
     job_id: str,
     here: Mapping[str, JobRef],
     claimed: list[OwnedJob],
+    *,
+    held_only: bool = False,
 ) -> OwnedJob | str:
     """Hold a job so that no other owner can be applying its requests: the handle, or why it cannot be held.
 
     A job in this owner's ``owned/`` is held already; any other is claimed from where it is unowned, and joins
-    *claimed* (to be given back once the withdrawal is durable).
+    *claimed* (to be given back once the withdrawal is durable). With *held_only* (a latched owner, after a
+    fail-stop: plan WORKFLOW_LOCAL_COMMANDS L3b) only a job this process holds is used: nothing is claimed.
     """
 
     if (mine := here.get(job_id)) is not None:
         held = owner.holds(mine)
+        if held_only and not held:
+            return "this command's owner does not hold it"
         handle = owner.adopt_owned(mine)
         if not held:
             claimed.append(handle)
         return handle
+    if held_only:
+        return "this command's owner does not hold it, and claims nothing after a fail-stop"
     current = index.locate(job_id, placement_hint=None, exhaustive=True)
     if current is None:
         return "the job was not found"
@@ -1138,6 +1187,21 @@ def _held_for_withdrawal(
     return won
 
 
+@dataclass
+class _Withdrawal:
+    """What :func:`_withdraw` did with each candidate request, by request id.
+
+    :param withdrawn: Unlinked (durably), or found gone already.
+    :param kept: Left armed on purpose, by the L1 rules (its application may have begun, its job cannot be held).
+    :param failed: Left armed because the withdrawal failed (the file could not be examined or unlinked, the owner
+        could not be used, or an interrupt cut it short).
+    """
+
+    withdrawn: set[str] = field(default_factory=set)
+    kept: set[str] = field(default_factory=set)
+    failed: set[str] = field(default_factory=set)
+
+
 def _withdraw(
     workspace: "Workspace",
     owner: Callable[[], _kernel.Owner],
@@ -1145,7 +1209,8 @@ def _withdraw(
     progress: _Progress,
     *,
     stopped: bool,
-) -> None:
+    ours: str | None = None,
+) -> _Withdrawal:
     """Withdraw this command's requests of one chunk that are left armed, each while this command holds its job.
 
     Left armed is a request whose outcome is ``uncertain`` and, when the command *stopped* (an exception or an
@@ -1157,6 +1222,23 @@ def _withdraw(
     here or in the owner's exit; when that fsync fails or is interrupted, the owner fail-stops with every job held
     and the original exception propagates. A request whose job cannot be held, whose application began, or whose
     withdrawal fails stays armed and is logged by id, as is the job being served when the command stopped.
+
+    A request whose job a batch moved without making the move durable is never withdrawn, and while the owner is
+    latched (after a batch's fail-stop) only the jobs this process holds are used: nothing is claimed or given back.
+    *ours* is the owner of a batch that held the jobs continuously and never replaced their state: its own run-log
+    records of applying them do not keep them (plan WORKFLOW_LOCAL_COMMANDS L3b); any other owner's still do.
+
+    The loss of the owner (:class:`~httk.workflow._kernel.OwnerLost`) is never one job's failure: the owner is
+    latched, the unlinks made so far are sealed, and it propagates; nothing more is claimed, unlinked or given back.
+
+    :param workspace: The workspace.
+    :param owner: Returns the command's CLI owner.
+    :param posted: The chunk's posted requests and their jobs.
+    :param progress: The chunk's progress.
+    :param stopped: Whether the command stopped (an exception or an interrupt).
+    :param ours: The owner of a batch whose own records of applying a request do not keep it, or ``None``.
+    :return: What became of each candidate, so that a caller that needs a withdrawal can tell a request kept on
+        purpose from one whose withdrawal failed.
     """
 
     in_flight = progress.serving if stopped else None
@@ -1169,12 +1251,18 @@ def _withdraw(
             _LOGGER.warning("job %s was being served when the command stopped: its state is uncertain", ref.job_id)
         if not ((result is None and stopped) or (result is not None and result.status == "uncertain")):
             continue
+        if request_id in progress.unresolved:
+            _LOGGER.warning(
+                "request %s for job %s stays: its job was moved, durability unresolved", request_id, ref.job_id
+            )
+            continue
         if request_id in progress.started:
             _LOGGER.warning("request %s for job %s stays pending: its application began", request_id, ref.job_id)
             continue
         candidates.append((ref, request_id, path))
+    report = _Withdrawal()
     if not candidates:
-        return
+        return report
     active: _kernel.Owner | None = None
     claimed: list[OwnedJob] = []
     # Every unlink that may have happened, recorded before the unlink is attempted: the barrier covers each of them.
@@ -1185,23 +1273,29 @@ def _withdraw(
     settled: set[str] = set()
     stopping: BaseException | None = None
     here: dict[str, JobRef] = {}
+    held_only = False
     try:
         armed: list[tuple[JobRef, str, Path]] = []
         for ref, request_id, path in candidates:
             try:
                 if _fs.lstat(_fs.loc(path)) is None:
                     settled.add(request_id)  # never published, or retired with its job meanwhile: nothing to withdraw
+                    report.withdrawn.add(request_id)
                     continue
             except _WITHDRAWAL_ERRORS as exc:
                 _LOGGER.warning("request %s for job %s was not withdrawn: %s", request_id, ref.job_id, exc)
                 settled.add(request_id)
+                report.failed.add(request_id)
                 continue
             armed.append((ref, request_id, path))
         if armed:
             try:
                 active = owner()
                 active.check_alive()
+                held_only = active.latched
                 here = {ref.job_id: ref for ref in active.owned()}
+            except _kernel.OwnerLost:
+                raise
             except _WITHDRAWAL_ERRORS as exc:
                 for ref, request_id, _path in armed:
                     _LOGGER.warning(
@@ -1211,11 +1305,14 @@ def _withdraw(
                         exc,
                     )
                     settled.add(request_id)
+                    report.failed.add(request_id)
                 armed = []
         for ref, request_id, path in armed:
             assert active is not None
             try:
-                handle = _held_for_withdrawal(workspace, active, progress.index, ref.job_id, here, claimed)
+                handle = _held_for_withdrawal(
+                    workspace, active, progress.index, ref.job_id, here, claimed, held_only=held_only
+                )
                 if isinstance(handle, str):
                     _LOGGER.warning(
                         "request %s for job %s was not withdrawn (%s); it may still be applied",
@@ -1224,25 +1321,32 @@ def _withdraw(
                         handle,
                     )
                     settled.add(request_id)
+                    report.kept.add(request_id)
                     continue
-                if (kept := _kept_for_recovery(handle, path, request_id)) is not None:
+                if (kept := _kept_for_recovery(handle, path, request_id, ours=ours)) is not None:
                     _LOGGER.warning("request %s for job %s kept: %s", request_id, ref.job_id, kept)
                     settled.add(request_id)
+                    report.kept.add(request_id)
                     continue
                 pending.append((ref.job_id, request_id))
                 _fs.remove_file(_fs.loc(path), durable=False)
+            except _kernel.OwnerLost:
+                raise  # never one job's failure: the owner is gone
             except _WITHDRAWAL_ERRORS as exc:
                 _LOGGER.warning(
                     "request %s for job %s was not withdrawn (%s); it may still be applied", request_id, ref.job_id, exc
                 )
                 settled.add(request_id)
+                report.failed.add(request_id)
                 continue
             unlinked.append((ref.job_id, request_id))
             settled.add(request_id)
+            report.withdrawn.add(request_id)
     except BaseException as exc:
-        stopping = exc  # an interrupt: the unlinks made so far are still sealed before any job goes back
+        stopping = exc  # an interrupt or the owner's loss: the unlinks made so far are still sealed first
         for ref, request_id, _path in candidates:
             if request_id not in settled:
+                report.failed.add(request_id)
                 _LOGGER.warning(
                     "request %s for job %s: its withdrawal was cut short (%s); it may still be applied",
                     request_id,
@@ -1266,15 +1370,25 @@ def _withdraw(
         _LOGGER.warning(
             "request %s for job %s withdrawn while held by this command; it had not been applied", request_id, job_id
         )
+    if isinstance(stopping, _kernel.OwnerLost):
+        # The owner is gone: nothing goes back (fail-stop); its exit, latched, touches nothing.
+        if active is not None:
+            active.latch()
+        raise stopping
     # Only now, the withdrawals durable, do the jobs claimed for them go back.
     for handle in claimed:
         try:
             handle.give_back()
+        except _kernel.OwnerLost:
+            assert active is not None
+            active.latch()
+            raise
         except _WITHDRAWAL_ERRORS as exc:
             _LOGGER.warning("job %s stays with this command's owner after a withdrawal: %s", handle.job_id, exc)
         progress.index.moved(handle.job_id, handle)
     if stopping is not None:
         raise stopping
+    return report
 
 
 #: The most of a job's run log a withdrawal reads for an owner's record of applying a request; a longer log keeps it.
@@ -1283,11 +1397,12 @@ _RUNLOG_EVIDENCE_LIMIT = 64 << 20
 _RUNLOG_CHUNK = 1 << 20
 
 
-def _application_logged(handle: OwnedJob, request_id: str) -> bool | None:
+def _application_logged(handle: OwnedJob, request_id: str, *, ours: str | None = None) -> bool | None:
     """Whether the held job's run log records any owner's ``request_applied`` of *request_id*; ``None`` if unknown.
 
     ``apply_requests`` appends that record durably before any effect of the request, so its absence proves that no
-    owner began applying it. The whole log is read (``None`` when it cannot be, or passes the limit).
+    owner began applying it. The whole log is read (``None`` when it cannot be, or passes the limit). A record of the
+    owner *ours* (a batch that held the job continuously and never replaced its state) does not count.
     """
 
     needle, offset, carry = request_id.encode(), 0, b""
@@ -1312,20 +1427,22 @@ def _application_logged(handle: OwnedJob, request_id: str) -> bool | None:
                 isinstance(detail, dict)
                 and entry.get("event") == "request_applied"
                 and detail.get("request_id") == request_id
+                and (ours is None or entry.get("owner_id") != ours)
             ):
                 return True
         if not data:
             return False
 
 
-def _kept_for_recovery(handle: OwnedJob, path: Path, request_id: str) -> str | None:
+def _kept_for_recovery(handle: OwnedJob, path: Path, request_id: str, *, ours: str | None = None) -> str | None:
     """Why a request of a held job must stay although this command never began applying it, or ``None``.
 
     Any owner's run-log record of applying it: that owner (dead, its job returned) may have begun its effect, and the
     pending request is what finishes it. A job whose ``state.json`` shows an attempt that may be live (``phase`` not
     ``idle``) or an unfinished commit as well: a manager signals a running attempt for a ``cancel`` before it logs
     the cancel. A ``delete`` or ``eject`` of an exchange-origin job as well: an exchange index may have been dropped.
-    A request, run log or ``state.json`` that cannot be read keeps it too.
+    A request, run log or ``state.json`` that cannot be read keeps it too. *ours* is as for
+    :func:`_application_logged`.
     """
 
     try:
@@ -1334,7 +1451,7 @@ def _kept_for_recovery(handle: OwnedJob, path: Path, request_id: str) -> str | N
         return None
     except FormatError as exc:
         return f"it cannot be read: {exc}"
-    logged = _application_logged(handle, request_id)
+    logged = _application_logged(handle, request_id, ours=ours)
     if logged is None:
         return "the job's run log cannot be read"
     if logged:
@@ -1373,6 +1490,1119 @@ def _seal_withdrawals(workspace: "Workspace", pending: Sequence[tuple[str, str]]
 type _Prepare = Callable[[], tuple[JobRef, Mapping[str, object]] | RequestOutcome]
 
 
+# -- batched Release and Drop chunks (plan WORKFLOW_LOCAL_COMMANDS §2 L3, §4-§6, phase L3b) --------------------------
+
+#: The actions whose effect is a Release or a Drop: the only ones a local chunk batches (plan WORKFLOW_LOCAL_COMMANDS
+#: amendments 8 and 14, L3b). ``delete`` (Discard), ``seal``, ``unseal``, ``unlock`` and ``eject`` are served serially.
+_BATCHABLE = frozenset(
+    {"cancel", "pause", "continue", "restart", "override_step", "set_priority", "set_budget", "set_workflow", "detach"}
+)
+#: The fewest eligible jobs a contiguous run batches; a shorter run, and a chunk with fewer candidates, is served
+#: serially (§2 L3, F-M9).
+_BATCH_MIN = 8
+#: The errors of one job's batched step that take it out of the batch, held, with an ``uncertain`` outcome
+#: (amendment 19); :class:`~httk.workflow._kernel.OwnerLost` is handled before them: it stops the chunk.
+_STEP_ERRORS = (WorkflowError, OSError)
+#: The errors of a commit point that the failure table handles (amendments 11, 17-20).
+_COMMIT_ERRORS = (OSError, _fs.UnsafePath)
+
+
+class _CommitFailed(Exception):
+    """A batch's commit point failed: the failure table decides every job the batch still holds.
+
+    :param phase: The phase whose commit point failed (``B``, ``C1``, ``C2``, ``D1`` or ``D2``).
+    :param error: What failed it.
+    """
+
+    def __init__(self, phase: str, error: BaseException) -> None:
+        super().__init__(f"commit point {phase} failed: {error}")
+        self.phase = phase
+        self.error = error
+
+
+class _Stopped(WorkflowError):
+    """A batch stopped its command, once every job's outcome it decided was recorded: no later job is served, and
+    the command withdraws its unserved requests and reports what it knows (plan WORKFLOW_LOCAL_COMMANDS amendments 3
+    and 22).
+
+    :param message: Why.
+    :param outcomes: The outcomes recorded so far, by request id.
+    """
+
+    def __init__(self, message: str, outcomes: Mapping[str, RequestOutcome]) -> None:
+        super().__init__(message)
+        self.outcomes = dict(outcomes)
+
+
+class _CommitStopped(_Stopped):
+    """A commit point of a batch failed and its row of the failure table decided every job: the command stops."""
+
+
+class _FailStop(_Stopped):
+    """A seal or a finish of a batch's cleanup failed: its jobs stay with the owner, whose ``owner.json`` stays, for
+    recovery (amendments 11, 12 and 20)."""
+
+
+class _Halt(Exception):
+    """A finish of the batch moved a job out of ``owned/`` but could not make the move durable (amendment 20): the
+    batch fail-stops before any further work."""
+
+
+@dataclass(eq=False)
+class _Member:
+    """One job of a batched run and how far the batch got with it.
+
+    :param ref: The job as posted.
+    :param request_id: Its request.
+    :param path: The request file.
+    :param names: The job's request files in the order snapshot (taken after A): its pre-claim listing.
+    """
+
+    ref: JobRef
+    request_id: str
+    path: Path
+    names: frozenset[str]
+    #: Where the claim found the job.
+    current: JobRef | None = None
+    handle: OwnedJob | None = None
+    #: The error of a claim that may have won the job with a damaged ``job.json`` (quarantined after B).
+    claim_error: Exception | None = None
+    #: The document to release with, the release, the outcome once it is durable, and the run-log lines of C1.
+    final: StateDoc | None = None
+    target: Release | None = None
+    outcome: RequestOutcome | None = None
+    lines: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+    staged: _fs.Staged | None = None
+    #: Whether the batch began writing its ``request_applied`` record of the request (it may be in the run log).
+    logged: bool = False
+    #: The last batched step begun: ``claimed``, ``logged``, ``replacing``, ``unlinking``, ``moving``.
+    step: str = "claimed"
+    #: Whether the job left the batch: decided, finished serially, or held after a step of its failed.
+    out: bool = False
+
+
+class _Batch:
+    """Serve one contiguous run of eligible jobs as a batch: phases B, C1, C2, D1 and D2, each ended by one commit
+    point of *commit* (``Owner.commit``), then the pruning of the placements the claims emptied.
+
+    :param workspace: The workspace.
+    :param owner: The command's CLI owner.
+    :param commit: The chunk's entered collector, in ``syncfs`` mode.
+    :param members: The run, in input order.
+    :param progress: The chunk's progress, whose index locates the jobs and records their moves.
+    """
+
+    def __init__(
+        self,
+        workspace: "Workspace",
+        owner: _kernel.Owner,
+        commit: _fs.Commit,
+        members: Sequence[_Member],
+        progress: _Progress,
+    ) -> None:
+        self.workspace, self.owner, self.commit = workspace, owner, commit
+        self.members, self.progress, self.index = list(members), progress, progress.index
+        #: The phase under way, and the phases whose commit point succeeded.
+        self.phase = "B"
+        self.sealed: set[str] = set()
+        #: The commit point that failed, with its error, once one did.
+        self.failed: tuple[str, BaseException] | None = None
+        #: Whether a seal or a finish of the cleanup failed: nothing more is given back, the owner stays latched.
+        self.stopped = False
+
+    def run(self) -> None:
+        """Serve the run; every job's outcome is recorded in the progress.
+
+        :raises _CommitStopped: When a commit point failed, its row of the failure table having decided every job.
+        :raises _FailStop: When a seal or a finish failed (the jobs stay held, the owner latched).
+        :raises httk.workflow._kernel.OwnerLost: When the owner was lost; nothing was given back.
+        """
+
+        token = _SERVING.set(self.progress)
+        try:
+            try:
+                self._claim()
+                self._seal("B")
+                self.phase = "admit"
+                self._admit()
+                self.phase = "C1"
+                self._log(self._active())
+                self._seal("C1")
+                self.phase = "C2"
+                self._replace(self._active())
+                self._seal("C2")
+                self.phase = "D1"
+                self._unlink(self._active())
+                self._seal("D1")
+                self.phase = "D2"
+                self._move(self._active())
+                self._seal("D2")
+                self._released(self._active())
+            except _CommitFailed as failure:
+                with _pool.DeferredInterrupts():
+                    self._settle(partial(self._row, failure.phase, failure.error, self._active()))
+                # Even when the row decided every job, a failed commit point stops the command (amendments 3, 22).
+                raise _CommitStopped(str(failure), self.progress.results) from failure.error
+            except _Halt:
+                with _pool.DeferredInterrupts():
+                    self._settle(self._halted)
+                raise AssertionError("unreachable: a halted batch fail-stops")  # pragma: no cover
+            except _kernel.OwnerLost:
+                self.owner.latch()  # stop the chunk and give nothing back (amendment 19)
+                raise
+            except (KeyboardInterrupt, SystemExit) as interrupt:
+                # Amendment 12: a second interrupt during the cleanup is recorded, never acted on.
+                with _pool.DeferredInterrupts(propagating=interrupt):
+                    try:
+                        self._settle(self._interrupted)
+                    except _FailStop:
+                        _LOGGER.warning("the batch's jobs stay with owner %s for recovery", self.owner.owner_id)
+                raise
+            except BaseException:
+                # An unexpected error fail-stops (§5.2): nothing is given back, owner.json stays.
+                self.owner.latch()
+                raise
+            self._end()
+        finally:
+            _SERVING.reset(token)
+
+    # -- the phases ------------------------------------------------------------------------------------------------
+
+    def _active(self) -> list[_Member]:
+        return [member for member in self.members if member.handle is not None and not member.out]
+
+    def _decide(self, member: _Member, outcome: RequestOutcome) -> None:
+        self.progress.results[member.request_id] = outcome
+        member.out = True
+
+    def _uncertain(self, member: _Member, explanation: str) -> RequestOutcome:
+        return RequestOutcome(member.ref.job_id, member.request_id, "uncertain", explanation)
+
+    def _unapplied_failure(self, member: _Member, error: BaseException) -> None:
+        """A step of this job failed before its state replace happened (amendments 19, 28; G3): it leaves the batch
+        and stays held, ``uncertain``, but its request is withdrawn first while held, with ``request_withdrawn``
+        after the batch's own record of applying it. When that withdrawal fails, the batch fail-stops (G1).
+
+        :param member: The job.
+        :param error: The step's error.
+        :raises _Halt: When the withdrawal failed.
+        """
+
+        self._discard_temporary(member)
+        if self._withdraw_held([member]):
+            self.stopped = True
+            explanation = f"{error}; the withdrawal of its request failed; the job stays held for recovery"
+            self._decide(member, self._uncertain(member, explanation))
+            raise _Halt from error
+        self._decide(member, self._uncertain(member, str(error)))
+
+    def _withdraw_held(self, members: Sequence[_Member]) -> list[_Member]:
+        """Withdraw the requests of held jobs whose state replace did not happen, under the L1 rules but without the
+        batch's own records of applying them keeping them (``ours``), then append ``request_withdrawn`` where the
+        batch had begun such a record. A request kept on purpose by the L1 rules is fine.
+
+        :param members: The held jobs.
+        :return: The jobs whose required withdrawal failed (G1), which must stay held.
+        :raises httk.workflow._kernel.OwnerLost: When the owner was lost (it propagates from the withdrawal).
+        """
+
+        if not members:
+            return []
+        posted = [(member.ref, member.path) for member in members]
+        try:
+            report = _withdraw(
+                self.workspace, lambda: self.owner, posted, self.progress, stopped=True, ours=self.owner.owner_id
+            )
+        except _kernel.OwnerLost:
+            raise
+        except Exception:  # its fsync of requests/ failed: the owner is in flight, nothing is durable
+            return list(members)
+        failed = [member for member in members if member.request_id in report.failed]
+        for member in members:
+            handle = member.handle
+            assert handle is not None
+            if not member.logged or member in failed or member.request_id not in report.withdrawn:
+                continue
+            try:
+                # The batch's request_applied record of it is not left standing alone (amendment 28).
+                handle.append_log("request_withdrawn", detail={"request_id": member.request_id})
+            except _kernel.OwnerLost:
+                raise
+            except _STEP_ERRORS:
+                failed.append(member)
+        return failed
+
+    def _claim(self) -> None:
+        """B: claim each job into ``owned/<owner-id>/``, its directories obligations of the owner."""
+
+        for member in self.members:
+            job_id = member.ref.job_id
+            current = self.index.locate(job_id, placement_hint=member.ref.placement, exhaustive=True)
+            if current is None:
+                self._decide(member, self._uncertain(member, "job disappeared before the request was observed"))
+                continue
+            if current.state == _kernel.OWNED:
+                outcome = RequestOutcome(job_id, member.request_id, "queued", _HELD, current.state)
+                self._decide(member, outcome)
+                continue
+            member.current = current
+            try:
+                handle = _kernel.claim(self.workspace, self.owner, current, commit=self.commit)
+            except _kernel.OwnerLost:
+                raise
+            except (FormatError, _fs.UnsafePath, OSError) as exc:
+                member.claim_error = exc  # quarantined once B is sealed, as serve() does at once
+                continue
+            except WorkflowError as exc:
+                self.index.moved(job_id, None)
+                self._decide(member, self._uncertain(member, str(exc)))
+                continue
+            if handle is None:
+                self.index.moved(job_id, None)
+                self._decide(
+                    member,
+                    _observed_outcome(
+                        self.workspace, member.ref, member.request_id, self.index, claimed=False, observed=()
+                    ),
+                )
+                continue
+            member.handle = handle
+
+    def _admit(self) -> None:
+        """The post-claim checks, after B (amendments 8, 19, 21, 26): a job that fails one is served serially at once,
+        still held; the others get their effect, the document to release with and their run-log lines."""
+
+        listing = _listed(self.workspace, [member.ref.job_id for member in self.members])
+        for member in self.members:
+            if member.claim_error is not None:
+                self._quarantine([member])
+                continue
+            if member.handle is None or member.out:
+                continue
+            if not self._admitted(member, listing.get(member.ref.job_id, [])):
+                self._serially(member)
+
+    def _quarantine(self, members: Iterable[_Member]) -> None:
+        """Quarantine each job whose claim was won with a damaged ``job.json``, once B is sealed, as :func:`serve`
+        does (plan WORKFLOW_LOCAL_COMMANDS L3b, E9); its outcome is that error."""
+
+        for member in members:
+            if member.claim_error is None or member.out:
+                continue
+            assert member.current is not None
+            self.index.moved(member.ref.job_id, None)
+            try:
+                error: Exception = _claim_failure(self.workspace, self.owner, member.current, member.claim_error)
+            except _kernel.OwnerLost:
+                raise
+            except (WorkflowError, OSError) as exc:
+                error = exc
+            self._decide(member, self._uncertain(member, str(error)))
+
+    def _admitted(self, member: _Member, names: Sequence[str]) -> bool:
+        """Whether *member* stays in the batch, its effect a Release or a Drop."""
+
+        handle, request_id = member.handle, member.request_id
+        assert handle is not None
+        try:
+            job = JobDefinition.from_path(handle.path / "job.json")
+            doc = handle.read_state()
+            if handle.pending_release() is not None or (
+                doc is not None and (doc.commit is not None or doc.phase["kind"] != "idle")
+            ):
+                return False  # needs reconciliation
+            if handle.already_applied(request_id) or not _plain_logs(handle.path):
+                return False
+            # The retirement evidence: one listing after B, the job held ever since (amendment 2).
+            if frozenset(names) != member.names or handle.request_files(listing=names) != [member.path]:
+                return False
+            request = _parse(member.path)
+        except _kernel.OwnerLost:
+            raise
+        except _STEP_ERRORS:
+            return False  # the serial code meets it again and decides
+        if request is None or request.request_id != request_id or request.action not in _BATCHABLE:
+            return False
+        if doc is None or doc.activation is None:
+            doc = (doc or StateDoc.empty(handle.job_id)).next_activation(job.initial_step, "initial")
+        # As apply_requests() decides it, with the same refusal checks.
+        installations: dict[str, _store.Installed | None] = {}
+        workspace, current, payload = self.workspace, doc, handle.path
+        try:
+            new, effect = _requests.apply(
+                job,
+                current,
+                handle.from_state,
+                handle.from_priority,
+                request,
+                refusal=lambda candidate: refusal(workspace, job, candidate, None, current, installations, payload),
+                workflow_name=lambda workflow_id: (
+                    None if (found := installations.get(workflow_id)) is None else found.name
+                ),
+            )
+        except _kernel.OwnerLost:
+            raise
+        except (ValueError, *_STEP_ERRORS):
+            return False  # the serial code meets it again and decides
+        detail: dict[str, object] = {"request_id": request_id, "action": request.action}
+        if isinstance(effect, Release):
+            target = effect
+            outcome = RequestOutcome(handle.job_id, request_id, "applied", f"{request.action} applied", target.state)
+        elif isinstance(effect, _requests.Drop):
+            detail["dropped"] = effect.reason
+            target = Release(handle.from_state, handle.from_priority, (request_id,))
+            outcome = RequestOutcome(handle.job_id, request_id, "refused", effect.reason, handle.from_state)
+        else:
+            return False
+        # As release() records it.
+        owner_id = self.owner.owner_id
+        moved = {"from": handle.from_state, "to": target.state}
+        member.final = new.updated(owner_id=owner_id).with_history("released", owner_id=owner_id, **moved)
+        member.target, member.outcome = target, outcome
+        member.lines = [("request_applied", {"detail": detail})]
+        if target.state == "failed":
+            attempt = new.attempt.get("id") if new.attempt is not None else None
+            code = new.failure.get("code") if new.failure is not None else None
+            member.lines.append(("failed", {"attempt_id": attempt, "detail": code}))
+        member.lines.append(("released", {**moved, "detail": {"priority": target.priority}}))
+        return True
+
+    def _serially(self, member: _Member) -> None:
+        """Finish an evicted job with today's per-job code, while it is still held (amendment 8)."""
+
+        handle, current = member.handle, member.current
+        assert handle is not None and current is not None
+        member.out = True
+        job_id, request_id = member.ref.job_id, member.request_id
+        observed: list[RequestOutcome] = []
+        self.progress.serving = job_id
+        try:
+            try:
+                _serve_claimed(self.workspace, self.owner, current, handle, only={request_id}, outcomes=observed)
+            finally:
+                self.index.moved(job_id, handle)
+        except _kernel.OwnerLost:
+            raise  # never swallowed: the batch stops (E3)
+        except (WorkflowError, OSError) as exc:
+            if self._moved_unresolved(handle):
+                self._unresolved(member, exc, None)
+                raise _Halt from exc
+            outcome = self._uncertain(member, str(exc))
+        else:
+            outcome = _observed_outcome(
+                self.workspace, member.ref, request_id, self.index, claimed=True, observed=observed
+            )
+        finally:
+            self.progress.serving = None
+        self.progress.results[request_id] = outcome
+
+    def _log(self, members: Sequence[_Member]) -> None:
+        """C1: the run-log lines and the state temporary of each job, recorded in the collector."""
+
+        for member in members:
+            handle, current, final, target = member.handle, member.current, member.final, member.target
+            assert handle is not None and current is not None and final is not None and target is not None
+            member.step = "logged"
+            try:
+                # Not "started" (L1's withdrawal boundary) yet: the batch holds the job from B on, so its request
+                # counts as begun only once its state replace happened (amendment 22, E2).
+                handle.append_log_line("claimed", {"from": current.state, "to": _kernel.OWNED}, commit=self.commit)
+                member.logged = True  # the next line is its request_applied record
+                for event, detail in member.lines:
+                    handle.append_log_line(event, detail, commit=self.commit)
+                member.staged = handle.stage_state(final.with_release(target), commit=self.commit)
+            except _kernel.OwnerLost:
+                raise
+            except _STEP_ERRORS as exc:
+                self._unapplied_failure(member, exc)
+
+    def _replace(self, members: Sequence[_Member]) -> None:
+        """C2: replace each job's ``state.json`` (an exposure obligation of its handle)."""
+
+        for member in members:
+            assert member.handle is not None and member.staged is not None
+            member.step = "replacing"
+            try:
+                member.handle.replace_state(member.staged, commit=self.commit)
+            except _kernel.OwnerLost:
+                raise
+            except _STEP_ERRORS as exc:
+                if not self._applied(member):
+                    self._unapplied_failure(member, exc)  # no replace happened: withdrawn while held (G3)
+                    continue
+                self.progress.started.add(member.request_id)
+                self._decide(member, self._uncertain(member, str(exc)))
+            else:
+                self.progress.started.add(member.request_id)  # its state replace happened (E2)
+
+    def _unlink(self, members: Sequence[_Member]) -> None:
+        """D1: unlink each job's request file (an exposure obligation of its handle)."""
+
+        for member in members:
+            assert member.handle is not None
+            member.step = "unlinking"
+            try:
+                member.handle.unlink_requests([member.path.name], commit=self.commit)
+            except _kernel.OwnerLost:
+                raise
+            except _STEP_ERRORS as exc:
+                self._decide(member, self._uncertain(member, str(exc)))
+
+    def _move(self, members: Sequence[_Member]) -> None:
+        """D2: move each job out of ``owned/<owner-id>/`` to where it is released to."""
+
+        for member in members:
+            handle, target = member.handle, member.target
+            assert handle is not None and target is not None
+            member.step = "moving"
+            placement = handle.placement()
+            try:
+                handle.move_out(target.state, placement, target.priority, commit=self.commit)
+            except _kernel.OwnerLost:
+                raise
+            except _STEP_ERRORS as exc:
+                if self._moved_unresolved(handle):
+                    # A late device's inline fsync failed after the rename (amendment 20): fail-stop now.
+                    self._unresolved(member, exc, _kernel._state_dir(self.workspace, target.state, placement))
+                    raise _Halt from exc
+                self._decide(member, self._uncertain(member, str(exc)))
+
+    def _seal(self, phase: str) -> None:
+        """End *phase* at its commit point, interrupts deferred around it.
+
+        :param phase: The phase (``B``, ``C1``, ``C2``, ``D1`` or ``D2``).
+        :raises _CommitFailed: When the commit point failed; an interrupt meanwhile is delivered first, the failure
+            recorded for its cleanup.
+        """
+
+        failure: BaseException | None = None
+        made = False
+        try:
+            with _pool.DeferredInterrupts():
+                try:
+                    self.owner.commit(self.commit)
+                    made = True
+                except _COMMIT_ERRORS as exc:
+                    failure = exc
+        finally:
+            if failure is not None:
+                self.failed = (phase, failure)
+            elif made:
+                self.sealed.add(phase)
+        if failure is not None:
+            raise _CommitFailed(phase, failure)
+
+    def _released(self, members: Iterable[_Member]) -> None:
+        """After D2: each of *members* is released durably; its outcome is the serial one."""
+
+        for member in members:
+            if member.out:
+                continue
+            assert member.outcome is not None and member.handle is not None
+            self._decide(member, member.outcome)
+            _LOGGER.info(
+                "job %s moved from %s to %s",
+                member.handle.job_key,
+                member.handle.from_state,
+                member.outcome.state,
+                extra={
+                    "event": "released",
+                    "job_key": member.handle.job_key,
+                    "job_id": member.handle.job_id,
+                    "to": member.outcome.state,
+                },
+            )
+
+    def _end(self) -> None:
+        """Record every claimed job's move in the index, prune the placements the claims emptied (amendment 26:
+        after D2) and, unless the batch fail-stopped, clear the owner's latch.
+
+        :raises _FailStop: When the latch cannot be cleared (an obligation cannot be sealed).
+        """
+
+        for member in self.members:
+            if member.handle is not None:
+                self.index.moved(member.ref.job_id, member.handle)
+        # E8: an interrupt here is delivered only once the latch is cleared, the batch decided.
+        with _pool.DeferredInterrupts():
+            pending: BaseException | None = None
+            try:
+                pruned: set[PurePosixPath] = set()
+                for member in self.members:
+                    current = member.current
+                    if (
+                        current is not None
+                        and current.state == "ready"
+                        and current.placement is not None
+                        and current.placement not in pruned
+                    ):
+                        pruned.add(current.placement)
+                        _kernel._prune_placement(self.workspace, "ready", current.placement)
+            except BaseException as exc:
+                pending = exc  # pruning is best effort; the latch is still cleared first
+            if not self.stopped:
+                try:
+                    self.owner.unlatch()
+                except _kernel.OwnerLost:
+                    raise
+                except (OSError, WorkflowError) as exc:
+                    self.stopped = True
+                    raise _FailStop(
+                        f"the batch's obligations could not be sealed: {exc}", self.progress.results
+                    ) from exc
+            if pending is not None:
+                raise pending
+
+    # -- failures and interrupts -----------------------------------------------------------------------------------
+
+    def _settle(self, cleanup: Callable[[], None]) -> None:
+        """Run a cleanup, then :meth:`_end`; a fail-stop latches the owner and raises once it is reported."""
+
+        try:
+            cleanup()
+        except _FailStop:
+            self.stopped = True
+        except BaseException:
+            self.stopped = True
+            self.owner.latch()
+            raise
+        if self.stopped:
+            self.owner.latch()
+        self._end()
+        if self.stopped:
+            raise _FailStop(
+                f"the batch's cleanup failed; its jobs stay with owner {self.owner.owner_id} for recovery",
+                self.progress.results,
+            )
+
+    def _stop(self, members: Iterable[_Member], explanation: str) -> None:
+        """Fail-stop: *members* stay held (or, moved, unresolved), each reported ``uncertain``."""
+
+        self.stopped = True
+        for member in members:
+            if not member.out:
+                self._decide(member, self._uncertain(member, explanation))
+
+    def _finish(self, member: _Member, step: Callable[[], object], destination: Path) -> bool:
+        """Finish one job individually through the per-job durable path; whether it was.
+
+        A finish whose move left ``owned/`` but whose fsync failed keeps its handle registered, records the move's
+        directories as obligations and fail-stops (amendment 20); any other failure leaves the job held and
+        fail-stops (amendment 11). Nothing more is given back after either.
+        """
+
+        handle = member.handle
+        assert handle is not None
+        try:
+            step()
+        except _kernel.OwnerLost:
+            raise
+        except _STEP_ERRORS as exc:
+            self.stopped = True
+            if self._moved_unresolved(handle):
+                self._unresolved(member, exc, destination)
+            else:
+                self._decide(member, self._uncertain(member, f"{exc}; the job stays held for recovery"))
+            return False
+        return True
+
+    def _moved_unresolved(self, handle: OwnedJob) -> bool:
+        """Whether a step that raised had moved the job out of ``owned/`` while its handle stayed registered: the
+        rename happened, its fsync did not (amendment 20)."""
+
+        return not os.path.lexists(handle.path) and handle.moved_to is None and self.owner.holds(handle.ref)
+
+    def _unresolved(self, member: _Member, error: BaseException, destination: Path | None) -> None:
+        """Amendment 20: the handle stays registered, the move's directories become obligations (the owner latches),
+        and the job is reported "moved, durability unresolved"; never withdrawn."""
+
+        handle = member.handle
+        assert handle is not None
+        self.stopped = True
+        directories = [handle.path.parent]
+        if destination is None:
+            found = _kernel.locate(self.workspace, handle.job_id, placement_hint=None, exhaustive=True)
+            destination = None if found is None else found.path.parent
+        if destination is not None:
+            directories.append(destination)
+        with self.owner.obliged(directories, kind="owner", job=handle):
+            pass
+        self.owner.latch()
+        self.progress.unresolved.add(member.request_id)
+        self._decide(member, self._uncertain(member, f"moved, durability unresolved: {error}"))
+
+    def _halted(self) -> None:
+        """After an unresolved finish (:class:`_Halt`): nothing more is done; every job the batch still has is
+        reported, held for recovery or, moved by a step not yet sealed, unresolved."""
+
+        self.stopped = True
+        for member in self._active():
+            handle = member.handle
+            assert handle is not None
+            if handle.moved_to is not None:
+                self.progress.unresolved.add(member.request_id)
+                self._decide(member, self._uncertain(member, "moved, durability unresolved: the batch stopped"))
+            else:
+                self._decide(member, self._uncertain(member, "the job stays held for recovery: the batch stopped"))
+
+    def _give_back(self, members: Sequence[_Member], outcome: Callable[[_Member], RequestOutcome | None]) -> None:
+        """Give each job back where it was claimed from (its move fsyncs both directories), in order, stopping at the
+        first that fails; *outcome* gives each one's outcome, or ``None`` for none."""
+
+        for position, member in enumerate(members):
+            handle = member.handle
+            assert handle is not None
+            self._discard_temporary(member)
+            destination = _kernel._state_dir(self.workspace, handle.from_state, handle.placement())
+            if not self._finish(member, handle.give_back, destination):
+                self._stop(members[position + 1 :], "the job stays held for recovery: an earlier finish failed")
+                return
+            if (result := outcome(member)) is not None:
+                self._decide(member, result)
+            member.out = True
+
+    def _discard_temporary(self, member: _Member) -> None:
+        # The state temporary of a job that is not applied (the C1 row, and its default rule): best effort.
+        staged, member.staged = member.staged, None
+        if staged is not None and member.step in ("logged", "replacing"):
+            try:
+                _fs.remove_file(staged.temporary, durable=False)
+            except OSError:
+                pass
+
+    def _return(self, members: Sequence[_Member], outcome: Callable[[_Member], RequestOutcome | None]) -> None:
+        """Return jobs whose state replace did not happen (amendments 12, 17, 22; E1, E2), while still held: seal the
+        owner's obligations (B's claims among them), quarantine damaged claims, withdraw their requests under the L1
+        rules (the batch's own run-log records of applying them do not keep them) and fsync ``requests/``, record
+        ``request_withdrawn`` where the batch had logged the application, and only then give them back. A seal or a
+        withdrawal that fails gives nothing back (fail-stop)."""
+
+        try:
+            self.owner.seal_obligations()
+        except _kernel.OwnerLost:
+            raise
+        except (*_COMMIT_ERRORS, WorkflowError) as exc:
+            self._stop(members, f"{exc}; the job stays held for recovery")
+            return
+        self._quarantine(self.members)
+        members = [member for member in members if not member.out]
+        if not members:
+            return
+        for member in members:
+            self._discard_temporary(member)
+        if failed := self._withdraw_held(members):
+            # A required withdrawal that failed is fatal for its job: it stays held, and nothing goes back (G1).
+            for member in failed:
+                explanation = "the withdrawal of its request failed; the job stays held for recovery"
+                self._decide(member, self._uncertain(member, explanation))
+            self._stop(members, "the job stays held for recovery: a withdrawal failed")
+            return
+        self._give_back(members, outcome)
+
+    def _row(self, phase: str, error: BaseException, members: Sequence[_Member]) -> None:
+        """The failure table (amendments 11, 17-20) for the failed commit point of *phase*, for *members*."""
+
+        failed = f"{error}"
+        if phase in ("B", "C1"):
+            # B: the claims sealed by directory before anything goes back; C1: the temporaries go too (E1, E2).
+            self._return(members, lambda member: self._uncertain(member, failed))
+        elif phase == "C2":
+            # Every job whose state replace happened: the serial apply, safe in either direction (amendment 18), never
+            # give_back. One whose replace did not happen is unapplied: returned, its request withdrawn (E2).
+            applied = [member for member in members if self._applied(member)]
+            for position, member in enumerate(applied):
+                handle, final, target = member.handle, member.final, member.target
+                assert handle is not None and final is not None and target is not None
+                self.progress.started.add(member.request_id)
+                destination = _kernel._state_dir(self.workspace, target.state, handle.placement())
+                if not self._finish(member, partial(handle.release, final, target), destination):
+                    self._stop(
+                        [*applied[position + 1 :], *members],
+                        "the job stays held for recovery: an earlier finish failed",
+                    )
+                    return
+                assert member.outcome is not None
+                self._decide(member, member.outcome)
+            self._return(
+                [member for member in members if not member.out], lambda member: self._uncertain(member, failed)
+            )
+        elif phase == "D1":
+            try:
+                self.owner.seal_obligations()  # requests/, by directory
+            except _kernel.OwnerLost:
+                raise
+            except _COMMIT_ERRORS as exc:
+                self._stop(members, f"{exc}; the job stays held for recovery")
+                return
+            for position, member in enumerate(members):
+                handle, target = member.handle, member.target
+                assert handle is not None and target is not None
+                placement = handle.placement()
+                destination = _kernel._state_dir(self.workspace, target.state, placement)
+                if not self._finish(
+                    member, partial(handle.move_out, target.state, placement, target.priority), destination
+                ):
+                    self._stop(members[position + 1 :], "the job stays held for recovery: an earlier finish failed")
+                    return
+                assert member.outcome is not None
+                self._decide(member, member.outcome)
+        else:
+            # D2: the moves only need their seal.
+            try:
+                self.owner.seal_obligations()
+            except _kernel.OwnerLost:
+                raise
+            except _COMMIT_ERRORS as exc:
+                for member in members:
+                    self.progress.unresolved.add(member.request_id)
+                self._stop(members, f"moved, durability unresolved: {exc}")
+                return
+            self._released(members)
+
+    def _interrupted(self) -> None:
+        """Amendment 12: after a commit point failed, the failure table; otherwise finish the applied jobs through
+        the remaining commit points, then return the unapplied ones (:meth:`_return`: withdrawn first, only after B
+        is sealed)."""
+
+        if self.failed is not None:
+            self._row(*self.failed, self._active())
+            return
+        applied = [member for member in self._active() if self._applied(member)]
+        unapplied = [member for member in self._active() if not self._applied(member)]
+        for member in applied:
+            self.progress.started.add(member.request_id)
+        if self.phase == "B" and not self._through("B", self._active()):
+            return
+        if self.phase in ("C2", "D1", "D2") and applied:
+            self._finish_applied(applied)
+        if self.stopped:
+            return
+        self._return([member for member in unapplied if not member.out], lambda member: None)
+
+    def _finish_applied(self, applied: Sequence[_Member]) -> None:
+        """Take the applied jobs through the chunk's remaining commit points (C2, D1, D2)."""
+
+        if self.phase == "C2" and not self._through("C2", self._active()):
+            return  # the C2 row released every job still held, applied or not
+        if self.phase in ("C2", "D1"):
+            self._unlink([member for member in applied if not member.out])
+            if not self._through("D1", [member for member in applied if not member.out]):
+                return
+        moving: list[_Member] = []
+        for member in applied:
+            handle = member.handle
+            assert handle is not None
+            if member.out:
+                continue
+            if member.step != "moving" or os.path.lexists(handle.path):
+                moving.append(member)
+            elif handle.moved_to is None:
+                # Moved by a step the interrupt cut short, its handle not retired: fail-stop (amendment 20).
+                self._stop([member], "moved, durability unresolved: the move was interrupted")
+        self._move(moving)
+        if not self._through("D2", [member for member in applied if not member.out]):
+            return
+        self._released(applied)
+
+    def _applied(self, member: _Member) -> bool:
+        """Whether the job's state replace happened (amendment 22): it is finished, never given back."""
+
+        if member.step in ("claimed", "logged"):
+            return False
+        if member.step == "replacing":
+            # Explicit evidence (G2): state.json is the staged temporary's inode. A missing temporary proves nothing:
+            # replace_staged removes it when os.replace fails.
+            staged = member.staged
+            if staged is None:
+                return False
+            try:
+                landed = os.lstat(staged.target.path, dir_fd=staged.target.at)
+            except FileNotFoundError:
+                return False
+            return (landed.st_dev, landed.st_ino) == staged.identity
+        return True
+
+    def _through(self, phase: str, members: Sequence[_Member]) -> bool:
+        """Make *phase*'s commit point, unless it was made; on failure, its row of the failure table for *members*.
+        Whether the cleanup goes on to the next commit point."""
+
+        if phase in self.sealed:
+            return True
+        try:
+            self.owner.commit(self.commit)
+        except _COMMIT_ERRORS as exc:
+            self.failed = (phase, exc)
+            self._row(phase, exc, members)
+            return False
+        self.sealed.add(phase)
+        return True
+
+
+def _plain_logs(job: Path) -> bool:
+    """Whether ``logs/`` is absent or a real directory and ``logs/runlog.jsonl`` absent or a regular file (amendment
+    26: a planted entry makes the job serial)."""
+
+    try:
+        logs = os.lstat(job / "logs").st_mode
+    except FileNotFoundError:
+        return True
+    if not stat.S_ISDIR(logs):
+        return False
+    try:
+        return stat.S_ISREG(os.lstat(job / "logs" / "runlog.jsonl").st_mode)
+    except FileNotFoundError:
+        return True
+
+
+def _runs(eligible: Sequence[bool]) -> list[tuple[bool, range]]:
+    """Cut a chunk's positions into contiguous runs: a maximal run of eligible positions at least
+    :data:`_BATCH_MIN` long is batched (``True``); everything between is served serially, in input order."""
+
+    runs: list[tuple[bool, range]] = []
+    start = 0
+    position = 0
+    while position < len(eligible):
+        if not eligible[position]:
+            position += 1
+            continue
+        end = position
+        while end < len(eligible) and eligible[end]:
+            end += 1
+        if end - position >= _BATCH_MIN:
+            if start < position:
+                runs.append((False, range(start, position)))
+            runs.append((True, range(position, end)))
+            start = end
+        position = end
+    if start < len(eligible):
+        runs.append((False, range(start, len(eligible))))
+    return runs
+
+
+class _Batching:
+    """The batched serving of one local command's chunks (plan WORKFLOW_LOCAL_COMMANDS phase L3b).
+
+    A chunk is batched only in a durable workspace, in ``syncfs`` mode on every filesystem it touches (the protocol
+    predicate, after the prime), and when a contiguous run of at least :data:`_BATCH_MIN` candidates can qualify:
+    jobs whose action is batchable, that are in no dependency component of the command and that have no request
+    file yet (one listing of ``requests/`` before the post, E5). Otherwise the chunk is posted and served exactly as
+    without batching. The checks after the post (and after the claim) stay authoritative.
+
+    :param workspace: The workspace.
+    :param job_ids: Every job of the command, across chunks.
+    :param index: The command's location index.
+    """
+
+    def __init__(self, workspace: "Workspace", job_ids: Sequence[str], index: LocationIndex) -> None:
+        self.workspace, self.job_ids, self.index = workspace, job_ids, index
+        self._components: frozenset[str] | None = None
+
+    def considers(self, chunk: Sequence[tuple[str, object]]) -> dict[str, list[str]] | None:
+        """Whether *chunk* may be batched at all, conservatively, before anything is prepared or posted: a durable
+        workspace, the protocol predicate (checked again after the prime), and a contiguous run of at least
+        :data:`_BATCH_MIN` jobs in no dependency component and without a request file yet.
+
+        :param chunk: The chunk's posts, job id first.
+        :return: The request files each job had in that listing, or ``None`` when the chunk is not batched.
+        """
+
+        if not self.workspace.durable or len(chunk) < _BATCH_MIN:
+            return None
+        try:
+            if _fs.protocol_mode(self.workspace.control, _kernel._io_sync(self.workspace)) != "syncfs":
+                return None
+        except OSError:
+            return None
+        components = self.components()
+        existing = _listed(self.workspace, [job_id for job_id, _prepare in chunk])
+        qualifying = [job_id not in components and not existing[job_id] for job_id, _prepare in chunk]
+        return existing if any(batched for batched, _positions in _runs(qualifying)) else None
+
+    def components(self) -> frozenset[str]:
+        """The jobs of the command in a dependency component (amendments 8 and 26), computed once, before any claim.
+
+        An edge counts only when the parent is itself a job of this command. A job whose ``job.json`` cannot be read
+        where the index last saw it counts as in a component.
+        """
+
+        if self._components is None:
+            ids = set(self.job_ids)
+            linked: set[str] = set()
+            for job_id in ids:
+                ref = self.index.hint(job_id)
+                try:
+                    if ref is None:
+                        raise FileNotFoundError(job_id)
+                    parent = JobDefinition.from_path(ref.path / "job.json").parent
+                except (OSError, WorkflowError):
+                    linked.add(job_id)
+                    continue
+                if parent is not None and (parent_id := str(parent["job_id"])) in ids:
+                    linked |= {job_id, parent_id}
+            self._components = frozenset(linked)
+        return self._components
+
+    def serve(
+        self,
+        chunk: Sequence[tuple[str, "_Prepare"]],
+        existing: Mapping[str, Sequence[str]],
+        owner: Callable[[], _kernel.Owner],
+        made: list[RequestOutcome | None],
+        posted: list[tuple[JobRef, Path]],
+        progress: _Progress,
+    ) -> None:
+        """Prepare, post and serve one chunk that :meth:`considers` admitted, batching what is eligible (see the
+        class); once prepared, a chunk whose candidates no longer make a qualifying run is posted and served serially.
+        """
+
+        prepared: list[tuple[JobRef, Mapping[str, object]]] = []
+        for _job_id, prepare in chunk:
+            result = prepare()
+            if isinstance(result, RequestOutcome):
+                made.append(result)
+                continue
+            made.append(None)
+            prepared.append(result)
+        components = self.components()
+        candidates = [
+            document.get("action") in _BATCHABLE and ref.job_id not in components and not existing.get(ref.job_id)
+            for ref, document in prepared
+        ]
+        with contextlib.ExitStack() as stack:
+            active: _kernel.Owner | None = None
+            commit: _fs.Commit | None = None
+            if any(batched for batched, _positions in _runs(candidates)):
+                active = owner()
+                commit = self._enter(stack)
+            if commit is None:
+                for ref, document in prepared:
+                    posted.append((ref, _kernel.request_file(self.workspace, document)))
+                    _kernel.post_request(self.workspace, document)
+                if posted:
+                    items = [(ref, path.name.split(".")[1]) for ref, path in posted]
+                    snapshots = _order_snapshot(self.workspace, dict.fromkeys(ref.job_id for ref, _path in posted))
+                    _serve_snapshot(self.workspace, owner(), items, snapshots, progress)
+                return
+            assert active is not None
+            self._post(active, commit, prepared, posted, progress)
+            listed, snapshots = _snapshot(self.workspace, dict.fromkeys(ref.job_id for ref, _path in posted))
+            items = [(ref, path.name.split(".")[1]) for ref, path in posted]
+            eligible = [
+                self._eligible(ref, request_id, path, listed[ref.job_id], snapshots[ref.job_id], components)
+                for (ref, request_id), (_ref, path) in zip(items, posted, strict=True)
+            ]
+            for batched, positions in _runs(eligible):
+                if not batched:
+                    _serve_snapshot(self.workspace, active, [items[at] for at in positions], snapshots, progress)
+                    continue
+                members = [
+                    _Member(items[at][0], items[at][1], posted[at][1], frozenset(listed[items[at][0].job_id]))
+                    for at in positions
+                ]
+                _Batch(self.workspace, active, commit, members, progress).run()
+
+    @staticmethod
+    def _eligible(
+        ref: JobRef,
+        request_id: str,
+        path: Path,
+        names: Sequence[str],
+        ordered: Sequence[_requests.Request] | None,
+        components: frozenset[str],
+    ) -> bool:
+        # Before the claim (amendment 8): one request file of the job, applied or not, and it this command's, of a
+        # batchable action; the job in no dependency component.
+        return (
+            list(names) == [path.name]
+            and ordered is not None
+            and len(ordered) == 1
+            and ordered[0].request_id == request_id
+            and ordered[0].action in _BATCHABLE
+            and ref.job_id not in components
+        )
+
+    def _enter(self, stack: contextlib.ExitStack) -> _fs.Commit | None:
+        """The chunk's collector, entered (the prime), when every filesystem it touches is in ``syncfs`` mode."""
+
+        workspace = self.workspace
+        requests = workspace.control / "requests"
+        try:
+            _fs.make_dirs(requests, durable=True)
+            directories = [requests, workspace.jobs]
+            for state in (*_kernel.UNOWNED_STATES, _kernel.OWNED):
+                if os.path.isdir(workspace.jobs / state):
+                    directories.append(workspace.jobs / state)
+            commit = stack.enter_context(
+                _fs.Commit(
+                    directories,
+                    _kernel._io_sync(workspace),
+                    workers=_kernel._io_workers(workspace),
+                    durable=True,
+                )
+            )
+        except (OSError, WorkflowError):
+            return None
+        return commit if commit.mode == "syncfs" else None
+
+    def _post(
+        self,
+        owner: _kernel.Owner,
+        commit: _fs.Commit,
+        prepared: Sequence[tuple[JobRef, Mapping[str, object]]],
+        posted: list[tuple[JobRef, Path]],
+        progress: _Progress,
+    ) -> None:
+        """A: write every request beside its name (C0: their data durable), rename them all (``requests/`` an owner
+        obligation), then commit A. A failed commit point reports every request ``uncertain`` and raises: the L1
+        withdrawal applies (rows C0 and A)."""
+
+        owner.mark_batched()  # durable before the chunk's first batched mutation (amendment 27)
+        staged: list[_fs.Staged] = []
+        renamed = 0
+        try:
+            for ref, document in prepared:
+                # Recorded before it is published: a post that renamed its file and then raised is withdrawn too.
+                posted.append((ref, _kernel.request_file(self.workspace, document)))
+                staged.append(_kernel.stage_request(self.workspace, document, commit=commit))
+            self._commit_post(owner, commit, posted, progress, "the request was not posted")
+            with owner.obliged([self.workspace.control / "requests"], kind="owner"):
+                for item in staged:
+                    _fs.replace_staged(item, durable=False, commit=commit)
+                    renamed += 1
+            self._commit_post(owner, commit, posted, progress, "the request's post is uncertain")
+        except BaseException:
+            for item in staged[renamed:]:
+                # C0: the temporaries go (replace_staged removed its own already when it raised).
+                try:
+                    _fs.remove_file(item.temporary, durable=False)
+                except OSError:
+                    pass
+            raise
+
+    @staticmethod
+    def _commit_post(
+        owner: _kernel.Owner,
+        commit: _fs.Commit,
+        posted: Sequence[tuple[JobRef, Path]],
+        progress: _Progress,
+        explanation: str,
+    ) -> None:
+        # Commit C0 or A, interrupts deferred around it; a failure makes every request of the chunk uncertain.
+        failure: BaseException | None = None
+        with _pool.DeferredInterrupts():
+            try:
+                owner.commit(commit)
+            except _COMMIT_ERRORS as exc:
+                failure = exc
+                for ref, path in posted:
+                    request_id = path.name.split(".")[1]
+                    progress.results[request_id] = RequestOutcome(
+                        ref.job_id, request_id, "uncertain", f"{explanation}: {exc}"
+                    )
+        if failure is not None:
+            raise failure
+
+
 def _post_and_serve(
     workspace: "Workspace",
     posts: Sequence[tuple[str, _Prepare]],
@@ -1380,6 +2610,7 @@ def _post_and_serve(
     owner: Callable[[], _kernel.Owner],
     index: LocationIndex,
     report: Callable[[Sequence[RequestOutcome]], None] | None = None,
+    action: str | None = None,
 ) -> list[RequestOutcome]:
     """Post and serve one command's requests chunk by chunk (plan WORKFLOW_LOCAL_COMMANDS §4.3).
 
@@ -1391,34 +2622,45 @@ def _post_and_serve(
     propagates to the owner, which gives its jobs back as before. Requests left armed by a SIGKILL, or a signal the
     CLI does not handle, are at most one chunk's.
 
+    A command whose *action* is a Release or a Drop (:data:`_BATCHABLE`) batches its chunks where it can (plan
+    WORKFLOW_LOCAL_COMMANDS phase L3b, :class:`_Batching`): in a durable workspace in ``syncfs`` mode, each contiguous
+    run of at least :data:`_BATCH_MIN` eligible jobs makes each phase durable with one ``syncfs`` per filesystem;
+    everything else is served as before, in input order.
+
     :param workspace: The local workspace.
     :param posts: The jobs and their preparations, in input order.
     :param owner: Returns the command's CLI owner.
     :param index: The command's location index.
     :param report: Called with each chunk's outcomes once it is served, or with those known when it stops.
+    :param action: The action of every request of the command, when it is one; only then may a chunk be batched.
     :return: One outcome per post, in input order.
     """
 
+    batching = _Batching(workspace, [job_id for job_id, _prepare in posts], index) if action in _BATCHABLE else None
     outcomes: list[RequestOutcome] = []
     for chunk in _chunks(posts):
         made: list[RequestOutcome | None] = []
         posted: list[tuple[JobRef, Path]] = []
         progress = _Progress(index)
         try:
-            for _job_id, prepare in chunk:
-                prepared = prepare()
-                if isinstance(prepared, RequestOutcome):
-                    made.append(prepared)
-                    continue
-                ref, document = prepared
-                made.append(None)
-                # Recorded before it is published: a post that renamed its file and then raised is withdrawn too.
-                posted.append((ref, _kernel.request_file(workspace, document)))
-                _kernel.post_request(workspace, document)
-            if posted:
-                items = [(ref, path.name.split(".")[1]) for ref, path in posted]
-                snapshots = _order_snapshot(workspace, dict.fromkeys(ref.job_id for ref, _path in posted))
-                _serve_snapshot(workspace, owner(), items, snapshots, progress)
+            existing = None if batching is None else batching.considers(chunk)
+            if batching is not None and existing is not None:
+                batching.serve(chunk, existing, owner, made, posted, progress)
+            else:
+                for _job_id, prepare in chunk:
+                    prepared = prepare()
+                    if isinstance(prepared, RequestOutcome):
+                        made.append(prepared)
+                        continue
+                    ref, document = prepared
+                    made.append(None)
+                    # Recorded before it is published: a post that renamed its file and then raised is withdrawn too.
+                    posted.append((ref, _kernel.request_file(workspace, document)))
+                    _kernel.post_request(workspace, document)
+                if posted:
+                    items = [(ref, path.name.split(".")[1]) for ref, path in posted]
+                    snapshots = _order_snapshot(workspace, dict.fromkeys(ref.job_id for ref, _path in posted))
+                    _serve_snapshot(workspace, owner(), items, snapshots, progress)
         except BaseException:
             try:
                 _withdraw(workspace, owner, posted, progress, stopped=True)
@@ -1581,7 +2823,7 @@ def _request_jobs(
     """Request as :func:`request_jobs` does, through the command's location index *index*."""
 
     posts = [(ref.job_id, partial(_post_now, index, ref, action, reason, copy)) for ref in refs]
-    return _post_and_serve(workspace, posts, owner=lambda: owner, index=index, report=report)
+    return _post_and_serve(workspace, posts, owner=lambda: owner, index=index, report=report, action=action)
 
 
 def remove_jobs(workspace: "Workspace", refs: Iterable[JobRef], *, force: bool = False) -> RemovalReport:

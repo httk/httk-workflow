@@ -104,6 +104,7 @@ __all__ = [
     "request_file",
     "scan_final",
     "scan_first",
+    "stage_request",
     "submit",
     "sweep_unrecorded_shm",
     "take",
@@ -1664,9 +1665,11 @@ class OwnedJob:
         if self._attempt is not None:
             raise WorkflowError(f"{self.job_key}: attempt {self._attempt} is still live")
 
-    def request_files(self) -> list[Path]:
+    def request_files(self, *, listing: Iterable[str] | None = None) -> list[Path]:
         """List this job's pending request files; delete leftover files of applied requests.
 
+        :param listing: The names of one listing of ``requests/`` taken after this job's claim, the job held ever
+            since (the retirement evidence of plan WORKFLOW_LOCAL_COMMANDS amendment 2), instead of listing it now.
         :return: The pending request files, sorted.
         """
 
@@ -1674,7 +1677,7 @@ class OwnedJob:
         doc = self.read_state()
         applied = set(doc.applied_requests) if doc is not None else set()
         directory, pending, listed = _requests_dir(self.owner.workspace), [], set()
-        for name in list_names(directory):
+        for name in list_names(directory) if listing is None else sorted(listing):
             request_id = _request_id(name, self.job_id)
             if request_id is None:
                 continue
@@ -2516,6 +2519,15 @@ class LocationIndex:
             self._observed[job_id] = ref
         return ref
 
+    def hint(self, job_id: str) -> JobRef | None:
+        """Return the entry of a job as listed, or as this command last observed it, without confirming it.
+
+        :param job_id: The job UUID.
+        :return: The reference (only a hint: the job may have moved since), or ``None``.
+        """
+
+        return self._entry(canonical_uuid(job_id, "job_id"))
+
     def present(self, job_id: str) -> bool:
         """Report whether the job exists anywhere, as an exhaustive :func:`locate` that finds it would.
 
@@ -3064,6 +3076,19 @@ def post_request(workspace: KernelWorkspace, doc: Mapping[str, object]) -> Path:
     # A unique name, or a deterministic id with equivalent content (§8.5): write_file is idempotent.
     _fs.write_file(_fs.loc(path), _encode(dict(doc)), durable=workspace.durable)
     return path
+
+
+def stage_request(workspace: KernelWorkspace, doc: Mapping[str, object], *, commit: _fs.Commit) -> _fs.Staged:
+    """Write a request beside its unique name, the first step of a batched :func:`post_request` (plan
+    WORKFLOW_LOCAL_COMMANDS §2 L3, phase A): :func:`httk.workflow._fs.replace_staged` then publishes it.
+
+    :param workspace: The workspace; ``requests/`` exists.
+    :param doc: The request document; its ``job_id`` and ``request_id`` name the file.
+    :param commit: The phase's collector, which records the temporary's writing descriptor instead of fsyncing it.
+    :return: The staged temporary; it is removed when this raises.
+    """
+
+    return _fs.stage_file(_fs.loc(request_file(workspace, doc)), _encode(dict(doc)), durable=False, commit=commit)
 
 
 def _placements_bottom_up(directory: Path) -> list[Path]:

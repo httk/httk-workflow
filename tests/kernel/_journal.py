@@ -18,7 +18,16 @@ def where(path: object, dir_fd: int | None) -> str:
 
 
 class Journal(list[tuple[str, str]]):
-    """``(operation, absolute path)`` of every rename, replace, unlink, rmdir, fsync and syncfs, in call order."""
+    """``(operation, absolute path)`` of every rename, replace, unlink, rmdir, fsync and syncfs, in call order.
+
+    Recorded with ``writes=True`` it also has ``create`` (a write temporary, ``*.tmp``, opened with ``O_CREAT``),
+    ``write`` (an ``os.write`` on such a temporary or on a descriptor opened for appending), ``mkdir``; and
+    :attr:`devices` gives the ``st_dev`` of each of those entries, by position.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.devices: dict[int, int] = {}
 
     def index_of(self, operation: str, path: Path | str) -> int:
         return self.index((operation, str(path)))
@@ -27,10 +36,11 @@ class Journal(list[tuple[str, str]]):
         return [i for i, (op, where) in enumerate(self) if op == operation and (path is None or where == str(path))]
 
 
-def record(monkeypatch: pytest.MonkeyPatch) -> Journal:
+def record(monkeypatch: pytest.MonkeyPatch, *, writes: bool = False) -> Journal:
     """Start recording into a new journal for the rest of the test (``syncfs`` is recorded, never called).
 
     :param monkeypatch: The test's monkeypatch.
+    :param writes: Record temporary creation, writes to temporaries and appended files, and ``mkdir`` too.
     :return: The journal.
     """
 
@@ -63,4 +73,42 @@ def record(monkeypatch: pytest.MonkeyPatch) -> Journal:
     monkeypatch.setattr(os, "rmdir", removing)
     monkeypatch.setattr(os, "fsync", fsyncing)
     monkeypatch.setattr(_fs, "_syncfs", lambda descriptor: recorded.append(("syncfs", where(descriptor, None))))
+    if writes:
+        _record_writes(monkeypatch, recorded)
     return recorded
+
+
+def _record_writes(monkeypatch: pytest.MonkeyPatch, recorded: Journal) -> None:
+    opening, writing, closing, making = os.open, os.write, os.close, os.mkdir
+    tracked: dict[int, str] = {}
+
+    def opened(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        descriptor = opening(path, flags, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
+        temporary = flags & os.O_CREAT and str(path).endswith(".tmp")
+        if temporary or flags & os.O_APPEND:
+            tracked[descriptor] = os.readlink(f"/proc/self/fd/{descriptor}")
+            if temporary:
+                recorded.devices[len(recorded)] = os.fstat(descriptor).st_dev
+                recorded.append(("create", tracked[descriptor]))
+        return descriptor
+
+    def wrote(descriptor: int, data: object) -> int:
+        count = writing(descriptor, data)  # type: ignore[arg-type]
+        if descriptor in tracked:
+            recorded.devices[len(recorded)] = os.fstat(descriptor).st_dev
+            recorded.append(("write", tracked[descriptor]))
+        return count
+
+    def closed(descriptor: int) -> None:
+        tracked.pop(descriptor, None)
+        closing(descriptor)
+
+    def made(path: object, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+        making(path, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
+        recorded.devices[len(recorded)] = os.stat(str(path) if dir_fd is None else path, dir_fd=dir_fd).st_dev  # type: ignore[arg-type]
+        recorded.append(("mkdir", where(path, dir_fd)))
+
+    monkeypatch.setattr(os, "open", opened)
+    monkeypatch.setattr(os, "write", wrote)
+    monkeypatch.setattr(os, "close", closed)
+    monkeypatch.setattr(os, "mkdir", made)
