@@ -273,7 +273,9 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("compress", "decompress"):
         item = commands.add_parser(name)
         if name == "compress":
-            item.add_argument("--method", choices=("bz2", "gz", "xz"), default="bz2")
+            item.add_argument("--method", choices=("bz2", "gz", "xz", "zst"), default="bz2")
+            item.add_argument("--level", type=int)
+            item.add_argument("--workers", type=int, default=1)
         item.add_argument("--remove-source", action="store_true")
         item.add_argument("paths", nargs="+")
 
@@ -896,7 +898,11 @@ def _utility_command(arguments: argparse.Namespace) -> int:
         render_template(arguments.template, arguments.output, read_json(Path(arguments.values)))
     elif command == "compress":
         for output_path in compress_files(
-            arguments.paths, method=arguments.method, remove_source=arguments.remove_source
+            arguments.paths,
+            method=arguments.method,
+            remove_source=arguments.remove_source,
+            level=arguments.level,
+            workers=arguments.workers,
         ):
             print(output_path)
     elif command == "decompress":

@@ -14,6 +14,8 @@ authors = [{ name = "Rickard Armiento", email = "gitcommits@armiento.net" }]
 dependencies = [
   # Collection attaches the DataRecord.product_of provenance edges added in 2.1.2.
   "httk-core>=2.1.2,<3",
+  # Zstandard (.zst) compression; stdlib compression.zstd from Python 3.14.
+  "backports.zstd>=1.0; python_version < '3.14'",
 ]
 keywords = [
   "Materials Discovery",

@@ -163,7 +163,7 @@ language, and compares everything both left behind.
 | — | `httk_workflow_batch` | Run several bridge commands, one per line, in one interpreter start; a batch stops at its first failing line. | none |
 | `runtime_utils.evaluate_expression` | `httk_calc` | Evaluate one arithmetic expression without a shell. | none |
 | `runtime_utils.render_template` | `httk_template_render` | Render one template file with one JSON value document. | the named output file |
-| `runtime_utils.compress_files` | `httk_compress` | Compress named files with `bz2`, `gz`, or `xz`, optionally removing the sources. | the compressed files |
+| `runtime_utils.compress_files` | `httk_compress` | Compress named files with `bz2`, `gz`, `xz`, or `zst` at an optional level and worker count, optionally removing the sources. | the compressed files |
 | `runtime_utils.decompress_files` | `httk_decompress` | Decompress named files, optionally removing the sources. | the decompressed files |
 
 Every scalar workspace setting is exported into each attempt's environment as

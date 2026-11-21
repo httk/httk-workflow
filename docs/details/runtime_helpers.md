@@ -440,6 +440,27 @@ replayed idempotently. `Attempt.initialize`, and so every dispatch through
 `Runner.main`, completes any batch an interrupted attempt sealed but did not
 apply.
 
+### Compressing files
+
+`httk.workflow.runtime_utils.compress_files(paths, method=..., level=...,
+workers=..., remove_source=...)` compresses regular files atomically with
+`bz2` (the default), `gz`, `xz`, or `zst` (Zstandard). `level=None` takes the
+codec default (bz2 9, gz 9, xz 6, zst 3); an out-of-range level raises
+`ValueError`. `workers` bounds the parallelism: Zstandard compresses the files
+one after another, each with `workers` threads inside libzstd, and the other
+codecs compress up to `workers` (at most 16) files concurrently. Outputs keep the
+source's permission bits. `decompress_files(paths)`
+reverses it. Every *httk₂* reader decompresses these suffixes transparently.
+
+```python
+from httk.workflow.runtime_utils import compress_files
+
+compress_files([a.workdir / "WAVECAR"], method="zst", workers=4, remove_source=True)
+```
+
+Bash runners call `httk_compress [--method M] [--level N] [--workers N]
+[--remove-source] PATH...` and `httk_decompress [--remove-source] PATH...`.
+
 ### Running processes
 
 `a.run(argv, timeout=...)` runs an argv array in the workdir and terminates

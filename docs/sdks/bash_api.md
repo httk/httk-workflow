@@ -560,6 +560,7 @@ A simulation code's Bash API ships with its code-support distribution, not with
   `nbands`;
 - `run` and `diagnose`;
 - `remedy_plan` and `remedy_apply`;
+- `finalize` (OUTCAR cleaning, POTCAR summaries and output compression);
 - `preclean`, `clean_outcar`, `normalize_poscar`, `scale_poscar`,
   `rattle_poscar`, and the energy, volume, POTIM, plane-wave, and POTCAR
   summary extractors.
