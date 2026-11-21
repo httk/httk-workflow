@@ -599,7 +599,7 @@ The daemon executes a `job_request` only for an indexed exchange root adopted
 from the inbox whose recorded `owner_key` matches the command-signing key,
 which must also remain in `authorized_keys`. Local jobs, keyless submissions,
 children, transferred or adopted jobs, and roots with an index entry recreated
-by `fsck --repair` are refused with `not_owner`. A mounted-daemon `job request`
+by `fsck --repair` are refused with `not_owner`. A mounted-daemon job command
 with `--operator` must use the identity that ejected the job. `detach` never
 applies through the daemon because only roots are controllable and roots have
 no parent; children move and stop with their root, daemon ejects include the
@@ -1184,8 +1184,8 @@ deployment check. Run those checks before relying on this daemon for
 production jobs.
 
 Job control has two site cases of its own. With no manager running, a
-`continue` and then a `cancel` of a paused job through
-`httk job request --workspace REMOTE:NAME` must return signed `applied`
+`job resume` and then a `job cancel` of a paused job through
+`--workspace REMOTE:NAME` must return signed `applied`
 results, which fresh signed `httk remote daemon status REMOTE --request-id
 COMMAND_ID` observations confirm. With a manager holding a running job, a
 cancellation must return `queued` with one internal request, which the manager

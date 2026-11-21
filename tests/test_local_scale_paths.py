@@ -156,8 +156,9 @@ def test_the_measured_command_lines() -> None:
         "job", "delete", "--workspace", "/w/ws", "--yes", "x--",
     ]  # fmt: skip
     assert bench.command_arguments("cancel", root, "", structures, ["--state", "ready"]) == [
-        "job", "request", "cancel", "--workspace", "/w/ws", "--reason", "bench", "--state", "ready",
+        "job", "cancel", "--workspace", "/w/ws", "--reason", "bench", "--state", "ready",
     ]  # fmt: skip
+    assert bench.command_arguments("continue", root, "", structures, ["x--"])[:2] == ["job", "resume"]
 
 
 def test_tags_are_distinct_and_widen_at_1000_jobs() -> None:

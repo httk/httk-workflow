@@ -1,4 +1,4 @@
-"""``job request`` against a workspace on a remote, end to end over the ``local`` adapter.
+"""The request verbs (``job pause`` and its siblings) against a workspace on a remote, end to end over the ``local`` adapter.
 
 Ported from the remote-operator-request half of the pre-redesign ``test_fetch.py`` (its offer/fetch/retire half
 was the legacy transfer protocol and is gone; ``test_job_transfer.py`` covers moving jobs).
@@ -65,7 +65,7 @@ def applied(pair: Pair, job_id: str) -> list[dict[str, object]]:
 
 
 def request(pair: Pair, *arguments: str) -> int:
-    return command(["job", "request", "pause", "--workspace", "cluster:station", *arguments], pair.context)
+    return command(["job", "pause", "--workspace", "cluster:station", *arguments], pair.context)
 
 
 def test_job_request_forwards_to_remote_workspace(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:

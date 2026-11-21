@@ -226,7 +226,7 @@ its workflow. Migrate one representative task first and compare it
 with the compatibility reference before moving a larger batch.
 
 Two v1 habits have *httk₂* counterparts. A v1 task directory sent to a
-computer was simply gone locally; `httk job push` leaves an `away` copy
+computer was simply gone locally; `httk push` leaves an `away` copy
 instead (`httk job list --state away`, `httk job recover JOB` if the remote
 job is lost). And v1's fixed task directory names made re-running an
 instantiate script create only what was missing; *httk₂* job keys are fresh
@@ -798,7 +798,7 @@ Stop instantiating new converted jobs first. Let submitted v1 jobs reach a
 terminal state, or cancel them through recorded operator requests:
 
 ```console
-httk job request cancel --workspace workflow-workspace \
+httk job cancel --workspace workflow-workspace \
   --reason "replaced by validated native workflow" JOB_UUID
 ```
 

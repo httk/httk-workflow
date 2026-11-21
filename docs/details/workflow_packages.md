@@ -129,7 +129,7 @@ checked against the interpreter doing the work:
 
 - **At claim time.** A manager whose environment does not meet the installed
   workflow's `requires` leaves the job unclaimed for another manager, as with
-  a missing capability; `httk job why` and `httk workflow precheck` name the
+  a missing capability; `httk job why` and `httk job precheck` name the
   unmet requirement. Install the required versions in its environment and
   restart it.
 - **When describing.** `httk workflow describe` refuses a workflow whose
@@ -173,7 +173,7 @@ The declaration is resolved through the workspace store:
   workflow it calls, transitively, are installed in the workspace and, for a
   package with `[workflow.build]`, built for the manager's platform. The
   check only looks things up and never fetches. Until then the job stays
-  unclaimed, and `httk job why`, `httk workflow precheck`, and the manager's
+  unclaimed, and `httk job why`, `httk job precheck`, and the manager's
   idle summary name what to install or build.
 - **At call time**, `Attempt.call` accepts only a declared alias or the
   installed id an alias names, and the callee must be installed. An ad hoc
@@ -279,7 +279,7 @@ not drained), recovery does not stop the dead attempt's processes, which may
 still run when the retry starts in the same directory; under confinement
 (`manager.confine`) or once the batch allocation has ended this cannot happen.
 
-`httk job request set_budget` raises the limits of an existing job (see
+`httk job set JOB budget.max_total_attempts=N` (and the other `budget.*` keys) raises the limits of an existing job (see
 {doc}`/restarting_jobs`); its `retry_on` cannot change, and `set_workflow` keeps
 the job's original `retry_policy`, since `job.json` is not rewritten. A child started with
 `Attempt.call` takes the called workflow's declared policy. A spawned child,
@@ -755,7 +755,7 @@ time) and `artifacts/`. A rebuild replaces it.
 
 A manager runs the installed package's platform probe to find its tag. A job
 whose workflow, or any workflow it calls, has no build for that tag, or whose
-probe fails, is not claimed; `httk job why` and `httk workflow precheck` name
+probe fails, is not claimed; `httk job why` and `httk job precheck` name
 the `httk workflow build` to run. A build that disappears between that check
 and the launch fails the attempt with `runner_unavailable`, and a probe that
 fails then with `runner_build_failed`.
@@ -1058,8 +1058,8 @@ next launch runs a different tree than its last, `job why` reports the
 mismatch between the installed tree and the job's `workflow_pin` as a
 `workflow pin` check, and `httk collect` refuses the job with both digests and
 the remedies: reinstall the tree it ran with, or rerun it on the installed
-tree (`httk job request restart --reason TEXT JOB` for a failed or paused job,
-or `continue --tree` when it failed waiting on failed children; a succeeded job
+tree (`httk job restart --reason TEXT JOB` for a failed or paused job,
+or `job resume --tree` when it failed waiting on failed children; a succeeded job
 is deleted with `httk job delete` and created again).
 `job new --workflow-dir DIR --install` reinstalls when the sources
 of `DIR` have changed since the installation (compared by the installed
@@ -1219,7 +1219,7 @@ anything; the model defends against the running job.
 - **Damaged state.** Rebuilding a damaged `state.json` never deletes the `workflow/`
   of a job with an embedded workflow, and keeps `workflow/` whenever `job.json` cannot be read.
 - **Seals.** `workflow/` is a payload member, so the job seal covers it.
-- **Transfer.** `job transfer`, `job adopt` and `job eject` bundles carry
+- **Transfer.** `job move`, `job adopt` and `job eject` bundles carry
   `workflow/` (trusted bundles); an embedded id is never reported as a missing
   workflow, while its fixed callees and slot-bound workflows are shipped or
   required as for any job. Trusted bundles run the embedded-workflow job at the destination with nothing installed.

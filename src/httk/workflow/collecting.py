@@ -1803,8 +1803,8 @@ def _job_collector(
             "reinstall the tree it ran with, or delete the job ('httk job delete JOB') and create it again so it "
             "runs on the installed tree"
             if record.state == "succeeded"
-            else "rerun the job on the installed tree ('httk job request restart --reason TEXT JOB', or 'continue "
-            "--tree' when it failed waiting on failed children), or reinstall the tree it ran with"
+            else "rerun the job on the installed tree ('httk job restart JOB', or 'httk job resume --tree JOB' when "
+            "it failed waiting on failed children), or reinstall the tree it ran with"
         )
         return (
             None,

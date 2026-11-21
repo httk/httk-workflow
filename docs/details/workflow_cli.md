@@ -3,7 +3,7 @@
 This is the complete command reference, from workspaces and jobs to projects,
 signed manifests, and remotes. Installing *httk-workflow* registers lazy
 `workflow`, `workspace`, `job`, `launcher`, `remote`, `manager`, `campaign`,
-`config`, `seal`, `transfer`, `v1`, and `collect` commands with *httk-core*:
+`config`, `push`, `pull`, `v1`, and `collect` commands with *httk-core*:
 
 ```console
 httk workflow --help
@@ -25,14 +25,15 @@ overrides a safety check instead.
 
 ```text
 httk workspace          show | set | unset | init | adopt | list | default | move | forget | delete | status | owners (managers) | attest-dead | workflows | fsck | gc | seal | unseal | verify | exchange enable | daemon init|configure|show|check|run
-httk job                new | submit | request | delete | seal | unseal | detach | unlock | eject | adopt | list | show | log | why | debug | push | pull | transfer
+httk job                new | submit | cancel | pause | resume | restart | set | delete | seal | unseal | detach | unlock | eject | adopt | list | show | log | why | precheck | debug | verify | move
+httk push               [SRC] DST [--job JOB] [--state STATE] [--step STEP] [--placement P] [--no-keep] [--no-workflows] [--json]
+httk pull               SRC [DST] [--job JOB] [--state STATE] [--step STEP] [--placement P] [--no-workflows] [--json]
 httk collect            [PATH] [--workspace WORKSPACE] [--into PATH] [--dry-run] …
 httk workflow list      [--workspace WORKSPACE] [--json]
 httk workflow describe  TARGET… [--workspace WORKSPACE] [--json]
 httk workflow install   SOURCE… [--workspace WORKSPACE] [--no-calls] [--no-build] [--json]
 httk workflow uninstall SELECTOR… [--workspace WORKSPACE] [--check] [--json]
 httk workflow build     [--workspace WORKSPACE] [--list] WORKFLOW…
-httk workflow precheck  [--workspace WORKSPACE] [--placement P] [--json]
 httk workflow run       [--workspace WORKSPACE]  (the recommended spelling of `manager run`)
 httk manager            run
 httk launcher           list | add | set | unset | show | check | remove
@@ -41,9 +42,7 @@ httk workflow postprocess
 httk v1                 collect
 httk remote             list | add | set | unset | check | import-v1 | show | remove | daemon
 httk config             show | set | unset | import-v1
-httk seal               verify [PATH] [--json] [--trusted-key KEY] [--shallow]
 httk campaign           init | show | set | unset | remove | submit | collect | start-managers
-httk transfer           status
 httk setup | identity    (core-owned: per-user configuration and named operator identities)
 httk project            init | show | import-v1 | export | check | repair | manifest | verify | seal | unseal   (core-owned)
 ```
@@ -51,7 +50,7 @@ httk project            init | show | import-v1 | export | check | repair | mani
 ### Configuration conventions
 
 Concept groups live directly below `httk`: `httk launcher`, `httk remote`,
-`httk manager`, `httk campaign`, `httk config`, and `httk seal`. `workflow`
+`httk manager`, `httk campaign` and `httk config`. `workflow`
 retains workflow installation, inspection, building and execution.
 
 Use `show [--json]` to inspect configuration. Workspaces, launchers, remotes,
@@ -104,7 +103,7 @@ workspace, the far side resolves the plain name in its own registry.
 Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 `show`, `log`, `why`, `request` and `delete`, `workflow install`, `build` and
 `run`) go through the adapter. Jobs are created locally, moved with
-`job push` and brought back with `job pull` (or `job transfer` in general).
+`push` and brought back with `pull` (or `job move` in general).
 
 ## Workspaces
 
@@ -126,7 +125,7 @@ Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 | `workspace move NAME DEST_DIR` | move a local workspace and update its registry path | `--no-durable` |
 | `workspace forget NAME...` | deregister names, leaving workspaces on disk | |
 | `workspace delete NAME...` | destroy workspaces and deregister them, after confirmation | `--yes` skips the confirmation |
-| `workspace status [NAME...]` | job counts by state, the seal, and the owners with their liveness (remote: over the adapter) | `--json` |
+| `workspace status [NAME...]` | job counts by state, the seal, the owners with their liveness, and the held transfers (transfer id, root job, members, destination, age; `transfers` in `--json`; a hold whose manifest cannot be read is named, `transfers_unreadable` in `--json`, without changing the exit status) (remote: over the adapter) | `--json` |
 | `workspace owners [NAME...]` | list the owners (managers, CLI processes, daemons) with their liveness; `managers` is an alias | `--kind manager\|cli\|daemon`, `--json` |
 | `workspace attest-dead OWNER [NAME] --reason TEXT` | declare an owner and its launches ended, so the next manager tick or `workspace gc` recovers its jobs | `--operator NAME`, `--force` |
 | `workspace workflows [NAME...]` | list the workflows installed in a workspace | `--json` |
@@ -137,7 +136,7 @@ Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 | `workspace gc [NAME...]` | collect what the retention policy allows and recover dead owners (remote: over the adapter) | `--dry-run`, `--category CATEGORY` (repeatable), `--json` |
 | `workspace seal [NAME...]` | record every job's seal digest under one signed workspace seal, listing the unsealed jobs | `--keys REFS` |
 | `workspace unseal [NAME...]` | remove a workspace's seal, refused while its project is sealed | `--yes` skips the confirmation |
-| `workspace verify [NAME...]` | verify a workspace seal and list the jobs that drifted since it; drift exits `1` | `--trusted-key`, `--json` |
+| `workspace verify [NAME...]` | verify a workspace seal and list the jobs that drifted since it; drift exits `1` | `--trusted-key`, `--json`, `--deep` (also verify each recorded job seal), `--content` (implies `--deep`, also checks uncompressed digests) |
 
 ### Creating, moving, and removing workspaces
 
@@ -289,24 +288,27 @@ manager's platform stays `ready` and unclaimed there.
 | --- | --- | --- |
 | `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--embed-workflow`, `--call`, `--call-parameter`, `--parameter`, `--environment`, `--language`, `--input`, `--input-move-from-job`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--start-step`, `--json` |
 | `job submit SOURCE...` | submit prepared payload directories | `--workspace`, `--move`, `--json` |
-| `job request ACTION JOB_ID...` | post one operator request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--operator`, required `--reason`, `--state`, `--step`, `--placement`, `--priority`, `--override-step`, `--destination`, `--max-attempts-per-activation`, `--max-total-attempts`, `--max-activations`, `--force`, `--keep-budget`, `--tree`, `--wait`, `--timeout`, `--adapter-timeout`, daemon-only `--request-id` |
-| `job delete JOB...` | delete terminal or paused jobs (remote: over the adapter) | `--workspace`, `--yes`, `--adapter-timeout` |
-| `job seal JOB...` | seal succeeded jobs that carry no seal | `--workspace` |
-| `job unseal JOB...` | release succeeded jobs from their seal, so they may be deleted | `--workspace`, `--yes` skips the confirmation |
-| `job detach JOB...` | make spawned jobs independent of their parents, permanently | `--workspace` |
-| `job unlock [--no-copy] JOB...` | put jobs, and every ancestor of them, in debug mode (one-way) and, unless `--no-copy`, give each selected job its own copy of the runner to edit | `--workspace`, `--no-copy`, `--reason TEXT` (default `job unlock`) |
-| `job eject JOB [DEST]` | move a quiescent job out into the bundle `DEST/<job-key>` | `--workspace`, `--tree`, `--wait`, `--timeout`, `--operator`, `--json` |
+| `job cancel\|pause\|resume\|restart JOB...` | post one `cancel`, `pause`, `continue` or `restart` request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--state`, `--step`, `--placement`, `--operator`, `--reason` (default: the command), `--adapter-timeout`, daemon-only `--request-id`; `pause`: `--wait`, `--timeout`; `resume`: `--tree`; `resume`, `restart`: `--force`, `--keep-budget` |
+| `job set JOB... KEY=VALUE...` | change jobs through requests: `workflow=`, `budget.max_attempts_per_activation=`, `budget.max_total_attempts=`, `budget.max_activations=`, `priority=`, `step=` | as the request verbs; `--force`, `--keep-budget` with `step=` |
+| `job delete JOB...` | delete terminal or paused jobs (remote: over the adapter; a workspace daemon: a signed request) | `--workspace`, `--yes`, `--operator`, `--adapter-timeout`, daemon-only `--request-id` |
+| `job seal JOB...` | seal succeeded jobs that carry no seal | `--workspace`, `--operator`, `--adapter-timeout`, daemon-only `--request-id` |
+| `job unseal JOB...` | release succeeded jobs from their seal, so they may be deleted | `--workspace`, `--yes` skips the confirmation, `--operator`, `--adapter-timeout`, daemon-only `--request-id` |
+| `job detach JOB...` | make spawned jobs independent of their parents, permanently | `--workspace`, `--operator`, `--adapter-timeout`, daemon-only `--request-id` |
+| `job unlock [--no-copy] JOB...` | put jobs, and every ancestor of them, in debug mode (one-way) and, unless `--no-copy`, give each selected job its own copy of the runner to edit | `--workspace`, `--no-copy`, `--reason TEXT` (default `httk job unlock`), `--operator`, `--adapter-timeout` |
+| `job eject JOB [DEST]` | move a quiescent job out into the bundle `DEST/<job-key>` (remote: an eject request; for a workspace daemon `DEST` is under its outbox, the outbox itself when omitted) | `--workspace`, `--tree`, `--wait`, `--timeout`, `--operator`, `--json`, `--adapter-timeout`, daemon-only `--request-id` |
 | `job adopt BUNDLE...` | move ejected bundles into the workspace, in turn | `--workspace`, `--move`, `--json` |
 | `job list` | list jobs a page at a time (remote: over the adapter) | `--workspace`, `--state`, `--step`, `--placement`, `--limit`, `--after`, `--tag-contains`, `--counts`, `--json` |
 | `job show JOB...` | describe jobs from their documents (remote: over the adapter) | `--workspace`, `--no-children`, `--json` |
 | `job log JOB...` | print run logs (remote: over the adapter) | `--workspace`, `--limit`, `--json` |
 | `job why JOB...` | explain why jobs are not progressing (remote: over the adapter) | `--workspace`, `--json` |
+| `job precheck` | check pending jobs before they start, without changing the workspace | `--workspace`, `--placement`, `--json` |
 | `job debug JOB` | drive one job to a terminal state in the foreground | `--workspace`, `--start-step`, `--placement`, `--follow-children`, `--timeout`, `--log-level` |
-| `job push [SRC] DST` | move the `ready` jobs (as `job transfer --tree --state ready`); the omitted SRC is the enclosing or default workspace | `--job`, `--state`, `--step`, `--placement`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
-| `job pull SRC [DST]` | move the `succeeded` jobs (as `job transfer --tree --state succeeded`); the omitted DST is the enclosing or default workspace | `--job`, `--state`, `--step`, `--placement`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
-| `job transfer SRC DST` | move jobs between two workspaces | `--job`, `--state`, `--step`, `--placement`, `--tree`, `--resume`, `--release`, `--destination-id`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
+| `job verify JOB...` | verify job seals against their payloads; a JOB that is a payload directory (holding `job.json`) is verified where it is, also outside any workspace | `--workspace`, `--content`, `--trusted-key`, `--json` |
+| `httk push [SRC] DST` | move the `ready` jobs (as `job move --tree --state ready`); the omitted SRC is the enclosing or default workspace | `--job`, `--state`, `--step`, `--placement`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
+| `httk pull SRC [DST]` | move the `succeeded` jobs (as `job move --tree --state succeeded`); the omitted DST is the enclosing or default workspace | `--job`, `--state`, `--step`, `--placement`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
+| `job move SRC DST` | move jobs between two workspaces | `--job`, `--state`, `--step`, `--placement`, `--tree`, `--resume`, `--release`, `--destination-id`, `--json`, `-q`/`--quiet`, `--adapter-timeout` |
 
-When giving more than one `JOB_ID`, name the workspace explicitly.
+When giving more than one `JOB`, name the workspace explicitly.
 
 ### Selecting jobs
 
@@ -470,40 +472,45 @@ inputs. See {doc}`/details/workflow_compat`.
 
 ### Requests
 
-`job request ACTION [JOB_ID...]` posts one request per job and requires
-`--reason`. Jobs are the `JOB_ID` selectors joined with every job in a
+`job cancel`, `job pause`, `job resume` and `job restart` post one request
+per job: `cancel`, `pause`, `continue` and `restart`. `job set JOB...
+KEY=VALUE...` posts the requests its pairs name, in this order: `workflow=WORKFLOW`
+(`set_workflow`: an installed id, short name or `NAME@REF`, resolved once in the
+jobs' workspace, on the remote side for a remote one; every job is checked
+against it before anything is posted, and a workspace daemon remote refuses it),
+the budget keys `budget.max_attempts_per_activation=N|unlimited`,
+`budget.max_total_attempts=N|unlimited` and `budget.max_activations=N|unlimited`
+(together one `set_budget` request), `priority=N` (`set_priority`) and
+`step=STEP` (`override_step`). A word holding `=` is a pair and every other word
+a job selector; an unknown key is refused naming the valid ones, and the command
+stops at the first request that does not exit `0`. `--reason TEXT` is recorded
+with each request (default: the command, such as `httk job pause`).
+
+Jobs are the `JOB` selectors joined with every job in a
 `--state STATE` (repeatable, an unowned state); `--step STEP` (repeatable)
 narrows both and alone selects from every unowned state, and `--placement
-PREFIX` narrows `--state`, or a `--step` without `JOB_ID`, to a placement
+PREFIX` narrows `--state`, or a `--step` without `JOB`, to a placement
 subtree. `--state`, `--step` and `--placement` select in a local workspace
-only, and a selection with no job exits `1` with `no jobs selected`. The
-actions are `cancel`, `pause`, `continue`, `restart`,
-`override_step` (with `--override-step STEP`), `set_priority` (with `--priority`),
-`set_budget` (with at least one of `--max-attempts-per-activation N|unlimited`,
-`--max-total-attempts N|unlimited` and `--max-activations N|unlimited`; the
-options are valid only with `set_budget`), `set_workflow` (with
-`--workflow WORKFLOW`: an installed id, short name or `NAME@REF`, resolved once
-in the jobs' workspace, on the remote side for a remote one; every job is
-checked against it before anything is posted, and a workspace daemon remote
-refuses it), `detach`, `unlock`, `eject` (with `--destination`), `delete`, `seal` and
-`unseal`. An `away` job accepts no request but `delete` (see
-*Away copies* below). The CLI applies each at once to a job no owner holds;
-a job held by an owner gets it once, at that owner's next boundary. What
-each action does is tabulated in
-[the task-manager guide](taskmanager.md#requests). `--force` accepts reviving a
-child a parent's observations name (`continue`, `restart`, `override_step`) and
-publishes an `override_step` outside the runner's recorded steps. `restart`
-refuses, posting nothing and exiting non-zero, a job that recorded a failed or
-cancelled child its rerun spawning step would reuse: it prints an `error:` line
-per such child and the remedy (`continue --tree`, or `httk job delete` the
-child); `--force` restarts anyway. The revival
-guard does not apply to a child that its parent's join still names (the parent
-failed at its wait, or waits on it again). A revival (`continue`, `restart`,
-`override_step`) restores the job's declared retry allowance; `--keep-budget`
-(only with those actions) keeps the current limits instead. `--tree` (only with `continue`, also over ssh, not
-for a workspace daemon remote) also resumes the failed descendants of the job reachable through retained
-joins, deepest first, before the job itself, forwarding `--keep-budget` to each;
-see {doc}`/restarting_jobs`.
+only, and a selection with no job exits `1` with `no jobs selected`. `job
+delete`, `job seal`, `job unseal`, `job detach`, `job unlock` and `job eject`
+post the requests of the same names (see their sections). An `away` job
+accepts no request but `delete` (see *Away copies* below). The CLI applies
+each at once to a job no owner holds; a job held by an owner gets it once, at
+that owner's next boundary. What each action does is tabulated in
+[the task-manager guide](taskmanager.md#requests). `--force` (on `job resume`,
+`job restart`, and `job set` with `step=`) accepts reviving a child a parent's
+observations name and publishes a `step=` outside the runner's recorded steps.
+`job restart` refuses, posting nothing and exiting non-zero, a job that
+recorded a failed or cancelled child its rerun spawning step would reuse: it
+prints an `error:` line per such child and the remedy (`job resume --tree`, or
+`httk job delete` the child); `--force` restarts anyway. The revival guard does
+not apply to a child that its parent's join still names (the parent failed at
+its wait, or waits on it again). A revival (`resume`, `restart`, `step=`)
+restores the job's declared retry allowance; `--keep-budget` keeps the current
+limits instead. `job resume --tree` (also over ssh, not for a workspace daemon
+remote) also resumes the failed descendants of the job reachable through
+retained joins, deepest first, before the job itself, forwarding
+`--keep-budget` to each; see {doc}`/restarting_jobs`.
 
 After publication, the CLI immediately serves the pending requests of each
 unowned job, from a snapshot taken then, oldest first by `created_at` instant
@@ -522,7 +529,7 @@ it is a `delete` or `eject` of a job adopted from an exchange (a previous owner
 may have begun it), when its job cannot be held (another owner holds it, or it
 is not found: it may still be applied), and when it is `queued`. Only a `SIGKILL` (or a signal the CLI does not handle) can
 leave one batch's requests behind unannounced (an interrupted withdrawal names
-the requests it did not settle); local `continue --tree` withdraws
+the requests it did not settle); local `job resume --tree` withdraws
 the same way, one job at a time. On an interrupt, the outcomes known so far are
 printed first. Each request prints its job id, request id, outcome (`applied`, `queued`, `refused` or `uncertain`) and
 an explanation. A job held by another owner, or one needing a manager's
@@ -530,13 +537,13 @@ reconciliation, keeps its request queued for that owner or manager, and so
 does a job with more than 256 pending requests; when an earlier request of the
 job cannot be served, the published one reports the same outcome and reason.
 Exit status is `0` for applied or queued requests and `1` for a refusal or
-uncertain result. `--wait` is valid only for `pause`; it waits for
+uncertain result. `job pause --wait` waits for
 queued pauses and exits `0` only when each reaches `paused`. A superseded,
 dropped or timed-out pause exits `1`. `--timeout SECONDS` requires `--wait`.
 
 In a durable workspace whose filesystems are all in `syncfs` mode (the protocol
 predicate: `io.sync` is `auto` or `syncfs`, `auto` resolves to `syncfs` there
-after the prime, and the filesystem is not Lustre), a `job request` (or `job
+after the prime, and the filesystem is not Lustre), a request verb (or `job
 detach`) whose action ends in a release or a drop (`cancel`, `pause`, `set_priority`,
 `set_budget`, `set_workflow`, `detach`, `continue`, `restart`,
 `override_step`) serves each contiguous run of at least eight eligible jobs of
@@ -566,7 +573,7 @@ and withdraws only the requests of jobs it still holds. Under `io.sync`
 workspace that is not durable, and for runs shorter than eight jobs, every job
 is served one at a time as before.
 
-`job delete` (and `job request delete`) is batched the same way. A job whose
+`job delete` is batched the same way. A job whose
 delete applies is moved into the command owner's trash scratch at its own
 commit point, after the claims and run-log lines (and after every job of the
 batch whose delete is dropped, such as a `ready` one, was released back); only
@@ -594,16 +601,20 @@ same immediate serving path, in the same batches with the same withdrawal, and
 print one concise line per job: done, or the `queued`, `refused` or `uncertain`
 outcome with its explanation.
 
-For an ordinary remote workspace, `job request ACTION --workspace REMOTE:NAME
-JOB_ID ...` keeps the signed two-leg request-envelope exchange: the client
+For an ordinary remote workspace, a request verb with `--workspace REMOTE:NAME
+JOB ...` keeps the signed two-leg request-envelope exchange: the client
 signs the request documents with the identity selected by `--operator`, then
-sends them back for verbatim publication. With `continue --tree` the far
+sends them back for verbatim publication; `job seal`, `job unseal`, `job detach`,
+`job unlock` and `job eject` reach a remote workspace the same way (`job delete`
+runs `job delete` there). With `job resume --tree` the far
 side expands the selection to the failed descendants, deepest first; the
 client signs only `continue` requests, each requested job among them, notes
 each added job on stderr, and has the far side post and serve them one at a
 time, stopping at the first that does not resume. The far side also applies
 the `restart` refusal before anything is signed. A mounted-daemon remote instead
-sends one signed typed command for each selector. Daemon batches are
+sends one signed typed command for each selector, also for `job delete`,
+`job seal`, `job unseal`, `job detach` and `job eject` (whose `DEST` is then a
+directory under the exchange outbox, the outbox itself when omitted). Daemon batches are
 non-atomic: earlier commands may have been accepted if a later command fails.
 A mounted daemon executes a command only for an exchange root submitted with
 the signing key; other targets are refused with `not_owner`.
@@ -654,20 +665,19 @@ deduplicate by `job_id`. `--counts` adds per-state totals, which need a full
 directory walk and ignore `--step`.
 
 `--state STATE` and `--step STEP` select jobs in the same way across `job
-list`, `job transfer`, `job request`, `collect`, `campaign collect` and
+list`, `job move`, the request verbs, `collect`, `campaign collect` and
 `postprocess`: each
 repeats (the values of one option are alternatives), and a job must match
 every option given. A job whose step cannot be determined (an unreadable
 `job.json` or a damaged `state.json`) matches no `--step`: `job list` logs a
-warning, `job request` leaves it out with a note, `job transfer` reports an
+warning, a request verb leaves it out with a note, `job move` reports an
 error, and `collect` counts it as
 unreadable. `--step` reads each examined job's `job.json` and `state.json`, so
 like `--tag-contains` a sparse `--step` page with `--limit` may examine up to
 `max(100 × limit, 10000)` jobs (two small reads each) and come back partial,
 with a `next_after` that resumes the scan. The step a job starts at is the
 `--start-step` of `job new` and `job debug`;
-`job request override_step` names the step a job resumes at with
-`--override-step`.
+`job set JOB step=STEP` names the step a job resumes at.
 
 `job why` also lists **held** jobs: a job held for a transfer is in neither
 state tree, and `job why JOB` shows its hold, destination and the way back.
@@ -692,14 +702,13 @@ Ancestor lines end with ` (ancestor)`; an ancestor already unlocked prints
 `already unlocked (ancestor)` and is not an error, and a parent that cannot be
 found prints `<job_id>` `parent <key> not found; not unlocked` without changing
 the exit status. It exits `1` when a request of a selected job or ancestor is
-refused or uncertain. `job request unlock` does the same on a local workspace, ancestors included, with the same lines and exit rules. Without `--no-copy`
+refused or uncertain. Without `--no-copy`
 it copies the job's installed `package/` to `workflow/` in the job directory
 (a reserved payload name), where the manager then runs the runner from, while
 the job is unlocked, and the operator edits it. The marker cannot
 be cleared by any request. A succeeded job with a live seal is refused until
-`job unseal`, and a cancelled job is refused. `job unlock` refuses a remote
-workspace as `job detach` does; `job request unlock` reaches an ssh remote
-through the signed request envelope (it copies; a spawned job is refused there:
+`job unseal`, and a cancelled job is refused. `job unlock` reaches an ssh remote
+through the signed request envelope (it copies, and refuses `--no-copy`; a spawned job is refused there:
 unlock spawned jobs on the workspace host with `httk job unlock`, which also
 unlocks their ancestors), and a
 workspace daemon refuses it (the daemon does not carry `unlock`; run it on the
@@ -739,7 +748,7 @@ failed delivery returns every job to the state it left.
 
 The hidden protocol option `--hold` puts the bundle in the workspace's own
 `.httk-workspace/transfers/outgoing/<transfer id>/` instead, the first leg of
-`job transfer`; DEST, when given, and `--destination-id` are then only recorded.
+`job move`; DEST, when given, and `--destination-id` are then only recorded.
 
 `job adopt BUNDLE...` validates each bundle and publishes each job into the state
 and priority it left, printing `JOB_KEY<TAB>STATE<TAB>DIRECTORY` per job and a
@@ -770,7 +779,7 @@ destination workspace id is refused and discarded there. A hold directory,
 `.httk-workspace/transfers/outgoing/<transfer id>/`, is itself a bundle: copied
 by hand to another machine, `job adopt` takes it like any ejected bundle (the
 remedy for a hold too large for a transfer session's answer; release the hold on
-its source afterwards with `job transfer --release`).
+its source afterwards with `job move --release`).
 
 Both commands are crash-safe and take no file locks: each records what it needs
 to finish before it moves anything, so an interrupted eject or adoption is
@@ -781,7 +790,7 @@ workspace or project; a sealed job keeps its seal.
 
 ## Moving jobs between workspaces
 
-`job transfer` moves jobs between two workspaces, each a registered name
+`job move` moves jobs between two workspaces, each a registered name
 (`REMOTE:WS` for a workspace on a remote) or else a workspace directory; a
 registered name wins over a same-named directory, so `./NAME` addresses the
 directory. Any combination of local and remote ends works, and a
@@ -789,18 +798,18 @@ remote-to-remote transfer is relayed through the client (a temporary directory
 here, see *Remote to remote* below):
 
 ```console
-httk job push [SRC] DST [--no-keep] [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--no-workflows] [--json] [-q]
-httk job pull SRC [DST] [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--no-workflows] [--json] [-q]
-httk job transfer (--job JOB … | --state STATE … | --step STEP …) [--placement PREFIX] [--tree] [--keep] [--no-workflows] SRC DST [--json] [-q]
-httk job transfer --resume [--keep] [SRC] [DST]
-httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [--keep [--destination-id ID]] [WS]
+httk push [SRC] DST [--no-keep] [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--no-workflows] [--json] [-q]
+httk pull SRC [DST] [--job JOB … | --state STATE … | --step STEP …] [--placement PREFIX] [--no-workflows] [--json] [-q]
+httk job move (--job JOB … | --state STATE … | --step STEP …) [--placement PREFIX] [--tree] [--keep] [--no-workflows] SRC DST [--json] [-q]
+httk job move --resume [--keep] [SRC] [DST]
+httk job move --release TRANSFER_ID [--release TRANSFER_ID …] [--keep [--destination-id ID]] [WS]
 httk job recover [--workspace WS] (JOB … | --all [--placement PREFIX])
-httk transfer status [WS] [--json]
+httk workspace status [WS] [--json]
 ```
 
-`job push` and `job pull` are the everyday forms: `job push REMOTE:WS` moves
+`push` and `pull` are the everyday forms: `push REMOTE:WS` moves
 every `ready` job (created, waiting to start) of the workspace the command
-runs in, else the default workspace, to REMOTE:WS, and `job pull REMOTE:WS`
+runs in, else the default workspace, to REMOTE:WS, and `pull REMOTE:WS`
 moves every `succeeded` job of REMOTE:WS back. With one positional push takes
 it as DST and pull as SRC; the omitted end resolves like any omitted
 workspace (the enclosing workspace, the project's default, else the per-user
@@ -808,7 +817,7 @@ default, which is created on first use), and with none the command is
 refused. Both always act as `--tree`, and `--job`, `--state` or `--step`
 replaces their implicit state (`--step` without `--state` selects from every
 unowned state except `away`; `--state away` is refused by push, pull and
-transfer). `--resume`, `--release` and `--destination-id` stay on `job transfer`.
+transfer). `--resume`, `--release` and `--destination-id` stay on `job move`.
 
 Jobs are selected by name with `--job` (a UUID, key, unique prefix, path or
 glob), or by state with `--state STATE`, which takes every job of SRC in that
@@ -1123,8 +1132,8 @@ only: it fails alone, stays held on SRC, and the message names the remedy by
 hand (an accepted limitation): copy its bundle
 `.httk-workspace/transfers/outgoing/<transfer id>/` from SRC to the
 destination's machine, run `httk job adopt BUNDLE` in the destination
-workspace, then `httk job transfer --release TRANSFER_ID SRC`, or, to keep away
-copies, `httk job transfer --release TRANSFER_ID --keep --destination-id ID
+workspace, then `httk job move --release TRANSFER_ID SRC`, or, to keep away
+copies, `httk job move --release TRANSFER_ID --keep --destination-id ID
 SRC`, ID being the `workspace_id` that `httk workspace status --json DST`
 reports (such a hold records no destination id, and `--keep` alone keeps
 none). A tree's `bundle.json` (about 220 bytes a member) is held to 512 MiB,
@@ -1150,7 +1159,7 @@ them held (`failed`). A hold that existed before the run (left by an earlier
 run, re-driven now) is never taken back, since an earlier delivery of it may
 have been adopted with its answer lost: it stays held and is reported
 `failed` with the refusal. Check with `httk job show` on DST: deliver it again
-with `--resume`, or, if the jobs are there, release it (`job transfer
+with `--resume`, or, if the jobs are there, release it (`job move
 --release T`), or, if they are not, take it back with
 `httk job adopt --workspace SRC SRC/.httk-workspace/transfers/outgoing/<transfer id>`
 (the message names both). This is why the earlier holds and the run's new ones
@@ -1168,7 +1177,7 @@ marks every hold of that call `failed` and leaves it held: whether the jobs
 arrived is unknown, and `--resume` delivers again (they then report "already
 adopted") and releases. Releasing such a hold by hand instead, after checking
 with `httk job show` that DST has the jobs, keeps away copies only with
-`httk job transfer --release T --keep --destination-id ID SRC`, where ID is the
+`httk job move --release T --keep --destination-id ID SRC`, where ID is the
 `workspace_id` that `httk workspace status --json REMOTE:WS` reports for DST.
 
 **Paged holds.** A transfer from a local SRC (a push, local to local) and a pull
@@ -1203,7 +1212,7 @@ answered, the synchronization file by file after a failed `syncfs`, and its
 workflow attempts.
 
 A push from a local SRC to a remote DST that keeps no away copies
-(`job transfer` without `--keep`, or `job push --no-keep`) holds one page ahead:
+(`job move` without `--keep`, or `push --no-keep`) holds one page ahead:
 a second thread holds the next page while the current one is staged, adopted
 and released (so a page costs about the longer of the two, not their sum),
 starting each page only once the one before was handed over. It holds nothing
@@ -1211,7 +1220,7 @@ else, prints nothing (its warnings go to stderr through logging), and hands
 each page over with everything it completed, a failure on SRC included, which
 then stops the destination as an error between pages does. With its pooled
 holds and the releases of the page before, up to twice `io.workers`
-operations can run on SRC at once. `job push` keeps away copies by default
+operations can run on SRC at once. `push` keeps away copies by default
 (like `--keep`), so it holds no page ahead unless given `--no-keep`; nor do
 pulls, remote to remote, local to local and the holds an earlier run left.
 
@@ -1255,7 +1264,7 @@ not also held in memory, so a spool that cannot be read back at the end (an
 I/O error on the file just written) stops the report where it is, perhaps
 leaving standard output with an incomplete JSON document, and the command
 exits with status 2 after one diagnostic on standard error: the transfers
-themselves are done as reported so far, and `httk transfer status` shows what
+themselves are done as reported so far, and `httk workspace status` shows what
 is still held. Every page
 driven also adopts the staged segments of every destination whose deadline
 has passed, so that one destination's last staged segment does not hold back
@@ -1308,7 +1317,7 @@ interrupt) stay held for `--resume`, reported as not delivered. The command then
 destination, why, how many selected jobs were not attempted (or that the
 selection was not, when the stop came before it; the holds not yet listed, when
 it came while the earlier holds were), and that
-`httk job transfer --resume SRC DST` drives the holds left on SRC; `--resume`
+`httk job move --resume SRC DST` drives the holds left on SRC; `--resume`
 re-drives holds and does not select the rest, so run the transfer again for
 that. A page of a pull whose answer was lost may have been held: the message
 says so, never that nothing was held, and `--resume` drives it. A failure of
@@ -1318,10 +1327,10 @@ between pages (an owner that cannot be registered, a hold that cannot be read)
 stops the destination (reading SRC's holds: every destination) and the pages
 already driven are still reported.
 
-The hidden protocol option `job transfer --hold` still holds everything first.
+The hidden protocol option `job move --hold` still holds everything first.
 
 **Recovery.** Delivery is at least once. Every run, and
-`job transfer --resume`, first re-drives the holds of SRC bound for DST
+`job move --resume`, first re-drives the holds of SRC bound for DST
 (`--resume` without DST re-drives every hold to the destination it records), so
 a transfer interrupted at any step is finished by running it again. A pushed
 hold records the destination locator only (no probe runs before a push); DST's
@@ -1332,16 +1341,16 @@ workspace's id. Accepted limitation: if a push's answer was unreadable and the
 remote workspace NAME is then pointed at another workspace before `--resume`,
 the resume delivers to the new workspace and the jobs exist in both; after such
 a change, check with `httk job show` or `httk job list` on the remote before
-resuming. `transfer status`
+resuming. `workspace status`
 lists the holds of a workspace (transfer id, root job, member count,
 destination, age), `job why JOB` explains a held job, and `httk project check`
 reports holds and incoming copies older than seven days. A transfer
 abandoned for good is taken back into SRC with
 `httk job adopt --workspace SRC SRC/.httk-workspace/transfers/outgoing/<transfer id>`,
 which is safe only after checking that DST does not have the jobs;
-`job transfer --release T` discards a hold whose jobs DST has (add `--keep
+`job move --release T` discards a hold whose jobs DST has (add `--keep
 --destination-id ID` to keep away copies, as above). The hidden protocol option
-`job transfer --hold (--job JOB … | --state STATE … | --step STEP …) SRC DST` only holds jobs in a local SRC,
+`job move --hold (--job JOB … | --state STATE … | --step STEP …) SRC DST` only holds jobs in a local SRC,
 recording DST as given, for a later `--resume` or `--release`; with `--json` it
 prints `{"holds": [...], "held_before": [...], "errors": [...]}`, where
 `held_before` lists, in the same shape, the other holds of SRC already bound for
@@ -1351,9 +1360,9 @@ push learns that id from the adoption report).
 
 ### Away copies
 
-`job push` leaves in SRC an *away copy* of every job it moves
-(`--no-keep` opts out), and `job transfer --keep` does the same; a plain
-`job transfer` moves. An away copy is a job in the seventh unowned state,
+`push` leaves in SRC an *away copy* of every job it moves
+(`--no-keep` opts out), and `job move --keep` does the same; a plain
+`job move` moves. An away copy is a job in the seventh unowned state,
 `away` (`jobs/away/<placement>/…`). It never runs, is not collected and cannot
 be transferred or requested; only `job delete` works on it. Its `state.json`
 records `away`: the destination workspace id and locator, the transfer id, the
@@ -1363,7 +1372,7 @@ recover JOB to resend)`, and `--json` outcomes carry `"kept": true|false`.
 `httk job list --state away` lists what you are still waiting for, and `job
 why` and `job show` explain an away job.
 
-`job pull` (or any trusted transfer back) replaces the away copy when the job
+`pull` (or any trusted transfer back) replaces the away copy when the job
 returns from the workspace it was pushed to. A bundle from another workspace
 is refused: `KEY is away at X, but this bundle comes from workspace Y; recover
 or delete the copy first`. An interrupted transfer finished with `--resume` is
@@ -1425,8 +1434,8 @@ it, the manager exits with status 2. See {doc}`taskmanager`.
 ### `precheck`: readiness before an attempt
 
 ```console
-httk workflow precheck --workspace WORKSPACE
-httk workflow precheck --workspace WORKSPACE --placement project/screening --json
+httk job precheck --workspace WORKSPACE
+httk job precheck --workspace WORKSPACE --placement project/screening --json
 ```
 
 This read-only, advisory report checks `ready`, `waiting`, and `paused` jobs:
@@ -1665,18 +1674,21 @@ registry, and a member not yet adopted on this machine. It repairs only through
 `gc` and adoption. `httk project check` only reports, and `--no-adopt` skips adopting.
 
 To seal a project, run `httk workspace seal` and then `httk project seal`.
-Verify the whole tree with `httk project verify` or `httk seal verify`.
+Verify the whole tree with `httk project verify`.
 
-### `seal verify`: verify a sealed tree
+### `job verify` and `workspace verify`: verify seals
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `seal verify [PATH]` | verify the seal at `PATH` (a project, workspace, or job payload; default `.`) and, unless `--shallow`, every seal it references | `--json`, `--trusted-key KEY_OR_FINGERPRINT` (repeatable), `--shallow`, `--content` |
+| `job verify JOB...` | verify each job's seal: its signatures and the digests of the files it seals; a payload directory is verified where it is, inside a workspace or free-standing | `--workspace`, `--json`, `--trusted-key KEY_OR_FINGERPRINT` (repeatable), `--content` |
+| `workspace verify [WORKSPACE...]` | verify a workspace seal and report every job that drifted since the snapshot | `--json`, `--trusted-key`, `--deep` (also verify every recorded job seal, as `job verify`), `--content` (implies `--deep`; as `job verify --content`) |
 
-The final status word and exit code mirror `project verify --manifest`: `ok` (exit 0)
-when every entry is `valid_trusted`, `UNTRUSTED` (exit 3) when no entry is
-invalid but a signer is untrusted, `FAILED` (exit 1) on any invalid entry. See
-{doc}`sealing`.
+`--content` also decompresses job files and checks them against their sealed
+`uncompressed.sha256` manifests. The final status word and exit code of
+`job verify` and `workspace verify --deep` mirror `project verify --manifest`:
+`ok` (exit 0) when every entry is `valid_trusted`, `UNTRUSTED` (exit 3) when no
+entry is invalid but a signer is untrusted, `FAILED` (exit 1) on any invalid
+entry, an unsealed job included. See {doc}`sealing`.
 
 ## Signed manifests and operator identity
 
@@ -1723,7 +1735,7 @@ setup` creates the first named identity and its key pair and makes it the
 default; `httk identity add --name NAME --email EMAIL SHORT` adds more, and
 `httk identity default SHORT` changes the default.
 
-`job request` records the selected identity's `Name <email>` label and signs the
+A request verb records the selected identity's `Name <email>` label and signs the
 request with that identity's key. Omitting `--operator` selects the default
 identity. A selector containing `<` is a literal `Name <email>` label, signed
 with the default identity's key; any other selector must be a configured short
@@ -1769,12 +1781,12 @@ ordinary commands; their spelling is frozen because the far side may run a
 different *httk*. A transfer itself runs over the hidden `workflow
 transfer-session`, whose one protocol version both ends must speak (see *The
 transfer session* in {doc}`remotes`); the release and the listing below are what
-an operator's `job transfer --release` and `transfer status` run on a remote:
+an operator's `job move --release` and `workspace status` run on a remote:
 
 ```text
 httk workflow transfer-session
-httk job transfer --release TRANSFER_ID [--release TRANSFER_ID …] [--keep [--destination-id ID]] WS
-httk transfer status --json WS
+httk job move --release TRANSFER_ID [--release TRANSFER_ID …] [--keep [--destination-id ID]] WS
+httk workspace status --json WS
 httk job request-envelopes ACTION --workspace WS --operator LABEL --reason TEXT [--priority N] [--override-step S] [--workflow W] [--destination D] [--max-attempts-per-activation N|unlimited] [--max-total-attempts N|unlimited] [--max-activations N|unlimited] [--force] [--keep-budget] [--tree] JOB_ID …
 httk job publish-requests --workspace WS --document JSON [--document JSON …] [--wait] [--timeout S] [--sequential]
 httk workspace status --by-path --json PATH
@@ -1799,17 +1811,17 @@ some commands and options. These spellings no longer parse:
 | `job seal --keys` | the workspace's `seal.keys` setting |
 | `job confirm-launches-ended` | `workspace attest-dead` once the owner and its launches are gone |
 | `job eject --resume` | an interrupted eject is rolled forward or back by recovery |
-| `httk workflow transfer offer\|receive\|retire\|reclaim` | `job transfer` (whose first leg is the hidden protocol option `job eject --hold`), `job adopt`, `job transfer --release` |
+| `httk workflow transfer offer\|receive\|retire\|reclaim` | `job move` (whose first leg is the hidden protocol option `job eject --hold`), `job adopt`, `job move --release` |
 | `workspace unlock` | removed with the maintenance lock; there is nothing to release (`job unlock` is unrelated: it puts one job in debug mode) |
 | `workspace forget --force` | `workspace forget` |
 | `workspace fsck --quarantine-unrepairable` | `workspace fsck --repair` |
 | `workspace seal --force` | `job seal` the remaining jobs first, or seal the workspace with them listed as unsealed |
 | `manager run --lease-seconds`, `--takeover-grace-factor`, `--unsafe-persistent-takeover`, `--unsafe-isolated-takeover` | recovery only after the death proof or `workspace attest-dead` |
-| `transfer send`, `transfer fetch`, `transfer status REMOTE` (by remote) | `job transfer --job JOB … SRC DST`; `transfer status WS` lists one workspace's holds (`REMOTE:WS` for a remote one) |
+| `transfer send`, `transfer fetch`, `workspace status REMOTE` (by remote) | `job move --job JOB … SRC DST`; `workspace status WS` lists one workspace's holds (`REMOTE:WS` for a remote one) |
 | the remote setting `transfer_session` (`off` forced the adapter operations) | nothing: transfers always use a transfer session, and both ends must run the same *httk* version; `remote set NAME transfer_session=…` is refused as an unknown setting |
 | `job adopt --stdin-tar` (with the hidden `--token`, `--sync`, `--built-for`), `workflow install --stdin-tar`, `--from-store`, `--source-label`, `--build`, `--also-build`, `workflow list --built-for` | the transfer session's own requests; `job adopt BUNDLE…` adopts bundles on disk |
 | the adapter operation `deliver` | the transfer session (`session` operation) |
-| `job list --kind`, `job transfer --kind` | `--state STATE` (and `--step STEP` to select by step) |
+| `job list --kind`, `job move --kind` | `--state STATE` (and `--step STEP` to select by step) |
 | `--force` on `job delete`, `job unseal`, `workspace delete`, `workspace unseal`, `launcher remove`, `remote remove`, `campaign remove` | `--yes` (pre-confirms the prompt; `workspace delete` now asks too) |
 | `--durable` | nothing: durability is the default; `--no-durable` opts out |
 | `config configure --set/--unset/--add/--remove`, `config set KEY VALUE` | `config set KEY=VALUE... [--add KEY=VALUE] [--remove KEY=VALUE]`, `config unset KEY...` |
@@ -1839,6 +1851,16 @@ some commands and options. These spellings no longer parse:
 | `httk project verify-seal` | `httk project verify` |
 | `httk project verify-export ZIP` | `httk project verify ZIP` |
 | `httk project unseal --force` | `httk project unseal --yes` |
+| `job request cancel\|pause\|restart` | `job cancel`, `job pause`, `job restart` (`--reason` is optional; it defaults to the command, e.g. `httk job pause`) |
+| `job request continue` | `job resume` |
+| `job request set_priority --priority N`, `override_step --override-step S`, `set_workflow --workflow W`, `set_budget --max-attempts-per-activation N --max-total-attempts N --max-activations N` | `job set JOB... priority=N step=S workflow=W budget.max_attempts_per_activation=N budget.max_total_attempts=N budget.max_activations=N` |
+| `job request delete\|seal\|unseal\|detach\|unlock` | `job delete`, `job seal`, `job unseal`, `job detach`, `job unlock` (which reach a remote workspace as signed requests too; over a remote they record the reason `httk job VERB`, and only `job unlock` takes `--reason`) |
+| `job request eject --destination D` | `job eject JOB [D]` (for a workspace daemon, `D` is under its outbox) |
+| `workflow precheck` | `job precheck` |
+| `job transfer` | `job move` |
+| `job push`, `job pull` | `httk push`, `httk pull` |
+| `httk transfer status [WS]` | `httk workspace status [WS]` (the held transfers; `transfers` in `--json`) |
+| `httk seal verify [PATH]` | `httk job verify JOB...` (a payload directory too), `httk workspace verify [--deep] [--content]`, `httk project verify` |
 
 Workspaces and bundles of the earlier layout are refused with a message that
 there is no migration: re-create the workspace with `httk workspace init` and

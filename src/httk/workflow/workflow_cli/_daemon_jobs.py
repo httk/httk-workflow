@@ -131,7 +131,7 @@ def request_remote_jobs(
 
     :param binding: The resolved remote workspace binding.
     :param context: The active CLI context.
-    :param arguments: The job request arguments.
+    :param arguments: The request arguments (as :func:`._job._post_requests` takes them).
     :param identity: The already selected operator identity.
     :return: Exit status and per-job result rows.
     :raises ValueError: If the daemon request or batch options are invalid.

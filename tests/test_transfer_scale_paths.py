@@ -474,7 +474,7 @@ def test_a_spool_that_cannot_be_read_back_stops_its_report_with_a_diagnostic_and
         json.loads(captured.out)
     (diagnostic,) = [line for line in captured.err.splitlines() if "could not be read back" in line]
     assert "Input/output error" in diagnostic and "the report is incomplete" in diagnostic
-    assert "`httk transfer status` shows what is still held" in diagnostic
+    assert "`httk workspace status` shows what is still held" in diagnostic
     assert_in(target, plan)  # the transfers themselves are done
     assert _moving.held_names(source) == []
 
@@ -585,7 +585,7 @@ def test_local_to_local_with_kept_copies_and_errors_reports_what_the_reference_r
     _target, target_name = registered(tmp_path, "b")
     paged(monkeypatch, 2)
     plan = jobs(source, 5)
-    hold = ["job", "transfer", "--hold", "--json", "--no-durable", *selected(plan[:3]), source_name, target_name]
+    hold = ["job", "move", "--hold", "--json", "--no-durable", *selected(plan[:3]), source_name, target_name]
     from httk.core.cli import CLIContext
 
     from httk.workflow.workflow_cli import command
@@ -849,7 +849,7 @@ def test_earlier_holds_resolve_each_root_once_a_page(
     argv = [item for mapping in mappings for item in ("--job", str(mapping["id"]))]
     assert (
         command(
-            ["job", "transfer", "--hold", "--no-durable", *argv, source_name, target_name], CLIContext("httk", tmp_path)
+            ["job", "move", "--hold", "--no-durable", *argv, source_name, target_name], CLIContext("httk", tmp_path)
         )
         == 0
     )

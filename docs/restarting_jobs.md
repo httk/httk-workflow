@@ -38,7 +38,7 @@ The job directory holds:
 
 Everything in the job directory may be edited while the job is `failed` or
 `paused`, except `state.json`, the engine's own record (change it only through
-`job request` actions), and `job.json`. `job.json` is digest-pinned at the first activation, and a
+requests such as `job resume` and `job set`), and `job.json`. `job.json` is digest-pinned at the first activation, and a
 different digest fails the job with `protocol_error`. That includes the retry
 policy, the parameters and the placement. The exception is an unlocked job (see
 [Debug mode](#debug-mode-unlocked-jobs)), whose `job.json` may be edited.
@@ -62,9 +62,9 @@ again from that point, unless you ask it not to with `--keep-budget` (see
 ## The three verbs
 
 ```console
-httk job request continue --reason "fixed the input" silicon
-httk job request restart --reason "redo this step" silicon
-httk job request override_step --override-step relax --reason "redo relax" silicon
+httk job resume --reason "fixed the input" silicon
+httk job restart --reason "redo this step" silicon
+httk job set silicon step=relax --reason "redo relax"
 ```
 
 Each applies to a `failed` or `paused` job. The CLI applies it at once to a job
@@ -73,9 +73,9 @@ job its owner holds applies it at the next boundary.
 
 | Action | Effect |
 | --- | --- |
-| `continue` | A job that failed at its wait on children (see below) returns to `waiting` with its retained join: no new attempt. Any other `failed` job, and a `paused` job, returns to `ready` and the current step reruns as a new attempt. |
-| `restart` | Always `ready`: the current step reruns as a new attempt. The failure is cleared and a retained join is dropped. |
-| `override_step --override-step STEP` | `ready` with a new activation of `STEP`. `STEP` is checked against the steps the runner recorded unless `--force`. A retained join is dropped. |
+| `job resume` (`continue`) | A job that failed at its wait on children (see below) returns to `waiting` with its retained join: no new attempt. Any other `failed` job, and a `paused` job, returns to `ready` and the current step reruns as a new attempt. |
+| `job restart` (`restart`) | Always `ready`: the current step reruns as a new attempt. The failure is cleared and a retained join is dropped. |
+| `job set step=STEP` (`override_step`) | `ready` with a new activation of `STEP`. `STEP` is checked against the steps the runner recorded unless `--force`. A retained join is dropped. |
 
 For a job that did not fail at a wait, `continue` and `restart` are the same.
 The attempt reason is `manual_continue` for both. Each of the three first
@@ -84,7 +84,7 @@ as many attempts and activations as it was declared with; `--keep-budget`
 revives it within the limits it has. `job why` says what the limits are after
 the revival.
 
-`--force` applies to all three. It accepts the revival hazard described next,
+`--force` applies to all three (`job set` takes it with `step=`). It accepts the revival hazard described next,
 and publishes an `override_step` outside the recorded steps. Cancelled jobs
 cannot be revived by any request.
 
@@ -125,7 +125,7 @@ drops an override that capped it. Automatic retries by the manager never raise
 a limit.
 
 `--keep-budget` (on `continue`, `restart` and `override_step`, and on
-`continue --tree`, where it applies to every descendant) leaves the limits as
+`job resume --tree`, where it applies to every descendant) leaves the limits as
 they are. The revival is then bound by them: a rerun past a limit fails right
 back with `retry_exhausted` or `budget_exhausted`, and a wait that failed with
 `budget_exhausted` re-decides under the same `maximum_activations`.
@@ -138,7 +138,7 @@ raise the limit with a request instead, since `job.json` cannot be edited:
 
 ```console
 httk job why silicon
-httk job request set_budget --max-attempts-per-activation 3 --reason "flaky node" silicon
+httk job set silicon budget.max_attempts_per_activation=3 --reason "flaky node"
 ```
 
 1. `job why` names the budgets against their effective limits.
@@ -147,10 +147,10 @@ httk job request set_budget --max-attempts-per-activation 3 --reason "flaky node
 3. A later revival does not lower it: the raise to the declared allowance only
    ever raises.
 
-`set_budget` takes at least one of `--max-attempts-per-activation N`,
-`--max-total-attempts N` and `--max-activations N`. Each is an integer of 1 or
-more, or `unlimited` to lift that limit. The options are valid only with
-`set_budget`. The request applies to any job that is not `succeeded` or
+`job set` takes the budget keys `budget.max_attempts_per_activation=N`,
+`budget.max_total_attempts=N` and `budget.max_activations=N`; the keys of one
+call form one `set_budget` request. Each value is an integer of 1 or more, or
+`unlimited` to lift that limit. The request applies to any job that is not `succeeded` or
 `cancelled`, including a `ready` or running one; on a running attempt it
 applies at the next boundary, like every request. It does not need `--force`.
 
@@ -181,7 +181,7 @@ would advance past `maximum_activations`) is reopened the same way: the
 for its next activation and advances to its next step, with no new children:
 
 ```console
-httk job request continue --reason "one more step" PARENT
+httk job resume --reason "one more step" PARENT
 ```
 
 With `--keep-budget`, raise `maximum_activations` with `set_budget` first.
@@ -210,24 +210,24 @@ the newest installation of a release:
 
 ```console
 httk workflow install git+https://github.com/ORG/REPO@v1.3.0#relax
-httk job request set_workflow --workflow relax@v1.3.0 --state ready --reason "bump to v1.3.0"
+httk job set workflow=relax@v1.3.0 --state ready --reason "bump to v1.3.0"
 ```
 
 To repair failed jobs with a fixed version, switch them, then restart them:
 
 ```console
-httk job request set_workflow --workflow relax@v1.3.1 --state failed --reason "fixed runner"
-httk job request restart --state failed --reason "rerun on v1.3.1"
+httk job set workflow=relax@v1.3.1 --state failed --reason "fixed runner"
+httk job restart --state failed --reason "rerun on v1.3.1"
 ```
 
-`--workflow` takes an installed id, a short name (the newest installation of
+`workflow=` takes an installed id, a short name (the newest installation of
 that name) or `NAME@REF`. It is resolved once, in the job's workspace, and the
-request names the installation's id. Jobs are selected by `JOB_ID` arguments,
+request names the installation's id. Jobs are selected by `JOB` arguments,
 by `--state STATE` (repeatable), by `--step STEP` (repeatable) and by
-`--placement PREFIX`, as for `job transfer`: `JOB_ID` and
+`--placement PREFIX`, as for `job move`: `JOB` and
 `--state` are joined, `--step` narrows both and alone selects from every
 unowned state, and `--placement` narrows `--state` or a `--step` given without
-`JOB_ID`. Every action of `job request` takes them, so
+`JOB`. Every request verb (`job cancel`, `pause`, `resume`, `restart`, `set`) takes them, so
 `--state ready --step relax` bumps only the ready jobs that will run `relax`.
 
 Every selected job is checked before any request is posted, and the job's owner
@@ -292,16 +292,13 @@ not store it by accident:
 ```console
 httk job unlock --reason "debugging relax" silicon   # marker and a runner copy
 httk job unlock --no-copy silicon                   # marker only
-httk job request unlock --reason "debugging relax" silicon   # the same, ancestors included
 ```
 
 `job unlock` posts an `unlock` request per selected job and applies it at once
 to a job no manager holds; it prints and exits as `job detach` does, and takes
-`--reason TEXT` (default `job unlock`). `job request unlock` posts the same
-request, and on a local workspace unlocks the ancestors too, with the same
-lines and exit status. A remote workspace is refused by `job unlock` as by
-`job detach`; `job request unlock` reaches an ssh remote through the signed
-request envelope, but is refused there for a spawned job (unlock spawned jobs
+`--reason TEXT` (default `httk job unlock`); the ancestors of each job are unlocked
+too, marker only. `job unlock` reaches an ssh remote through the signed
+request envelope (without `--no-copy`), but is refused there for a spawned job (unlock spawned jobs
 on the workspace host with `httk job unlock`, which also unlocks their
 ancestors). A workspace daemon does not carry `unlock` (run it on the daemon
 host). A cancelled job cannot be unlocked, and a
@@ -378,7 +375,7 @@ the job:
 ```console
 httk job unlock silicon
 $EDITOR "$(httk job show silicon)/workflow/run.py"
-httk job request restart --reason "try the fix" silicon
+httk job restart --reason "try the fix" silicon
 ```
 
 In a confined attempt and its ranks `workflow/` is a read-only overlay, like
@@ -448,10 +445,10 @@ keeps its `join` then too; see [Raising a budget](#raising-a-budget).
 
 ```console
 httk job why PARENT
-httk job request continue --reason "fixed the INCAR" CHILD
+httk job resume --reason "fixed the INCAR" CHILD
 httk job show CHILD
 httk job log CHILD
-httk job request continue --reason "child succeeded" PARENT
+httk job resume --reason "child succeeded" PARENT
 ```
 
 1. `job why PARENT` says the job failed while waiting on its children, lists
@@ -483,7 +480,7 @@ Failures propagate upward: when a child's own wait fails, that child fails with
 level keeps its join. To resume the whole chain at once:
 
 ```console
-httk job request continue --tree --reason "inputs fixed" PARENT
+httk job resume --tree --reason "inputs fixed" PARENT
 ```
 
 `--tree` also resumes the `failed` descendants reachable through retained
@@ -492,13 +489,13 @@ posted and served one job at a time in that order. If a descendant's request is
 not applied (queued behind its owner, refused, or its revival fails at a
 budget), the CLI stops, posts nothing for the remaining jobs, prints
 `not posted: <job_key> ...` for each and exits `1`; resolve that job and rerun
-`continue --tree`. A budget refusal happens only with `--keep-budget`, which
+`job resume --tree`. A budget refusal happens only with `--keep-budget`, which
 `--tree` forwards to every `continue` it posts. Children in other states (`succeeded`, `paused`, running,
 `cancelled`) are left alone. Join children `--tree` leaves alone (not found,
 `cancelled`, or held by an owner at that moment) are reported with a note, as
 without `--tree`. Fix the leaf failures first: a descendant that fails for its
 own reason, not at a wait, returns to `ready` and reruns its step, which may
-fail again. `--tree` is valid only with `continue`.
+fail again. `--tree` is an option of `job resume` alone.
 
 ### Restarting the parent instead
 
@@ -512,12 +509,12 @@ cancelled child (its label, job key, state and failure code) and the remedy,
 then exits non-zero (`1`; `2` over ssh, where the far side's lines are relayed):
 
 ```console
-$ httk job request restart --reason "redo" PARENT
+$ httk job restart --reason "redo" PARENT
 error: x x--<uuid> is failed dependency_failure; a restart reruns the spawning step, which reuses it
-resume failed descendants and the parent with 'httk job request continue --tree --reason TEXT PARENT'; ...
+resume failed descendants and the parent with 'httk job resume --tree PARENT'; ...
 ```
 
-Revive the child first (`continue` it, or `continue --tree` the parent), or
+Revive the child first (`job resume` it, or `job resume --tree` the parent), or
 delete it with `httk job delete` so the restarted step creates a fresh one.
 `--force` restarts anyway; the runtime then logs a warning for each failed or
 cancelled child it reuses. The check also applies to jobs selected with
@@ -526,7 +523,7 @@ longer exists is created anew. The restart restores the declared allowance, so
 it runs even with `maximum_attempts_per_activation = 1`; with `--keep-budget`
 the spawning step's attempt counts against the current limit, and such a
 `restart` fails right back with `retry_exhausted`. Alternatively,
-`httk job request override_step --override-step <spawning step>` reruns that step as a
+`httk job set JOB step=<spawning step>` reruns that step as a
 new activation.
 The restarted step waits on the reused children again. Between the
 `restart` and the publication of the new wait, reviving one of them still needs
@@ -570,12 +567,12 @@ new attempt, or `restart` it, which does the same; edit its files first, as for
 a failed job. `override_step` moves it to a named step.
 
 ```console
-httk job request continue --reason "quota restored" silicon
+httk job resume --reason "quota restored" silicon
 ```
 
 ## Remote workspaces
 
-`continue --tree` works on a remote workspace reached over ssh as it does
+`job resume --tree` works on a remote workspace reached over ssh as it does
 locally: the far side expands the tree, your machine signs only `continue`
 requests (the selected jobs and their failed descendants, each noted on
 stderr), and the far side serves them one at a time, deepest first, stopping
@@ -587,14 +584,14 @@ also select jobs of local workspaces only; give job ids for a remote one.
 `set_workflow` resolves `--workflow` on the remote side, against the remote
 workspace's installations; it is refused for a workspace daemon remote.
 {doc}`/details/remotes` covers what a remote binding accepts. A job lost on a
-remote after `job push` is returned from its `away` copy with
+remote after `push` is returned from its `away` copy with
 `httk job recover JOB` and pushed again.
 
 ## See also
 
 - {doc}`running`: inspecting and controlling jobs.
 - {doc}`/details/taskmanager`: the request table and the revival guard.
-- {doc}`/details/workflow_cli`: `job request` options.
+- {doc}`/details/workflow_cli`: the options of the request verbs.
 - {doc}`/details/composing_workflows`: failure semantics of called children.
 - {doc}`/details/workflow_filesystem_api`: `state.json`, joins and requests in
   the protocol.

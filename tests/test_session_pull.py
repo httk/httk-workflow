@@ -1,7 +1,7 @@
 """A pull over one transfer session (plan WORKFLOW_TRANSFER_SESSION §7, T2; paged holds since T3, §7.8).
 
-The far side's ``select``, ``hold_page``, ``holds_page``, ``send`` and ``release`` ops (the holds of ``job transfer
---hold``, the listing of ``transfer status --json``, ``job transfer --release``, and the download of held bundles and
+The far side's ``select``, ``hold_page``, ``holds_page``, ``send`` and ``release`` ops (the holds of ``job move
+--hold``, the listing of ``workspace status --json``, ``job move --release``, and the download of held bundles and
 store entries, over a real session), and the client's pull: one connection and one start, segment by segment, with
 per-segment outcomes. The paging rules themselves are tested in ``test_paged_holds``.
 """
@@ -495,7 +495,7 @@ def test_a_slow_hold_and_release_report_their_progress_and_are_no_stall(
             assert len(set(counts)) >= 3, (name, counts)
 
 
-def test_holds_page_lists_what_transfer_status_json_lists_a_page_at_a_time(
+def test_holds_page_lists_what_workspace_status_json_lists_a_page_at_a_time(
     tmp_path: Path, remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     _, bundle = local_project(tmp_path)
@@ -521,13 +521,16 @@ def test_holds_page_lists_what_transfer_status_json_lists_a_page_at_a_time(
     assert [len(page["holds"]) for page in pages] == [2, 2]
     assert [hold["transfer_id"] for hold in bound["holds"]] == [elsewhere.transfer_id] and bound["next"] is None
     listed = [hold for page in pages for hold in page["holds"]]
-    from httk.workflow.workflow_cli import transfer_command
+    from httk.workflow.workflow_cli import workspace_command
 
-    assert transfer_command(["status", "--json", far_name], CLIContext("httk", tmp_path)) == 0
-    printed = json.loads(capsys.readouterr().out)
-    for hold in [*listed, *printed["holds"]]:
+    assert workspace_command(["status", "--json", far_name], CLIContext("httk", tmp_path)) == 0
+    (printed,) = json.loads(capsys.readouterr().out)
+    for hold in [*listed, *printed["transfers"]]:
         hold.pop("age_seconds")
-    assert listed == printed["holds"]
+    # The page names the workflows each hold needs; the status summary does not resolve them.
+    assert [{key: value for key, value in hold.items() if key != "workflows"} for hold in listed] == printed[
+        "transfers"
+    ]
     assert sorted(hold["transfer_id"] for hold in listed) == sorted(
         [elsewhere.transfer_id, *(h.transfer_id for h in holds)]
     )
@@ -709,9 +712,9 @@ def ssh(tmp_path: Path, remote: Remote) -> tuple[Path, Workspace, str, Workspace
 
 
 def durable(cwd: Path, *argv: str) -> int:
-    """``job transfer`` with durable publication (``run`` passes ``--no-durable``), so a landing gets its barrier."""
+    """``job move`` with durable publication (``run`` passes ``--no-durable``), so a landing gets its barrier."""
 
-    return command(["job", "transfer", *argv], CLIContext("httk", cwd))
+    return command(["job", "move", *argv], CLIContext("httk", cwd))
 
 
 def landing_scratches(workspace: Workspace) -> list[Path]:
@@ -815,7 +818,7 @@ def test_a_pull_into_the_default_workspace_creates_nothing_when_src_cannot_serve
     capsys: pytest.CaptureFixture[str],
     which: str,
 ) -> None:
-    # `job pull REMOTE:WS` outside any workspace, with no default registered: the default workspace (DST) would be
+    # `pull REMOTE:WS` outside any workspace, with no default registered: the default workspace (DST) would be
     # created and registered, but SRC's transfer session is opened and checked first (plan §7.12, correction C3).
     project, _near, _near_name, far, far_name = ssh
     if which == "older":
@@ -1149,7 +1152,7 @@ def test_a_refused_release_leaves_the_jobs_here_and_names_the_remedy(
     for outcome in transfers:
         assert f"the jobs are in {near.root}, but the hold was not released" in outcome["message"]
         assert "a scripted release refusal" in outcome["message"]
-        assert f"httk job transfer --release {outcome['transfer_id']} cluster:{far_name}" in outcome["message"]
+        assert f"httk job move --release {outcome['transfer_id']} cluster:{far_name}" in outcome["message"]
     assert_in(near, plan)
     assert len(outgoing(far)) == 2
     monkeypatch.delenv("HTTK_TEST_REFUSE_RELEASE")

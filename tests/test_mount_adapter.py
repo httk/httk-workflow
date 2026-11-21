@@ -509,7 +509,7 @@ def test_a_job_reaches_a_mount_workspace_and_runs_there(
     register_ws(context, destination.root, "station", remote="cluster")
 
     requests = recorded_requests(monkeypatch)
-    assert command(["job", "transfer", "--job", job_id, "home", "cluster:station"], context) == 0
+    assert command(["job", "move", "--job", job_id, "home", "cluster:station"], context) == 0
 
     assert _kernel.locate(home, job_id, placement_hint=None, exhaustive=True) is None
     assert v3.find(destination, job_id).state == "ready"

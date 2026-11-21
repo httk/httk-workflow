@@ -58,7 +58,7 @@ store:
   refused with the `httk workflow install` command that fixes it;
 - a manager does not claim a job until its workflow and every workflow it
   calls, transitively, are installed (and built, when compiled), so a
-  missing callee shows up in `httk job why` and `httk workflow precheck`
+  missing callee shows up in `httk job why` and `httk job precheck`
   before any step runs.
 
 An ad hoc workflow (a runner file given to `job new --from-runner`) has no

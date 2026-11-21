@@ -35,8 +35,8 @@ def _setup(tmp_path: Path, context: CLIContext, name: str) -> tuple[Workspace, _
     return workspace, installed, register_ws(context, workspace.root, name)
 
 
-def _request(name: str, job_id: str, action: str, *options: str) -> list[str]:
-    return ["job", "request", action, "--workspace", name, job_id, "--reason", "x", *options]
+def _request(name: str, job_id: str, verb: str, *words: str) -> list[str]:
+    return ["job", verb, "--workspace", name, job_id, "--reason", "x", *words]
 
 
 def test_run_leaf_capability_claims_a_gated_job(tmp_path: Path, context: CLIContext, capsys) -> None:
@@ -75,14 +75,12 @@ def test_override_step_is_refused_client_side_against_recorded_runner_steps(
     failed = _failed_with_steps(workspace, installed)
     capsys.readouterr()
 
-    assert command(_request(name, failed.job_id, "override_step", "--override-step", "bogus"), context) == 2
+    assert command(_request(name, failed.job_id, "set", "step=bogus"), context) == 2
     assert "does not implement the step 'bogus'" in capsys.readouterr().err
     assert not list(workspace.control.glob("requests/*.json"))
 
     # A runner may have been reinstalled with a recovery step: --force downgrades the refusal.
-    assert (
-        command(_request(name, failed.job_id, "override_step", "--override-step", "recover", "--force"), context) == 0
-    )
+    assert command(_request(name, failed.job_id, "set", "step=recover", "--force"), context) == 0
     error = capsys.readouterr().err
     assert "--force was given" in error and "the runner will refuse it at the next attempt" in error
 
@@ -95,7 +93,7 @@ def test_override_step_is_allowed_with_a_note_before_runner_steps_are_recorded(
 
     assert command(_request(name, ref.job_id, "pause"), context) == 0
     capsys.readouterr()
-    assert command(_request(name, ref.job_id, "override_step", "--override-step", "whatever"), context) == 0
+    assert command(_request(name, ref.job_id, "set", "step=whatever"), context) == 0
     assert "could not be pre-validated" in capsys.readouterr().err
 
 

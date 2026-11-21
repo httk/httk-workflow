@@ -349,17 +349,18 @@ class BudgetStatus:
         ]
 
     def set_budget_option(self) -> str:
-        """Name the ``job request set_budget`` options that raise the exhausted attempt budgets.
+        """Name the ``job set`` budget pairs that raise the exhausted attempt budgets.
 
-        :return: ``--max-attempts-per-activation N``, ``--max-total-attempts N``, or both when both are exhausted.
+        :return: ``budget.max_attempts_per_activation=N``, ``budget.max_total_attempts=N``, or both when both are
+            exhausted.
         """
 
         per_activation, total = self.maximum_attempts_per_activation, self.maximum_total_attempts
         options = []
         if per_activation is not None and self.attempts_this_activation + 1 > per_activation:
-            options.append("--max-attempts-per-activation N")
+            options.append("budget.max_attempts_per_activation=N")
         if total is not None and self.total_attempts + 1 > total:
-            options.append("--max-total-attempts N")
+            options.append("budget.max_total_attempts=N")
         return " ".join(options)
 
     def as_mapping(self) -> dict[str, object]:
@@ -632,7 +633,7 @@ def _pin_check(workspace: Workspace, state: str, doc: StateDoc | None, report: _
     assert doc is not None
     if state in {"failed", "paused"} or (state == "succeeded" and doc.unlocked is not None):
         report.hint(
-            "rerun it on the installed tree ('httk job request restart --reason TEXT JOB', or 'continue --tree' when "
+            "rerun it on the installed tree ('httk job restart JOB', or 'httk job resume --tree JOB' when "
             "it failed waiting on failed children), or reinstall the tree it ran with"
         )
     elif state == "succeeded":
@@ -710,8 +711,8 @@ def _budget_checks(job: JobDefinition, doc: StateDoc | None, report: _Diagnosing
         report.check("budget", not exhausted, text)
     if exhausted:
         report.hint(
-            "the next claim of this job will fail it with budget_exhausted; raise the limit with 'httk job request "
-            f"set_budget --workspace WORKSPACE {budgets.set_budget_option()} --operator NAME --reason WHY JOB'"
+            "the next claim of this job will fail it with budget_exhausted; raise the limit with "
+            f"'httk job set -w WORKSPACE JOB {budgets.set_budget_option()}'"
         )
 
 
@@ -771,7 +772,7 @@ def _continue_checks(
     if exhausted and doc.join is None and budgets.activation_budget_exhausted:
         report.hint("with --keep-budget, the rerun step's advance would exceed maximum_activations again")
     if verb == "continue":
-        report.hint("resume it with 'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB'")
+        report.hint("resume it with 'httk job resume -w WORKSPACE JOB'")
 
 
 def _history_check(ref: JobRef, report: _Diagnosing) -> None:
@@ -1001,13 +1002,12 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
             report.check(
                 "wait",
                 None,
-                f"the wait on {count} children can be reopened with `httk job request continue`, which restores the "
+                f"the wait on {count} children can be reopened with `httk job resume`, which restores the "
                 f"declared retry allowance (maximum_activations {after} after it)",
             )
             report.hint(
-                "'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB' reopens the wait; "
-                "with --keep-budget, raise maximum_activations first with 'httk job request set_budget --workspace "
-                "WORKSPACE --max-activations N --operator NAME --reason WHY JOB'"
+                "'httk job resume -w WORKSPACE JOB' reopens the wait; with --keep-budget, raise "
+                "maximum_activations first with 'httk job set -w WORKSPACE JOB budget.max_activations=N'"
             )
         elif join is not None:
             # A kept join makes continue reopen the wait, which no budget binds; restart is budget-bound.
@@ -1017,7 +1017,7 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
             report.check(
                 "wait",
                 None,
-                f"the wait on {count} children can be reopened with `httk job request continue`; "
+                f"the wait on {count} children can be reopened with `httk job resume`; "
                 f"`restart` reruns step {step or '-'}, which reuses the children that still exist, failed or "
                 "cancelled ones included: revive such a child first, or delete it to have the step create a "
                 "fresh one",
@@ -1061,7 +1061,7 @@ def explain_job(workspace: Workspace, ref: JobRef) -> Diagnosis:
                 None,
                 f"left {away['state']} at priority {away['priority']}, transfer {away['transfer_id']}",
             )
-            report.hint(f"bring the finished job home with 'httk job pull {locator}' (it replaces this copy)")
+            report.hint(f"bring the finished job home with 'httk pull {locator}' (it replaces this copy)")
             # A member is recovered with the root of its away tree.
             root = _moving.away_root(workspace, ref).job_key
             report.hint(f"if the job was lost there, run 'httk job recover {root}' and push it again")
@@ -1098,7 +1098,7 @@ def explain_held(workspace: Workspace, selector: str) -> list[Diagnosis]:
             report = _Diagnosing()
             report.check("held bundle", False, f"{hold.path} (transfer {hold.transfer_id}, to {destination})")
             report.check("returns to", None, f"{member.state} at priority {member.priority}")
-            report.hint("finish the transfer with `httk job transfer --resume`")
+            report.hint("finish the transfer with `httk job move --resume`")
             report.hint(
                 f"after checking that {destination} does not have it, take it back with `httk job adopt {hold.path}`"
             )

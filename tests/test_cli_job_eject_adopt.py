@@ -196,7 +196,7 @@ def test_adopt_json_reports_already_adopted(tmp_path: Path, capsys: pytest.Captu
     copy = tmp_path / "copy"
     copy.mkdir()
     shutil.copytree(bundle, copy / bundle.name, symlinks=True)
-    # A transfer's incoming copy, as a remote `job transfer` pushes it before adopting.
+    # A transfer's incoming copy, as a remote `job move` pushes it before adopting.
     incoming = target.control / "transfers" / "incoming" / f"{bundle.name}.x"
     shutil.copytree(bundle, incoming, symlinks=True)
     assert command(["job", "adopt", "--workspace", target_name, str(bundle)], context(tmp_path)) == 0

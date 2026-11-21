@@ -40,7 +40,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _request_budget(arguments: argparse.Namespace) -> dict[str, int | None] | None:
-    """Return the ``set_budget`` limits given on a ``job request`` command line (``None`` is unlimited), if any."""
+    """Return the ``set_budget`` limits a request namespace carries (``None`` is unlimited), if any."""
 
     # The options default to argparse.SUPPRESS, so an absent attribute is "not given" and None is "unlimited".
     return {name: getattr(arguments, name) for name in BUDGET_LIMITS if hasattr(arguments, name)} or None
@@ -481,7 +481,7 @@ def _local_root(arguments: argparse.Namespace, context: CLIContext, *, action: s
         raise ValueError(
             f"workspace {binding.name!r} is bound to the remote {binding.remote!r}, so it cannot "
             f"{action} locally; run this on {binding.remote}, or reach it with "
-            f"`httk job push`/`httk job pull` and `httk workspace status {binding.name}`"
+            f"`httk push`/`httk pull` and `httk workspace status {binding.name}`"
         )
     return root
 

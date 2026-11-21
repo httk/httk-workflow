@@ -5,18 +5,20 @@ import errno
 import json
 import os
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from contextlib import redirect_stdout
 from copy import copy
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from httk.core.cli import CLIContext
 from httk.core.identity import configured_operator_identity
 
-from .. import _death, _kernel, _store
+from .. import _death, _kernel, _moving, _store
+from .._bundles import BundleError
 from .._setting_catalog import annotate_setting, installed_workflow_settings, report_written_settings, use_color
 from ..adapters import (
     REMOTE_STATUS_COMMAND,
@@ -66,6 +68,7 @@ from ..seals import (
     require_cli_modifiable,
     seal_workspace,
     unseal_workspace,
+    verify_tree,
     verify_workspace_seal,
 )
 from ..workspace import (
@@ -92,7 +95,7 @@ from ._common import (
     add_workspace_argument,
     confirm,
 )
-from ._seal import _default_trusted_keys
+from ._seal import _default_trusted_keys, render_seal_entries
 
 # ---------------------------------------------------------------------------
 # workspace
@@ -307,8 +310,28 @@ def _print_owner_rows(rows: list[dict[str, object]]) -> None:
         print(line)
 
 
+def _held_transfers(workspace: Workspace) -> tuple[list[_moving.Hold], list[str]]:
+    """Return the readable held transfers of *workspace* and the transfer ids of those that cannot be read.
+
+    A status summary, which a remote's compatibility probe reads too, must not fail on one damaged hold.
+    """
+
+    holds: list[_moving.Hold] = []
+    unreadable: list[str] = []
+    for name in _moving.held_names(workspace):
+        try:
+            hold = _moving.held_one(workspace, name)
+        except (BundleError, OSError):
+            unreadable.append(name)
+            continue
+        if hold is not None:
+            holds.append(hold)
+    return holds, unreadable
+
+
 def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Summarize one workspace: its job counts by state, its seal, and its owners with their liveness.
+    """Summarize one workspace: its job counts by state, its seal, its owners with their liveness, and its held
+    transfers.
 
     The owner probe is the tombstone-writing one: an owner proven dead gets its
     ``dead.json`` here, and the next manager tick or ``workspace gc`` recovers it.
@@ -328,6 +351,8 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
     counts = {state: count for state in JOB_STATES if (count := count_jobs(workspace, state))}
     owners = _owner_rows(workspace, kind=None, tombstoning=True)
     sealed = is_workspace_sealed(workspace)
+    now = time.time()
+    holds, unreadable = _held_transfers(workspace)
     if arguments.json:
         print(
             json.dumps(
@@ -342,6 +367,8 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
                     "sealed": sealed,
                     "counts": counts,
                     "owners": owners,
+                    "transfers": [hold.as_mapping(now) for hold in holds],
+                    "transfers_unreadable": unreadable,
                 },
                 indent=2,
             )
@@ -353,6 +380,14 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
     print(f"sealed: {'yes' if sealed else 'no'}")
     print(f"owners: {len(owners)}")
     _print_owner_rows(owners)
+    damaged = f" ({len(unreadable)} unreadable: {', '.join(unreadable)})" if unreadable else ""
+    print(f"held transfers: {len(holds)}{damaged}")
+    for hold in holds:
+        age = cast(int, hold.as_mapping(now)["age_seconds"]) // 3600
+        destination = hold.destination_locator or "-"
+        if hold.destination_workspace_id is not None:
+            destination = f"{destination} ({hold.destination_workspace_id})"
+        print(f"{hold.transfer_id}\t{hold.members[0]}\t{len(hold.members)} job(s)\tto {destination}\t{age}h old")
     return 0
 
 
@@ -488,12 +523,20 @@ def handle_workspace_seal(arguments: argparse.Namespace, context: CLIContext) ->
 
 
 def handle_workspace_verify(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Verify a workspace seal and report every job that drifted since the snapshot; drift exits one."""
+    """Verify a workspace seal and report every job that drifted since the snapshot; drift exits one.
+
+    With ``--deep`` every job seal the workspace seal records is verified too, and the verdicts and exit status are
+    those of ``job verify``; ``--content`` implies it and also checks each file against its sealed uncompressed
+    digest.
+    """
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_verify)
     workspace = Workspace(_local_root(arguments, context, action="verify its seal"))
     trusted = _default_trusted_keys(workspace.root, list(arguments.trusted_key))
+    if arguments.deep or arguments.content:
+        report = verify_tree(workspace.root, trusted_keys=trusted, content=arguments.content)
+        return render_seal_entries(report.entries, as_json=arguments.json)
     verification = verify_workspace_seal(workspace, trusted_keys=trusted)
     if arguments.json:
         print(json.dumps(verification.as_entry("workspace", workspace.workspace_id), indent=2, sort_keys=True))
@@ -1063,10 +1106,11 @@ def build_workspace_parser(
     status = _leaf(
         group,
         "status",
-        summary="summarize job counts, the seal, and the owners",
+        summary="summarize job counts, the seal, the owners and held transfers",
         description=(
-            "Summarize one workspace: its job counts by state, whether it is sealed, and its owners with their "
-            "liveness; an owner proven dead gets its tombstone, for the next manager tick or workspace gc to recover"
+            "Summarize one workspace: its job counts by state, whether it is sealed, its owners with their "
+            "liveness, and its held transfers (transfer id, root job, members, destination and age); an owner "
+            "proven dead gets its tombstone, for the next manager tick or workspace gc to recover"
         ),
         handler=handle_workspace_status,
     )
@@ -1331,6 +1375,19 @@ def build_workspace_parser(
     )
     _add_workspace_targets(verify, help_text="the workspace to verify")
     verify.add_argument("--json", action="store_true", help="print the verdict as one JSON document")
+    verify.add_argument(
+        "--deep",
+        action="store_true",
+        help="also verify every recorded job seal (the report and exit status of job verify)",
+    )
+    verify.add_argument(
+        "--content",
+        action="store_true",
+        help=(
+            "with --deep (which it implies), also decompress job files and check them against their sealed "
+            "uncompressed.sha256 manifests"
+        ),
+    )
     verify.add_argument(
         "--trusted-key",
         action="append",

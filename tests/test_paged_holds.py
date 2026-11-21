@@ -2,7 +2,7 @@
 
 A local SRC (push; local → local) and a remote SRC over its transfer session (pull) hold their selection page by
 page and drive each page before holding the next. With nothing changing concurrently, every page size holds what
-holding everything first (``job transfer --hold``) holds; the deliberate differences, the bounds of a page, the state
+holding everything first (``job move --hold``) holds; the deliberate differences, the bounds of a page, the state
 each pair keeps across pages, the stops, the workflow attempts and the counts are tested here.
 """
 
@@ -184,6 +184,12 @@ def _visibility_deadline(request: pytest.FixtureRequest, monkeypatch: pytest.Mon
     return deadline
 
 
+def _listed(workspace: Workspace) -> list[dict[str, object]]:
+    """The holds of *workspace* as ``workspace status --json`` lists them (``transfers``)."""
+
+    return [hold.as_mapping() for hold in _moving.held(workspace, workflows=True)]
+
+
 def patched_paged(tmp_path: Path, remote: Remote) -> None:
     """Make the stand-in cluster's ``httk`` (the ``local`` adapter's too) :data:`PATCHED_PAGED`."""
 
@@ -362,7 +368,7 @@ SCENARIOS = {
 def everything_first(
     tmp_path: Path, workspace: Workspace, argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> tuple[list[list[str]], list[str], list[str]]:
-    """What ``job transfer --hold`` holds of a copy of *workspace*: each hold's members, the errors, the notes."""
+    """What ``job move --hold`` holds of a copy of *workspace*: each hold's members, the errors, the notes."""
 
     copy = tmp_path / f"copy-{uuid.uuid4().hex[:8]}"
     shutil.copytree(workspace.root, copy, symlinks=True)
@@ -928,7 +934,7 @@ def test_holds_page_closes_a_page_at_its_byte_budget(
     patched_paged(tmp_path, remote)
     far, far_name = registered(tmp_path, "far")
     holds, _ = hold_jobs(far, 4)
-    size = max(len(_frames.json_payload({"item": hold})) for hold in transfer_cli.status_document(far)["holds"])
+    size = max(len(_frames.json_payload({"item": hold})) for hold in _listed(far))
     monkeypatch.setenv("HTTK_TEST_ANSWER_BUDGET", str(size + size // 2))  # one hold fits, two reach it
     listed: list[list[str]] = []
     with opened(bundle) as session:
@@ -960,14 +966,14 @@ def test_an_oversized_hold_is_answered_by_id_and_fails_alone_with_the_manual_rem
     (transfer_id,) = outgoing(far)
     assert f".httk-workspace/transfers/outgoing/{transfer_id}/ of cluster:{far_name}" in message
     assert "`httk job adopt BUNDLE` in the destination workspace" in message
-    assert f"`httk job transfer --release {transfer_id} cluster:{far_name}`" in message
+    assert f"`httk job move --release {transfer_id} cluster:{far_name}`" in message
     assert "transfer_session" not in message and find(near, mapping["id"]) is None
     # The remedy, by hand: copy the hold, adopt the copy, release the hold.
     copy = project.parent / "carried" / transfer_id
     shutil.copytree(far.control / "transfers" / "outgoing" / transfer_id, copy, symlinks=True)
     context = CLIContext("httk", project)
     assert command(["job", "adopt", "--workspace", near_name, str(copy)], context) == 0
-    assert command(["job", "transfer", "--release", transfer_id, f"cluster:{far_name}"], context) == 0
+    assert command(["job", "move", "--release", transfer_id, f"cluster:{far_name}"], context) == 0
     capsys.readouterr()
     assert find(near, mapping["id"]) is not None and outgoing(far) == []
 
@@ -985,12 +991,12 @@ def test_an_oversized_hold_without_a_destination_id_keeps_away_copies_by_the_nam
     mapping, _, _ = single(far)
     assert run(tmp_path, "--hold", *ids(mapping), str(far.root), str(near.root)) == 0  # no --destination-id
     (transfer_id,) = outgoing(far)
-    assert _moving.Hold.from_mapping(transfer_cli.status_document(far)["holds"][0]).destination_workspace_id is None
+    assert _moving.Hold.from_mapping(_listed(far)[0]).destination_workspace_id is None
     capsys.readouterr()
     assert run(project, "--json", "-q", "--keep", "--resume", f"cluster:{far_name}") == 1
     (outcome,) = json.loads(capsys.readouterr().out)["transfers"]
     message = outcome["message"]
-    release = f"httk job transfer --release {transfer_id} --keep --destination-id ID cluster:{far_name}"
+    release = f"httk job move --release {transfer_id} --keep --destination-id ID cluster:{far_name}"
     assert f"`{release}`, ID being the workspace_id that `httk workspace status --json DST` reports" in message
     # The remedy, by hand, as the message names it.
     copy = tmp_path / "carried" / transfer_id
@@ -1030,7 +1036,7 @@ def test_hold_page_closes_a_page_at_its_answer_budget(
     patched_paged(tmp_path, remote)
     far, far_name = registered(tmp_path, "far")
     hold_jobs(far, 1)  # one hold to measure what a hold of the same shape takes in an answer
-    size = max(len(_frames.json_payload({"item": hold})) for hold in transfer_cli.status_document(far)["holds"])
+    size = max(len(_frames.json_payload({"item": hold})) for hold in _listed(far))
     plan = jobs(far, 3)
     budget = size + size // 2  # one hold fits an answer, two do not
     monkeypatch.setenv("HTTK_TEST_ANSWER_BUDGET", str(budget))
@@ -1264,7 +1270,7 @@ def test_hold_page_answers_carry_their_diagnostics_within_the_budget(
     patched_paged(tmp_path, remote)
     far, far_name = registered(tmp_path, "far")
     hold_jobs(far, 1)
-    size = max(len(_frames.json_payload({"item": hold})) for hold in transfer_cli.status_document(far)["holds"])
+    size = max(len(_frames.json_payload({"item": hold})) for hold in _listed(far))
     plan = jobs(far, 3)
     budget = (64 << 10) + 4 * size  # the diagnostics' tail and every hold
     monkeypatch.setenv("HTTK_TEST_ANSWER_BUDGET", str(budget))
@@ -1781,7 +1787,7 @@ def test_holds_page_measures_its_whole_answer_with_its_diagnostics(
     patched_paged(tmp_path, remote)
     far, far_name = registered(tmp_path, "far")
     holds, _ = hold_jobs(far, 4)
-    size = max(len(_frames.json_payload({"item": hold})) for hold in transfer_cli.status_document(far)["holds"])
+    size = max(len(_frames.json_payload({"item": hold})) for hold in _listed(far))
     budget = (64 << 10) + 2 * size + size // 2  # the diagnostics' tail and two holds
     monkeypatch.setenv("HTTK_TEST_ANSWER_BUDGET", str(budget))
     monkeypatch.setenv("HTTK_TEST_LISTING_NOISE", str(100_000))
@@ -1813,7 +1819,7 @@ def test_a_first_hold_in_the_gap_of_the_cursor_is_answered_by_id_and_nothing_is_
     for mapping, _, _ in plan:
         assert run(tmp_path, "--hold", *ids(mapping), str(far.root), str(near.root)) == 0
     capsys.readouterr()
-    size = max(len(_frames.json_payload(hold)) for hold in transfer_cli.status_document(far)["holds"])
+    size = max(len(_frames.json_payload(hold)) for hold in _listed(far))
     empty = len(_frames.json_payload({"ok": True, "next": "", "stderr": "", "holds": []}))
     monkeypatch.setenv("HTTK_TEST_ANSWER_BUDGET", str(empty + size + 10))  # the cursor takes 32 + 2 more
     requests = recorded_requests(monkeypatch)
@@ -1836,7 +1842,7 @@ def test_a_carried_hold_beside_a_note_is_answered_and_the_note_follows(
     patched_paged(tmp_path, remote)
     far, far_name = registered(tmp_path, "far")
     hold_jobs(far, 1)  # one hold to measure what a hold of the same shape takes in an answer
-    size = max(len(_frames.json_payload(hold)) for hold in transfer_cli.status_document(far)["holds"])
+    size = max(len(_frames.json_payload(hold)) for hold in _listed(far))
     parent = job_mapping(WORKFLOW, {"start": "succeed"}, tag="parent", placement="camp/p")
     child = job_mapping(WORKFLOW, {"start": "succeed"}, tag="c1", placement="aaa/c1")
     child["parent"] = parent_link(parent, far.workspace_id)
@@ -1964,7 +1970,7 @@ def test_a_stop_names_the_held_jobs_not_yet_reported(
     from test_deliver import hold_jobs
 
     measured, _ = hold_jobs(far, 1)
-    size = max(len(_frames.json_payload({"item": hold})) for hold in transfer_cli.status_document(far)["holds"])
+    size = max(len(_frames.json_payload({"item": hold})) for hold in _listed(far))
     transfer_cli.release_holds(far, [measured[0].transfer_id], keep=False, destination_id=None)
     plan = jobs(far, 2)
     monkeypatch.setenv("HTTK_TEST_ANSWER_BUDGET", str(size + size // 2))
@@ -1992,7 +1998,7 @@ def test_a_second_select_while_holds_are_carried_is_refused(
     patched_paged(tmp_path, remote)
     far, far_name = registered(tmp_path, "far")
     hold_jobs(far, 1)
-    size = max(len(_frames.json_payload({"item": hold})) for hold in transfer_cli.status_document(far)["holds"])
+    size = max(len(_frames.json_payload({"item": hold})) for hold in _listed(far))
     plan = jobs(far, 2)
     monkeypatch.setenv("HTTK_TEST_ANSWER_BUDGET", str(size + size // 2))
     with opened(bundle) as session:

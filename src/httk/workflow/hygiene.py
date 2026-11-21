@@ -250,7 +250,7 @@ def remove_remote(
 ) -> dict[str, object]:
     """Remove one remote bundle, refusing while a held transfer still needs it.
 
-    A held transfer bound for a workspace on the remote is finished (``httk job transfer --resume``) or
+    A held transfer bound for a workspace on the remote is finished (``httk job move --resume``) or
     released through that remote's adapter; removing it would leave the hold with no way there. Only the
     holds of the workspaces registered locally on this machine are checked: a hold in an unregistered
     workspace, or on another remote, does not stop the removal.
@@ -266,7 +266,7 @@ def remove_remote(
     if pending:
         raise ValueError(
             f"remote {name!r} still has held transfers from workspace {', '.join(pending)}; "
-            "finish them with `httk job transfer --resume` (see `httk transfer status`) first "
+            "finish them with `httk job move --resume` (see `httk workspace status`) first "
             "(only the workspaces registered on this machine are checked)"
         )
     shutil.rmtree(bundle)
@@ -415,7 +415,7 @@ STALE_TRANSFER_DAYS = 7
 def _check_transfers(workspace_root: Path, days: float = STALE_TRANSFER_DAYS) -> Finding:
     """Held transfers and incoming copies older than *days*; this check reports and never acts.
 
-    A stale hold is driven on with ``httk job transfer --resume``, or, once its destination is checked not to have
+    A stale hold is driven on with ``httk job move --resume``, or, once its destination is checked not to have
     the jobs, taken back with ``httk job adopt`` of its path. An ``incoming`` entry is an interrupted copy an earlier
     version pushed (none is written since transfer sessions are required; its jobs are still held on the source, so
     it is safe to remove by hand, and a refused one is discarded by adoption).
@@ -439,7 +439,7 @@ def _check_transfers(workspace_root: Path, days: float = STALE_TRANSFER_DAYS) ->
         "transfers",
         "warning",
         f"{len(stale)} held transfer(s) and {len(leftovers)} incoming cop(ies) older than {days:g} days: drive holds "
-        "on with `httk job transfer --resume`, or after checking the destination, `httk job adopt` the held path "
+        "on with `httk job move --resume`, or after checking the destination, `httk job adopt` the held path "
         "back; remove incoming copies by hand",
         details=details,
     )

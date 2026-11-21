@@ -1,4 +1,4 @@
-"""Measure ``httk job transfer`` at scale: the T5 acceptance benchmark (plan WORKFLOW_TRANSFER_SESSION §7.10, item 6).
+"""Measure ``httk job move`` at scale: the T5 acceptance benchmark (plan WORKFLOW_TRANSFER_SESSION §7.10, item 6).
 
 This is a script, not a test. One invocation measures one transfer of N single-job bundles (about ten small files
 each) between two durable workspaces with the default policy (``io.sync=auto``, ``io.workers=8``) and the
@@ -1036,7 +1036,7 @@ def run(arguments: argparse.Namespace) -> int:
 
     source_locator, destination_locator = _locators(p["direction"], names)
     state = "paused" if p["tree"] else "succeeded"
-    command = [sys.executable, str(SCRIPT), "_probe", "client", "job", "transfer", "--json", "--state", state]
+    command = [sys.executable, str(SCRIPT), "_probe", "client", "job", "move", "--json", "--state", state]
     command += ["--tree"] if p["tree"] else []
     command += [source_locator, destination_locator]
     stdout_path = logs / "stdout.json"
@@ -1183,7 +1183,7 @@ def _traced_subset(
     source_locator, destination_locator = _locators(p["direction"], names)
     state = "paused" if p["tree"] else "succeeded"
     command = ["strace", "-f", "-c", "-qq", "-o", str(output), "-e", f"trace={','.join(SYSCALLS)}"]
-    command += [sys.executable, str(SCRIPT), "_probe", "client", "job", "transfer", "--json", "-q", "--state", state]
+    command += [sys.executable, str(SCRIPT), "_probe", "client", "job", "move", "--json", "-q", "--state", state]
     command += ["--tree"] if p["tree"] else []
     command += [source_locator, destination_locator]
     completed = subprocess.run(command, cwd=project, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False)

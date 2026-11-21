@@ -49,7 +49,7 @@ from ..adapters import (
     resolve_remote,
     run_adapter,
 )
-from ..errors import DuplicateTagError, FormatError, WorkflowError
+from ..errors import DuplicateTagError, FormatError, ResolutionMiss, WorkflowError
 from ..introspection import (
     JOB_HISTORY_FORMAT,
     JOB_LIST_FORMAT,
@@ -117,11 +117,13 @@ from ._common import (
     _json_value,
     _leaf,
     _load_inputs,
+    _local_root,
     _modifiable,
     _pairs,
     _remote_workspace_read,
     _request_budget,
     _resolve_binding,
+    _step_name,
     add_durability_arguments,
     confirm,
     remote_workspace_output,
@@ -592,7 +594,7 @@ def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int
 
 
 # ---------------------------------------------------------------------------
-# job request and the remote signing protocol
+# job cancel/pause/resume/restart/set and the remote signing protocol
 # ---------------------------------------------------------------------------
 
 
@@ -779,7 +781,7 @@ def _continue_notes(workspace: Workspace, refs: Sequence[JobRef], action: str, *
             elif child.state == "cancelled" or (child.state == "failed" and not tree):
                 print(
                     f"note: {key} is still {child.state}; the reopened wait of {ref.job_key} fails again unless it "
-                    "is resumed first (continue --tree also resumes failed descendants)",
+                    "is resumed first (job resume --tree also resumes failed descendants)",
                     file=sys.stderr,
                 )
 
@@ -839,7 +841,7 @@ def _restart_refusal(workspace: Workspace, refs: Sequence[JobRef]) -> list[str]:
     if lines:
         lines.append(
             "resume failed descendants and the parent with "
-            f"'httk job request continue --tree --reason TEXT {' '.join(parents)}'; "
+            f"'httk job resume --tree {' '.join(parents)}'; "
             "delete a child with 'httk job delete' to have the step create a fresh one; "
             "or pass --force to restart anyway"
         )
@@ -876,7 +878,7 @@ def _stops_tree(outcome: RequestOutcome, rest: Sequence[JobRef]) -> bool:
     for ref in rest:
         print(
             f"not posted: {ref.job_key} (an earlier request in the tree was {status}; "
-            "resolve it and rerun continue --tree)",
+            "resolve it and rerun job resume --tree)",
             file=sys.stderr,
         )
     return True
@@ -1116,24 +1118,102 @@ def _selected_jobs(
     return refs
 
 
-def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Post operator requests against jobs, and optionally wait for pauses to land."""
+#: The request arguments a verb that does not take them leaves at these values.
+_REQUEST_DEFAULTS: dict[str, object] = {
+    "state": [],
+    "step": None,
+    "placement": None,
+    "operator": None,
+    "request_id": None,
+    "priority": None,
+    "override_step": None,
+    "workflow": None,
+    "destination": None,
+    "force": False,
+    "keep_budget": False,
+    "tree": False,
+    "wait": False,
+    "timeout": None,
+    "adapter_timeout": None,
+}
 
+
+def handle_job_control(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Post the request ``job cancel``, ``pause``, ``resume`` or ``restart`` names against jobs.
+
+    A pause optionally waits for the pauses to land.
+    """
+
+    if arguments.reason is None:
+        arguments.reason = f"httk job {arguments.verb}"
+    return _post_requests(arguments, context)
+
+
+def handle_job_set(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Post the requests the KEY=VALUE pairs of ``job set`` name, one per kind in the order of :data:`_SET_KEYS`.
+
+    The budget keys form one ``set_budget`` request. The requests are posted one after another, each selecting
+    its jobs anew, and the command stops at the first that does not exit zero.
+    """
+
+    pairs: dict[str, object] = {}
+    for word in arguments.words:
+        if isinstance(word, tuple):
+            key, value = word
+            if key in pairs:
+                raise ValueError(f"{key} is given twice")
+            pairs[key] = value
+    if not pairs:
+        raise ValueError(f"job set needs at least one KEY=VALUE pair: {', '.join(_SET_KEYS)}")
+    if (arguments.force or arguments.keep_budget) and "step" not in pairs:
+        raise ValueError("--force and --keep-budget apply to step=")
+    if arguments.reason is None:
+        arguments.reason = "httk job set"
+    base = {name: value for name, value in vars(arguments).items() if name != "words"}
+    base["job_id"] = [word for word in arguments.words if isinstance(word, str)]
+    requests: list[dict[str, object]] = []
+    if "workflow" in pairs:
+        requests.append({"action": "set_workflow", "workflow": pairs["workflow"]})
+    budget = {
+        f"maximum_{key.removeprefix('budget.max_')}": value for key, value in pairs.items() if key.startswith("budget.")
+    }
+    if budget:
+        requests.append({"action": "set_budget", **budget})
+    if "priority" in pairs:
+        requests.append({"action": "set_priority", "priority": pairs["priority"]})
+    if "step" in pairs:
+        requests.append({"action": "override_step", "override_step": pairs["step"]})
+    if arguments.request_id is not None and len(requests) > 1:
+        raise ValueError("--request-id names one daemon command: set one kind of key per call")
+    for request in requests:
+        revival = request["action"] == "override_step"
+        options = {"force": base["force"] and revival, "keep_budget": base["keep_budget"] and revival}
+        status = _post_requests(argparse.Namespace(**{**base, **options, **request}), context)
+        if status:
+            return status
+    return 0
+
+
+def _post_requests(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Post operator requests against jobs, and optionally wait for pauses to land.
+
+    *arguments* name the request ``action`` and the selection; a request argument they leave out takes its
+    :data:`_REQUEST_DEFAULTS` value.
+    """
+
+    arguments = argparse.Namespace(**{**_REQUEST_DEFAULTS, **vars(arguments)})
     _check_wait(arguments.wait, arguments.timeout, (arguments.action,))
     tree = bool(getattr(arguments, "tree", False))
     if tree and arguments.action != "continue":
         raise ValueError("--tree applies only to the continue action")
-    if arguments.action == "override_step" and arguments.override_step is None:
-        # Checked before selecting, so `override_step --step STEP` is not reported as an empty --step selection.
-        raise ValueError("--override-step is required by, and only valid with, the override_step action")
     if not (arguments.job_id or arguments.state or arguments.step):
-        raise ValueError("select jobs: give JOB_ID selectors, --state STATE, --step STEP, or a combination")
+        raise ValueError("select jobs: give JOB selectors, --state STATE, --step STEP, or a combination")
     if arguments.placement is not None and (
         not (arguments.state or (arguments.step and not arguments.job_id))
         or not normalize_placement(arguments.placement).parts
     ):
         raise ValueError(
-            "--placement narrows --state, or --step without JOB_ID, to a placement prefix; "
+            "--placement narrows --state, or --step without JOB, to a placement prefix; "
             "it needs one of them and a nonempty prefix"
         )
     identity = _resolve_request_identity(arguments.operator)
@@ -1155,8 +1235,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
             status, stdout = request_remote_jobs(binding, context, arguments, identity)
             sys.stdout.write(stdout)
             return status
-        if getattr(arguments, "request_id", None) is not None:
-            raise ValueError("--request-id is supported only for one mount-daemon job request")
+        _refuse_request_id(arguments)
         ensure_identity_key(identity)
         for selector in arguments.job_id:
             if selector_uses_remote_path(context.cwd, selector):
@@ -1171,8 +1250,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
                 f"remote request envelope build failed (exit {status}); see the relayed remote error above"
             )
         return status
-    if getattr(arguments, "request_id", None) is not None:
-        raise ValueError("--request-id is supported only for one mount-daemon job request")
+    _refuse_request_id(arguments)
     ensure_identity_key(identity)
     workspace = _modifiable(arguments, context, action="post requests in it")
     index = _selection_index(workspace, arguments)
@@ -1188,8 +1266,6 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
             return 1
     if tree:
         refs = _with_failed_descendants(workspace, refs)
-    # As `job unlock`: the parents of a debugged job take its results, so they are unlocked too (marker only).
-    ancestors = _ancestors(workspace, refs, index) if arguments.action == "unlock" else []
     _continue_notes(workspace, refs, arguments.action, tree=tree)
     if tree:
         return _continue_tree(
@@ -1227,8 +1303,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
             report=_print_outcomes,
             action=arguments.action,
         )
-        unlocked = not ancestors or not _unlock_ancestors(workspace, owner(), ancestors, arguments.reason, index)
-    if any(outcome.status in {"refused", "uncertain"} for outcome in outcomes) or not unlocked:
+    if any(outcome.status in {"refused", "uncertain"} for outcome in outcomes):
         return 1
     if not arguments.wait:
         return 0
@@ -1238,6 +1313,13 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         if outcome.status == "queued" or (outcome.status == "applied" and outcome.state != "paused")
     ]
     return 0 if not pending else _wait_for_pauses(workspace, pending, timeout=arguments.timeout)
+
+
+def _refuse_request_id(arguments: argparse.Namespace) -> None:
+    """Refuse ``--request-id`` where no workspace daemon carries the command (local and ssh workspaces)."""
+
+    if getattr(arguments, "request_id", None) is not None:
+        raise ValueError("--request-id is supported only for one mount-daemon job request")
 
 
 def _prepared(ref: JobRef, document: Mapping[str, object]) -> tuple[JobRef, Mapping[str, object]]:
@@ -1367,7 +1449,7 @@ def _validate_remote_envelopes(
         keep_budget=bool(getattr(arguments, "keep_budget", False)),
         workflow=getattr(arguments, "workflow", None),
     )
-    # Every optional member the format knows (eject's tree and unlock's no_copy too, which `job request` never
+    # Every optional member the format knows (eject's tree and unlock's no_copy too, which a forwarded request never
     # asks for): the far side may add none the request did not carry.
     expected: dict[str, object] = {**dict.fromkeys(_requests._OPTIONS), **options}
     workflow = options.get("workflow")
@@ -1408,7 +1490,7 @@ def _validate_remote_envelopes(
         matched.update(hits)
     for index, key in enumerate(keys):
         if index not in matched:
-            print(f"note: continue --tree also resumes {key}", file=sys.stderr)
+            print(f"note: job resume --tree also resumes {key}", file=sys.stderr)
     return envelopes
 
 
@@ -1795,6 +1877,12 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
+        if _daemon_binding(binding, context):
+            # A workspace daemon runs no commands but its signed job requests.
+            if not confirm(f"Delete {len(arguments.jobs)} job(s)?", yes=arguments.yes):
+                return 1
+            return _forward(arguments, context, "delete")
+        _refuse_request_id(arguments)
         _validate_remote_job_ids(arguments.jobs, "delete")
         if not arguments.yes and not sys.stdin.isatty():
             print("job delete without a terminal requires --yes", file=sys.stderr)
@@ -1811,6 +1899,7 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
         sys.stdout.write(stdout)
         sys.stderr.write(stderr)
         return status
+    _refuse_request_id(arguments)
     workspace = _modifiable(arguments, context, action="delete jobs in it")
     index = _location_index(workspace)
     refs = _resolve_selectors(workspace, context.cwd, arguments.jobs, index)
@@ -1864,18 +1953,26 @@ def handle_job_recover(arguments: argparse.Namespace, context: CLIContext) -> in
 def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str, done: str) -> int:
     """Post one *action* request per selected job and apply it now where the job is unowned.
 
-    A request for a job an owner holds is ``queued`` for that owner (exit status 0, as ``job request``);
+    A request for a job an owner holds is ``queued`` for that owner (exit status 0, as ``job pause`` and the other
+    request verbs);
     one that did not take effect otherwise is ``refused`` or ``uncertain`` (exit status 1). An ``unlock`` copies
     the runner unless ``--no-copy``, and is followed by marker-only ``unlock`` requests for the ancestors.
     """
 
+    if _resolve_binding(arguments, context)[1] is None:
+        if action == "unseal" and not confirm(f"Unseal {len(arguments.jobs)} job(s)?", yes=arguments.yes):
+            return 1
+        if getattr(arguments, "no_copy", False):
+            raise ValueError("--no-copy is not carried to a remote workspace")
+        return _forward(arguments, context, action)
+    _refuse_request_id(arguments)
     workspace = _modifiable(arguments, context, action=f"{action} jobs in it")
     index = _location_index(workspace)
     refs = _resolve_selectors(workspace, context.cwd, arguments.jobs, index)
     if action == "unseal" and not confirm(f"Unseal {len(refs)} job(s)?", yes=arguments.yes):
         return 1
     copy = not getattr(arguments, "no_copy", False)
-    reason = getattr(arguments, "reason", None) or f"job {action}"
+    reason = getattr(arguments, "reason", None) or f"httk job {action}"
     # Found before any request moves a job; a string stands in for an ancestor that cannot be followed.
     ancestors = _ancestors(workspace, refs, index) if action == "unlock" else []
     failed: list[bool] = []
@@ -1892,6 +1989,36 @@ def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str
         )
         failed.append(_unlock_ancestors(workspace, owner, ancestors, reason, index))
     return 1 if any(failed) else 0
+
+
+def _forward(arguments: argparse.Namespace, context: CLIContext, action: str, **options: object) -> int:
+    """Send the jobs of a dedicated verb on a remote workspace as *action* requests, as the request verbs do.
+
+    :param arguments: The verb's arguments: ``workspace`` and ``jobs``, and ``operator``, ``reason``,
+        ``adapter_timeout``, ``request_id`` and ``no_durable`` when it takes them.
+    :param context: The invocation context.
+    :param action: The request action.
+    :param **options: Request arguments of the action, such as an eject's ``destination``.
+    :return: The exit status of :func:`_post_requests`.
+    """
+
+    names = ("workspace", "operator", "adapter_timeout", "request_id")
+    request = {name: getattr(arguments, name, None) for name in names}
+    request["no_durable"] = getattr(arguments, "no_durable", False)
+    reason = getattr(arguments, "reason", None) or f"httk job {action}"
+    return _post_requests(
+        argparse.Namespace(**request, **options, action=action, job_id=list(arguments.jobs), reason=reason), context
+    )
+
+
+def _daemon_binding(binding: WorkspaceBinding, context: CLIContext) -> bool:
+    """Whether a remote workspace binding is reached through a workspace daemon (a ``mount-daemon`` remote)."""
+
+    try:
+        target = resolve_remote(binding.remote, project=context.cwd)
+    except ResolutionMiss:
+        return False  # the path the binding then takes resolves it again and reports the miss
+    return read_metadata(target.bundle).get("kind") == "mount-daemon"
 
 
 def _print_now(outcome: RequestOutcome, done: str, mark: str = "") -> bool:
@@ -2008,7 +2135,7 @@ def handle_job_unlock(arguments: argparse.Namespace, context: CLIContext) -> int
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
-        if read_metadata(resolve_remote(binding.remote, project=context.cwd).bundle).get("kind") == "mount-daemon":
+        if _daemon_binding(binding, context):
             raise ValueError("the workspace daemon does not carry unlock; run it on the daemon host")
     return _request_now(arguments, context, "unlock", "unlocked")
 
@@ -2017,9 +2144,28 @@ def handle_job_eject(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Move a quiescent job (with ``--tree``, its terminal or paused descendants too) out into a bundle.
 
     With ``--hold`` the bundle goes to the workspace's own ``transfers/outgoing/<transfer id>`` (the first leg of
-    ``job transfer``), and DEST, when given, is only recorded as the transfer's destination.
+    ``job move``), and DEST, when given, is only recorded as the transfer's destination. A job of a remote
+    workspace is ejected by an eject request there (:func:`_forward`): through a workspace daemon into DEST under
+    its exchange outbox (the outbox itself without DEST), over ssh into DEST on the far side.
     """
 
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        local = (arguments.hold, arguments.destination_id, arguments.tree, arguments.wait, arguments.json)
+        if any(local) or arguments.timeout is not None:
+            raise ValueError(
+                "--tree, --wait, --timeout and --json apply to a local workspace (a workspace daemon ejects the "
+                "whole tree)"
+            )
+        target = resolve_remote(binding.remote, project=context.cwd)  # an unknown remote is reported as such
+        if arguments.destination is None and read_metadata(target.bundle).get("kind") != "mount-daemon":
+            raise ValueError("job eject needs DEST, the directory on the remote to put the bundle in")
+        arguments.jobs = [arguments.job]
+        return _forward(arguments, context, "eject", destination=arguments.destination)
+    _refuse_request_id(arguments)
+    if arguments.timeout is None:
+        arguments.timeout = 600.0
     if arguments.timeout < 0:
         raise ValueError("--timeout must not be negative")
     if arguments.hold and arguments.operator is not None:
@@ -2604,6 +2750,46 @@ def handle_job_why(arguments: argparse.Namespace, context: CLIContext) -> int:
     return _for_each_job(arguments, context, "why", report, held)
 
 
+def handle_job_verify(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Verify the seals of job payloads against their files and signatures, as ``workspace verify`` does a workspace.
+
+    A JOB that is a directory holding ``job.json`` is verified where it is, inside a workspace or free-standing;
+    any other JOB is a selector in the workspace. Prints one verdict line per job and ``ok``, ``UNTRUSTED`` or
+    ``FAILED``; exits 0 when every seal is valid and trusted, 3 when one is valid but signed by an unknown key, 1
+    otherwise (an unsealed job is invalid).
+    """
+
+    from ..seals import verify_tree
+    from ._seal import _default_trusted_keys, render_seal_entries
+
+    workspace: Workspace | None = None
+    payloads: list[Path] = []
+    for selector in arguments.jobs:
+        directory = (context.cwd / Path(selector).expanduser()).resolve()
+        if (directory / "job.json").is_file():
+            payloads.append(directory)
+            continue
+        if workspace is None:
+            workspace = Workspace(_local_root(arguments, context, action="verify job seals"))
+        payloads.extend(ref.path for ref in resolve_job_selectors(workspace, context.cwd, [selector]))
+    entries = [
+        entry
+        for payload in payloads
+        for entry in verify_tree(
+            payload, trusted_keys=_default_trusted_keys(payload, list(arguments.trusted_key)), content=arguments.content
+        ).entries
+    ]
+    return render_seal_entries(entries, as_json=arguments.json)
+
+
+def handle_job_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Report pending-job environment and runner readiness without mutation (:func:`._precheck.handle_precheck`)."""
+
+    from ._precheck import handle_precheck  # imported on use: a job verb started remotely stays lean
+
+    return handle_precheck(arguments, context)
+
+
 def handle_job_debug(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Drive one job to a terminal state in the foreground, as a CLI owner."""
 
@@ -2638,6 +2824,24 @@ def _add_job_selector(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_operator_option(parser: argparse.ArgumentParser) -> None:
+    """Add ``--operator``, the identity that signs a command's requests."""
+
+    parser.add_argument(
+        "--operator", metavar="IDENTITY", help='configured identity short name or a literal "Name <email>"'
+    )
+
+
+def _add_request_id_option(parser: argparse.ArgumentParser) -> None:
+    """Add ``--request-id``, the daemon command id of one mount-daemon job request, for exact retries."""
+
+    parser.add_argument(
+        "--request-id",
+        metavar="ID",
+        help="32 lowercase hexadecimal daemon command ID for one mount-daemon job request and exact retries",
+    )
+
+
 def _budget_limit(text: str) -> int | None:
     """Parse one ``set_budget`` limit: an integer of at least 1, or ``unlimited`` (``None``)."""
 
@@ -2648,8 +2852,45 @@ def _budget_limit(text: str) -> int | None:
     return int(text)
 
 
+#: The ``job set`` keys, in the order one call posts their requests, with the request action each belongs to.
+_SET_KEYS = {
+    "workflow": "set_workflow",
+    "budget.max_attempts_per_activation": "set_budget",
+    "budget.max_total_attempts": "set_budget",
+    "budget.max_activations": "set_budget",
+    "priority": "set_priority",
+    "step": "override_step",
+}
+
+
+def _set_word(word: str) -> str | tuple[str, object]:
+    """Parse one ``job set`` positional: a ``KEY=VALUE`` pair with its value, or a job selector.
+
+    A word is a pair when it holds ``=`` and its key is a ``job set`` key (or starts with ``budget.``); a word with
+    ``=`` and ``/`` but another key is a path selector; any other word with ``=`` is an unknown key.
+    """
+
+    key, separator, text = word.partition("=")
+    if not separator or (key not in _SET_KEYS and not key.startswith("budget.") and "/" in word):
+        return word  # a selector; a path may hold = in a placement
+    if key not in _SET_KEYS:
+        raise argparse.ArgumentTypeError(f"unknown key {key!r} in {word!r} (valid keys: {', '.join(_SET_KEYS)})")
+    if key == "priority":
+        try:
+            return key, int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"priority must be an integer, not {text!r}") from None
+    if key.startswith("budget."):
+        return key, _budget_limit(text)
+    if key == "step":
+        return key, _step_name(text)
+    if not text:
+        raise argparse.ArgumentTypeError(f"{key} needs a value")
+    return key, text
+
+
 def _add_request_options(parser: argparse.ArgumentParser) -> None:
-    """Add the per-action request options shared by ``request`` and ``request-envelopes``."""
+    """Add the per-action request options of the hidden ``request-envelopes`` leaf."""
 
     parser.add_argument("--priority", type=int, metavar="PRIORITY", help="the new priority, for set_priority")
     parser.add_argument("--override-step", metavar="STEP", help="the step to resume at, for override_step")
@@ -2858,8 +3099,8 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
 class _IntermixedParser(argparse.ArgumentParser):
     """A leaf whose optional positionals may follow its options.
 
-    argparse matches an empty ``*`` positional together with the positional before it, so ``job request ACTION
-    --reason TEXT JOB`` would leave ``JOB`` unrecognized; intermixed parsing reads the options first.
+    argparse stops filling a ``*`` positional at the first option, so ``job pause JOB --reason TEXT JOB2`` would
+    leave ``JOB2`` unrecognized; intermixed parsing reads the options first.
     """
 
     _inner = False
@@ -2883,23 +3124,21 @@ class _IntermixedParser(argparse.ArgumentParser):
             self._inner = False
 
 
-def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
-    request = _leaf(
-        group,
-        "request",
-        summary="post an operator request",
-        description=(
-            "Post one operator request per job and apply it at once when no owner holds the job; "
-            "otherwise the owner applies it at its next boundary"
-        ),
-        handler=handle_job_request,
-    )
-    request.add_argument("action", metavar="ACTION", choices=_requests.ACTIONS, help=", ".join(_requests.ACTIONS))
-    _add_workspace_option(request, help_text="the workspace holding the job")
-    request.add_argument(
-        "job_id", metavar="JOB_ID", nargs="*", help="job UUIDs, unique prefixes, or paths inside the workspace"
-    )
-    request.add_argument(
+def _add_selection(leaf: argparse.ArgumentParser, *, words: str | None = None) -> None:
+    """Add the job selection, operator, reason, request and durability options every request verb shares.
+
+    :param leaf: The verb's parser.
+    :param words: The positional's metavar and help when it takes more than job selectors (``job set``).
+    """
+
+    _add_workspace_option(leaf, help_text="the workspace holding the jobs")
+    if words is None:
+        leaf.add_argument(
+            "job_id", metavar="JOB", nargs="*", help="job UUIDs, unique prefixes, or paths inside the workspace"
+        )
+    else:
+        leaf.add_argument("words", metavar="JOB|KEY=VALUE", nargs="*", type=_set_word, help=words)
+    leaf.add_argument(
         "-s",
         "--state",
         action="append",
@@ -2909,41 +3148,108 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
         help="also select every job in this state (repeatable; local workspaces)",
     )
     _add_step_option(
-        request,
+        leaf,
         help_text=(
-            "only jobs at this step (repeatable; local workspaces): narrows JOB_ID and --state, "
+            "only jobs at this step (repeatable; local workspaces): narrows JOB and --state, "
             "and alone selects from every unowned state"
         ),
     )
-    request.add_argument(
+    leaf.add_argument(
         "--placement",
         metavar="PREFIX",
-        help="with --state, or --step without JOB_ID: only jobs under this placement prefix",
+        help="with --state, or --step without JOB: only jobs under this placement prefix",
     )
     # add_parser takes no per-leaf parser class, so the leaf is given its intermixed class here.
-    request.__class__ = _IntermixedParser
-    request.add_argument(
-        "--operator", metavar="IDENTITY", help='configured identity short name or a literal "Name <email>"'
+    leaf.__class__ = _IntermixedParser
+    _add_operator_option(leaf)
+    leaf.add_argument(
+        "--reason", metavar="TEXT", help="why, recorded with each request (default: the command, e.g. httk job pause)"
     )
-    request.add_argument("--reason", metavar="TEXT", required=True, help="why, recorded with the request")
-    _add_request_options(request)
-    request.add_argument(
-        "--tree",
+    _add_request_id_option(leaf)
+    _add_adapter_timeout(leaf)
+    add_durability_arguments(leaf)
+
+
+def _add_revival_options(leaf: argparse.ArgumentParser, *, what: str) -> None:
+    """Add ``--force`` and ``--keep-budget``, the options of a revival (*what* names where they apply)."""
+
+    leaf.add_argument(
+        "--force",
         action="store_true",
         help=(
-            "with continue: also resume the failed descendants of a job that failed waiting on its children, "
-            "deepest first (not over a mount-daemon binding)"
+            f"{what}accept reviving a job a decided join already consumed, publish a step outside the runner's "
+            "recorded steps, and restart a job whose failed or cancelled children its rerun spawning step would reuse"
         ),
     )
-    request.add_argument("--wait", action="store_true", help="wait until every pause request reaches paused")
-    request.add_argument("--timeout", type=float, metavar="SECONDS", help="stop waiting after SECONDS (needs --wait)")
-    request.add_argument(
-        "--request-id",
-        metavar="ID",
-        help="32 lowercase hexadecimal daemon command ID for one mount-daemon job request and exact retries",
+    leaf.add_argument(
+        "--keep-budget",
+        action="store_true",
+        help=(
+            f"{what}revive without restoring the declared retry allowance; by default a revival raises the job's "
+            "retry limits so it again has its declared allowance"
+        ),
     )
-    _add_adapter_timeout(request)
-    add_durability_arguments(request)
+
+
+#: The request verbs: the request action each posts, and its summary.
+_CONTROL_VERBS = {
+    "cancel": ("cancel", "cancel jobs; a running attempt is stopped first"),
+    "pause": ("pause", "pause jobs, at their next boundary when running"),
+    "resume": ("continue", "resume failed or paused jobs"),
+    "restart": ("restart", "rerun failed or paused jobs from a new attempt, dropping a retained join"),
+}
+
+
+def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    for verb, (action, summary) in _CONTROL_VERBS.items():
+        leaf = _leaf(
+            group,
+            verb,
+            summary=summary,
+            description=(
+                f"{summary[0].upper()}{summary[1:]}: one {action} request per job, applied at once when no owner "
+                "holds the job, otherwise by the owner at its next boundary"
+            ),
+            handler=handle_job_control,
+        )
+        leaf.set_defaults(action=action, verb=verb)
+        _add_selection(leaf)
+        if verb == "pause":
+            leaf.add_argument("--wait", action="store_true", help="wait until every job reaches paused")
+            leaf.add_argument(
+                "--timeout", type=float, metavar="SECONDS", help="stop waiting after SECONDS (needs --wait)"
+            )
+        if verb == "resume":
+            leaf.add_argument(
+                "--tree",
+                action="store_true",
+                help=(
+                    "also resume the failed descendants of a job that failed waiting on its children, deepest first "
+                    "(not over a mount-daemon binding)"
+                ),
+            )
+        if verb in ("resume", "restart"):
+            _add_revival_options(leaf, what="")
+
+    setting = _leaf(
+        group,
+        "set",
+        summary="change the workflow, retry budget, priority or step of jobs",
+        description=(
+            "Change jobs through requests: workflow=WORKFLOW (an installed id, short name or NAME@REF), "
+            "budget.max_attempts_per_activation=N|unlimited, budget.max_total_attempts=N|unlimited, "
+            "budget.max_activations=N|unlimited, priority=N (0 is highest) and step=STEP (resume at a new "
+            "activation of STEP). One call posts one request per kind, in that order (the budget keys together "
+            "form one request), stopping at the first that fails"
+        ),
+        handler=handle_job_set,
+    )
+    setting.set_defaults(verb="set")
+    _add_selection(
+        setting,
+        words="job selectors and KEY=VALUE pairs (a word holding = is a pair): " + ", ".join(_SET_KEYS),
+    )
+    _add_revival_options(setting, what="with step=: ")
 
     envelopes = _leaf(
         group,
@@ -3058,6 +3364,8 @@ def build_job_parser(
         handler=handle_job_delete,
     )
     _add_job_selector(delete)
+    _add_operator_option(delete)
+    _add_request_id_option(delete)
     delete.add_argument("--yes", action="store_true", help="skip the confirmation")
     delete.add_argument("--confirmed", action="store_true", help=argparse.SUPPRESS)
     _add_adapter_timeout(delete)
@@ -3067,7 +3375,7 @@ def build_job_parser(
         "recover",
         summary="return away copies to the states they left, to push them again",
         description=(
-            "Return away jobs, the copies job push (or job transfer --keep) kept here, to the states and priorities "
+            "Return away jobs, the copies push (or job move --keep) kept here, to the states and priorities "
             "they left, each root with its away tree, so that a job lost where it went can be pushed again; "
             "nothing checks whether it still runs there, and a later return of it from there is refused"
         ),
@@ -3099,6 +3407,9 @@ def build_job_parser(
             handler=handler,
         )
         _add_job_selector(leaf)
+        _add_operator_option(leaf)
+        _add_request_id_option(leaf)
+        _add_adapter_timeout(leaf)
         if name == "unseal":
             leaf.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     unlock = _leaf(
@@ -3113,8 +3424,14 @@ def build_job_parser(
         handler=handle_job_unlock,
     )
     _add_job_selector(unlock)
-    unlock.add_argument("--no-copy", action="store_true", help="unlock without copying the runner into the job")
-    unlock.add_argument("--reason", metavar="TEXT", default="job unlock", help="the reason recorded with the marker")
+    _add_operator_option(unlock)
+    unlock.add_argument(
+        "--no-copy", action="store_true", help="unlock without copying the runner into the job (local workspaces)"
+    )
+    unlock.add_argument(
+        "--reason", metavar="TEXT", help="the reason recorded with the marker (default: httk job unlock)"
+    )
+    _add_adapter_timeout(unlock)
 
     eject = _leaf(
         group,
@@ -3128,22 +3445,26 @@ def build_job_parser(
     )
     _add_workspace_option(eject, help_text="the workspace holding the job")
     eject.add_argument("job", metavar="JOB", help="job UUID, job key, unique prefix, or a path inside the workspace")
-    eject.add_argument("destination", metavar="DEST", nargs="?", help="the directory to put the bundle in")
-    eject.add_argument("--hold", action="store_true", help=argparse.SUPPRESS)
     eject.add_argument(
-        "--operator", metavar="IDENTITY", help='configured identity short name or a literal "Name <email>"'
+        "destination",
+        metavar="DEST",
+        nargs="?",
+        help=(
+            "the directory to put the bundle in; for a workspace daemon, a directory under its exchange outbox "
+            "(default: the outbox)"
+        ),
     )
+    eject.add_argument("--hold", action="store_true", help=argparse.SUPPRESS)
+    _add_operator_option(eject)
+    _add_request_id_option(eject)
     eject.add_argument("--destination-id", metavar="WORKSPACE_ID", help=argparse.SUPPRESS)
     eject.add_argument("--tree", action="store_true", help="eject the job's descendants too")
     eject.add_argument("--wait", action="store_true", help="pause a running job and wait until it can move")
     eject.add_argument(
-        "--timeout",
-        type=float,
-        metavar="SECONDS",
-        default=600.0,
-        help="give up waiting after this long (default: 600)",
+        "--timeout", type=float, metavar="SECONDS", help="give up waiting after this long (default: 600)"
     )
     eject.add_argument("--json", action="store_true", help="print the result as one JSON document")
+    _add_adapter_timeout(eject)
     add_durability_arguments(eject)
     adopt = _leaf(
         group,
@@ -3205,6 +3526,54 @@ def build_job_parser(
     _add_job_selector(why)
     why.add_argument("--json", action="store_true", help="print the diagnoses as one JSON array")
     _add_adapter_timeout(why)
+
+    verify = _leaf(
+        group,
+        "verify",
+        summary="verify job seals against their payloads",
+        description=(
+            "Verify each job's seal: its signatures and the digests of the files it seals; exits 0 when every seal "
+            "is valid and trusted, 3 when one is signed by an unknown key, 1 when one is invalid or missing"
+        ),
+        handler=handle_job_verify,
+    )
+    _add_workspace_option(verify, help_text="the workspace holding the jobs")
+    verify.add_argument(
+        "jobs",
+        metavar="JOB",
+        nargs="+",
+        help="job UUID, job key, unique prefix, path inside the workspace, or a job payload directory anywhere",
+    )
+    verify.add_argument(
+        "--content",
+        action="store_true",
+        help="also decompress job files and check them against their sealed uncompressed.sha256 manifests",
+    )
+    verify.add_argument(
+        "--trusted-key",
+        action="append",
+        default=[],
+        metavar="KEY_OR_FINGERPRINT",
+        help=(
+            "trust this key as well: an ed25519:BASE64 value, a sha256: fingerprint, or the path of a *.pub file "
+            "(repeatable); the project's pinned keys and all local identities are always trusted"
+        ),
+    )
+    verify.add_argument("--json", action="store_true", help="print the verdicts as one JSON document")
+
+    precheck = _leaf(
+        group,
+        "precheck",
+        summary="check pending jobs before they start",
+        description=(
+            "Report declared-environment resolution, workflow installation and build, and claimability "
+            "of pending jobs without changing the workspace"
+        ),
+        handler=handle_job_precheck,
+    )
+    _add_workspace_option(precheck, help_text="the workspace to precheck")
+    precheck.add_argument("--placement", metavar="PLACEMENT", help="check only jobs at or below this placement")
+    precheck.add_argument("--json", action="store_true", help="print the complete report as JSON")
 
     debug = _leaf(
         group,

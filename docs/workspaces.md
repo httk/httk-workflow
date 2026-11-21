@@ -100,7 +100,7 @@ setting override, counts.
 
 `io.workers` (an integer from 1 to 32, default 8) sets how many jobs a batch
 command works on at once in this workspace: holding, adopting and releasing
-jobs in `job push`, `job pull`, `job transfer` and `job adopt`, writing the
+jobs in `push`, `pull`, `job move` and `job adopt`, writing the
 small files (up to 1 MiB) of a tar stream pushed into the workspace, and
 reading the rows and per-state counts of `job list`. Each job's own steps
 still run in order, and the output is the same as with one worker. The
@@ -193,7 +193,7 @@ pool is back. A
 a synced tree from another filesystem, a directory or a single file, is
 synchronized file by file.
 
-The command that runs `job transfer`, `job push` or `job pull` prints the
+The command that runs `job move`, `push` or `pull` prints the
 strategy on standard error, unless `-q`: `syncing 120 landed file(s) to disk
 (syncfs: lustre, Linux 5.14)`, or `made 3 landed bundle(s) durable (fsync:
 zfs 2.2.2 is below 2.4.0)` when every file was synchronized as it was
@@ -219,7 +219,7 @@ everyone on it:
   segment then waiting at the destination (up to 8), each delivered once more
   in turn; every segment staged afterwards is synchronized file by file at
   once. If a segment's second delivery is refused too, its jobs stay held at
-  the source for `job transfer --resume` (they were sent, so they are never
+  the source for `job move --resume` (they were sent, so they are never
   taken back);
 - a push from a remote workspace (remote to remote) synchronizes each segment
   as it lands, and a failure is delivered once more from its relayed local
@@ -227,23 +227,23 @@ everyone on it:
   destination's transfer session, per segment (the segment is staged once
   more, before anything of it is adopted), and every later segment is then
   synchronized file by file at once. If that delivery is refused too, its jobs
-  stay held at the source (`job transfer --resume`);
+  stay held at the source (`job move --resume`);
 - a pull synchronizes each landing here only when it adopts it, as a push
   does; when that fails, the landing is discarded and fetched once more at once
   into a fresh landing, with every file synchronized as it is written here (as
   every later fetch of the session then is), and adopted before any later
   landing. If that fails too, the pull stops there (that segment and every
   later one stay held at the source, and no later page of the selection is
-  held); their jobs stay held at the source, and `job transfer --resume`
+  held); their jobs stay held at the source, and `job move --resume`
   delivers them again.
 
 A failure is not retried otherwise. A destination (or, for a pull, this
 workspace) on `io.sync fsync`, whose per-file errors are exact, fails at once:
 a push from a local workspace takes the jobs it held itself back into the
 source (`not_moved`; run the transfer again), and a push from a remote
-workspace keeps the jobs held at the source for `job transfer --resume`; a pull
+workspace keeps the jobs held at the source for `job move --resume`; a pull
 stops (that segment and every later one stay held at the source), resumable
-with `job transfer --resume`. A hold an earlier run left is never taken back, since an earlier
+with `job move --resume`. A hold an earlier run left is never taken back, since an earlier
 delivery may have adopted it (see {doc}`details/workflow_cli`). Job
 creation (`job new`, campaigns), `job submit` of copies and workflow
 installation have no retry either: the command fails, and for job creation
@@ -259,7 +259,7 @@ another filesystem whose `syncfs` failed are made once more with every file
 synchronized as it is written, and the chunk fails (jobs held at the source)
 only if that fails too. The retried delivery or fetch runs under the same
 `--adapter-timeout` as the first one; when it times out, its outcome is
-unknown and the jobs stay held at the source, and `job transfer --resume`
+unknown and the jobs stay held at the source, and `job move --resume`
 then reports those that arrived as `already_adopted` and releases them.
 
 ```console
@@ -311,8 +311,8 @@ httk workflow install --workspace default 'git+https://github.com/httk/workflows
 httk workspace workflows default
 ```
 
-`job new --install` installs a missing workflow on the fly. A job transfer
-(`job push`, `job pull`, `job transfer`) installs the workflows its jobs need
+`job new --install` installs a missing workflow on the fly. A transfer
+(`push`, `pull`, `job move`) installs the workflows its jobs need
 in the destination when it lacks them (see {doc}`details/remotes`).
 
 ## Environment preludes
@@ -388,12 +388,12 @@ httk workflow run --workspace kappa:runs --count 4
 ```
 
 `NAME:WORKSPACE` is a binding, not a path. Jobs are created locally, pushed
-with `httk job push kappa:runs` (every job waiting to start) after
+with `httk push kappa:runs` (every job waiting to start) after
 `httk workflow install --workspace kappa:runs …` installed their workflow
-there, and the finished ones brought back with `httk job pull kappa:runs`
+there, and the finished ones brought back with `httk pull kappa:runs`
 (every succeeded job); the end left out is the workspace the command runs in,
 else the default workspace. A push leaves an `away` copy of each job in its
-source until the pull brings the job back. `httk job transfer SRC DST` is the
+source until the pull brings the job back. `httk job move SRC DST` is the
 general form; see {doc}`running`. A transfer to or from a remote runs over one
 transfer session, so the remote's `httk` must be the same version as this
 machine's: otherwise the transfer stops before anything is held, with "the httk

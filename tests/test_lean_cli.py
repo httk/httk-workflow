@@ -87,12 +87,12 @@ def probe(*argvs: Sequence[str], stdin: bytes = b"") -> dict[str, Any]:
         pytest.param(
             [
                 ["job", "adopt", "--json", "--workspace", "WS", "--help"],
-                ["job", "transfer", "--hold", "--json", "--help"],
-                ["job", "transfer", "--release", "T", "WS", "--help"],
+                ["job", "move", "--hold", "--json", "--help"],
+                ["job", "move", "--release", "T", "WS", "--help"],
             ],
             id="job",
         ),
-        pytest.param([["transfer", "status", "--json", "WS", "--help"]], id="transfer"),
+        pytest.param([["push", "--json", "WS", "--help"], ["pull", "--json", "WS", "--help"]], id="push-pull"),
         pytest.param([["workspace", "status", "--json", "WS", "--help"]], id="workspace"),
         pytest.param(
             [["workflow", "install", "--json", "--workspace", "WS", "--help"]],
@@ -128,9 +128,9 @@ def test_adopting_a_bundle_stays_lean(tmp_path: Path) -> None:
     # The far side adopts a copy of the hold, then the near side releases that hold and holds the next job.
     result = probe(
         ["job", "adopt", "--json", "--no-durable", "--workspace", far_name, str(copy)],
-        ["job", "transfer", "--no-durable", "--release", holds[0].transfer_id, "--keep"]
+        ["job", "move", "--no-durable", "--release", holds[0].transfer_id, "--keep"]
         + ["--destination-id", far.workspace_id, near_name],
-        ["job", "transfer", "--no-durable", "--hold", "--json", "--destination-id", far.workspace_id]
+        ["job", "move", "--no-durable", "--hold", "--json", "--destination-id", far.workspace_id]
         + ["--job", str(waiting["id"]), "--", near_name, "cluster:far"],
     )
     assert result["codes"] == [0, 0, 0]
@@ -143,10 +143,7 @@ def test_adopting_a_bundle_stays_lean(tmp_path: Path) -> None:
 
 def test_inspecting_a_workspace_stays_lean(tmp_path: Path) -> None:
     _, name = registered(tmp_path, "far")
-    result = probe(
-        ["workspace", "status", "--json", name],
-        ["transfer", "status", "--json", name],
-    )
+    result = probe(["workspace", "status", "--json", name], ["workspace", "status", name])
     assert result["codes"] == [0, 0]
     assert result["loaded"] == []
 

@@ -445,7 +445,7 @@ def test_dependency_failure_names_the_failed_child(ws: Workspace, joins: _store.
 
 
 def _serve(ws: Workspace, ref: _kernel.JobRef, action: str, **extra: Any) -> str | None:
-    """Post *action* for *ref* and apply it immediately, as `httk job request` does; return the new state."""
+    """Post *action* for *ref* and apply it immediately, as the request verbs do; return the new state."""
 
     assert ref.placement is not None
     path = _requests.post(

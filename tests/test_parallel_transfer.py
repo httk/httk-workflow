@@ -261,7 +261,7 @@ def compare(
 
 
 def by_members(out: str) -> str:
-    """A ``job transfer --json`` document with its transfers in member order (they come in transfer id order)."""
+    """A ``job move --json`` document with its transfers in member order (they come in transfer id order)."""
 
     document = json.loads(out)
     document["transfers"].sort(key=lambda outcome: outcome["members"])
@@ -269,7 +269,7 @@ def by_members(out: str) -> str:
 
 
 def transfer(root: Path, *argv: str) -> int:
-    return command(["job", "transfer", "--no-durable", *argv], CLIContext("httk", root))
+    return command(["job", "move", "--no-durable", *argv], CLIContext("httk", root))
 
 
 def adopt(root: Path, workspace: str, *bundles: str) -> int:
@@ -1035,7 +1035,7 @@ def test_a_sigkilled_pooled_hold_is_recovered_exactly_once(tmp_path: Path) -> No
     plan = Plan()
     plan.singles(8)
     plan.populate(source)
-    argv = ["job", "transfer", "--no-durable", "--hold", "--state", "succeeded", "a", "b"]
+    argv = ["job", "move", "--no-durable", "--hold", "--state", "succeeded", "a", "b"]
     killed_while_parked(tmp_path, source, "hold", argv, "hold")
     assert_once_and_intact(plan, source.jobs, source.control / "transfers")
     assert_quiet(source)
@@ -1051,7 +1051,7 @@ def test_a_sigkilled_pooled_kept_release_is_recovered_exactly_once(tmp_path: Pat
     assert transfer(tmp_path, "--hold", "--state", "succeeded", "a", "b") == 0
     releases = [part for item in _moving.held(source) for part in ("--release", item.transfer_id)]
     destination = "22222222-2222-4222-8222-222222222222"
-    argv = ["job", "transfer", "--no-durable", *releases, "--keep", "--destination-id", destination, "a"]
+    argv = ["job", "move", "--no-durable", *releases, "--keep", "--destination-id", destination, "a"]
     killed_while_parked(tmp_path, source, "release-keep", argv, "release-keep")
     assert_once_and_intact(plan, source.jobs, source.control / "transfers")
     assert_quiet(source)

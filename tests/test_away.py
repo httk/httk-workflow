@@ -663,7 +663,7 @@ def test_an_interrupted_recover_is_finished_by_a_second_one(tmp_path: Path) -> N
 
 
 def kept_by_id(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> tuple[Workspace, Workspace, Plan, _moving.Hold]:
-    """A hold that records no destination id, adopted in B and released in A by ``job transfer --release --keep
+    """A hold that records no destination id, adopted in B and released in A by ``job move --release --keep
     --destination-id`` naming B (the push learns the id only from the adoption report)."""
 
     from httk.core.cli import CLIContext
@@ -679,7 +679,7 @@ def kept_by_id(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> tuple[Work
     assert hold.destination_workspace_id is None
     assert deliver(hold, target, tmp_path / "landing" / hold.transfer_id) is not None
     context = CLIContext("httk", tmp_path)
-    release = ["job", "transfer", "--no-durable", "--release", hold.transfer_id]
+    release = ["job", "move", "--no-durable", "--release", hold.transfer_id]
     # Refused: without --keep, and with an id that is no canonical UUID; nothing is released.
     assert command([*release, "--destination-id", target.workspace_id, str(source.root)], context) == 2
     assert "needs --keep" in capsys.readouterr().err

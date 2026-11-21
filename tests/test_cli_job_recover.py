@@ -29,7 +29,7 @@ def key(ws: Workspace, mapping: dict[str, object]) -> str:
 
 
 def kept_tree(tmp_path: Path) -> tuple[Workspace, str, Workspace, str, Plan]:
-    """A tree moved from A to B with ``job transfer --keep``: away copies in A."""
+    """A tree moved from A to B with ``job move --keep``: away copies in A."""
 
     source, source_name = registered(tmp_path, "a")
     target, target_name = registered(tmp_path, "b")
@@ -146,7 +146,7 @@ def test_why_and_show_explain_an_away_job(tmp_path: Path, capsys: pytest.Capture
     text = capsys.readouterr().out
     assert f"this job is away: a copy kept when it was pushed to {destination} on " in text
     assert "it does not run here" in text and "left succeeded at priority 420" in text
-    assert f"bring the finished job home with 'httk job pull {destination}' (it replaces this copy)" in text
+    assert f"bring the finished job home with 'httk pull {destination}' (it replaces this copy)" in text
     assert f"if the job was lost there, run 'httk job recover {root}' and push it again" in text
     assert command(["job", "show", "--workspace", source_name, "--json", root], context) == 0
     (report,) = json.loads(capsys.readouterr().out)

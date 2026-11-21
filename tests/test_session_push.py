@@ -1455,7 +1455,7 @@ def test_another_workspace_answering_a_later_segment_stops_the_push(
     assert all("not the expected workspace" in outcome["message"] for outcome in transfers[2:4])
     for outcome in transfers[4:]:
         assert "not delivered, since the transfer session stopped" in outcome["message"]
-        assert f"httk job transfer --resume {near.root} cluster:{far_name}" in outcome["message"]
+        assert f"httk job move --resume {near.root} cluster:{far_name}" in outcome["message"]
     assert len(adopts(requests)) == 2
     assert sorted(outgoing(near)) == sorted(outcome["transfer_id"] for outcome in transfers[2:])
 
@@ -1659,7 +1659,7 @@ def test_an_installation_claimed_for_an_aborted_upload_stops_the_push_before_any
     assert run(project, "--json", "-q", "--job", job_id, near_name, f"cluster:{far_name}") == 1
     (outcome,) = outcomes(capsys)["transfers"]
     assert outcome["status"] == "failed" and "failed before anything was adopted" in outcome["message"]
-    assert f"httk job transfer --resume {near.root} cluster:{far_name}" in outcome["message"]
+    assert f"httk job move --resume {near.root} cluster:{far_name}" in outcome["message"]
     assert set(shipped(outcome).values()) == {"failed"}
     assert all("aborted workflow upload as installed" in entry["reason"] for entry in outcome["workflows"])
     assert not {"adopt", "stage"} & set(ops(requests)) and find(far, job_id) is None and len(outgoing(near)) == 1

@@ -246,7 +246,7 @@ def receive_tar(
         is made and the barrier entered (directory fsyncs, its prime's ``syncfs``), ``extract`` with the stream bytes
         read, then ``sync`` again once the reading ends, however it ends (the writes still running, the directory
         times and fsyncs, the terminal and the commit, or a refused stream's discard).
-    :param quiet: Print no progress line of the sync barrier (``job transfer -q`` receiving a pull).
+    :param quiet: Print no progress line of the sync barrier (``job move -q`` receiving a pull).
     :param primed_devices: With *barrier*, the transfer's set of filesystems a barrier of it primed already (see
         :class:`~httk.workflow._fs.Barrier`): a transfer session's ``adopt`` and ``stage``, a pull's landings. The
         barrier then primes only the first landing on a filesystem; by default it always primes.

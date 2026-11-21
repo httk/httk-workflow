@@ -7,7 +7,6 @@ other machines depend on are stable.
 """
 
 import argparse
-import json
 from pathlib import Path
 
 import pytest
@@ -16,11 +15,11 @@ from httk.core.cli import CLIContext, main
 import v3_helpers as v3
 from httk.workflow import Workspace, adapters, workflow_cli
 from httk.workflow.projects import initialize_project
-from httk.workflow.workflow_cli import _campaign, command
+from httk.workflow.workflow_cli import _campaign, _transfer, command
 
 #: Every group of the canonical tree, with the subcommands its help must name.
 #: ``run`` is deliberately absent: it is a single verb rather than a group, so
-#: it is checked on its own below. ``transfer`` is a leaf of the ``job`` group.
+#: it is checked on its own below. ``move`` is a leaf of the ``job`` group; ``push`` and ``pull`` are top-level verbs.
 GROUPS: dict[str, tuple[str, ...]] = {
     "workspace": (
         "init",
@@ -46,7 +45,11 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "job": (
         "new",
         "submit",
-        "request",
+        "cancel",
+        "pause",
+        "resume",
+        "restart",
+        "set",
         "delete",
         "seal",
         "unseal",
@@ -57,10 +60,10 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "show",
         "log",
         "why",
+        "precheck",
         "debug",
-        "push",
-        "pull",
-        "transfer",
+        "verify",
+        "move",
     ),
     "manager": ("run",),
     "v1": ("collect",),
@@ -68,7 +71,6 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "remote": ("list", "add", "set", "unset", "check", "import-v1", "show", "remove"),
     "launcher": ("list", "add", "set", "unset", "show", "check", "remove"),
     "campaign": ("init", "show", "set", "unset", "submit", "collect", "start-managers"),
-    "seal": ("verify",),
 }
 
 #: Superseded group spellings that were removed: ``tasks`` was the transfer
@@ -113,7 +115,7 @@ def test_the_tree_itself_answers_help_and_names_every_group(tmp_path: Path, caps
     for group in GROUPS:
         assert group in printed
     # The single-verb ``run`` command is a leaf, but the tree still names it.
-    # ``transfer`` is a leaf of ``job`` and is checked in that group's help.
+    # ``move`` is a leaf of ``job`` and is checked in that group's help.
     assert "run" in printed
     # A bare invocation is somebody exploring, not somebody making a mistake.
     assert command([], _context(tmp_path)) == 0
@@ -161,10 +163,22 @@ def test_the_removed_spellings_are_absent_from_the_help(tmp_path: Path, capsys) 
     for group in REMOVED_GROUPS:
         assert group not in printed
 
-    # transfer is a verb, not a group: its help shows the SRC/DST usage rather
+    # move is a verb, not a group: its help shows the SRC/DST usage rather
     # than a subcommand listing.
-    assert command(["job", "transfer", "--help"], _context(tmp_path)) == 0
+    assert command(["job", "move", "--help"], _context(tmp_path)) == 0
     assert "SRC DST" in capsys.readouterr().out
+    # The verbs this tree reorganized are gone from their old places.
+    for removed in (
+        ["job", "request", "pause", "--reason", "r", "J"],
+        ["job", "transfer", "a", "b"],
+        ["job", "push", "b"],
+        ["job", "pull", "a"],
+        ["precheck"],
+        ["seal", "verify"],
+        ["transfer", "status"],
+    ):
+        assert command(removed, _context(tmp_path)) == 2
+        assert "invalid choice" in capsys.readouterr().err
 
 
 def test_postprocess_is_a_single_verb(tmp_path: Path) -> None:
@@ -255,7 +269,7 @@ def test_the_job_options_of_the_runner_store_and_per_job_modes_are_removed(tmp_p
         ["job", "eject", "--resume"],
         ["job", "confirm-launches-ended", "job"],
         ["runner", "publish", "file"],
-        ["precheck", "--runner-search-path", "d"],
+        ["job", "precheck", "--runner-search-path", "d"],
         ["build", "--store", "s"],
     ):
         with pytest.raises(SystemExit):
@@ -375,32 +389,32 @@ def test_campaign_start_managers_returns_nonzero_for_a_failed_partition(tmp_path
 
 
 def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
-    """`job transfer SRC DST` replaced the old send/fetch manager-submission subcommands."""
+    """`job move SRC DST` replaced the old send/fetch manager-submission subcommands."""
 
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    parsed = parser.parse_args(["job", "transfer", "--job", "J", "--tree", "a", "b"])
+    parsed = parser.parse_args(["job", "move", "--job", "J", "--tree", "a", "b"])
     assert parsed.handler is workflow_cli.handle_transfer
     assert (parsed.source, parsed.destination, parsed.jobs, parsed.tree) == ("a", "b", ["J"], True)
-    parsed = parser.parse_args(["job", "transfer", "--resume"])
+    parsed = parser.parse_args(["job", "move", "--resume"])
     assert (parsed.resume, parsed.source, parsed.destination) == (True, None, None)
-    parsed = parser.parse_args(["job", "transfer", "--release", "T", "--release", "U", "a"])
+    parsed = parser.parse_args(["job", "move", "--release", "T", "--release", "U", "a"])
     assert (parsed.release, parsed.source) == (["T", "U"], "a")
     with pytest.raises(SystemExit):
-        parser.parse_args(["job", "transfer", "send", "c", "J"])
+        parser.parse_args(["job", "move", "send", "c", "J"])
     parsed = parser.parse_args(["job", "eject", "--hold", "J"])
     assert (parsed.hold, parsed.destination) == (True, None)
     # Selection by state, as `job list --state`, optionally under a placement prefix; owned jobs cannot be held.
-    argv = ["job", "transfer", "--state", "succeeded", "--state", "failed", "--placement", "c1", "a", "b"]
+    argv = ["job", "move", "--state", "succeeded", "--state", "failed", "--placement", "c1", "a", "b"]
     parsed = parser.parse_args(argv)
     assert (parsed.state, parsed.placement, parsed.jobs) == (["succeeded", "failed"], "c1", [])
     with pytest.raises(SystemExit):
-        parser.parse_args(["job", "transfer", "--state", "owned", "a", "b"])
+        parser.parse_args(["job", "move", "--state", "owned", "a", "b"])
     # Selection by step repeats; a value that is no step name is refused while parsing.
-    parsed = parser.parse_args(["job", "transfer", "--step", "relax", "--step", "scf", "a", "b"])
+    parsed = parser.parse_args(["job", "move", "--step", "relax", "--step", "scf", "a", "b"])
     assert parsed.step == ["relax", "scf"]
     for invalid in ("a/b", ""):
         with pytest.raises(SystemExit):
-            parser.parse_args(["job", "transfer", "--step", invalid, "a", "b"])
+            parser.parse_args(["job", "move", "--step", invalid, "a", "b"])
 
 
 # ---------------------------------------------------------------------------
@@ -414,8 +428,14 @@ def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
     assert adapters.REMOTE_JOB_EJECT_COMMAND == ("httk", "job", "eject")
     assert adapters.REMOTE_JOB_ADOPT_COMMAND == ("httk", "job", "adopt")
-    assert adapters.REMOTE_JOB_TRANSFER_COMMAND == ("httk", "job", "transfer")
-    assert adapters.REMOTE_TRANSFER_STATUS_COMMAND == ("httk", "transfer", "status")
+    assert adapters.REMOTE_JOB_MOVE_COMMAND == ("httk", "job", "move")
+    assert not hasattr(adapters, "REMOTE_JOB_TRANSFER_COMMAND") and not hasattr(
+        adapters, "REMOTE_TRANSFER_STATUS_COMMAND"
+    )
+    # A remote release runs `job move --release` on the far side.
+    release = _transfer._release_argv(["T"], True, "D")
+    assert release == ["httk", "job", "move", "--release", "T", "--keep", "--destination-id", "D"]
+    assert parser.parse_args(release[1:]).release == ["T"]
     for name in ("handle_transfer_receive", "handle_transfer_offer", "handle_transfer_retire"):
         assert not hasattr(workflow_cli, name)
     with pytest.raises(SystemExit):
@@ -424,7 +444,7 @@ def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
         parser.parse_args(["internal", "receive", "--workspace", "/w", "--bundle", "/b"])
 
 
-@pytest.mark.parametrize("group", ["manager", "launcher", "remote", "config", "campaign", "seal", "v1", "transfer"])
+@pytest.mark.parametrize("group", ["manager", "launcher", "remote", "config", "campaign", "v1"])
 def test_promoted_groups_are_discoverable_at_root(group, tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert main([group, "--help"]) == 0
@@ -451,18 +471,23 @@ def test_frozen_remote_manager_command_still_parses(capsys):
     assert "--by-path" not in capsys.readouterr().out
 
 
-def test_operator_transfer_help_and_status(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(("verb", "keep"), [("push", True), ("pull", False)])
+def test_push_and_pull_are_top_level_verbs(verb, keep, tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    initialize_project(tmp_path, name="transfer-help")
-    _init_workspace(tmp_path)
-    # status is the only transfer subcommand; the legacy operator and protocol verbs are refused.
-    assert main(["transfer", "status", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["holds"] == []
-    for verb in ("retire", "reclaim", "receive", "offer"):
-        assert main(["transfer", verb, "--help"]) == 2
-        assert "invalid choice" in capsys.readouterr().err
-    assert main(["workflow", "transfer", "receive", "--workspace", "/w", "--bundle", "/b"]) == 2
-    capsys.readouterr()
+    assert main([verb, "--help"]) == 0
+    assert capsys.readouterr().out.startswith(f"usage: httk {verb} ")
+    parser = workflow_cli.build_parser("httk", _context(tmp_path))
+    parsed = parser.parse_args([verb, "cluster:ws", "--state", "failed"])
+    assert parsed.handler is workflow_cli.handle_transfer and parsed.transfer_verb == verb
+    assert (parsed.source, parsed.state, parsed.keep, parsed.tree) == ("cluster:ws", ["failed"], keep, True)
+    # The registered handler reaches the transfer: a missing other end is refused under the verb's own name.
+    dispatch = {"push": workflow_cli.push_command, "pull": workflow_cli.pull_command}[verb]
+    assert dispatch([], _context(tmp_path)) == 2
+    end = "DST" if verb == "push" else "SRC"
+    assert f"httk {verb}: name the other workspace: httk {verb} {end} (e.g. REMOTE:WS)" in capsys.readouterr().err
+    assert main(["workflow", verb, "--help"]) == 2
+    assert "invalid choice" in capsys.readouterr().err
+    assert main(["transfer", "status"]) == 2
 
 
 def test_renamed_options_and_short_flags_parse_to_their_destinations(tmp_path: Path, monkeypatch) -> None:

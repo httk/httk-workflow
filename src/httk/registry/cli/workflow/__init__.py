@@ -39,19 +39,19 @@ register_cli_command(
 )
 
 register_cli_command(
-    "seal",
-    "httk.workflow.workflow_cli:seal_command",
-    "verify sealed projects, workspaces and jobs",
+    "push",
+    "httk.workflow.workflow_cli:push_command",
+    "move the ready jobs of a workspace to another",
+)
+
+register_cli_command(
+    "pull",
+    "httk.workflow.workflow_cli:pull_command",
+    "move the succeeded jobs of another workspace here",
 )
 
 register_cli_command(
     "v1",
     "httk.workflow.workflow_cli:v1_command",
     "collect legacy workflow results",
-)
-
-register_cli_command(
-    "transfer",
-    "httk.workflow.workflow_cli:transfer_command",
-    "inspect held workspace transfers",
 )

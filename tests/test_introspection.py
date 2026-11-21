@@ -414,7 +414,7 @@ def test_why_reports_a_failed_job_with_its_breadcrumb_and_continue(ws: Workspace
     assert checks["failure"].detail.startswith("process_failure: ")
     assert checks["error breadcrumb"].detail == "step start raised RuntimeError: the inputs are missing"
     assert checks["operator continue"].satisfied is True
-    assert any("job request continue --workspace WORKSPACE" in hint for hint in diagnosis.hints)
+    assert any("httk job resume -w WORKSPACE JOB" in hint for hint in diagnosis.hints)
     assert checks["attempt history"].detail.startswith("1 attempts across 1 activations")
 
     report = describe_job(ws, ref)
@@ -460,7 +460,7 @@ def _failed_at_wait(ws: Workspace, installed: Any, retry_policy: dict[str, int])
 
 
 _WAIT = (
-    "the wait on 2 children can be reopened with `httk job request continue`; "
+    "the wait on 2 children can be reopened with `httk job resume`; "
     "`restart` reruns step start, which reuses the children that still exist, failed or cancelled ones "
     "included: revive such a child first, or delete it to have the step create a fresh one"
 )
@@ -519,16 +519,15 @@ def test_why_says_continue_reopens_a_join_kept_by_maximum_activations(ws: Worksp
     diagnosis = explain_job(ws, ref)
     checks = {check.name: check for check in diagnosis.checks}
     assert checks["wait"].detail == (
-        "the wait on 2 children can be reopened with `httk job request continue`, which restores the declared retry "
+        "the wait on 2 children can be reopened with `httk job resume`, which restores the declared retry "
         "allowance (maximum_activations 2 after it)"
     )
     assert "operator restart" not in checks and "operator continue" not in checks
-    (hint,) = [hint for hint in diagnosis.hints if "set_budget" in hint]
+    (hint,) = [hint for hint in diagnosis.hints if "budget." in hint]
     assert hint.startswith(
-        "'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB' reopens the wait; "
-        "with --keep-budget, raise maximum_activations first"
+        "'httk job resume -w WORKSPACE JOB' reopens the wait; with --keep-budget, raise maximum_activations first"
     )
-    assert "set_budget --workspace WORKSPACE --max-activations N --operator NAME" in hint
+    assert "'httk job set -w WORKSPACE JOB budget.max_activations=N'" in hint
     assert not any("rerun step" in hint or "restart" in hint for hint in diagnosis.hints)
 
     # The continue reopens the wait with one more activation for the join.
@@ -564,7 +563,7 @@ def test_budget_verdicts_launch_an_unstarted_attempt_as_it_is(ws: Workspace, ins
 
 def test_budget_hint_names_every_exhausted_attempt_budget() -> None:
     status = _diagnosis.BudgetStatus(1, 1, 1, 1, 1, None, declared={}, budget_override=None)
-    assert status.set_budget_option() == "--max-attempts-per-activation N --max-total-attempts N"
+    assert status.set_budget_option() == "budget.max_attempts_per_activation=N budget.max_total_attempts=N"
 
 
 def test_render_job_surfaces_a_process_failure_breadcrumb_headline_and_control(ws: Workspace, installed: Any) -> None:
@@ -697,7 +696,7 @@ def test_why_reports_a_paused_job(ws: Workspace, installed: Any) -> None:
     assert "only an operator request moves it" in diagnosis.summary
     pause = next(check for check in diagnosis.checks if check.name == "pause")
     assert "operator inspection" in pause.detail
-    assert any("job request continue --workspace WORKSPACE" in hint for hint in diagnosis.hints)
+    assert any("httk job resume -w WORKSPACE JOB" in hint for hint in diagnosis.hints)
 
 
 def test_why_lists_a_pending_request(ws: Workspace, installed: Any) -> None:

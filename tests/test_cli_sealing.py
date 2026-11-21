@@ -2,20 +2,20 @@
 
 import base64
 import json
+import shutil
 import sys
 from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
 from httk.core.crypto import ed25519_generate_seed
-from httk.core.project.cli import command as project_command
 
 import v3_helpers as v3
 from conftest import configure_identity
 from httk.workflow import Workspace, _kernel
 from httk.workflow._state import Release, StateDoc
 from httk.workflow.projects import initialize_project
-from httk.workflow.seals import is_job_sealed, is_project_sealed, is_workspace_sealed, job_seal_path
+from httk.workflow.seals import is_job_sealed, is_workspace_sealed, job_seal_path
 from httk.workflow.workflow_cli import command
 
 # The library side (seal and unseal requests, the workspace snapshot, verify) is covered by test_seals and
@@ -158,44 +158,56 @@ def test_workspace_verify_reports_drift_and_exits_one(tmp_path: Path, capsys) ->
     assert {"path": added.job_key, "kind": "unsealed"} in entry["discrepancies"]
 
 
-def test_project_seal_then_verify_ok_and_tamper_fails(tmp_path: Path, capsys) -> None:
+def test_job_verify_ok_and_tamper_fails(tmp_path: Path, capsys) -> None:
     project_root, workspace, ref = _setup(tmp_path)
 
     assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
-    assert command(["workspace", "seal"], _context(project_root)) == 0
     capsys.readouterr()
-    assert project_command(["seal"], _context(project_root)) == 0
-    assert "\tsealed\t" in capsys.readouterr().out
-    assert is_project_sealed(project_root)
-
-    assert command(["seal", "verify"], _context(project_root)) == 0
+    assert command(["job", "verify", ref.job_id], _context(project_root)) == 0
     verified = capsys.readouterr().out
     assert verified.strip().splitlines()[-1] == "ok"
-    assert "valid_trusted" in verified
+    assert f"job\t{ref.job_key}\tvalid_trusted\t" in verified
 
     (v3.find(workspace, ref.job_id).path / "files" / "runner").write_text(
         "#!/bin/sh\necho tampered\n", encoding="utf-8"
     )
 
-    assert command(["seal", "verify"], _context(project_root)) == 1
+    assert command(["job", "verify", ref.job_id], _context(project_root)) == 1
     tampered = capsys.readouterr().out
     assert tampered.strip().splitlines()[-1] == "FAILED"
     assert "  mismatch\tfiles/runner" in tampered
 
 
-def test_seal_verify_json_shape(tmp_path: Path, capsys) -> None:
-    project_root, _workspace, _ref = _setup(tmp_path)
-    assert command(["workspace", "seal"], _context(project_root)) == 0
-    assert project_command(["seal"], _context(project_root)) == 0
+def test_job_verify_json_shape(tmp_path: Path, capsys) -> None:
+    project_root, _workspace, ref = _setup(tmp_path)
+    assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
     capsys.readouterr()
 
-    assert command(["seal", "verify", "--json"], _context(project_root)) == 0
+    assert command(["job", "verify", "--json", ref.job_id], _context(project_root)) == 0
     document = json.loads(capsys.readouterr().out)
     assert document["ok"] is True and document["trusted"] is True
-    assert isinstance(document["entries"], list) and document["entries"]
-    first = document["entries"][0]
-    assert first["level"] == "project"
+    (first,) = document["entries"]
+    assert first["level"] == "job" and first["subject"] == ref.job_key
     assert set(first) >= {"level", "subject", "valid", "verdict", "reason", "signers", "discrepancies"}
+
+
+def test_workspace_verify_content_verifies_the_recorded_job_seals(tmp_path: Path, capsys) -> None:
+    project_root, workspace, ref = _setup(tmp_path)
+    assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
+    assert command(["workspace", "seal"], _context(project_root)) == 0
+    capsys.readouterr()
+    assert command(["workspace", "verify", "--content"], _context(project_root)) == 0
+    verified = capsys.readouterr().out.strip().splitlines()
+    assert verified[-1] == "ok" and verified[0].startswith(f"workspace\t{workspace.workspace_id}\tvalid_trusted")
+
+    (v3.find(workspace, ref.job_id).path / "files" / "runner").write_text("tampered\n", encoding="utf-8")
+    # The workspace snapshot still matches the job seal; only the job seal itself sees the changed file.
+    assert command(["workspace", "verify"], _context(project_root)) == 0
+    capsys.readouterr()
+    assert command(["workspace", "verify", "--content", "--json"], _context(project_root)) == 1
+    (document,) = json.loads(capsys.readouterr().out)
+    assert document["ok"] is False and [entry["level"] for entry in document["entries"]] == ["workspace", "job"]
+    assert {"path": "files/runner", "kind": "mismatch"} in document["entries"][1]["discrepancies"]
 
 
 def test_confirm_non_tty_refuses_without_yes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -226,7 +238,7 @@ def test_workspace_status_reports_the_seal(tmp_path: Path, capsys) -> None:
     assert json.loads(capsys.readouterr().out)[0]["sealed"] is True
 
 
-def test_seal_verify_untrusted_signer_exits_three(tmp_path: Path, capsys) -> None:
+def test_job_verify_untrusted_signer_exits_three(tmp_path: Path, capsys) -> None:
     # job seal --keys is gone: a job seal is signed with the workspace seal.keys setting.
     project_root, workspace, ref = _setup(tmp_path)
     seed_file = tmp_path / "foreign.seed"
@@ -236,40 +248,42 @@ def test_seal_verify_untrusted_signer_exits_three(tmp_path: Path, capsys) -> Non
     assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
     capsys.readouterr()
 
-    assert command(["seal", "verify", str(v3.find(workspace, ref.job_id).path)], _context(project_root)) == 3
+    assert command(["job", "verify", ref.job_id], _context(project_root)) == 3
     out = capsys.readouterr().out
     assert out.strip().splitlines()[-1] == "UNTRUSTED"
     assert "valid_unknown_key" in out
 
 
-def test_seal_verify_unsealed_subject_renders_not_sealed(tmp_path: Path, capsys) -> None:
-    project_root, _workspace, _ref = _setup(tmp_path)
+def test_job_verify_unsealed_job_renders_not_sealed(tmp_path: Path, capsys) -> None:
+    project_root, _workspace, ref = _setup(tmp_path)
 
-    assert command(["seal", "verify"], _context(project_root)) == 1
+    assert command(["job", "verify", ref.job_id], _context(project_root)) == 1
     out = capsys.readouterr().out
-    assert "not sealed" in out
+    assert f"job\t{ref.job_key}\tinvalid\tjob seal is absent" in out
     assert out.strip().splitlines()[-1] == "FAILED"
 
 
 @pytest.mark.parametrize(("flags", "content"), [([], False), (["--content"], True)])
-def test_seal_verify_passes_content_to_verify_tree(
+def test_job_verify_passes_content_to_the_job_seal_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str], content: bool
 ) -> None:
-    from httk.workflow.seals import SealReport
-    from httk.workflow.workflow_cli import _seal
+    from httk.workflow import seals
 
+    project_root, _workspace, ref = _setup(tmp_path)
+    assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
     calls: list[bool] = []
+    verify = seals.verify_job_seal
 
-    def fake_verify_tree(path: Path, *, trusted_keys: list[str], deep: bool, content: bool) -> SealReport:
+    def recording(payload: Path, *, trusted_keys: list[str], content: bool) -> seals.SealVerification:
         calls.append(content)
-        return SealReport((), True)
+        return verify(payload, trusted_keys=trusted_keys, content=content)
 
-    monkeypatch.setattr(_seal, "verify_tree", fake_verify_tree)
-    assert command(["seal", "verify", *flags, str(tmp_path)], _context(tmp_path)) == 0
+    monkeypatch.setattr(seals, "verify_job_seal", recording)
+    assert command(["job", "verify", *flags, ref.job_id], _context(project_root)) == 0
     assert calls == [content]
 
 
-def test_seal_verify_content_refuses_a_project_root(tmp_path: Path, capsys) -> None:
+def test_content_verification_refuses_a_project_root(tmp_path: Path) -> None:
     from httk.workflow.errors import FormatError
     from httk.workflow.seals import verify_tree
 
@@ -278,5 +292,32 @@ def test_seal_verify_content_refuses_a_project_root(tmp_path: Path, capsys) -> N
     initialize_project(project_root, name="sealing")
     with pytest.raises(FormatError, match="run it on each workspace"):
         verify_tree(project_root, content=True)
-    assert command(["seal", "verify", "--content"], _context(project_root)) == 2
-    assert "--content verifies workspaces and jobs" in capsys.readouterr().err
+
+
+def test_job_verify_takes_a_free_standing_payload_directory(tmp_path: Path, capsys) -> None:
+    project_root, workspace, ref = _setup(tmp_path)
+    assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
+    capsys.readouterr()
+    copy = tmp_path / "elsewhere" / "payload"
+    shutil.copytree(v3.find(workspace, ref.job_id).path, copy, symlinks=True)
+
+    assert command(["job", "verify", str(copy)], _context(tmp_path / "elsewhere")) == 0
+    out = capsys.readouterr().out
+    assert f"job\t{ref.job_key}\t" in out and out.strip().splitlines()[-1] in {"ok", "UNTRUSTED"}
+    (copy / "files" / "runner").write_text("tampered\n", encoding="utf-8")
+    assert command(["job", "verify", "payload"], _context(tmp_path / "elsewhere")) == 1
+    assert "  mismatch\tfiles/runner" in capsys.readouterr().out
+
+
+def test_workspace_verify_deep_verifies_the_job_seals_without_content(tmp_path: Path, capsys) -> None:
+    project_root, workspace, ref = _setup(tmp_path)
+    assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
+    assert command(["workspace", "seal"], _context(project_root)) == 0
+    (v3.find(workspace, ref.job_id).path / "files" / "runner").write_text("tampered\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert command(["workspace", "verify"], _context(project_root)) == 0
+    capsys.readouterr()
+    assert command(["workspace", "verify", "--deep"], _context(project_root)) == 1
+    out = capsys.readouterr().out
+    assert out.strip().splitlines()[-1] == "FAILED" and "  mismatch\tfiles/runner" in out

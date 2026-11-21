@@ -3131,7 +3131,7 @@ def _remove_jobs(
     """Remove as :func:`remove_jobs` does, through the command's location index *index*.
 
     *report* is called with each chunk's outcomes in input order once it is served, and with those known when the
-    command stops (a failure or an interrupt), before that propagates, as ``job request`` reports them.
+    command stops (a failure or an interrupt), before that propagates, as the request verbs report them.
     """
 
     selected = list(refs)

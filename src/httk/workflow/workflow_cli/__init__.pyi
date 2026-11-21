@@ -47,13 +47,14 @@ from ._describe import (
 from ._job import (
     build_job_parser,
     ensure_identity_key,
+    handle_job_control,
     handle_job_debug,
     handle_job_delete,
     handle_job_list,
     handle_job_log,
     handle_job_new,
-    handle_job_request,
     handle_job_seal,
+    handle_job_set,
     handle_job_show,
     handle_job_submit,
     handle_job_unseal,
@@ -82,7 +83,7 @@ from ._manager import (
 )
 from ._monitor import build_monitor_parser, handle_monitor
 from ._postprocess import build_postprocess_parser, handle_postprocess
-from ._precheck import build_precheck_parser, handle_precheck
+from ._precheck import handle_precheck
 from ._project import (
     build_config_parser,
     handle_config_import_v1,
@@ -90,10 +91,9 @@ from ._project import (
     handle_config_show,
     handle_config_unset,
 )
-from ._seal import build_seal_parser, handle_seal_verify
 from ._transfer import (
+    build_push_pull_parser,
     build_remote_parser,
-    build_transfer_operator_parser,
     build_transfer_parser,
     handle_remote_add,
     handle_remote_check,
@@ -153,11 +153,9 @@ __all__ = [
     "build_monitor_parser",
     "build_parser",
     "build_postprocess_parser",
-    "build_precheck_parser",
+    "build_push_pull_parser",
     "build_remote_parser",
     "build_run_parser",
-    "build_seal_parser",
-    "build_transfer_operator_parser",
     "build_transfer_parser",
     "build_v1_parser",
     "build_workspace_parser",
@@ -177,13 +175,14 @@ __all__ = [
     "handle_config_set",
     "handle_config_show",
     "handle_config_unset",
+    "handle_job_control",
     "handle_job_debug",
     "handle_job_delete",
     "handle_job_list",
     "handle_job_log",
     "handle_job_new",
-    "handle_job_request",
     "handle_job_seal",
+    "handle_job_set",
     "handle_job_show",
     "handle_job_submit",
     "handle_job_unseal",
@@ -207,7 +206,6 @@ __all__ = [
     "handle_remote_set",
     "handle_remote_show",
     "handle_remote_unset",
-    "handle_seal_verify",
     "handle_transfer",
     "handle_v1_collect",
     "handle_workflow_describe",
@@ -232,12 +230,12 @@ __all__ = [
     "launcher_command",
     "manager_command",
     "publish_job_requests",
+    "pull_command",
+    "push_command",
     "remote_command",
     "remote_workspace_output",
     "request_remote_job_result",
-    "seal_command",
     "submit_remote_manager_result",
-    "transfer_command",
     "v1_command",
     "workflow_command",
     "workspace_command",
@@ -295,11 +293,11 @@ def config_command(argv: Sequence[str], context: CLIContext) -> int:
 def campaign_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``campaign`` command."""
 
-def seal_command(argv: Sequence[str], context: CLIContext) -> int:
-    """Handle the registered top-level ``seal`` command."""
+def push_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``push`` command."""
+
+def pull_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``pull`` command."""
 
 def v1_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``v1`` command."""
-
-def transfer_command(argv: Sequence[str], context: CLIContext) -> int:
-    """Handle the registered top-level ``transfer`` command: inspecting held transfers."""

@@ -60,11 +60,9 @@ __all__ = [
     "build_monitor_parser",
     "build_parser",
     "build_postprocess_parser",
-    "build_precheck_parser",
+    "build_push_pull_parser",
     "build_remote_parser",
     "build_run_parser",
-    "build_seal_parser",
-    "build_transfer_operator_parser",
     "build_transfer_parser",
     "build_v1_parser",
     "build_workspace_parser",
@@ -84,13 +82,14 @@ __all__ = [
     "handle_config_set",
     "handle_config_show",
     "handle_config_unset",
+    "handle_job_control",
     "handle_job_debug",
     "handle_job_delete",
     "handle_job_list",
     "handle_job_log",
     "handle_job_new",
-    "handle_job_request",
     "handle_job_seal",
+    "handle_job_set",
     "handle_job_show",
     "handle_job_submit",
     "handle_job_unseal",
@@ -114,7 +113,6 @@ __all__ = [
     "handle_remote_set",
     "handle_remote_show",
     "handle_remote_unset",
-    "handle_seal_verify",
     "handle_transfer",
     "handle_v1_collect",
     "handle_workflow_describe",
@@ -139,12 +137,12 @@ __all__ = [
     "launcher_command",
     "manager_command",
     "publish_job_requests",
+    "pull_command",
+    "push_command",
     "remote_command",
     "remote_workspace_output",
     "request_remote_job_result",
-    "seal_command",
     "submit_remote_manager_result",
-    "transfer_command",
     "v1_command",
     "workflow_command",
     "workspace_command",
@@ -188,7 +186,8 @@ _LAZY_EXPORTS = {
     "handle_job_list": "._job",
     "handle_job_log": "._job",
     "handle_job_new": "._job",
-    "handle_job_request": "._job",
+    "handle_job_control": "._job",
+    "handle_job_set": "._job",
     "handle_job_seal": "._job",
     "handle_job_show": "._job",
     "handle_job_submit": "._job",
@@ -215,17 +214,14 @@ _LAZY_EXPORTS = {
     "handle_monitor": "._monitor",
     "build_postprocess_parser": "._postprocess",
     "handle_postprocess": "._postprocess",
-    "build_precheck_parser": "._precheck",
     "handle_precheck": "._precheck",
     "build_config_parser": "._project",
     "handle_config_import_v1": "._project",
     "handle_config_set": "._project",
     "handle_config_show": "._project",
     "handle_config_unset": "._project",
-    "build_seal_parser": "._seal",
-    "handle_seal_verify": "._seal",
     "build_remote_parser": "._transfer",
-    "build_transfer_operator_parser": "._transfer",
+    "build_push_pull_parser": "._transfer",
     "build_transfer_parser": "._transfer",
     "handle_remote_add": "._transfer",
     "handle_remote_check": "._transfer",
@@ -262,16 +258,15 @@ _GROUPS = (
     (("describe",), "._describe", "build_describe_parser", False, False),
     (("list",), "._describe", "build_list_parser", False, False),
     (("install", "uninstall"), "._describe", "build_install_parser", False, False),
-    (("seal",), "._seal", "build_seal_parser", False, True),
     (("collect",), "._collect", "build_collect_parser", True, True),
     (("build",), "._build", "build_build_parser", False, False),
     (("postprocess",), "._postprocess", "build_postprocess_parser", False, False),
-    (("precheck",), "._precheck", "build_precheck_parser", False, False),
     (("run",), "._manager", "build_run_parser", False, False),
     (("manager",), "._manager", "build_manager_parser", False, True),
     (("v1",), "._compat", "build_v1_parser", False, True),
     (("config",), "._project", "build_config_parser", False, True),
     (("remote",), "._transfer", "build_remote_parser", False, True),
+    (("push", "pull"), "._transfer", "build_push_pull_parser", False, True),
     (("launcher",), "._launcher", "build_launcher_parser", False, True),
     (("campaign",), "._campaign", "build_campaign_parser", False, True),
     (("monitor",), "._monitor", "build_monitor_parser", False, False),
@@ -449,24 +444,19 @@ def campaign_command(argv: Sequence[str], context: CLIContext) -> int:
     return command(["campaign", *argv], context, prog=f"{context.program} campaign")
 
 
-def seal_command(argv: Sequence[str], context: CLIContext) -> int:
-    """Handle the registered top-level ``seal`` command."""
+def push_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``push`` command."""
 
-    return command(["seal", *argv], context, prog=f"{context.program} seal")
+    return command(["push", *argv], context, prog=f"{context.program} push")
+
+
+def pull_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``pull`` command."""
+
+    return command(["pull", *argv], context, prog=f"{context.program} pull")
 
 
 def v1_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``v1`` command."""
 
     return command(["v1", *argv], context, prog=f"{context.program} v1")
-
-
-def transfer_command(argv: Sequence[str], context: CLIContext) -> int:
-    """Handle the registered top-level ``transfer`` command: inspecting held transfers."""
-
-    from ._transfer import build_transfer_operator_parser
-
-    parser = argparse.ArgumentParser(prog=context.program)
-    parser.set_defaults(handler=None, help_parser=parser)
-    build_transfer_operator_parser(parser.add_subparsers())
-    return dispatch(parser, ["transfer", *argv], context, prog=f"{context.program} transfer")

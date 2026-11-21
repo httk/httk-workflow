@@ -278,7 +278,7 @@ per-user default, takes precedence.
 **A nonzero `returncode` is still `ok: true`.** The operation succeeded: it ran
 the command and reports the outcome. `ok: false` means the adapter could not
 run the command at all. Callers check `returncode` themselves; every remote
-command in `httk job transfer …` does so and raises on a nonzero value.
+command in `httk job move …` does so and raises on a nonzero value.
 
 If `argv[0]` is the literal `httk`, the adapter must apply the remote's
 `httk_command` setting; see

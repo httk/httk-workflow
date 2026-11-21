@@ -158,7 +158,7 @@ def ids_of(plan: list[tuple[dict[str, Any], str, int]]) -> list[str]:
 
 
 def selection_of(workspace: Workspace, cwd: Path, **options: Any) -> Any:
-    """A selection of *workspace* as ``job transfer`` makes it (``jobs``, ``state``, ``step``, ``placement``,
+    """A selection of *workspace* as ``job move`` makes it (``jobs``, ``state``, ``step``, ``placement``,
     ``tree``), its snapshot taken."""
 
     namespace = argparse.Namespace(

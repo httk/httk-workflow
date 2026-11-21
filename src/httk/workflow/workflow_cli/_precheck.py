@@ -1,4 +1,4 @@
-"""The read-only workflow precheck command."""
+"""The read-only ``job precheck`` command."""
 
 import argparse
 import json
@@ -21,7 +21,7 @@ from ..precheck import (
     precheck_jobs,
 )
 from ..workspace import Workspace
-from ._common import _leaf, _local_root
+from ._common import _local_root
 
 
 def _summary(findings: list[dict[str, object]]) -> dict[str, int]:
@@ -138,26 +138,3 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
         or summary["step_problems"]
         else 0
     )
-
-
-def build_precheck_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
-    """Declare the ``precheck`` read-only command."""
-
-    parser = _leaf(
-        subparsers,
-        "precheck",
-        summary="check pending jobs before they start",
-        description=(
-            "Report declared-environment resolution, workflow installation and build, and claimability "
-            "of pending jobs without changing the workspace"
-        ),
-        handler=handle_precheck,
-    )
-    parser.add_argument(
-        "-w",
-        "--workspace",
-        metavar="WORKSPACE",
-        help="the workspace to precheck (default: the enclosing workspace, this project's workspace, or the per-user default)",
-    )
-    parser.add_argument("--placement", metavar="PLACEMENT", help="check only jobs at or below this placement")
-    parser.add_argument("--json", action="store_true", help="print the complete report as JSON")

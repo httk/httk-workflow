@@ -1,4 +1,4 @@
-"""Switching the workflow existing jobs run: ``job request set_workflow`` and ``state.json`` ``workflow_override``."""
+"""Switching the workflow existing jobs run: ``job set workflow=`` and ``state.json`` ``workflow_override``."""
 
 import json
 import os
@@ -65,8 +65,8 @@ def _new(workspace: Workspace, workflow: str, script: str, placement: str, **par
     return new_job(workspace, workflow, parameters={"script": {"start": script}, **parameters}, placement=placement).ref
 
 
-def _request(name: str, action: str, *selectors: str) -> list[str]:
-    return ["job", "request", action, "--workspace", name, "--reason", "bump", *selectors]
+def _request(name: str, verb: str, *words: str) -> list[str]:
+    return ["job", verb, "--workspace", name, "--reason", "bump", *words]
 
 
 def _ran_by(workspace: Workspace, job_id: str) -> str:
@@ -80,8 +80,8 @@ def test_ready_jobs_switch_now_by_state_and_run_the_new_installation(tmp_path: P
     other = _new(workspace, old.id, "fail", "elsewhere/0")
     before = {ref.job_id: (ref.path / "job.json").read_bytes() for ref in jobs}
 
-    selection = ["--workflow", "demo-next", "--state", "ready", "--placement", "project"]
-    assert command(_request(name, "set_workflow", *selection), CLIContext("httk", tmp_path)) == 0
+    selection = ["workflow=demo-next", "--state", "ready", "--placement", "project"]
+    assert command(_request(name, "set", *selection), CLIContext("httk", tmp_path)) == 0
     assert capsys.readouterr().out.count("\tapplied\t") == 3
 
     for ref in jobs:
@@ -113,7 +113,7 @@ def test_a_failed_job_switches_then_restarts_on_the_new_installation(tmp_path: P
     pinned, stored = v3.state_of(failed).job_digest, (failed.path / "job.json").read_bytes()
     assert pinned is not None
 
-    assert command(_request(name, "set_workflow", "--workflow", new.id, ref.job_id), CLIContext("httk", tmp_path)) == 0
+    assert command(_request(name, "set", f"workflow={new.id}", ref.job_id), CLIContext("httk", tmp_path)) == 0
     assert command(_request(name, "restart", ref.job_id), CLIContext("httk", tmp_path)) == 0
     capsys.readouterr()
     v3.run(workspace)
@@ -130,10 +130,7 @@ def test_an_owned_job_switches_at_its_next_boundary(tmp_path: Path, capsys) -> N
     with _kernel.register_owner(workspace, kind="manager", label="live", allocation=None, advertised={}) as owner:
         owned = _kernel.claim(workspace, owner, ref)
         assert owned is not None
-        assert (
-            command(_request(name, "set_workflow", "--workflow", "demo-next", ref.job_id), CLIContext("httk", tmp_path))
-            == 0
-        )
+        assert command(_request(name, "set", "workflow=demo-next", ref.job_id), CLIContext("httk", tmp_path)) == 0
         assert "\tqueued\tanother owner holds the job" in capsys.readouterr().out
         owned.give_back()
     # A manager applies it when it claims the job, before it assesses and launches it.
@@ -147,14 +144,11 @@ def test_refusals_post_nothing_and_name_the_rule(tmp_path: Path, capsys) -> None
     ref = _new(workspace, "demo", "fail", "project/refused")
     stranger = v3.install(workspace, tmp_path / "stranger", name="stranger")
     for workflow, rule in (("absent", "rule 1 (installed)"), (stranger.id, "rule 2 (declaration)")):
-        assert (
-            command(_request(name, "set_workflow", "--workflow", workflow, ref.job_id), CLIContext("httk", tmp_path))
-            == 2
-        )
+        assert command(_request(name, "set", f"workflow={workflow}", ref.job_id), CLIContext("httk", tmp_path)) == 2
         assert rule in capsys.readouterr().err
     assert not list(workspace.control.glob("requests/*.json"))
-    assert command(_request(name, "set_workflow", ref.job_id), CLIContext("httk", tmp_path)) == 2
-    assert "--workflow is required by, and only valid with, the set_workflow action" in capsys.readouterr().err
+    assert command(_request(name, "set", ref.job_id), CLIContext("httk", tmp_path)) == 2
+    assert "job set needs at least one KEY=VALUE pair" in capsys.readouterr().err
     assert command(_request(name, "pause", "--workflow", "demo-next", ref.job_id), CLIContext("httk", tmp_path)) == 2
 
 
@@ -302,7 +296,7 @@ def test_mount_daemon_remotes_refuse_set_workflow(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(job_cli, "_resolve_binding", lambda *_args, **_kwargs: (binding, None))
     monkeypatch.setattr(job_cli, "resolve_remote", lambda *_args, **_kwargs: SimpleNamespace(bundle=bundle))
     (bundle / "remote.json").write_text(json.dumps({"kind": "mount-daemon", "settings": {}}), encoding="utf-8")
-    argv = _request("cluster:runs", "set_workflow", "--workflow", "demo-next", str(uuid.uuid4()))
+    argv = _request("cluster:runs", "set", "workflow=demo-next", str(uuid.uuid4()))
     assert command(argv, CLIContext("httk", tmp_path)) == 2
     assert "not carried by the workspace daemon protocol" in capsys.readouterr().err
     argv = _request("cluster:runs", "pause", "--state", "ready")
@@ -310,7 +304,7 @@ def test_mount_daemon_remotes_refuse_set_workflow(tmp_path: Path, monkeypatch: p
     assert "--state, --step and --placement select jobs of a local workspace" in capsys.readouterr().err
 
 
-def test_job_request_selects_by_state_for_every_action(tmp_path: Path, capsys) -> None:
+def test_request_verbs_select_by_state(tmp_path: Path, capsys) -> None:
     workspace, name = _workspace(tmp_path)
     v3.install(workspace, tmp_path / "v1", workflow=DECLARED)
     refs = [_new(workspace, "demo", "fail", f"project/{index}") for index in range(2)]
@@ -319,7 +313,7 @@ def test_job_request_selects_by_state_for_every_action(tmp_path: Path, capsys) -
     assert capsys.readouterr().out.count("\tapplied\t") == 2
     assert [v3.find(workspace, ref.job_id).state for ref in refs] == ["paused", "paused"]
     assert command(_request(name, "pause"), CLIContext("httk", tmp_path)) == 2
-    assert "give JOB_ID selectors, --state STATE, --step STEP, or a combination" in capsys.readouterr().err
+    assert "give JOB selectors, --state STATE, --step STEP, or a combination" in capsys.readouterr().err
     assert command(_request(name, "pause", refs[0].job_id, "--placement", "project"), CLIContext("httk", tmp_path)) == 2
     assert "--placement narrows --state" in capsys.readouterr().err
     assert os.environ["XDG_CONFIG_HOME"].startswith(str(tmp_path))
@@ -394,18 +388,18 @@ def test_ssh_remote_set_workflow_resolves_on_the_far_side(tmp_path: Path, capsys
     refs = [_new(remote, old.id, "fail", f"project/{index}") for index in range(2)]
     context = CLIContext("httk", project)
     # A name resolves on the far side, which checks every job there; the envelopes name the id it resolved to.
-    argv = _request("cluster:station", "set_workflow", "--workflow", "demo-next", refs[0].job_id)
+    argv = _request("cluster:station", "set", "workflow=demo-next", refs[0].job_id)
     assert command(argv, context) == 0
     captured = capsys.readouterr()
     assert "\tapplied\t" in captured.out and f"demo-next is installed here as {new.id}" in captured.err
     # An exact id must come back verbatim; an incompatible candidate is refused there, naming the rule.
-    assert command(_request("cluster:station", "set_workflow", "--workflow", new.id, refs[1].job_id), context) == 0
+    assert command(_request("cluster:station", "set", f"workflow={new.id}", refs[1].job_id), context) == 0
     capsys.readouterr()
     for ref in refs:
         doc = v3.state_of(v3.find(remote, ref.job_id))
         assert dict(doc.workflow_override or {}) == {"id": new.id, "name": "demo-next"}
     stranger = v3.install(remote, tmp_path / "stranger", name="stranger")
-    assert command(_request("cluster:station", "set_workflow", "--workflow", stranger.id, refs[0].job_id), context) == 2
+    assert command(_request("cluster:station", "set", f"workflow={stranger.id}", refs[0].job_id), context) == 2
     assert "rule 2 (declaration)" in capsys.readouterr().err
 
 

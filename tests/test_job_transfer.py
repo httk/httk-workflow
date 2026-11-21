@@ -1,4 +1,4 @@
-"""``httk job transfer``: hold + copy + adopt + release, locally and through remote adapters, and its recovery.
+"""``httk job move``: hold + copy + adopt + release, locally and through remote adapters, and its recovery.
 
 Ported from the pre-redesign ``test_cli_job_transfer.py``, ``test_cli_transfer_tree.py``,
 ``test_management_transfer.py``, ``test_transfer_status.py`` and ``test_fetch.py`` (their transfer halves).
@@ -25,7 +25,7 @@ from httk.workflow._state import Release, read_state_unowned
 from httk.workflow.projects import initialize_project
 from httk.workflow.registry import create_workspace
 from httk.workflow.workflow_cli import _transfer as transfer_cli
-from httk.workflow.workflow_cli import command, transfer_command
+from httk.workflow.workflow_cli import command, workspace_command
 from test_moving import (  # noqa: F401 (io_workers: fixture)
     assert_in,
     claim_root,
@@ -118,7 +118,7 @@ def agrees_with_state(outcome: dict[str, Any], src: Workspace, dst: Workspace) -
 
 
 def run(cwd: Path, *argv: str) -> int:
-    return command(["job", "transfer", "--no-durable", *argv], CLIContext("httk", cwd))
+    return command(["job", "move", "--no-durable", *argv], CLIContext("httk", cwd))
 
 
 def recorded_requests(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
@@ -259,15 +259,19 @@ def test_a_refused_bundle_stays_held_and_can_be_taken_back(tmp_path: Path, capsy
     assert find(source, mapping["id"]) is None and find(target, mapping["id"]) is None
     assert (find(target, present["id"]).state, find(target, present["id"]).priority) == ("failed", 100)  # type: ignore[union-attr]
 
-    # Inspection lists the hold: transfer status, and job why by the job's id.
+    # Inspection lists the hold: workspace status, and job why by the job's id.
     context = CLIContext("httk", tmp_path)
-    assert transfer_command(["status", source_name, "--json"], context) == 0
-    status = json.loads(capsys.readouterr().out)
-    (listed,) = status["holds"]
+    assert workspace_command(["status", source_name, "--json"], context) == 0
+    (status,) = json.loads(capsys.readouterr().out)
+    (listed,) = status["transfers"]
     assert listed["transfer_id"] == held.transfer_id and listed["destination"] == str(target.root)
     assert listed["members"] == list(held.members) and listed["age_seconds"] >= 0
-    assert transfer_command(["status", source_name], context) == 0
-    assert held.transfer_id in capsys.readouterr().out
+    assert "workflows" not in listed and status["transfers_unreadable"] == []
+    assert workspace_command(["status", source_name], context) == 0
+    text = capsys.readouterr().out
+    assert "held transfers: 1\n" in text
+    members = f"{held.members[0]}\t{len(held.members)} job(s)"
+    assert f"{held.transfer_id}\t{members}\tto {target.root} ({target.workspace_id})\t0h old" in text
     assert command(["job", "why", "--workspace", source_name, str(mapping["id"])[:8]], context) == 0
     why = capsys.readouterr().out
     assert "is held" in why and str(held.path) in why and "job adopt" in why
@@ -364,7 +368,7 @@ def test_a_hold_adopts_only_into_the_workspace_it_records(tmp_path: Path, capsys
     assert command(argv, context) == 0
     held = json.loads(capsys.readouterr().out)
     assert held["destination_workspace_id"] == elsewhere and held["destination"] == str(target.root)
-    assert transfer_command(["status", source_name], context) == 0
+    assert workspace_command(["status", source_name], context) == 0
     assert f"({elsewhere})" in capsys.readouterr().out
     # The path now holds another workspace than the one the hold was made for: --resume refuses it.
     assert run(tmp_path, "--json", "--resume", source_name) == 1
@@ -573,12 +577,15 @@ def test_remote_status_and_refusal_keep_the_remote_hold(
     assert outcome["status"] == "refused"
     (held,) = outgoing(near)
     context = CLIContext("httk", project)
-    assert transfer_command(["status", "--json", f"cluster:{near_name}"], context) == 0
-    status = json.loads(capsys.readouterr().out)
-    assert [hold["transfer_id"] for hold in status["holds"]] == [held]
-    assert status["holds"][0]["destination"] == str(far.root)
+    assert workspace_command(["status", "--json", f"cluster:{near_name}"], context) == 0
+    (status,) = json.loads(capsys.readouterr().out)
+    assert [hold["transfer_id"] for hold in status["transfers"]] == [held]
+    assert status["transfers"][0]["destination"] == str(far.root)
     # The remote source recorded the id the client learnt from the destination.
-    assert status["holds"][0]["destination_workspace_id"] == far.workspace_id
+    assert status["transfers"][0]["destination_workspace_id"] == far.workspace_id
+    assert workspace_command(["status", f"cluster:{near_name}"], context) == 0
+    text = capsys.readouterr().out
+    assert "held transfers: 1\n" in text and f"{held}\t" in text and f"to {far.root} ({far.workspace_id})" in text
     assert not list((far.control / "tmp").iterdir())
     # The remote hold is released through the adapter.
     assert run(project, "--release", held, f"cluster:{near_name}") == 0
@@ -647,7 +654,7 @@ def test_adopt_refuses_a_nesting_member_placement_and_leaves_the_bundle(
 
 
 def adapter_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Record every adapter call ``job transfer`` makes: the operation, and for ``invoke`` the remote verb."""
+    """Record every adapter call ``job move`` makes: the operation, and for ``invoke`` the remote verb."""
 
     from httk.workflow import adapters
     from httk.workflow.workflow_cli import _common
@@ -1138,11 +1145,11 @@ def test_a_listed_job_claimed_before_its_hold_is_counted_as_changed(
     other.close()
 
 
-# -- job push / job pull ----------------------------------------------------------------------------------------
+# -- push / pull ----------------------------------------------------------------------------------------------
 
 
 def everyday(verb: str, cwd: Path, *argv: str) -> int:
-    return command(["job", verb, "--no-durable", *argv], CLIContext("httk", cwd))
+    return command([verb, "--no-durable", *argv], CLIContext("httk", cwd))
 
 
 def test_push_and_pull_take_the_enclosing_workspace_as_the_omitted_end(
@@ -1175,7 +1182,7 @@ def test_push_and_pull_outside_a_workspace_use_the_registered_default(
     assert everyday("pull", project, "--json", f"cluster:{far_name}") == 0
     assert_in(far, [ready])
     assert_in(home, [done])
-    # Two positionals name both ends, as for job transfer.
+    # Two positionals name both ends, as for job move.
     assert everyday("push", project, "-q", f"cluster:{far_name}", home_name) == 0
     assert_in(home, [ready, done])
     capsys.readouterr()
@@ -1187,7 +1194,7 @@ def test_push_and_pull_need_one_end_and_refuse_the_transfer_only_options(
     source, source_name = registered(tmp_path, "a")
     for verb, end in (("push", "DST"), ("pull", "SRC")):
         assert everyday(verb, source.root) == 2
-        assert f"name the other workspace: httk job {verb} {end} (e.g. REMOTE:WS)" in capsys.readouterr().err
+        assert f"name the other workspace: httk {verb} {end} (e.g. REMOTE:WS)" in capsys.readouterr().err
         for option in (["--hold"], ["--resume"], ["--release", "0" * 32], ["--destination-id", "x"], ["--tree"]):
             assert everyday(verb, source.root, *option, source_name) == 2
             assert "unrecognized arguments" in capsys.readouterr().err

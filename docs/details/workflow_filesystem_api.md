@@ -161,7 +161,7 @@ dotted names to JSON scalars; the protocol reads `seal.succeeded`, `seal.keys`,
 | `failed` | Ended with a failure; `continue`, `restart` and `override_step` revive it; a parent failed at its wait keeps `join` and `continue` reopens it. |
 | `succeeded` | Ended successfully; never changed by the protocol until `job unseal`, or unless the job is unlocked (§Unlocked jobs). |
 | `cancelled` | Cancelled by a request. |
-| `away` | An inert away copy of a job that `job push` or `job transfer --keep` moved elsewhere; never runs, only `job delete` or `job recover` act on it. |
+| `away` | An inert away copy of a job that `push` or `job move --keep` moved elsewhere; never runs, only `job delete` or `job recover` act on it. |
 
 `succeeded`, `failed` and `cancelled` are terminal (`TERMINAL_STATES`); the seven
 states other than `owned` are the unowned states (`UNOWNED_STATES`).
@@ -1165,7 +1165,7 @@ refuse), and an owner holding such a job is latched: an exception or interrupt
 inside its context seals every obligation (all or nothing) and gives nothing
 back, leaving every job for recovery. The serial paths register no obligation,
 and a workspace that is not durable registers and syncs nothing. The batched
-steps serve local `job request`, `job detach` and `job delete` runs of at least eight jobs
+steps serve local request-verb (`job cancel` and its siblings), `job detach` and `job delete` runs of at least eight jobs
 whose request ends in a release, a drop or a delete, in `syncfs` mode only (`removal._Batching`): one
 collector per batch of up to 256 jobs, primed before its first write, and one
 commit point per phase (the posts' data, their renames, the claims, the run-log
@@ -1781,7 +1781,7 @@ runs, only a `cancel` acts at once: the attempt and its launches are stopped
 (`SIGTERM`, then `SIGKILL` after the cancel grace) and the job commits as
 `cancelled`; other requests wait for the boundary. An unowned job, located at
 the request's placement, is claimed, reconciled (which applies the requests)
-and released. `job request`, `job delete`, `job seal`, `job unseal`, `job detach` and
+and released. The request verbs, `job delete`, `job seal`, `job unseal`, `job detach` and
 `job unlock` apply their requests at once, as a CLI owner, when the job is
 unowned.
 
@@ -1876,7 +1876,7 @@ from `applied_requests` at the next write.
 
 ### Unlocked jobs
 
-An `unlock` request (`httk job unlock`, `httk job request unlock`) puts a job
+An `unlock` request (`httk job unlock`) puts a job
 in debug mode: it lifts the provenance-integrity rules for that job and marks
 it so that collection will not store it by accident. It is a request like the
 others (applied by the owner, exactly once), except that the workspace daemon
@@ -1889,7 +1889,7 @@ protocol does not carry it.
   into the first `state.json` of every child that an unlocked parent
   publishes; such a child has no runner copy. The CLI also posts a
   marker-only `unlock` (`no_copy: true`) to every ancestor of a selected job,
-  nearest first; `job request unlock` on a local workspace does the same. Through an
+  nearest first. Through an
   ssh remote's request envelope `unlock` is refused for a spawned job.
 - **The runner copy.** Applying `unlock` without `no_copy` copies the effective
   installation's `package/` to `<payload>/workflow/`, the way the
@@ -1921,7 +1921,7 @@ protocol does not carry it.
   with a top-level `workflow/` is refused as carrying a trusted entry. Unlocked jobs are never sealed, so the seal covering `workflow/` matters only
   for the layout. The operator edits it in place. An untrusted exchange bundle
   may not carry it (§Adopt: exchange jobs run only pre-installed
-  workflows); trusted bundles (`job transfer`, `job adopt`, `job eject`) carry it
+  workflows); trusted bundles (`job move`, `job adopt`, `job eject`) carry it
   along.
 - **Relaxed.** A different `job.json` digest is pinned again (§`job.json`);
   `continue`, `restart`, `override_step`, `set_budget` and `set_workflow`
@@ -2009,7 +2009,7 @@ definition URI is `embedded.source` when set, else none. See
 
 A job references a workflow by id, and that workflow, and the transitive
 closure of its `[workflow.calls]`, must be installed before a manager starts
-the job. A job transfer installs the workflows its jobs need in the
+the job. A job move installs the workflows its jobs need in the
 destination when it lacks them, as copies of the source's store entries (see
 **Install a copy** below); the exchange never does.
 
@@ -2115,7 +2115,7 @@ is the submitting operator's canonical `ed25519:<base64>` public key written
 by `job eject`; it is unsigned. Only untrusted (exchange) adoption uses it. With `--operator IDENTITY`, eject uses
 that identity and fails without moving the job if it has no key. Otherwise it
 uses the configured default identity when keyed, and omits the member when it
-is not. Holds, `job transfer`, manager ejects and exchange returns never write
+is not. Holds, `job move`, manager ejects and exchange returns never write
 it; `--operator` with `--hold` is refused. When omitted, `bundle.json` retains
 exactly its previous bytes. Untrusted adoption refuses a non-canonical key.
 
@@ -2257,7 +2257,7 @@ untrusted bundle and to nothing for a trusted one.
 
 ### Holds and transfer
 
-`job transfer --job JOB... SRC DST` is hold + copy + adopt + release:
+`job move --job JOB... SRC DST` is hold + copy + adopt + release:
 
 1. **Hold.** SRC ejects each job (with `--tree`, its tree) into its own
    `transfers/outgoing/<transfer-id>/`, recording DST as the destination

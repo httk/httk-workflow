@@ -249,6 +249,23 @@ def test_a_hold_copied_by_hand_adopts_as_a_bundle_and_its_release_completes_the_
     (entry,) = json.loads(capsys.readouterr().out)["bundles"]
     assert entry["status"] == "adopted"
     assert_in(far, plan)
-    assert command(["job", "transfer", "--release", hold.transfer_id, near_name], context) == 0
+    assert command(["job", "move", "--release", hold.transfer_id, near_name], context) == 0
     assert f"released {hold.transfer_id}" in capsys.readouterr().out
     assert _moving.held(near) == [] and all(find(near, mapping["id"]) is None for mapping, _, _ in plan)
+
+
+def test_workspace_status_names_an_unreadable_hold_and_still_succeeds(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source, name = registered(tmp_path, "a")
+    good, damaged = hold_jobs(source, 2)[0]
+    Path(damaged.path, "bundle.json").write_text("{not json", encoding="utf-8")
+    context = CLIContext("httk", tmp_path)
+
+    assert command(["workspace", "status", name], context) == 0
+    out = capsys.readouterr().out
+    assert f"held transfers: 1 (1 unreadable: {damaged.transfer_id})\n" in out and f"{good.transfer_id}\t" in out
+    assert command(["workspace", "status", "--json", name], context) == 0
+    (document,) = json.loads(capsys.readouterr().out)
+    assert [hold["transfer_id"] for hold in document["transfers"]] == [good.transfer_id]
+    assert document["transfers_unreadable"] == [damaged.transfer_id] and document["format_version"] == 3

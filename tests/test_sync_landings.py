@@ -159,9 +159,9 @@ def statuses(capsys: pytest.CaptureFixture[str]) -> list[dict[str, Any]]:
 
 
 def transfer(cwd: Path, *argv: str) -> int:
-    """A durable ``job transfer`` (the transfer suites run ``--no-durable``)."""
+    """A durable ``job move`` (the transfer suites run ``--no-durable``)."""
 
-    return command(["job", "transfer", "--no-workflows", *argv], CLIContext("httk", cwd))
+    return command(["job", "move", "--no-workflows", *argv], CLIContext("httk", cwd))
 
 
 def assert_syncfs_barrier(events: Events, start: str, end: str, published: str = "take") -> None:

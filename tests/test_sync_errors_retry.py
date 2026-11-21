@@ -670,7 +670,7 @@ def test_a_retry_answered_by_another_workspace_keeps_the_holds(
     # Not taken back, though the second answer is a refusal: the holds stay for --resume (at least once).
     assert outcome["status"] == "failed" and "whether the jobs arrived is unknown" in outcome["message"]
     assert f"answered the second delivery as workspace {other}" in outcome["message"]
-    assert "httk job transfer --resume" in outcome["message"]
+    assert "httk job move --resume" in outcome["message"]
     assert len(far_side.calls) == 2 and outgoing(near) == [outcome["transfer_id"]]
 
 
@@ -838,7 +838,7 @@ def test_a_retry_adopted_by_another_workspace_says_so_and_keeps_the_holds(
     assert outcome["status"] == "failed" and len(far_side.calls) == 2
     message = outcome["message"]
     assert f"staged the segment in workspace {far.workspace_id}, not the expected workspace {expected}" in message
-    assert "nothing of it was adopted" in message and "httk job transfer --resume" in message
+    assert "nothing of it was adopted" in message and "httk job move --resume" in message
     assert outgoing(near) == [outcome["transfer_id"]]
     assert all(find(far, mapping["id"]) is None for mapping, _, _ in plan)
     # The resume delivers it and releases the hold.

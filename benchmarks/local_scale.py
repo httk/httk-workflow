@@ -3,10 +3,10 @@
 This is a script, not a test. One invocation measures, on N jobs in a local workspace, the commands::
 
     job new --workspace WS --workflow URI --install --input-from structure DIR --duplicate-tag skip
-    job request cancel --reason bench SEL...      (on the N fresh ready jobs)
+    job cancel --reason bench SEL...              (on the N fresh ready jobs)
     job delete --yes SEL...                       (on the N cancelled jobs)
-    job request pause --reason bench SEL...       (on N fresh ready jobs, a second workspace)
-    job request continue --reason bench SEL...    (on the N paused jobs)
+    job pause --reason bench SEL...               (on N fresh ready jobs, a second workspace)
+    job resume --reason bench SEL...              (on the N paused jobs)
 
 and writes one JSON result::
 
@@ -99,7 +99,7 @@ AFTER: dict[str, str | None] = {"new": "ready", "cancel": "cancelled", "delete":
 AFTER["continue"] = "ready"
 NOT_MEASURED = {
     "recover": (
-        "job recover --all needs away copies, which only a job push or job transfer --keep into another workspace "
+        "job recover --all needs away copies, which only a push or job move --keep into another workspace "
         "makes; at N = 100 that setup costs about 41 fsyncs a job (audit item F), several times the recover itself, "
         "on every repetition"
     ),
@@ -538,7 +538,8 @@ def command_arguments(
         return ["job", "new", "--workspace", str(workspace), "--workflow", workflow, "--install", *source]
     if command == "delete":
         return ["job", "delete", "--workspace", str(workspace), "--yes", *selection]
-    return ["job", "request", command, "--workspace", str(workspace), "--reason", "bench", *selection]
+    verb = "resume" if command == "continue" else command
+    return ["job", verb, "--workspace", str(workspace), "--reason", "bench", *selection]
 
 
 def output_problems(command: str, jobs: int, stdout: str, stderr: str) -> list[str]:

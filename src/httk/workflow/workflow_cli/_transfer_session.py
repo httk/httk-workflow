@@ -703,7 +703,7 @@ def _fit(answer: dict[str, Any], items: list[_Item], optional: tuple[str, ...] =
     The first item always goes: a hold that does not fit the answer as it is sent with nothing else taken (its
     *optional* members given way: no note, the diagnostics replaced by a marker) goes by id only (``transfer_id``,
     ``member_count``, ``oversized``), and an error that does not fit is cut to what does. Every other hold goes as
-    ``transfer status --json`` lists it, each error cut to :data:`_ERROR_LIMIT` characters. The optional members come
+    ``workspace status --json`` lists it, each error cut to :data:`_ERROR_LIMIT` characters. The optional members come
     back, the note first, as far as they fit beside the items taken; the whole answer is then measured again, and
     what still does not fit (but the first item) is left for the next answer too.
 
@@ -774,7 +774,7 @@ def _select(request: Request) -> Mapping[str, Any]:
     first ``hold_page``, after the client drove the holds an earlier run left.
 
     Header: ``workspace``, ``jobs`` (selectors), ``state``, ``step`` (lists), ``placement``, ``tree``,
-    ``destination`` (the locator each hold records) and ``destination_id``, as ``job transfer --hold`` takes them.
+    ``destination`` (the locator each hold records) and ``destination_id``, as ``job move --hold`` takes them.
     Nothing is held. A bad request or selector refuses it with nothing changed and clears an earlier selection;
     otherwise the selection replaces an earlier one. While holds of the current selection are made but not reported
     yet, it is refused with nothing changed. The response counts the ``candidates`` named by ``jobs``.
@@ -839,7 +839,7 @@ def _hold_page(request: Request) -> Mapping[str, Any]:
 
     Header: ``limit_candidates`` (looked at), ``limit_holds`` (attempted) and ``limit_members`` (job keys), each
     clamped to this side's maxima; a page also closes at 256 errors and near :data:`_ANSWER_BUDGET`. The first
-    request takes the selection's listing (step 2). The response carries ``holds`` (as ``transfer status --json``
+    request takes the selection's listing (step 2). The response carries ``holds`` (as ``workspace status --json``
     lists them, with their workflows) and ``errors`` (each cut to :data:`_ERROR_LIMIT` characters), the whole answer
     within :data:`_ANSWER_BUDGET` (see :func:`_fit`): what does not fit goes first in the next answer, which holds
     nothing new; ``changed`` (listed jobs left out as changed since the listing), ``remaining`` (selected jobs no page
@@ -958,7 +958,7 @@ def _holds_page(request: Request) -> Mapping[str, Any]:
     request without one (after exhaustion) takes one too. Every request reads that enumeration from the first id
     greater than ``after`` (which need not be one of them), at most 4096 names a request (a name bound elsewhere or gone since the listing
     is passed over), until the page has its holds, job keys or :data:`_ANSWER_BUDGET`. A hold made after the
-    freeze is not seen by it (it belongs to another run). The response carries ``holds`` (as ``transfer status
+    freeze is not seen by it (it belongs to another run). The response carries ``holds`` (as ``workspace status
     --json`` lists them, with their workflows; the whole answer within :data:`_ANSWER_BUDGET`, see :func:`_fit`),
     ``next``: the ``after`` of the next page (the name before the first hold not answered), ``null`` when the
     enumeration is exhausted, which frees it (the next request takes a new one), and the end of the captured
@@ -1340,7 +1340,7 @@ def _send_archive(
 
 
 def _release(request: Request) -> Mapping[str, Any]:
-    """Release holds: ``job transfer --release T ... [--keep [--destination-id ID]] WS``
+    """Release holds: ``job move --release T ... [--keep [--destination-id ID]] WS``
     (:func:`~httk.workflow.workflow_cli._transfer.release_holds`).
 
     Header: ``workspace``, ``transfer_ids``, ``keep`` and ``destination_id`` (the adopting workspace's id away copies

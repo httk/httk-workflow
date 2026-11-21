@@ -283,17 +283,18 @@ def test_the_exchange_adoption_never_installs_workflows(tmp_path: Path, monkeypa
     assert report is not None and report.published and report.missing_workflows
 
 
-def test_transfer_status_reports_the_workflows_of_each_hold(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_workspace_status_lists_a_hold_without_resolving_its_workflows(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     source, source_name = registered(tmp_path, "a")
     caller = workflows(source, tmp_path)
     assert run(tmp_path, "--hold", "--job", job(source, caller), source_name, "far:somewhere") == 0
     capsys.readouterr()
-    from httk.workflow.workflow_cli import transfer_command
+    from httk.workflow.workflow_cli import workspace_command
 
-    assert transfer_command(["status", "--json", source_name], CLIContext("httk", tmp_path)) == 0
-    (hold,) = json.loads(capsys.readouterr().out)["holds"]
-    assert sorted(entry["id"] for entry in hold["workflows"]) == [GIT_ID, "local:caller"]
-    assert _moving.Hold.from_mapping(hold).workflows is not None
+    assert workspace_command(["status", "--json", source_name], CLIContext("httk", tmp_path)) == 0
+    ((hold,),) = (document["transfers"] for document in json.loads(capsys.readouterr().out))
+    assert "workflows" not in hold and _moving.Hold.from_mapping(hold).workflows is None
 
 
 def test_a_destination_s_install_refusal_is_reported_and_gc_sweeps_landings(

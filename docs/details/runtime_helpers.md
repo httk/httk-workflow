@@ -460,7 +460,7 @@ decompressing the directory `sha256sum -c uncompressed.sha256` checks it;
 `read_digest_manifest(directory)` reads it. Each update drops entries whose file
 is gone. A name holding a newline or backslash is compressed but not recorded.
 The manifest is an ordinary payload file, so a job seal covers it; `httk
-workflow seal verify --content` checks the files against it.
+job verify --content` checks the files against it.
 
 ```python
 from httk.workflow.runtime_utils import compress_files

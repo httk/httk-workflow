@@ -192,11 +192,11 @@ job's workflow there, push the jobs waiting to start and run its manager there:
 
 ```console
 $ httk workflow install --workspace kappa:runs 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-$ httk job push kappa:runs
+$ httk push kappa:runs
 $ httk workflow run --workspace kappa:runs --count 4
 ```
 
-`httk job push [SRC] DST` moves every `ready` job of SRC; the SRC left out is
+`httk push [SRC] DST` moves every `ready` job of SRC; the SRC left out is
 the workspace the command runs in, else the default workspace (the per-user
 one is created on first use). SRC keeps an inert *away copy* of each pushed job
 (state `away`; `--no-keep` keeps none) so the jobs stay accounted for:
@@ -204,10 +204,10 @@ one is created on first use). SRC keeps an inert *away copy* of each pushed job
 them, and `httk job recover JOB` returns a job lost on the remote to the state
 it left, to push again. See *Away copies* in {doc}`workflow_cli`.
 
-Workflows travel with the jobs. A transfer (push, pull or `job transfer`, local
+Workflows travel with the jobs. A transfer (push, pull or `job move`, local
 or remote ends, either direction) installs in DST every workflow the moved jobs
 need that DST lacks and SRC has, under the same id, before adopting them: each
-job's effective workflow (after `job request set_workflow`) and the closure of
+job's effective workflow (after `job set workflow=`) and the closure of
 its `[workflow.calls]`. One query asks DST which of them it has; the missing
 store entries then travel as their sources only (`install.json` and
 `package/`, never `builds/`, and `requires` is not checked there), each is
@@ -236,20 +236,20 @@ the implicit state, and `--step` without `--state` selects from every unowned
 state):
 
 ```console
-$ httk job pull kappa:runs
+$ httk pull kappa:runs
 ```
 
-Push and pull are the everyday forms of `httk job transfer SRC DST`, which
+Push and pull are the everyday forms of `httk job move SRC DST`, which
 names both ends and an explicit selection (`--job`, `--state`, `--step`):
 
 ```console
-$ httk job transfer --state succeeded --placement camp kappa:runs default
+$ httk job move --state succeeded --placement camp kappa:runs default
 ```
 
 A transfer holds the jobs on the source, copies them, adopts them at the
 destination and only then releases the hold, so an interrupted transfer is
-finished by running it again or with `httk job transfer --resume`;
-`httk transfer status` lists what a workspace holds. All jobs of one transfer
+finished by running it again or with `httk job move --resume`;
+`httk workspace status` lists what a workspace holds. All jobs of one transfer
 travel together, so the cost is the same whether it moves one job or a thousand:
 a push to a remote workspace is one ssh connection and one remote `httk` start,
 a transfer session (below) that also ships and builds the workflows the
@@ -263,7 +263,7 @@ remote workspace needs its transfer session, so both machines must run the same
 *httk* version (see *The transfer session* below). On a site where
 every Python start is slow, that is what a transfer costs. It reports each step
 on stderr (`-q` silences that). The
-steps and their recovery are in the `job transfer` section of {doc}`workflow_cli`.
+steps and their recovery are in the `job move` section of {doc}`workflow_cli`.
 
 ### The transfer session
 
@@ -291,9 +291,9 @@ source never takes a hold back: a refusal, an unknown outcome or a failure of
 that directory (a full disk) leaves the holds held there for `--resume`.
 
 A push holds and delivers its jobs a page at a time (when it keeps no away
-copies, as `job transfer` without `--keep` and `job push --no-keep`, the next
+copies, as `job move` without `--keep` and `push --no-keep`, the next
 page is held while the current one is delivered, so up to twice `io.workers`
-operations can run on the source; `job push` keeps away copies by default and
+operations can run on the source; `push` keeps away copies by default and
 so does not; see *Paged holds* in {doc}`workflow_cli`). Over the session it first
 asks the destination which of the workflows a page's jobs need it lacks or has
 unbuilt, installs and builds those (once a command per workflow; a failure is
@@ -338,10 +338,10 @@ to a bundle), nothing more is sent: this run's holds in that segment and in the
 segments never sent are taken back, an earlier run's stay held, and the
 segments staged before it (sent, not yet adopted) stay held too.
 Before the first segment, a session that fails while the workflows are installed
-has adopted nothing: the holds stay for `httk job transfer --resume`. An answer that cannot be read, a far side that dies, or a
+has adopted nothing: the holds stay for `httk job move --resume`. An answer that cannot be read, a far side that dies, or a
 segment answered by another workspace than the first stops the push there: that
 segment's holds and every later one's stay held, and running the transfer again
-(or `httk job transfer --resume`) finishes it, reporting what had arrived as
+(or `httk job move --resume`) finishes it, reporting what had arrived as
 already adopted.
 
 Over the session a pull first has the source check and resolve its selection
@@ -370,7 +370,7 @@ a file of it was replaced or changed size while it was read) fails alone and the
 rest of its segment is fetched once more without it. A source that dies or
 answers something else, or a refusal naming no hold (a full quota here, say),
 stops the pull: nothing of that fetch was adopted, its holds and every later one
-stay held there, and no later page is held; `httk job transfer --resume` lists
+stay held there, and no later page is held; `httk job move --resume` lists
 the holds over a new session and drives them (run the transfer again to select
 what was never held). A hold too large to describe in one answer (448 MiB as
 encoded; at about 40 to 60 bytes a job, a tree of several million jobs, more
@@ -378,8 +378,8 @@ than a bundle can hold, see below) fails alone and stays held on the source,
 and its message names the remedy by hand: copy its bundle
 `.httk-workspace/transfers/outgoing/<transfer id>/` from the source to the
 destination's machine, run `httk job adopt BUNDLE` in the destination
-workspace, then `httk job transfer --release TRANSFER_ID REMOTE:WS`; with
-`--keep`, `httk job transfer --release TRANSFER_ID --keep --destination-id ID
+workspace, then `httk job move --release TRANSFER_ID REMOTE:WS`; with
+`--keep`, `httk job move --release TRANSFER_ID --keep --destination-id ID
 REMOTE:WS`, ID being the `workspace_id` that `httk workspace status --json` of
 the destination reports (a hold of a remote source records no destination id,
 and a release without one keeps no away copies). A failed release leaves the
@@ -443,7 +443,7 @@ an answer that large (a page of holds, or the adoption of a tree of about a
 million jobs) takes a few GB of Python objects to read on each side, an accepted
 cost at that scale. A tree whose adoption answer exceeds it (an accepted
 limitation) is still copied and adopted, but its answer cannot be read: the push
-reports an unknown outcome and keeps the hold, and `httk job transfer --resume`
+reports an unknown outcome and keeps the hold, and `httk job move --resume`
 completes it, its second delivery answered "already adopted" (a short answer)
 and the hold released, at the cost of copying the tree a second time; `httk job
 eject` and `httk job adopt` by hand avoid that second copy.
@@ -487,9 +487,9 @@ $ httk workspace init --name scratch local-tree:/tmp/me/httk/scratch
 
 ### Job trees travel together
 
-A child job spawned by another job travels with its parent. `job push` and
-`job pull` always move a root together with its spawned descendants, with
-their placements kept; `job transfer` does so with `--tree` and without it
+A child job spawned by another job travels with its parent. `push` and
+`pull` always move a root together with its spawned descendants, with
+their placements kept; `job move` does so with `--tree` and without it
 refuses a job whose descendants are present. Every descendant must be paused or
 terminal, so a pull of finished work brings a campaign back whole once it is
 done. A root that finished before its children (an `any_terminal`,
@@ -499,9 +499,9 @@ first. A child that should leave alone is detached first, because a child may
 read its parent's files in place (see {doc}`composing_workflows`):
 
 ```console
-$ httk job pull kappa:runs
+$ httk pull kappa:runs
 $ httk job detach CHILD
-$ httk job push --job CHILD kappa:runs
+$ httk push --job CHILD kappa:runs
 ```
 
 ## Mounted filesystem with a separate executor (`mount`)
@@ -556,7 +556,7 @@ against the mounted tree. The remote machine owns the workspace, so every
 ```console
 $ httk workspace init --name runs sigma:/proj/x/users/me/httk/runs
 $ httk workflow install --workspace sigma:runs ./my-workflow
-$ httk job transfer --job JOB default sigma:runs
+$ httk job move --job JOB default sigma:runs
 $ httk workflow run --workspace sigma:runs --count 4
 $ httk workspace status sigma:runs
 ```
@@ -604,7 +604,7 @@ $ httk remote daemon show confined
 $ httk remote daemon start confined --configuration small
 $ httk remote daemon status confined
 $ httk remote daemon status confined --handle MANAGER_HANDLE
-$ httk job request pause --workspace confined:runs --reason 'operator pause' JOB_UUID
+$ httk job pause --workspace confined:runs --reason 'operator pause' JOB_UUID
 $ httk remote daemon cancel confined --handle MANAGER_HANDLE
 $ httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_KEY
 ```
@@ -647,16 +647,18 @@ daemon take-back confined NAME [DESTINATION]`. It is client-only: it renames
 If the name is gone, a manager took it. See {doc}`workspace_daemon` for the job
 lifecycle, rejected bundles, `status.json` and signed job control.
 
-`job request` against a `mount-daemon` workspace sends one signed typed
-command per UUID or UUID-prefix selector. A batch is sequential and
+A request verb (`job cancel`, `pause`, `resume`, `restart`, `set`), and `job
+delete`, `job seal`, `job unseal`, `job detach` and `job eject`, against a
+`mount-daemon` workspace sends one signed typed command per UUID or
+UUID-prefix selector. A batch is sequential and
 non-atomic: earlier selectors may already be queued if a later one fails.
 Selectors must be UUIDs or lowercase UUID prefixes; paths, globs and tags are
-refused. `--force` is refused before any command is sent. Eject destinations
-are relative to the daemon exchange `outbox`. `--operator` selects the local
+refused. `--force` is refused before any command is sent. A `job eject` `DEST`
+is relative to the daemon exchange `outbox` (the outbox itself when omitted). `--operator` selects the local
 identity that signs each command. The daemon executes a command only for an
 exchange root submitted with that signing key, which must also be authorized;
 `--operator` must select the identity that ejected the job.
-`job request` exits 0 when each command is applied or queued, and 1 for a
+The command exits 0 when each command is applied or queued, and 1 for a
 refusal or uncertain result. Each output row includes the resolved job id,
 outcome, internal request id, daemon command id, explanation and observed
 state when available.
@@ -707,7 +709,7 @@ acceptance window and replay rules.
 `uncertain` and unacknowledged calls exit 2. `UNKNOWN` is a valid status and
 does not establish completion. A cancellation acknowledgement does not confirm
 that the job has terminated. Finished jobs appear in the exchange `outbox` on their own.
-For daemon-mediated `job request pause --wait`, the client sends the original
+For daemon-mediated `job pause --wait`, the client sends the original
 pause once, then polls with a fresh signed status request every second until
 the job is paused, the command is refused or uncertain, a terminal state
 supersedes the pause, or the finite nonnegative `--timeout` expires. Passive
@@ -716,7 +718,7 @@ uncertainty, supersession and timeout exit 1.
 
 ### What is refused
 
-Generic `confined:workspace` commands (including `job transfer`), arbitrary
+Generic `confined:workspace` commands (including `job move`), arbitrary
 invocation, and adapter push/pull are refused. Manage workspace configuration at the destination
 through the operator. The older `mount` adapter still uses its separate
 executor as described above and does not gain confinement from this feature.

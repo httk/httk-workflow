@@ -104,15 +104,6 @@ def test_unlock_reaches_every_ancestor_marker_only(tmp_path: Path, capsys: pytes
     assert (v3.find(workspace, chain[1]).path / COPY).is_dir()
 
 
-def test_job_request_unlock_is_the_same_action(tmp_path: Path) -> None:
-    workspace, _installed, ref = _failed(tmp_path)
-    configure_identity()
-    arguments = ["job", "request", "unlock", "--reason", "debugging", ref.job_id]
-    assert command(arguments, CLIContext("httk", workspace.root)) == 0
-    job = v3.find(workspace, ref.job_id)
-    assert v3.state_of(job).unlocked is not None and (job.path / COPY / "run").is_file()
-
-
 def test_mount_daemon_remotes_refuse_unlock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -125,10 +116,6 @@ def test_mount_daemon_remotes_refuse_unlock(
     context = CLIContext("httk", tmp_path)
     assert command(["job", "unlock", "--workspace", "cluster:runs", str(uuid.uuid4())], context) == 2
     assert "the workspace daemon does not carry unlock" in capsys.readouterr().err
-    configure_identity()
-    request = ["job", "request", "unlock", "--workspace", "cluster:runs", "--reason", "r", str(uuid.uuid4())]
-    assert command(request, context) == 2
-    assert "unlock is not carried by the workspace daemon protocol" in capsys.readouterr().err
 
 
 def test_a_parent_not_in_the_workspace_is_reported_and_not_unlocked(
@@ -154,8 +141,8 @@ def test_a_parent_not_in_the_workspace_is_reported_and_not_unlocked(
     ]
 
 
-def test_job_request_unlock_unlocks_the_ancestors_too(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    # A parent failed at its wait on a failed child; the child is debugged through `job request unlock`.
+def test_job_unlock_of_a_child_unlocks_its_parent_too(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # A parent failed at its wait on a failed child; the child is debugged through `job unlock`.
     workspace = v3.workspace(tmp_path / "workspace")
     installed = v3.install(workspace, tmp_path / "demo")
     spawn = {"children": [{"label": "child", "script": {"start": "fail"}}]}
@@ -170,7 +157,7 @@ def test_job_request_unlock_unlocks_the_ancestors_too(tmp_path: Path, capsys: py
     (child,) = v3.state_of(v3.find(workspace, parent.job_id)).children
     child_id = str(child["job_id"])
     configure_identity()
-    request = ["job", "request", "unlock", "--reason", "debugging", child_id]
+    request = ["job", "unlock", "--reason", "debugging", child_id]
     assert command(request, CLIContext("httk", workspace.root)) == 0
     assert capsys.readouterr().out.splitlines()[-1] == f"{parent.job_id}\tunlocked (ancestor)"
 
@@ -221,7 +208,7 @@ def test_set_workflow_of_a_job_running_its_copy_is_refused_before_posting(
     other = v3.install(workspace, tmp_path / "other", name="other")
     assert _unlock(workspace, ref.job_id) == 0
     configure_identity()
-    request = ["job", "request", "set_workflow", "--workflow", other.id, "--reason", "r", ref.job_id]
+    request = ["job", "set", "--reason", "r", ref.job_id, f"workflow={other.id}"]
     assert command(request, CLIContext("httk", workspace.root)) == 2
     assert f"the job runs its own workflow copy at {COPY}/; edit or remove it" in capsys.readouterr().err
     assert not list(workspace.control.glob("requests/*.json"))

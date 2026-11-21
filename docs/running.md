@@ -44,7 +44,7 @@ no placement component may look like a job key (`name--uuid`). Workflows decide
 their own data handling through parameters; the VASP workflows, for example,
 copy a curated set of results into `data/` only with
 `--parameter publish_data=true`. `httk workflow describe NAME` shows what a
-workflow declares before anything is created, and `httk workflow precheck`
+workflow declares before anything is created, and `httk job precheck`
 reports whether the workspace can run its jobs.
 
 A large output of a finished job, a trajectory too big to copy, is handed to
@@ -138,11 +138,11 @@ the workdir, `data/` the results a job committed, and `logs/` its run log.
 Operator requests change a job's course without touching its files:
 
 ```console
-httk job request pause --reason "hold for quota" silicon
-httk job request continue --reason "quota restored" silicon
-httk job request restart --reason "redo this step" silicon
-httk job request cancel --reason "wrong structure" silicon
-httk job request set_budget --max-attempts-per-activation 3 --reason "flaky node" silicon
+httk job pause --reason "hold for quota" silicon
+httk job resume --reason "quota restored" silicon
+httk job restart --reason "redo this step" silicon
+httk job cancel --reason "wrong structure" silicon
+httk job set silicon budget.max_attempts_per_activation=3 --reason "flaky node"
 httk job delete silicon                # terminal or paused jobs only
 ```
 
@@ -175,13 +175,13 @@ succeeded job home:
 
 ```console
 httk workflow install --workspace kappa:runs 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-httk job push kappa:runs
+httk push kappa:runs
 httk workflow run --workspace kappa:runs --count 4
-httk job pull kappa:runs
+httk pull kappa:runs
 ```
 
-`httk job push [SRC] DST` moves every `ready` job (created, waiting to start)
-and `httk job pull SRC [DST]` every `succeeded` one, each root together with
+`httk push [SRC] DST` moves every `ready` job (created, waiting to start)
+and `httk pull SRC [DST]` every `succeeded` one, each root together with
 its children. The end left out is the workspace the command runs in, else the
 default workspace (the per-user one is created on first use). `--job JOB`,
 `--state STATE` or `--step STEP` replaces that implicit state (`--step` without
@@ -189,15 +189,15 @@ default workspace (the per-user one is created on first use). `--job JOB`,
 the selection to one campaign. A root is never split from its children: one
 with children still running (a parent that an `any_terminal`, `any_succeeded`
 or `at_least` join let finish first) is refused and stays until they finish.
-Both are forms of `httk job transfer SRC DST`, the general verb, which needs an
+Both are forms of `httk job move SRC DST`, the general verb, which needs an
 explicit selection and moves a selected job with its descendants only with
 `--tree`.
 
-`job push` keeps an *away copy* of every job it moves: an inert job in the
+`push` keeps an *away copy* of every job it moves: an inert job in the
 state `away` that never runs, is not collected and records where it went.
 `httk job list --state away` shows what you are still waiting for, and
-`job pull` of the finished jobs replaces the copies (`--no-keep` keeps none;
-plain `job transfer` moves, `job transfer --keep` keeps). A job lost on the
+`pull` of the finished jobs replaces the copies (`--no-keep` keeps none;
+plain `job move` moves, `job move --keep` keeps). A job lost on the
 remote is returned to the state it left with `httk job recover JOB` (or
 `--all`), to push again; nothing checks that it is dead there, so recovering
 one that still runs and pushing it elsewhere runs it twice. See
@@ -205,8 +205,8 @@ one that still runs and pushing it elsewhere runs it twice. See
 
 A transfer holds the jobs on the source, copies them to the destination,
 adopts them there and only then releases the hold; an interrupted transfer is
-finished by running it again or with `httk job transfer --resume`, and
-`httk transfer status` lists the holds.
+finished by running it again or with `httk job move --resume`, and
+`httk workspace status` lists the holds.
 
 Without a registered workspace at either end, `job eject` and `job adopt` move
 jobs through a plain directory:
@@ -271,9 +271,10 @@ and projects are sealed on top, bottom-up, and unsealed top-down:
 
 ```console
 httk job seal silicon                  # a succeeded job that has no seal yet
+httk job verify silicon                # check it against its seal
 httk workspace seal
 httk project seal
-httk seal verify
+httk project verify
 httk project unseal
 ```
 

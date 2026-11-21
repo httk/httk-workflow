@@ -187,9 +187,7 @@ def test_job_request_cancel_outcomes_match_the_serial_code(
 
     monkeypatch.setattr(job_cli, "_selected_jobs", moving_after_selection)
     with _held(workspace, jobs["held"]):
-        status = command(
-            ["job", "request", "cancel", "--workspace", name, "--reason", "parity", *chosen], _context(tmp_path)
-        )
+        status = command(["job", "cancel", "--workspace", name, "--reason", "parity", *chosen], _context(tmp_path))
         output = capsys.readouterr()
     observed = {
         "status": status,
@@ -264,7 +262,7 @@ def test_job_delete_outcomes_match_the_serial_code(
 
 
 _UNKNOWN_PARITY: dict[str, object] = {
-    'request': {'status': 2, 'stdout': [], 'state': 'ready/p500', 'requests_left': 0},
+    'cancel': {'status': 2, 'stdout': [], 'state': 'ready/p500', 'requests_left': 0},
     'delete': {'status': 2, 'stdout': [], 'state': 'ready/p500', 'requests_left': 0},
 }
 
@@ -274,7 +272,7 @@ def test_an_unknown_selector_posts_nothing(tmp_path: Path, capsys) -> None:
     ready = _job(tmp_path, workspace, "par-known")
     unknown = "00000000-0000-4000-8000-000000000000"
     observed: dict[str, object] = {}
-    for verb in (["request", "cancel", "--reason", "parity"], ["delete", "--yes"]):
+    for verb in (["cancel", "--reason", "parity"], ["delete", "--yes"]):
         try:
             status: object = command(["job", *verb, "--workspace", name, ready.job_id, unknown], _context(tmp_path))
         except ValueError as exc:
@@ -356,7 +354,7 @@ def test_a_stale_job_costs_at_most_one_exhaustive_locate(
 
     monkeypatch.setattr(job_cli, "_resolve_selectors", moving_after_selection)
     chosen = [ref.job_id for ref in refs]
-    assert command(["job", "request", "cancel", "--workspace", name, "--reason", "r", *chosen], _context(tmp_path)) == 0
+    assert command(["job", "cancel", "--workspace", name, "--reason", "r", *chosen], _context(tmp_path)) == 0
     assert capsys.readouterr().out.count("\tapplied\t") == 6
     assert {job_id: count for job_id, count in exhaustive_locates.items() if count} == dict.fromkeys(stale, 1)
     for ref in refs:
@@ -461,7 +459,7 @@ def test_a_job_request_verifies_each_signature_once(tmp_path: Path, capsys, veri
     refs = [_job(tmp_path, workspace, f"once-{number}") for number in range(3)]
     verifications.clear()
     chosen = [ref.job_id for ref in refs]
-    assert command(["job", "request", "pause", "--workspace", name, "--reason", "r", *chosen], _context(tmp_path)) == 0
+    assert command(["job", "pause", "--workspace", name, "--reason", "r", *chosen], _context(tmp_path)) == 0
     assert capsys.readouterr().out.count("\tapplied\t") == 3
     assert len(verifications) == 3
 
@@ -487,7 +485,7 @@ def test_requests_are_posted_and_served_in_chunks(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(removal, "_serve_one", serving)
     monkeypatch.setattr(removal, "_CHUNK_JOBS", 2)
     chosen = [ref.job_id for ref in refs]
-    assert command(["job", "request", "cancel", "--workspace", name, "--reason", "r", *chosen], _context(tmp_path)) == 0
+    assert command(["job", "cancel", "--workspace", name, "--reason", "r", *chosen], _context(tmp_path)) == 0
     assert events == ["post", "post", "serve", "serve"] * 2 + ["post", "serve"]
     assert capsys.readouterr().out.count("\tapplied\t") == 5
     events.clear()
@@ -917,7 +915,7 @@ def test_the_fsync_sequence_of_one_job_is_unchanged(tmp_path: Path, fsyncs: list
     ref = _job(tmp_path, workspace, "seq-1")
     context = _context(tmp_path)
     fsyncs.clear()
-    assert command(["job", "request", "cancel", "--workspace", name, "--reason", "r", ref.job_id], context) == 0
+    assert command(["job", "cancel", "--workspace", name, "--reason", "r", ref.job_id], context) == 0
     cancel = _normalized(fsyncs, workspace.root)
     fsyncs.clear()
     assert command(["job", "delete", "--workspace", name, "--yes", ref.job_id], context) == 0
@@ -1075,20 +1073,17 @@ def test_one_command_lists_its_selection_once(tmp_path: Path, monkeypatch: pytes
 
     monkeypatch.setattr(_reading, "iter_jobs", listing)
     monkeypatch.setattr(_kernel, "locate", locating)
-    # --state selection, a full-id selector and the ancestors of an unlock, in one command.
-    argv = ["job", "request", "unlock", "--workspace", name, "--reason", "r", "--state", "ready"]
+    # --state selection and a full-id selector in one command.
+    argv = ["job", "pause", "--workspace", name, "--reason", "r", "--state", "ready"]
     argv += ["--placement", "lists/children", child.job_id]
     assert command(argv, _context(tmp_path)) == 0
     output = capsys.readouterr().out
     assert output.count("\tapplied\t") == 4  # the child and the three others
-    assert f"{parent.job_id}\tunlocked (ancestor)" in output  # and, marker only, the parent
-    # One listing of the --state selection, shared with serving; the parent, outside it, is probed once at its
-    # placement (as before) and then known.
+    # One listing of the --state selection, shared with serving; nothing is probed outside it.
     assert listings == [((("ready",),), {"placement_prefix": "lists/children"})]
-    assert locates == [(parent.job_id, False)]
-    assert {ref.job_id for ref in others} | {child.job_id, parent.job_id} <= {
-        line.split("\t")[0] for line in output.splitlines()
-    }
+    assert locates == []
+    assert {ref.job_id for ref in others} | {child.job_id} == {line.split("\t")[0] for line in output.splitlines()}
+    assert v3.find(workspace, parent.job_id).state == "ready"
 
 
 def test_a_state_selection_traverses_only_its_states_and_placement(
@@ -1109,7 +1104,7 @@ def test_a_state_selection_traverses_only_its_states_and_placement(
     blocked = workspace.jobs / "failed"
     blocked.chmod(0)  # an unrelated, unreadable state must not matter
     try:
-        argv = ["job", "request", "cancel", "--workspace", name, "--reason", "r", "--state", "ready"]
+        argv = ["job", "cancel", "--workspace", name, "--reason", "r", "--state", "ready"]
         assert command([*argv, "--placement", "target"], _context(tmp_path)) == 0
     finally:
         blocked.chmod(0o755)

@@ -267,7 +267,7 @@ class Hold:
         )
 
     def as_mapping(self, now: float | None = None) -> dict[str, object]:
-        """Return the hold as ``transfer status --json`` and ``job eject --hold --json`` print it.
+        """Return the hold as ``workspace status --json`` and ``job eject --hold --json`` print it.
 
         :param now: The time its age is measured against; the current time by default.
         :return: A fresh mapping.

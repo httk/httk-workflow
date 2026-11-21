@@ -15,7 +15,7 @@ from httk.workflow.errors import WorkflowError
 from httk.workflow.removal import serve_requests
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import command
-from test_cli_job_request import _context, _job, _new_workspace, _request_args, _requests
+from test_cli_job_request import _context, _job, _new_workspace, _request_args, _requests, _set_args
 
 
 @pytest.fixture(autouse=True)
@@ -57,12 +57,7 @@ def test_cancel_continue_override_and_detach_apply_without_a_manager(tmp_path: P
     capsys.readouterr()
     assert command(_request_args(name, ref.job_id), _context(tmp_path)) == 0
     capsys.readouterr()
-    assert (
-        command(
-            _request_args(name, ref.job_id, action="override_step") + ["--override-step", "start"], _context(tmp_path)
-        )
-        == 0
-    )
+    assert command(_set_args(name, ref.job_id, "step=start"), _context(tmp_path)) == 0
     capsys.readouterr()
     assert command(_request_args(name, ref.job_id, action="cancel"), _context(tmp_path)) == 0
     capsys.readouterr()
@@ -82,9 +77,9 @@ def test_cancel_continue_override_and_detach_apply_without_a_manager(tmp_path: P
         "spawn_id": str(uuid4()),
     }
     child = v3.submit_mapping(workspace, child_mapping)
-    assert command(_request_args(name, child.job_id, action="detach"), _context(tmp_path)) == 0
+    assert command(["job", "detach", "--workspace", name, child.job_id], _context(tmp_path)) == 0
     output = capsys.readouterr().out
-    assert "\tapplied\t" in output
+    assert output == f"{child.job_id}\tdetached\n"  # applied now: `job detach` prints its concise line
     detached = _kernel.locate(workspace, child.job_id, placement_hint=child.placement, exhaustive=True)
     assert detached is not None
     doc, _damage = read_state_unowned(detached.path / "state.json")
@@ -307,7 +302,7 @@ def test_failed_seal_and_eject_are_reported_as_refused_with_jobs_returned(
     assert command(["job", "unseal", "--workspace", name, "--yes", sealed.job_id], _context(tmp_path)) == 0
     capsys.readouterr()
     monkeypatch.setattr(seals, "seal_payload", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("bad payload")))
-    assert command(_request_args(name, sealed.job_id, action="seal"), _context(tmp_path)) == 1
+    assert command(["job", "seal", "--workspace", name, sealed.job_id], _context(tmp_path)) == 1
     assert "\trefused\tbad payload" in capsys.readouterr().out
     assert v3.find(workspace, sealed.job_id).state == "succeeded"
 
@@ -319,14 +314,13 @@ def test_failed_seal_and_eject_are_reported_as_refused_with_jobs_returned(
     destination.mkdir()
     (destination / ejected.job_key).mkdir()
     (destination / ejected.job_key / "occupied").write_text("occupied", encoding="utf-8")
-    assert (
-        command(
-            _request_args(name, ejected.job_id, action="eject") + ["--destination", str(destination)],
-            _context(tmp_path),
-        )
-        == 1
+    # `job eject` ejects an unowned job itself; an eject request (as a workspace daemon or an owner applies it) is
+    # served here as the CLI serves every request it posts.
+    published = job_cli.publish_job_requests(
+        workspace, [v3.find(workspace, ejected.job_id)], action="eject", reason="r", destination=str(destination)
     )
-    assert "\trefused\teject failed" in capsys.readouterr().out
+    (outcome,) = serve_requests(workspace, published)
+    assert (outcome.status, outcome.explanation.startswith("eject failed")) == ("refused", True)
     assert _kernel.locate(workspace, ejected.job_id, placement_hint=ejected.placement, exhaustive=True) is not None
     assert not _requests(workspace)
 

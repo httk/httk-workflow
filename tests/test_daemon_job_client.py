@@ -240,7 +240,6 @@ def test_changed_reason_retry_is_invalid_cli_input_before_any_publish(
     result = command(
         [
             "job",
-            "request",
             "cancel",
             "--workspace",
             "cluster:runs",
@@ -268,14 +267,52 @@ def test_a_mount_daemon_eject_may_omit_the_destination(
     monkeypatch.setattr(job_cli, "_resolve_binding", lambda *_args, **_kwargs: (binding, None))
     monkeypatch.setattr(job_cli, "resolve_remote", lambda *_args, **_kwargs: SimpleNamespace(bundle=bundle))
     monkeypatch.setattr(job_cli, "_resolve_request_identity", lambda _selector: identity)
-    argv = ["job", "request", "eject", "--workspace", "cluster:runs", "--reason", "return it", JOB_ID]
+    argv = ["job", "eject", "--workspace", "cluster:runs", JOB_ID]
     if destination is not None:
-        argv.append(f"--destination={destination}")
+        argv.append(destination)
 
     assert command(argv, CLIContext("httk", bundle.parent)) == 0
     capsys.readouterr()
     # Omitted, the daemon ejects into the outbox root.
-    assert [(request.action, request.destination) for request in seen] == [("eject", destination)]
+    assert [(request.action, request.destination, request.reason) for request in seen] == [
+        ("eject", destination, "httk job eject")
+    ]
+
+
+def test_mount_daemon_delete_and_seal_are_signed_job_requests(
+    remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bundle, _endpoint, identity, response_seed = remote
+    seen = _mock_adapter(monkeypatch, response_seed, [("applied", None), ("queued", None)])
+    binding = WorkspaceBinding("cluster:runs", "cluster", None)
+    monkeypatch.setattr(job_cli, "_resolve_binding", lambda *_args, **_kwargs: (binding, None))
+    monkeypatch.setattr(job_cli, "resolve_remote", lambda *_args, **_kwargs: SimpleNamespace(bundle=bundle))
+    monkeypatch.setattr(job_cli, "_resolve_request_identity", lambda _selector: identity)
+    context = CLIContext("httk", bundle.parent)
+
+    assert command(["job", "delete", "--yes", "--workspace", "cluster:runs", JOB_ID], context) == 0
+    assert command(["job", "seal", "--workspace", "cluster:runs", JOB_ID], context) == 0
+    rows = capsys.readouterr().out.splitlines()
+    assert [row.split("\t")[1] for row in rows] == ["applied", "queued"]
+    assert [(request.action, request.reason) for request in seen] == [
+        ("delete", "httk job delete"),
+        ("seal", "httk job seal"),
+    ]
+
+
+def test_a_mount_daemon_seal_carries_its_request_id(remote, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    bundle, _endpoint, identity, response_seed = remote
+    seen = _mock_adapter(monkeypatch, response_seed, [("applied", None)])
+    binding = WorkspaceBinding("cluster:runs", "cluster", None)
+    monkeypatch.setattr(job_cli, "_resolve_binding", lambda *_args, **_kwargs: (binding, None))
+    monkeypatch.setattr(job_cli, "resolve_remote", lambda *_args, **_kwargs: SimpleNamespace(bundle=bundle))
+    monkeypatch.setattr(job_cli, "_resolve_request_identity", lambda _selector: identity)
+    command_id = "c" * 32
+
+    argv = ["job", "seal", "--workspace", "cluster:runs", "--request-id", command_id, JOB_ID]
+    assert command(argv, CLIContext("httk", bundle.parent)) == 0
+    assert f"\t{command_id}\t" in capsys.readouterr().out
+    assert [(request.action, request.request_id) for request in seen] == [("seal", command_id)]
 
 
 def test_pause_wait_polls_with_fresh_signed_command_status(remote, monkeypatch: pytest.MonkeyPatch) -> None:

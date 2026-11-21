@@ -208,7 +208,7 @@ def test_set_workflow_refuses_an_embedded_job(tmp_path: Path, capsys: pytest.Cap
     message = "an embedded workflow cannot be switched; unlock the job and edit workflow/ instead"
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, workspace.root, f"embedded-{os.getpid()}")
-    argv = ["job", "request", "set_workflow", "--workspace", name, "--reason", "r", "--workflow", other.id, ref.job_id]
+    argv = ["job", "set", "--workspace", name, "--reason", "r", f"workflow={other.id}", ref.job_id]
     assert command(argv, context) == 2
     assert message in capsys.readouterr().err
     path = _requests.post(

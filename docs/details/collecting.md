@@ -527,9 +527,9 @@ Each `--raw` line is exactly `JobRecord.as_mapping()`, and
 to a file, shipped and read back by the storing process.
 
 Jobs that ran on a remote are collected the same way once home:
-`httk job pull REMOTE:NAME` moves every succeeded job into the local
+`httk pull REMOTE:NAME` moves every succeeded job into the local
 workspace (the enclosing one, else the default) in its terminal state, and
-`httk job transfer --job JOB REMOTE:NAME default` moves single jobs whatever
+`httk job move --job JOB REMOTE:NAME default` moves single jobs whatever
 their state; collect cannot tell them from local jobs. See {doc}`/details/workflow_cli`.
 
 ### Summary line and exit codes
@@ -803,7 +803,7 @@ installed workflow package in the workspace, after checking that its tree
 digest still matches the job's `runner_provenance` (a workflow reinstalled or
 modified since the job ran is refused; a reinstall's refusal names both digests
 and the remedies: reinstalling the tree it ran with, or rerunning the job on
-the installed tree with `httk job request restart` (`continue --tree` when it
+the installed tree with `httk job restart` (`job resume --tree` when it
 failed waiting on failed children), a succeeded job by deleting it and creating
 it again); refusals degrade only that job. See
 {doc}`/details/workflow_packages` for the trust tiers and package hook

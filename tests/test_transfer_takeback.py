@@ -102,9 +102,9 @@ def assert_kept_held(
         assert outcome["status"] == "failed" and message.startswith("refused before anything was adopted: ")
         assert f"stays held on {near.root}, because an earlier delivery may already have adopted it" in message
         assert f"httk job show` on cluster:{far_name}" in message
-        assert f"httk job transfer --resume {near.root} cluster:{far_name}" in message
+        assert f"httk job move --resume {near.root} cluster:{far_name}" in message
         kept = f" --keep --destination-id {far.workspace_id}" if keep else ""
-        assert f"if the jobs are there, release with `httk job transfer --release {transfer_id}{kept} {near.root}`" in (
+        assert f"if the jobs are there, release with `httk job move --release {transfer_id}{kept} {near.root}`" in (
             message
         )
         hold = near.control / "transfers" / "outgoing" / transfer_id

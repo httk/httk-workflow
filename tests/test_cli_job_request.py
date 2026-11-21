@@ -20,6 +20,7 @@ import v3_helpers as v3
 from httk.workflow import TaskManager, Workspace, _kernel, _store
 from httk.workflow._job import JobDefinition
 from httk.workflow._state import StateDoc, encode_state, read_state_unowned
+from httk.workflow.adapters import REMOTE_JOB_REQUEST_ENVELOPES_COMMAND
 from httk.workflow.registry import create_workspace
 from httk.workflow.removal import serve_requests
 from httk.workflow.workflow_cli import _job as job_cli
@@ -72,7 +73,14 @@ def _applied(workspace: Workspace, job_id: str) -> list[dict[str, object]]:
 
 
 def _request_args(workspace_name: str, *job_ids: str, action: str = "pause") -> list[str]:
-    return ["job", "request", action, "--workspace", workspace_name, "--reason", "test request", *job_ids]
+    """The request verb posting *action* (``continue`` is ``job resume``) for *job_ids*."""
+
+    verb = "resume" if action == "continue" else action
+    return ["job", verb, "--workspace", workspace_name, "--reason", "test request", *job_ids]
+
+
+def _set_args(workspace_name: str, *words: str) -> list[str]:
+    return ["job", "set", "--workspace", workspace_name, "--reason", "test request", *words]
 
 
 def test_repeatable_job_ids_post_one_request_and_path_each(tmp_path: Path, capsys) -> None:
@@ -103,7 +111,7 @@ def test_job_request_uses_default_workspace_with_one_job_id(tmp_path: Path, caps
     workspace = Workspace.default()
     job_id = _job(tmp_path, workspace, "default-workspace").job_id
 
-    assert command(["job", "request", "pause", "--reason", "default workspace", job_id], _context(tmp_path)) == 0
+    assert command(["job", "pause", "--reason", "default workspace", job_id], _context(tmp_path)) == 0
     capsys.readouterr()
     assert v3.find(workspace, job_id).state == "paused"
 
@@ -134,14 +142,10 @@ def test_job_request_step_narrows_ids_and_state_and_alone_selects_unowned_jobs(t
     assert "no jobs selected" in capsys.readouterr().err
     assert command([*_request_args(workspace_name), "--state", "ready", "--step", "start"], context) == 0
     assert states() == ["paused", "cancelled", "paused"]
-    # The pre-rename spelling of override_step's target names the option it lacks, before --step selects nothing.
-    argv = [*_request_args(workspace_name, late.job_id, action="override_step"), "--step", "start"]
-    assert command(argv, context) == 2
-    assert "--override-step is required by, and only valid with, the override_step action" in capsys.readouterr().err
-    # With JOB_ID, --step selects no listing for --placement to narrow.
+    # With JOB, --step selects no listing for --placement to narrow.
     argv = [*_request_args(workspace_name, late.job_id), "--step", "finish", "--placement", "late"]
     assert command(argv, context) == 2
-    assert "--placement narrows --state, or --step without JOB_ID" in capsys.readouterr().err
+    assert "--placement narrows --state, or --step without JOB" in capsys.readouterr().err
 
 
 def test_request_id_is_rejected_for_local_jobs(tmp_path: Path, capsys) -> None:
@@ -159,65 +163,77 @@ def test_request_id_is_rejected_for_local_jobs(tmp_path: Path, capsys) -> None:
 
 
 @pytest.mark.parametrize(
-    ("action", "options", "message"),
+    ("verb", "words", "message"),
     [
-        (
-            "cancel",
-            ["--override-step", "start"],
-            "--override-step is required by, and only valid with, the override_step action",
-        ),
-        ("set_priority", [], "--priority is required by"),
-        (
-            "set_budget",
-            [],
-            "one of --max-attempts-per-activation, --max-total-attempts, --max-activations is required by",
-        ),
-        ("cancel", ["--max-activations", "2"], "only valid with, the set_budget action"),
-        ("set_budget", ["--max-activations", "0"], "an integer of at least 1 or 'unlimited'"),
-        ("eject", [], "--destination is required by"),
-        ("pause", ["--force"], "--force applies only to"),
-        ("pause", ["--tree"], "--tree applies only to the continue action"),
-        ("restart", ["--tree"], "--tree applies only to the continue action"),
+        ("cancel", ["--priority", "3"], "unrecognized arguments: --priority"),
+        ("pause", ["--force"], "unrecognized arguments: --force"),
+        ("pause", ["--tree"], "unrecognized arguments: --tree"),
+        ("restart", ["--tree"], "unrecognized arguments: --tree"),
+        ("cancel", ["--wait"], "unrecognized arguments: --wait"),
+        ("set", [], "job set needs at least one KEY=VALUE pair: workflow, budget.max_attempts_per_activation"),
+        ("set", ["budget.max_activations=0"], "an integer of at least 1 or 'unlimited'"),
+        ("set", ["priority=high"], "priority must be an integer, not 'high'"),
+        ("set", ["priority=1", "priority=2"], "priority is given twice"),
+        ("set", ["priority=3", "--force"], "--force and --keep-budget apply to step="),
+        ("set", ["priority=3", "--keep-budget"], "--force and --keep-budget apply to step="),
     ],
 )
-def test_job_request_options_belong_to_their_actions(
-    tmp_path: Path, capsys, action: str, options: list[str], message: str
+def test_request_verbs_take_only_their_own_options(
+    tmp_path: Path, capsys, verb: str, words: list[str], message: str
 ) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
     job_id = _job(tmp_path, workspace, "options").job_id
 
-    assert command([*_request_args(workspace_name, job_id, action=action), *options], _context(tmp_path)) == 2
+    argv = ["job", verb, "--workspace", workspace_name, job_id, *words]
+    assert command(argv, _context(tmp_path)) == 2
     assert message in capsys.readouterr().err
     assert not _requests(workspace)
+    assert v3.find(workspace, job_id).state == "ready"
 
 
-def test_job_request_carries_the_action_options(tmp_path: Path, capsys) -> None:
+def test_job_set_refuses_an_unknown_key_naming_the_valid_ones(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    job_id = _job(tmp_path, workspace, "options").job_id
+    job_id = _job(tmp_path, workspace, "unknown-key").job_id
 
-    assert (
-        command(
-            [*_request_args(workspace_name, job_id, action="set_priority"), "--priority", "700"], _context(tmp_path)
-        )
-        == 0
-    )
-    assert (
-        command(
-            [*_request_args(workspace_name, job_id, action="eject"), "--destination", "relative/destination"],
-            _context(tmp_path),
-        )
-        == 1
-    )
+    assert command(_set_args(workspace_name, job_id, "colour=red", "priority=3"), _context(tmp_path)) == 2
+    err = capsys.readouterr().err
+    assert "usage: httk job set" in err
+    assert "unknown key 'colour' in 'colour=red' (valid keys: workflow, budget.max_attempts_per_activation, " in err
+    assert "budget.max_activations, priority, step)" in err
+    assert not _requests(workspace) and v3.find(workspace, job_id).priority != 3
+
+
+def test_job_set_posts_one_request_per_kind_in_order_and_one_budget_request(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_id = _job(tmp_path, workspace, "mixed").job_id
+
+    words = ["priority=700", "budget.max_activations=4", job_id, "budget.max_attempts_per_activation=unlimited"]
+    assert command(_set_args(workspace_name, *words), _context(tmp_path)) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2 and all("\tapplied\t" in line for line in lines)
+    applied = _applied(workspace, job_id)
+    assert [entry["action"] for entry in applied] == ["set_budget", "set_priority"]
+    assert all(entry["reason"] == "test request" for entry in applied)
+    found = v3.find(workspace, job_id)
+    assert found.priority == 700
+    assert v3.state_of(found).budget_override == {"maximum_attempts_per_activation": None, "maximum_activations": 4}
+
+
+def test_job_set_records_its_command_as_the_default_reason(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_id = _job(tmp_path, workspace, "reason").job_id
+
+    assert command(["job", "set", "-w", workspace_name, "priority=9", job_id], _context(tmp_path)) == 0
+    assert command(["job", "pause", "-w", workspace_name, job_id], _context(tmp_path)) == 0
     capsys.readouterr()
-    assert v3.find(workspace, job_id).priority == 700
-    assert not _requests(workspace)
+    assert [entry["reason"] for entry in _applied(workspace, job_id)] == ["httk job set", "httk job pause"]
 
 
 def test_set_budget_records_the_given_limits_and_unlimited_as_null(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
     job_id = _job(tmp_path, workspace, "budget").job_id
-    argv = [*_request_args(workspace_name, job_id, action="set_budget"), "--max-attempts-per-activation", "unlimited"]
-    assert command([*argv, "--max-activations", "4"], _context(tmp_path)) == 0
+    words = [job_id, "budget.max_attempts_per_activation=unlimited", "budget.max_activations=4"]
+    assert command(_set_args(workspace_name, *words), _context(tmp_path)) == 0
     capsys.readouterr()
     doc = v3.state_of(v3.find(workspace, job_id))
     assert doc.budget_override == {"maximum_attempts_per_activation": None, "maximum_activations": 4}
@@ -579,12 +595,55 @@ def test_wait_timeout_names_pending_job_and_keeps_request(tmp_path: Path, capsys
     assert _requests(workspace)
 
 
-def test_wait_is_rejected_for_non_pause_action(tmp_path: Path, capsys) -> None:
+@pytest.mark.parametrize(
+    ("verb", "start", "end"),
+    [("cancel", "ready", "cancelled"), ("pause", "ready", "paused"), ("resume", "paused", "ready")],
+)
+def test_each_request_verb_applies_its_action_locally(tmp_path: Path, capsys, verb: str, start: str, end: str) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
-    job_id = _job(tmp_path, workspace, "cancel").job_id
+    job_id = _job(tmp_path, workspace, verb).job_id
+    if start == "paused":
+        assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 0
+    assert v3.find(workspace, job_id).state == start
 
-    assert command(_request_args(workspace_name, job_id, action="cancel") + ["--wait"], _context(tmp_path)) == 2
-    assert "--wait is only valid with the pause action" in capsys.readouterr().err
+    assert command(["job", verb, "-w", workspace_name, job_id], _context(tmp_path)) == 0
+    assert "\tapplied\t" in capsys.readouterr().out
+    assert v3.find(workspace, job_id).state == end
+    assert _applied(workspace, job_id)[-1]["reason"] == f"httk job {verb}"
+
+
+@pytest.mark.parametrize(
+    ("argv", "action", "options"),
+    [
+        (["job", "cancel"], "cancel", []),
+        (["job", "pause"], "pause", []),
+        (["job", "resume", "--keep-budget"], "continue", ["--keep-budget"]),
+        (["job", "restart", "--force"], "restart", ["--force"]),
+        (["job", "set", "step=relax", "--keep-budget"], "override_step", ["--override-step=relax", "--keep-budget"]),
+        (["job", "set", "workflow=demo@v1"], "set_workflow", ["--workflow=demo@v1"]),
+    ],
+)
+def test_request_verbs_forward_their_action_to_a_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], action: str, options: list[str]
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_adapter(_bundle: object, _verb: str, payload: dict[str, list[str]], **_options: object) -> dict:
+        calls.append(payload["argv"])
+        return {"returncode": 3, "stderr": "stop"}
+
+    binding = job_cli.WorkspaceBinding("host:ws", "host", None)
+    monkeypatch.setattr(job_cli, "_resolve_binding", lambda *_args: (binding, None))
+    monkeypatch.setattr(job_cli, "resolve_remote", lambda *_args, **_kwargs: argparse.Namespace(bundle=tmp_path))
+    monkeypatch.setattr(job_cli, "read_metadata", lambda _bundle: {"kind": "ssh"})
+    monkeypatch.setattr(job_cli, "run_adapter", fake_adapter)
+    job_id = str(uuid.uuid4())
+
+    assert command([*argv, "--workspace", "host:ws", job_id], _context(tmp_path)) == 2
+    (sent,) = calls
+    assert sent[:4] == [*REMOTE_JOB_REQUEST_ENVELOPES_COMMAND, action]
+    assert "--workspace=ws" in sent and f"--reason=httk job {argv[1]}" in sent and sent[-1] == job_id
+    assert all(option in sent for option in options)
 
 
 def _mapping(tmp_path: Path, workspace: Workspace, tag: str) -> dict[str, object]:
@@ -685,7 +744,7 @@ def test_continue_notes_the_children_that_would_fail_a_reopened_wait(tmp_path: P
     assert command(_request_args(workspace_name, parent.job_id, action="continue"), _context(tmp_path)) == 0
     err = capsys.readouterr().err
     assert f"note: {child.job_key} is still failed; the reopened wait of {parent.job_key} fails again" in err
-    assert "continue --tree also resumes failed descendants" in err
+    assert "job resume --tree also resumes failed descendants" in err
     assert f"note: ghost--{ghost} was not found at its placement" in err
     assert v3.find(workspace, parent.job_id).state == "waiting"
     assert v3.find(workspace, child.job_id).state == "failed"
@@ -702,14 +761,6 @@ def test_restart_is_an_action_and_takes_force(tmp_path: Path, capsys) -> None:
     assert "\tapplied\t" in capsys.readouterr().out
     restarted = v3.find(workspace, parent.job_id)
     assert restarted.state == "ready" and v3.state_of(restarted).join is None
-
-
-def test_job_request_help_lists_restart_and_tree_only_on_request(tmp_path: Path, capsys) -> None:
-    assert command(["job", "request", "--help"], _context(tmp_path)) == 0
-    out = capsys.readouterr().out
-    assert "continue, restart, override_step" in out and "--tree" in out
-    assert command(["job", "request-envelopes", "--help"], _context(tmp_path)) == 0
-    assert "--tree" in capsys.readouterr().out
 
 
 def test_continue_tree_stops_at_a_descendant_that_does_not_resume(tmp_path: Path, capsys) -> None:
@@ -730,7 +781,7 @@ def test_continue_tree_stops_at_a_descendant_that_does_not_resume(tmp_path: Path
     for ref in (child, parent):
         assert (
             f"not posted: {ref.job_key} (an earlier request in the tree was applied but left the job failed; "
-            "resolve it and rerun continue --tree)"
+            "resolve it and rerun job resume --tree)"
         ) in captured.err
     assert [v3.find(workspace, ref.job_id).state for ref in (leaf, child, parent)] == ["failed"] * 3
     assert not _requests(workspace)
@@ -779,14 +830,6 @@ def test_continue_tree_restores_budgets_and_forwards_keep_budget(
     assert seen == [True, True, True]
 
 
-def test_keep_budget_applies_only_to_revivals(tmp_path: Path, capsys) -> None:
-    workspace, workspace_name = _new_workspace(tmp_path)
-    job_id = _job(tmp_path, workspace, "keep").job_id
-    assert command([*_request_args(workspace_name, job_id), "--keep-budget"], _context(tmp_path)) == 2
-    assert "--keep-budget applies only to the continue, restart and override_step actions" in capsys.readouterr().err
-    assert not _requests(workspace)
-
-
 def test_continue_tree_notes_the_children_it_does_not_resume(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
     tree = [_mapping(tmp_path, workspace, tag) for tag in ("failed-child", "cancelled-child", "parent")]
@@ -820,7 +863,7 @@ def test_remote_envelopes_note_a_failed_child_and_suggest_tree(tmp_path: Path, c
     assert command(argv, _context(tmp_path)) == 0
     err = capsys.readouterr().err
     assert f"note: {child.job_key} is still failed; the reopened wait of {parent.job_key} fails again" in err
-    assert "continue --tree also resumes failed descendants" in err
+    assert "job resume --tree also resumes failed descendants" in err
 
 
 def test_continue_notes_a_held_child_and_tree_does_not_expand_it(tmp_path: Path, capsys) -> None:
@@ -875,12 +918,12 @@ def test_restart_refuses_a_job_whose_rerun_spawn_reuses_a_failed_or_cancelled_ch
     assert (
         f"error: x {child.job_key} is {shown}; a restart reruns the spawning step, which reuses it\n"
         f"resume failed descendants and the parent with "
-        f"'httk job request continue --tree --reason TEXT {parent.job_key}'; delete a child with 'httk job delete' "
+        f"'httk job resume --tree {parent.job_key}'; delete a child with 'httk job delete' "
         "to have the step create a fresh one; or pass --force to restart anyway\n"
     ) == captured.err
     assert v3.find(workspace, parent.job_id).state == "failed"
     # --state selections are checked too.
-    argv = ["job", "request", "restart", "--workspace", workspace_name, "--reason", "r", "--state", "failed"]
+    argv = ["job", "restart", "--workspace", workspace_name, "--reason", "r", "--state", "failed"]
     assert command(argv, _context(tmp_path)) == 1
     assert "a restart reruns the spawning step" in capsys.readouterr().err and not _requests(workspace)
 
@@ -1001,7 +1044,7 @@ def test_remote_tree_envelopes_admit_only_extra_continues_and_need_every_selecto
     arguments = _remote_tree_arguments(parent)
 
     assert job_cli._validate_remote_envelopes(_envelopes_document(continued), arguments, operator) == continued
-    assert capsys.readouterr().err == f"note: continue --tree also resumes tag--{extra}\n"
+    assert capsys.readouterr().err == f"note: job resume --tree also resumes tag--{extra}\n"
     # The far side must claim the expansion, and without --tree the count stays strict.
     with pytest.raises(ValueError, match="valid request-envelopes document"):
         job_cli._validate_remote_envelopes(_envelopes_document(continued, tree=False), arguments, operator)
@@ -1050,7 +1093,7 @@ def test_mount_daemon_remotes_refuse_continue_tree(tmp_path: Path, capsys, monke
     monkeypatch.setattr(job_cli, "_resolve_binding", lambda *_args: (binding, None))
     monkeypatch.setattr(job_cli, "resolve_remote", lambda *_args, **_kwargs: argparse.Namespace(bundle=tmp_path))
     monkeypatch.setattr(job_cli, "read_metadata", lambda _bundle: {"kind": "mount-daemon"})
-    argv = ["job", "request", "continue", "--workspace", "host:ws", "--reason", "r", "--tree", str(uuid.uuid4())]
+    argv = ["job", "resume", "--workspace", "host:ws", "--reason", "r", "--tree", str(uuid.uuid4())]
     assert command(argv, _context(tmp_path)) == 2
     assert "--tree is not carried by the workspace daemon protocol; run it on the daemon host" in (
         capsys.readouterr().err
@@ -1102,3 +1145,129 @@ def test_remote_envelopes_reject_an_option_member_the_request_did_not_carry(
     (member,) = extra
     with pytest.raises(ValueError, match=f"'{member}' disagrees"):
         job_cli._validate_remote_envelopes({**document, "envelopes": [{**envelope, **extra}]}, arguments, operator)
+
+
+def _fake_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str = "ssh") -> list[list[str]]:
+    """Bind ``host:ws`` to a remote of *kind* whose adapter records each argv and fails it (exit 3)."""
+
+    calls: list[list[str]] = []
+
+    def fake_adapter(_bundle: object, _verb: str, payload: dict[str, list[str]], **_options: object) -> dict:
+        calls.append(payload["argv"])
+        return {"returncode": 3, "stderr": "stop"}
+
+    binding = job_cli.WorkspaceBinding("host:ws", "host", None)
+    monkeypatch.setattr(job_cli, "_resolve_binding", lambda *_args: (binding, None))
+    monkeypatch.setattr(job_cli, "resolve_remote", lambda *_args, **_kwargs: argparse.Namespace(bundle=tmp_path))
+    monkeypatch.setattr(job_cli, "read_metadata", lambda _bundle: {"kind": kind})
+    monkeypatch.setattr(job_cli, "run_adapter", fake_adapter)
+    return calls
+
+
+def test_ssh_job_eject_forwards_an_eject_request_with_its_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    calls = _fake_remote(tmp_path, monkeypatch)
+    job_id = str(uuid.uuid4())
+
+    assert command(["job", "eject", "-w", "host:ws", job_id, "/far/out"], _context(tmp_path)) == 2
+    (sent,) = calls
+    assert sent[:4] == [*REMOTE_JOB_REQUEST_ENVELOPES_COMMAND, "eject"]
+    assert "--destination=/far/out" in sent and "--reason=httk job eject" in sent and sent[-1] == job_id
+    calls.clear()
+    capsys.readouterr()
+    assert command(["job", "eject", "-w", "host:ws", job_id], _context(tmp_path)) == 2
+    assert "job eject needs DEST" in capsys.readouterr().err
+    for option in (["--tree"], ["--wait"], ["--json"], ["--timeout", "5"]):
+        assert command(["job", "eject", "-w", "host:ws", *option, job_id, "/far/out"], _context(tmp_path)) == 2
+        assert "apply to a local workspace" in capsys.readouterr().err
+    assert calls == []
+
+
+def test_ssh_job_unlock_forwards_and_refuses_no_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    calls = _fake_remote(tmp_path, monkeypatch)
+    job_id = str(uuid.uuid4())
+
+    assert command(["job", "unlock", "-w", "host:ws", job_id], _context(tmp_path)) == 2
+    (sent,) = calls
+    assert sent[:4] == [*REMOTE_JOB_REQUEST_ENVELOPES_COMMAND, "unlock"] and "--reason=httk job unlock" in sent
+    calls.clear()
+    assert command(["job", "unlock", "-w", "host:ws", "--no-copy", job_id], _context(tmp_path)) == 2
+    assert "--no-copy is not carried to a remote workspace" in capsys.readouterr().err
+    assert calls == []
+
+
+def test_remote_job_unseal_needs_yes_without_a_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    calls = _fake_remote(tmp_path, monkeypatch)
+    monkeypatch.setattr(job_cli.sys.stdin, "isatty", lambda: False)
+
+    assert command(["job", "unseal", "-w", "host:ws", str(uuid.uuid4())], _context(tmp_path)) == 1
+    assert "requires --yes" in capsys.readouterr().err and calls == []
+    assert command(["job", "unseal", "-w", "host:ws", "--yes", str(uuid.uuid4())], _context(tmp_path)) == 2
+    assert calls[0][:4] == [*REMOTE_JOB_REQUEST_ENVELOPES_COMMAND, "unseal"]
+
+
+def test_mount_daemon_job_delete_needs_yes_without_a_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    calls = _fake_remote(tmp_path, monkeypatch, kind="mount-daemon")
+    monkeypatch.setattr(job_cli.sys.stdin, "isatty", lambda: False)
+
+    assert command(["job", "delete", "-w", "host:ws", str(uuid.uuid4())], _context(tmp_path)) == 1
+    assert "requires --yes" in capsys.readouterr().err and calls == []
+
+
+def test_request_id_is_refused_for_dedicated_verbs_off_a_workspace_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_id = _job(tmp_path, workspace, "request-id").job_id
+    for verb in (["seal"], ["detach"], ["delete", "--yes"], ["eject"]):
+        argv = ["job", *verb, "-w", workspace_name, "--request-id", "a" * 32, job_id]
+        assert command(argv + (["out"] if verb == ["eject"] else []), _context(tmp_path)) == 2
+        assert "--request-id is supported only for one mount-daemon job request" in capsys.readouterr().err
+    assert v3.find(workspace, job_id).state == "ready"
+    calls = _fake_remote(tmp_path, monkeypatch)
+    assert (
+        command(["job", "seal", "-w", "host:ws", "--request-id", "a" * 32, str(uuid.uuid4())], _context(tmp_path)) == 2
+    )
+    assert "--request-id is supported only for one mount-daemon job request" in capsys.readouterr().err
+    assert calls == []
+
+
+def test_job_set_refuses_one_request_id_for_two_kinds_of_key(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_id = _job(tmp_path, workspace, "two-kinds").job_id
+
+    argv = [*_set_args(workspace_name, job_id, "priority=3", "budget.max_activations=2"), "--request-id", "b" * 32]
+    assert command(argv, _context(tmp_path)) == 2
+    assert "--request-id names one daemon command: set one kind of key per call" in capsys.readouterr().err
+    assert not _requests(workspace) and v3.find(workspace, job_id).priority != 3
+
+
+def test_job_set_keeps_the_requests_applied_before_the_one_that_failed(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_id = _job(tmp_path, workspace, "partial").job_id
+
+    # A ready job takes a priority but no step override: the priority stays, and the command exits 1.
+    assert command(_set_args(workspace_name, job_id, "step=start", "priority=700"), _context(tmp_path)) == 1
+    out = capsys.readouterr().out.splitlines()
+    assert "\tapplied\t" in out[0] and "\trefused\t" in out[1]
+    assert v3.find(workspace, job_id).priority == 700
+    assert [entry["action"] for entry in _applied(workspace, job_id)] == ["set_priority", "override_step"]
+
+
+def test_job_set_takes_a_path_selector_holding_an_equals_sign() -> None:
+    assert job_cli._set_word("jobs/run=2/silicon") == "jobs/run=2/silicon"
+    assert job_cli._set_word("budget.max_activations=3") == ("budget.max_activations", 3)
+    for word in ("run=2", "budget.colour=red"):
+        with pytest.raises(argparse.ArgumentTypeError, match="unknown key"):
+            job_cli._set_word(word)
+
+
+def test_job_eject_to_an_unknown_remote_names_the_remote(tmp_path: Path, capsys) -> None:
+    assert command(["job", "eject", "-w", "nohost:ws", str(uuid.uuid4())], _context(tmp_path)) == 2
+    err = capsys.readouterr().err
+    assert "unknown remote: nohost" in err and "needs DEST" not in err

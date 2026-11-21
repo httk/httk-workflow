@@ -7,14 +7,17 @@ inputs present and is its next step one the runner implements. Transfer-time
 advisories are tested in ``test_precheck_transfer.py``.
 """
 
+import json
 from pathlib import Path
 from typing import cast
 
 import pytest
+from httk.core.cli import CLIContext
 
 import v3_helpers as v3
 from httk.workflow import TaskManager, _store
 from httk.workflow import precheck as precheck_module
+from httk.workflow.workflow_cli import job_command, workflow_command
 from test_workflow_packages import _jobflow_package
 
 _BUILD = '\n[workflow.build]\ncommand = "./build.sh"\nartifacts = ["out"]\n'
@@ -212,3 +215,15 @@ def test_precheck_finds_package_module_without_executing_parent(
     spec = precheck_module._find_module_spec_without_import("sentinel_parent.child")
     assert spec is not None and spec.origin is not None
     assert not sentinel.exists()
+
+
+def test_job_precheck_reports_the_pending_jobs_and_workflow_precheck_is_gone(tmp_path: Path, capsys) -> None:
+    ws = v3.workspace(tmp_path / "workspace")
+    v3.submit(ws, ("local:absent", "absent"), {"start": "succeed"})
+    context = CLIContext("httk", tmp_path)
+
+    assert job_command(["precheck", "-w", str(ws.root), "--json"], context) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["format"] == "httk-workflow-precheck" and report["summary"]["runner_problems"] == 1
+    assert workflow_command(["precheck", "-w", str(ws.root)], context) == 2
+    assert "invalid choice: 'precheck'" in capsys.readouterr().err

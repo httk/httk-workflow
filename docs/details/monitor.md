@@ -31,7 +31,7 @@ and worker errors appear in the status line.
 | `w` | load the full diagnosis |
 | `l` | load full history |
 | `t` | follow `logs/stdio.out` |
-| `c`, `P`, `C` | request cancel, pause, and continue |
+| `c`, `P`, `C` | request cancel, pause, and resume (`job cancel`, `job pause`, `job resume`) |
 | `m` | start managers |
 | `D` | remove removable jobs after confirmation |
 | `r` | refresh |

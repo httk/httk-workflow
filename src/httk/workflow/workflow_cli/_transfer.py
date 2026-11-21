@@ -1,11 +1,11 @@
 """Remote and transfer command groups.
 
-``job transfer`` moves jobs between workspaces as hold + copy + adopt + release
+``job move`` moves jobs between workspaces as hold + copy + adopt + release
 on :mod:`httk.workflow._moving`, locally or over a transfer session to each remote end (the far-side
 ``workflow transfer-session``, :class:`~httk.workflow.adapters.TransferSession`), which a transfer requires: one that
-cannot be opened stops it before anything is held or changed; ``job push``/``job pull`` are its everyday forms (an implicit
+cannot be opened stops it before anything is held or changed; ``push``/``pull`` are its everyday forms (an implicit
 ``--state ready``/``succeeded``, ``--tree``, the default workspace as the omitted end);
-``transfer status`` lists held transfers. ``job push`` (unless ``--no-keep``) and ``job transfer --keep``
+``workspace status`` lists held transfers. ``push`` (unless ``--no-keep``) and ``job move --keep``
 release the hold keeping the moved jobs in SRC as ``away`` copies, which a later transfer back replaces.
 """
 
@@ -43,8 +43,7 @@ from .._frames import DATA_LIMIT, StreamReader
 from .._manager_scheduling import current_step
 from .._util import write_json_atomic
 from ..adapters import (
-    REMOTE_JOB_TRANSFER_COMMAND,
-    REMOTE_TRANSFER_STATUS_COMMAND,
+    REMOTE_JOB_MOVE_COMMAND,
     RemoteTarget,
     RequestAborted,
     SessionFailed,
@@ -78,7 +77,6 @@ from ._common import (
     _group,
     _leaf,
     _required,
-    _run_remote_workspace,
     _setting_pair,
     _settings,
     _workspace_argument,
@@ -471,11 +469,9 @@ def build_remote_parser(
 
 
 # ---------------------------------------------------------------------------
-# job transfer: hold, copy, adopt, release
+# job move: hold, copy, adopt, release
 # ---------------------------------------------------------------------------
 
-#: The format of ``transfer status --json``.
-TRANSFER_STATUS_FORMAT = "httk-workflow-transfer-status"
 _TRANSFER_ID = re.compile(r"[0-9a-f]{32}")
 #: Transfer outcomes that moved the jobs.
 _DELIVERED = ("adopted", "already_adopted")
@@ -803,9 +799,9 @@ def hold_selected(
     workflows: bool,
 ) -> list[_moving.Hold]:
     """Hold every job the selection of *arguments* names in the local *workspace* for a transfer to *locator*, all
-    of them before anything is driven (``job transfer --hold``; a transfer holds page by page, :class:`_Selection`).
+    of them before anything is driven (``job move --hold``; a transfer holds page by page, :class:`_Selection`).
 
-    The selection is ``jobs``, ``state``, ``step``, ``placement`` and ``tree`` as ``job transfer`` parses them; a
+    The selection is ``jobs``, ``state``, ``step``, ``placement`` and ``tree`` as ``job move`` parses them; a
     job that cannot move is an error appended to *errors*. Notes (a job left out by ``--step``, children that move
     only with their root) go to standard error.
 
@@ -882,7 +878,7 @@ def hold_selected(
             moving.update(outcome.members)
 
     workers = workspace.io_workers
-    with _owner(workspace, "job transfer") as owner:
+    with _owner(workspace, "job move") as owner:
         for index, ref in enumerate(refs):
             if index == explicit and not sequential and workers > 1:
                 # Disjoint trees: no listed root has a parent here, so none is in another's tree.
@@ -1417,7 +1413,7 @@ class _Selection:
             self._pending = [*batch, *self._pending]  # stopped while it was decided: no owner, nothing attempted
             return page(False)
         try:
-            registered = _owner(self.workspace, "job transfer")
+            registered = _owner(self.workspace, "job move")
         except BaseException as exc:
             self._pending = [*batch, *self._pending]  # nothing attempted: left for a later page
             if cut is None:
@@ -1664,10 +1660,10 @@ def hold_document(
     locator: str,
     errors: list[str],
 ) -> dict[str, Any]:
-    """Return the document ``job transfer --hold --json`` prints.
+    """Return the document ``job move --hold --json`` prints.
 
     Besides the new *holds* and the *errors*, it lists the other holds of *workspace* already bound for *locator*
-    (``held_before``), so that a client needs no ``transfer status`` call; their workflows are resolved for these
+    (``held_before``), so that a client needs no ``workspace status`` call; their workflows are resolved for these
     only, not for every hold of the workspace.
 
     :param workspace: The source workspace.
@@ -1699,7 +1695,7 @@ def _hold_jobs(
     arguments: argparse.Namespace,
     errors: list[str],
 ) -> list[_moving.Hold]:
-    """``job transfer --hold``: hold every selected job on the local *src*, recording *dst* and its id when known; a
+    """``job move --hold``: hold every selected job on the local *src*, recording *dst* and its id when known; a
     job that cannot move is an error.
 
     :param src: The local source end.
@@ -1901,7 +1897,7 @@ def _stage_local(settled: "_Deliveries", holds: list[_moving.Hold]) -> None:
     stage: _moving.Stage | None = None
     try:
         require_cli_modifiable(workspace)
-        stage = _moving.Stage(workspace, _owner(workspace, "job transfer"))
+        stage = _moving.Stage(workspace, _owner(workspace, "job move"))
         if not copied:
             # One filesystem: adoption moves each hold in, and a refusal moves it back.
             sources = [Path(hold.path) for hold in holds]
@@ -1969,7 +1965,7 @@ def _adopt_local_stage(
     ids = [hold.transfer_id for hold in holds]
     failure: Exception | None = None
     adopted: list[dict[str, Any]] = []
-    resume = f"`httk job transfer --resume {src.locator} {dst.locator}`"
+    resume = f"`httk job move --resume {src.locator} {dst.locator}`"
     # From here until its adoption begins, the stage is no longer in the pair's queue (its adoption took it out): an
     # interrupt gives it up here (its landing discarded, a deferred barrier's descriptor closed, its owner closed),
     # also while a failed commit's landing is being disposed of (abandoning it again is safe).
@@ -2106,7 +2102,7 @@ def _adopt_with_retry(
                 raise RuntimeError(
                     f"{dst.locator} staged the segment in workspace {second}, not the expected workspace {first} "
                     f"that answered {pair[1]}; nothing of it was adopted, and its holds stay held on {src.locator}: "
-                    f"check which workspace {dst.locator} names, then deliver it with `httk job transfer --resume "
+                    f"check which workspace {dst.locator} names, then deliver it with `httk job move --resume "
                     f"{src.locator} {dst.locator}`"
                 )
             if "refused" not in document:
@@ -2115,7 +2111,7 @@ def _adopt_with_retry(
                 raise RuntimeError(
                     f"{dst.locator} adopted the jobs into workspace {second}, not the expected workspace {first} "
                     f"that answered {pair[1]}; the holds are kept on {src.locator}: check with `httk job "
-                    f"show` on {dst.locator}, then `httk job transfer --resume {src.locator} {dst.locator}` reports "
+                    f"show` on {dst.locator}, then `httk job move --resume {src.locator} {dst.locator}` reports "
                     "them already adopted there and releases the holds"
                 )
             detail = f"{dst.locator} answered {pair[0]} as workspace {second}, {pair[1]} as {first}"
@@ -2144,7 +2140,7 @@ def _unknown_adoption(detail: str, src: _End, dst: _End, arguments: argparse.Nam
 
     return RuntimeError(
         f"{detail}; whether the jobs arrived is unknown: check with `httk job show` on {dst.locator}, then "
-        f"deliver again with `httk job transfer --resume {src.locator} {dst.locator}` or, if they are there, "
+        f"deliver again with `httk job move --resume {src.locator} {dst.locator}` or, if they are there, "
         f"release with {_release_remedy(arguments, 'TRANSFER_ID', None, src, dst)}"
     )
 
@@ -2172,7 +2168,7 @@ def _release_remedy(
 ) -> str:
     """The hand-run release of *transfer_id*, keeping away copies (for *destination_id*, or DST's id) with ``keep``."""
 
-    command = f"httk job transfer --release {transfer_id}"
+    command = f"httk job move --release {transfer_id}"
     if not arguments.keep:
         return f"`{command} {src.locator}`"
     if destination_id is not None:
@@ -2192,7 +2188,7 @@ def _take_back(src: _End, holds: list[_moving.Hold], reason: str) -> dict[str, d
     assert workspace is not None
     updates: dict[str, dict[str, Any]] = {}
     message = f"refused before anything was adopted: {reason}; the jobs are back in {src.locator}"
-    with _owner(workspace, "job transfer") as owner:
+    with _owner(workspace, "job move") as owner:
         sources = [Path(hold.path) for hold in holds]
         settled = _moving.settle_absent(workspace, sources)
 
@@ -2264,7 +2260,7 @@ def _install_shipped(
     rows: dict[str, dict[str, Any]] = {}
     require_cli_modifiable(dst.workspace)
     failure: Exception | None = None
-    with _owner(dst.workspace, "job transfer") as owner:
+    with _owner(dst.workspace, "job move") as owner:
         # Errors are kept, not raised, inside: an owner left by an error stays open for recovery.
         scratch = None
         try:
@@ -2514,7 +2510,7 @@ def _build_shipped(dst: _End, shipping: dict[str, dict[str, Any]], arguments: ar
     for workflow_id in built:
         reason = None
         try:
-            with _owner(dst.workspace, "job transfer") as owner:
+            with _owner(dst.workspace, "job move") as owner:
                 try:
                     with _stdout_to_stderr(True):
                         _store.build(dst.workspace, owner, workflow_id)
@@ -2532,12 +2528,12 @@ _BUILDABLE = ("installed", "present", "mismatch")
 
 
 def _release_argv(transfer_ids: list[str], keep: bool, destination_id: str | None = None) -> list[str]:
-    """The ``job transfer --release ... [--keep [--destination-id ID]]`` arguments that release *transfer_ids* on a
+    """The ``job move --release ... [--keep [--destination-id ID]]`` arguments that release *transfer_ids* on a
     remote; *destination_id* is the adopting workspace's id for away copies of holds that record none."""
 
     releases = [item for transfer_id in transfer_ids for item in ("--release", transfer_id)]
     identified = ["--destination-id", destination_id] if destination_id is not None else []
-    return [*REMOTE_JOB_TRANSFER_COMMAND, *releases, *(["--keep", *identified] if keep else [])]
+    return [*REMOTE_JOB_MOVE_COMMAND, *releases, *(["--keep", *identified] if keep else [])]
 
 
 def release_holds(
@@ -2546,13 +2542,13 @@ def release_holds(
     *,
     keep: bool,
     destination_id: str | None,
-    label: str = "job transfer",
+    label: str = "job move",
     progress: Callable[[str, int | None], object] | None = None,
 ) -> list[bool]:
     """Release the holds *transfer_ids* of the local *workspace*: discard each, or with *keep* keep its jobs there
     as away copies (recording *destination_id*, the adopting workspace, when a hold records none).
 
-    ``job transfer --release``, the release step of a transfer from a local SRC and the transfer session's
+    ``job move --release``, the release step of a transfer from a local SRC and the transfer session's
     ``release`` op share this.
 
     :param workspace: The workspace holding them.
@@ -2628,7 +2624,7 @@ def _release_over_session(
         header["destination_id"] = destination_id
     response = session.request("release", header)
     if response.get("ok") is not True:
-        raise RuntimeError(f"job transfer --release failed on {src.locator}: {response.get('error')}")
+        raise RuntimeError(f"job move --release failed on {src.locator}: {response.get('error')}")
     released, missing = response.get("released"), response.get("missing")
     if not isinstance(released, list) or not isinstance(missing, list):
         raise RuntimeError(f"{src.locator} answered the release with no released and missing lists")
@@ -3003,7 +2999,7 @@ def _adopt_staged(
             said = "" if "nothing was adopted" in error else "; nothing of it was adopted"
             settled.fail(
                 holds,
-                f"{refusal}{said}: deliver it with `httk job transfer --resume {src.locator} {dst.locator}`",
+                f"{refusal}{said}: deliver it with `httk job move --resume {src.locator} {dst.locator}`",
             )
             settled.stopped = settled.stopped or refusal
             return
@@ -3022,7 +3018,7 @@ def _adopt_staged(
             raise RuntimeError(
                 f"{dst.locator} adopted the jobs into workspace {answered}, not the expected workspace "
                 f"{staged['workspace_id']} that answered their stage; the holds are kept on {src.locator}: check with "
-                f"`httk job show` on {dst.locator}, then `httk job transfer --resume {src.locator} {dst.locator}` "
+                f"`httk job show` on {dst.locator}, then `httk job move --resume {src.locator} {dst.locator}` "
                 "reports them already adopted there and releases the holds"
             )
     except RuntimeError as exc:
@@ -3072,7 +3068,7 @@ def _late_retry(
     """
 
     src, dst, arguments = settled.src, settled.dst, settled.arguments
-    resume = f"`httk job transfer --resume {src.locator} {dst.locator}`"
+    resume = f"`httk job move --resume {src.locator} {dst.locator}`"
     settled.fsync = True  # every later segment of the pair goes so
     _say(
         arguments,
@@ -3134,7 +3130,7 @@ def _abandon_staged(
     staged = f"it was staged in {where} and discarded there" if copied else "nothing of it was copied"
     message = (
         f"not adopted, since the transfer stopped ({reason}); {staged}, and it is delivered again by "
-        f"`httk job transfer --resume {src.locator} {dst.locator}`"
+        f"`httk job move --resume {src.locator} {dst.locator}`"
     )
     settled.fail(holds, message)
 
@@ -3326,7 +3322,7 @@ class _Deliveries:
             reason = f"{dst.locator}: {document['refused']}"
             if src.workspace is None:
                 message = f"refused before anything was adopted: {reason}; it stays held on {src.locator}"
-                message += f" (`httk job transfer --resume {src.locator} {dst.locator}` delivers it again)"
+                message += f" (`httk job move --resume {src.locator} {dst.locator}` delivers it again)"
                 for hold in holds:
                     earlier = self.fresh_known and hold.transfer_id not in self.fresh
                     self.outcomes[hold.transfer_id].update(
@@ -3360,7 +3356,7 @@ class _Deliveries:
         return (
             f"refused before anything was adopted: {reason}; it stays held on {src.locator}, because "
             f"an earlier delivery may already have adopted it: check with `httk job show` on "
-            f"{dst.locator}, then deliver again with `httk job transfer --resume {src.locator} "
+            f"{dst.locator}, then deliver again with `httk job move --resume {src.locator} "
             f"{dst.locator}` or, if the jobs are there, release with {remedy}, or, if they are not "
             f"there, take it back{where} with `httk job adopt --workspace {workspace} {hold.path}`"
         )
@@ -3444,7 +3440,7 @@ def _push_over_session(session: TransferSession, deliveries: list[list[_moving.H
             settled.fail(
                 segment,
                 f"not delivered, since the transfer session stopped ({settled.stopped}); deliver it with "
-                f"`httk job transfer --resume {src.locator} {dst.locator}`",
+                f"`httk job move --resume {src.locator} {dst.locator}`",
             )
             continue
         which = f" (segment {number} of {len(segments)})" if len(segments) > 1 else ""
@@ -3491,7 +3487,7 @@ def _push_segment(
             settled.fail(
                 holds,
                 f"not delivered, since the transfer session stopped ({settled.stopped}); deliver it with "
-                f"`httk job transfer --resume {src.locator} {dst.locator}`",
+                f"`httk job move --resume {src.locator} {dst.locator}`",
             )
             break
         deliver = partial(_deliver_segment, session, settled, holds, base, size)
@@ -3506,7 +3502,7 @@ def _push_segment(
                 settled.fail(
                     holds,
                     f"{dst.locator} refused to stage it at its capacity, with nothing staged: {exc}; it stays held: "
-                    f"deliver it with `httk job transfer --resume {src.locator} {dst.locator}`",
+                    f"deliver it with `httk job move --resume {src.locator} {dst.locator}`",
                 )
                 settled.stopped = f"{dst.locator}: a stage refused at its capacity with nothing staged"
                 break
@@ -3517,7 +3513,7 @@ def _push_segment(
             settled.fail(
                 holds,
                 f"not delivered: {dst.locator} stages nothing more on this transfer session ({exc}); deliver it "
-                f"with `httk job transfer --resume {src.locator} {dst.locator}`",
+                f"with `httk job move --resume {src.locator} {dst.locator}`",
             )
             settled.stopped = f"{dst.locator}: an adopted stage there could not be closed"
             break
@@ -3711,7 +3707,7 @@ def _pull_part(
     stage: _moving.Stage | None = None
     try:
         require_cli_modifiable(workspace)
-        stage = _moving.Stage(workspace, _owner(workspace, "job transfer"))
+        stage = _moving.Stage(workspace, _owner(workspace, "job move"))
         stage.landing = stage.owner.scratch("landing")
     except BaseException as exc:
         if stage is not None:
@@ -3790,7 +3786,7 @@ def _repull(source: "_SourceSession", settled: _Deliveries, holds: list[_moving.
     """
 
     src, dst, arguments = settled.src, settled.dst, settled.arguments
-    resume = f"`httk job transfer --resume {src.locator} {dst.locator}`"
+    resume = f"`httk job move --resume {src.locator} {dst.locator}`"
     if settled.stopped is not None:
         settled.fail(
             holds, f"not adopted: {reason}; and the transfer stopped ({settled.stopped}): deliver it with {resume}"
@@ -3873,7 +3869,7 @@ def _pull_over_session(source: _SourceSession, holds: list[_moving.Hold], settle
     session = source.get()
     assert session is not None
     src, dst, arguments = settled.src, settled.dst, settled.arguments
-    resume = f"`httk job transfer --resume {src.locator} {dst.locator}`"
+    resume = f"`httk job move --resume {src.locator} {dst.locator}`"
     # The bundles are SRC's to measure: here a segment closes at bundles only.
     segments = _segments(holds, measure=lambda _hold: (0, 0))
     for number, segment in enumerate(segments, 1):
@@ -4002,7 +3998,7 @@ def _relay_over_session(
     """
 
     src, dst, arguments = settled.src, settled.dst, settled.arguments
-    resume = f"`httk job transfer --resume {src.locator} {dst.locator}`"
+    resume = f"`httk job move --resume {src.locator} {dst.locator}`"
     segments = _segments(holds, measure=lambda _hold: (0, 0))
     for number, segment in enumerate(segments, 1):
         which = f" (segment {number} of {len(segments)})" if len(segments) > 1 else ""
@@ -4088,7 +4084,7 @@ def _contained(settled: _Deliveries, holds: list[_moving.Hold], deliver: Callabl
         ]
         message = (
             f"the transfer to {dst.locator} failed while it was driven ({exc}); it stays held on {src.locator} unless "
-            f"it was adopted: `httk job transfer --resume {src.locator} {dst.locator}` delivers or releases it"
+            f"it was adopted: `httk job move --resume {src.locator} {dst.locator}` delivers or releases it"
         )
         settled.fail(left, message, complete=True)
 
@@ -4243,7 +4239,7 @@ def _adopt_oldest(pair: _Pair) -> None:
         settled.fail(
             [hold for hold in stage.holds if hold.transfer_id not in settled.handled],
             f"the transfer to {dst.locator} failed while its staged segment was adopted ({exc}); it stays held on "
-            f"{src.locator} unless it was adopted: `httk job transfer --resume {src.locator} {dst.locator}` delivers "
+            f"{src.locator} unless it was adopted: `httk job move --resume {src.locator} {dst.locator}` delivers "
             "or releases it",
             complete=True,
         )
@@ -4439,7 +4435,7 @@ def _drive(
             if failure is not None:
                 message = (
                     f"{failed}: the transfer session failed before anything was adopted ({failure}); deliver "
-                    f"it with `httk job transfer --resume {src.locator} {dst.locator}`"
+                    f"it with `httk job move --resume {src.locator} {dst.locator}`"
                 )
                 for delivery in deliveries:
                     settled.fail(delivery, message)
@@ -4521,7 +4517,7 @@ def _conclude(
     for transfer_id, reason in settled.unreleased:
         outcomes[transfer_id]["message"] = (
             f"the jobs are in {dst.locator}, but the hold was not released: {reason}; "
-            f"run `httk job transfer --resume` or {_release_remedy(arguments, transfer_id, destination_id, src, dst)}"
+            f"run `httk job move --resume` or {_release_remedy(arguments, transfer_id, destination_id, src, dst)}"
         )
     if not unshipped:
         pair.shipping.update(shipping)  # attempted, failures included: never attempted again for the pair
@@ -4780,7 +4776,7 @@ class _Spool:
             with contextlib.suppress(OSError, ValueError):
                 print(
                     f"the transfer report could not be read back from {_spool_directory()} ({exc}): the transfers "
-                    "themselves are done as reported so far; the report is incomplete; `httk transfer status` shows "
+                    "themselves are done as reported so far; the report is incomplete; `httk workspace status` shows "
                     "what is still held",
                     file=sys.stderr,
                 )
@@ -4885,7 +4881,7 @@ def _handle_release(arguments: argparse.Namespace, context: CLIContext) -> int:
         arguments.release,
         keep=arguments.keep,
         destination_id=destination_id,
-        label="job transfer --release",
+        label="job move --release",
     )
     for transfer_id, done in zip(arguments.release, released, strict=True):
         if done:
@@ -4932,13 +4928,13 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     :return: 0 when every transfer was adopted (or already was), else 1.
     """
 
-    everyday = arguments.transfer_verb != "transfer"
+    everyday = arguments.transfer_verb != "move"
     if everyday:
-        # job push [SRC] DST / job pull SRC [DST]: the omitted end stays None, which _end resolves as the enclosing
+        # push [SRC] DST / pull SRC [DST]: the omitted end stays None, which _end resolves as the enclosing
         # or default workspace; the implicit state is set before the guards so that --placement sees it.
         if arguments.source is None:
             end = "DST" if arguments.transfer_verb == "push" else "SRC"
-            raise ValueError(f"name the other workspace: httk job {arguments.transfer_verb} {end} (e.g. REMOTE:WS)")
+            raise ValueError(f"name the other workspace: httk {arguments.transfer_verb} {end} (e.g. REMOTE:WS)")
         if arguments.transfer_verb == "push" and arguments.destination is None:
             arguments.source, arguments.destination = None, arguments.source
         if not (arguments.jobs or arguments.state or arguments.step):
@@ -5211,7 +5207,7 @@ class _Transfer:
             pair.refusal = None
             message = (
                 f"the transfer to {pair.dst.locator} failed while it was driven ({exc}); it stays held on "
-                f"{self.src.locator} unless it was adopted: `httk job transfer --resume {self.src.locator} "
+                f"{self.src.locator} unless it was adopted: `httk job move --resume {self.src.locator} "
                 f"{pair.dst.locator}` delivers or releases it"
             )
             self.report.add(self._outcome(pair, hold, message) for hold in holds)
@@ -5316,14 +5312,14 @@ class _Transfer:
             if selection is not None and self.dst is not None and pair.dst.locator == self.dst.locator:
                 message += f"{selection}; "
             message += (
-                f"`httk job transfer --resume {src.locator} {pair.dst.locator}` drives the holds left on {src.locator}"
+                f"`httk job move --resume {src.locator} {pair.dst.locator}` drives the holds left on {src.locator}"
             )
             if selection is not None:
                 message += " (it does not select the rest: run the transfer again for that)"
             self.report.error(message)
         if self.failure is not None and not self.pairs:
             self.report.error(
-                f"{self.failure}; the holds on {src.locator} stay held there: `httk job transfer --resume "
+                f"{self.failure}; the holds on {src.locator} stay held there: `httk job move --resume "
                 f"{src.locator}` drives them"
             )
 
@@ -5525,7 +5521,7 @@ def _stop_ahead(
             if failure is not None and str(failure) != pair.stopped:
                 run.report.error(
                     f"holding a page on {run.src.locator} failed: {failure}; what it held stays held there: "
-                    f"`httk job transfer --resume {run.src.locator} {pair.dst.locator}` drives it"
+                    f"`httk job move --resume {run.src.locator} {pair.dst.locator}` drives it"
                 )
     if escaping is None and failure is not None and not isinstance(failure, _ERRORS):
         raise failure  # an unexpected failure of the producer, as it would have been raised holding the page here
@@ -5602,7 +5598,7 @@ def _transfer_pull(run: _Transfer, session: TransferSession, selected: bool) -> 
                 failed = f"the transfer session to {src.locator} failed while listing its holds: {exc}"
                 break
             if response.get("ok") is not True:
-                failed = f"transfer status failed on {src.locator}: {response.get('error')}"
+                failed = f"listing the holds failed on {src.locator}: {response.get('error')}"
                 break
             try:
                 holds, oversized = _reported_holds(response.get("holds"))
@@ -5678,7 +5674,7 @@ def _pull_select(run: _Transfer, session: TransferSession) -> tuple[str | None, 
         return None, f"the transfer session to {src.locator} failed while selecting: {exc}"
     sys.stderr.write(str(response.get("stderr", "")))
     if response.get("ok") is not True:
-        return f"job transfer --hold on {src.locator} was refused: {response.get('error')}", None
+        return f"job move --hold on {src.locator} was refused: {response.get('error')}", None
     return None, None
 
 
@@ -5775,57 +5771,11 @@ def _oversized(run: _Transfer, holds: list[tuple[str, int]]) -> None:
         )
 
 
-def status_document(workspace: Workspace) -> dict[str, Any]:
-    """Return the document ``transfer status --json`` prints for a local *workspace*: every hold, with the workflows
-    its members need.
-
-    :param workspace: The workspace.
-    :return: ``{"format", "format_version", "workspace", "holds"}``.
-    """
-
-    now = time.time()
-    listed = [hold.as_mapping(now) for hold in _moving.held(workspace, workflows=True)]
-    return {"format": TRANSFER_STATUS_FORMAT, "format_version": 1, "workspace": str(workspace.root), "holds": listed}
-
-
-def handle_transfer_status(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """List a workspace's held transfers (read only).
-
-    :param arguments: The parsed arguments.
-    :param context: The CLI invocation.
-    :return: Exit status 0.
-    """
-
-    src = _end(arguments.workspace, context, arguments)
-    if src.workspace is None:
-        assert src.binding is not None
-        tail = ["--json"] if arguments.json else []
-        return _run_remote_workspace(
-            src.binding, context, [*REMOTE_TRANSFER_STATUS_COMMAND, *tail, src.plain], timeout=arguments.adapter_timeout
-        )
-    if arguments.json:
-        assert src.workspace is not None
-        print(json.dumps(status_document(src.workspace), indent=2, sort_keys=True))
-        return 0
-    now = time.time()
-    assert src.workspace is not None
-    holds = _moving.held(src.workspace, workflows=False)
-    if not holds:
-        print(f"no held transfers in {src.locator}")
-    for hold in holds:
-        age = cast(int, hold.as_mapping(now)["age_seconds"]) // 3600
-        destination = hold.destination_locator or "-"
-        if hold.destination_workspace_id is not None:
-            destination = f"{destination} ({hold.destination_workspace_id})"
-        print(f"{hold.transfer_id}\t{hold.members[0]}\t{len(hold.members)} job(s)\tto {destination}\t{age}h old")
-    return 0
-
-
 _TRANSFER_DESCRIPTION = """\
-Move jobs between two workspaces (the everyday forms are `job push [SRC] DST`
-for the ready jobs and `job pull SRC [DST]` for the succeeded ones):
-`job transfer --job JOB [--tree] SRC DST`,
-or every job in a state: `job transfer --state succeeded [--placement PREFIX]
+Move jobs between two workspaces (the everyday forms are `httk push [SRC] DST`
+for the ready jobs and `httk pull SRC [DST]` for the succeeded ones):
+`job move --job JOB [--tree] SRC DST`,
+or every job in a state: `job move --state succeeded [--placement PREFIX]
 [--tree] SRC DST` (--state and --job combine; both repeat). `--step STEP`
 (repeatable) narrows the selection to jobs at that step (the current
 activation's, else the initial step); without --state it selects from every
@@ -5868,31 +5818,31 @@ installation DST already has is never replaced, even with another tree
 (reported). --no-workflows ships none.
 
 Away copies: with --keep the release keeps each moved job in SRC as an inert
-copy in the state `away` (`job push` does so unless --no-keep), recording
+copy in the state `away` (`push` does so unless --no-keep), recording
 DST, the transfer and the state it left; it never runs or moves there. A
-later transfer back from DST replaces the copies (`job pull` does), and
+later transfer back from DST replaces the copies (`pull` does), and
 `job recover JOB` returns a lost job's copy to the state it left, to push
 again. `--state away` is no choice.
 
-Recovery: delivery is at least once. Every run, and `job transfer --resume
+Recovery: delivery is at least once. Every run, and `job move --resume
 [SRC] [DST]`, first re-drives the holds bound for DST (with --resume and no DST,
 every hold, to the destination it records); DST reports "already adopted" for
 a bundle it already has, and the hold is released (keeping away copies with
-the --keep of the run that releases it). `transfer status` and
+the --keep of the run that releases it). `workspace status` and
 `job why` list held bundles. A transfer abandoned for good is taken back into
 SRC with `job adopt SRC/.httk-workspace/transfers/outgoing/<transfer id>`,
 which is safe only after checking that DST does not have the jobs.
-`job transfer --release T [--release T ...] [--keep] [WS]` discards holds
+`job move --release T [--release T ...] [--keep] [WS]` discards holds
 whose jobs DST has (with --keep, keeps them as away copies)."""
 
 
 _EVERYDAY_DESCRIPTION = """\
-`job {verb} {usage}` moves every {state} job ({meaning})
+`httk {verb} {usage}` moves every {state} job ({meaning})
 {direction}, each root with its children. It is
-`job transfer --tree --state {state} SRC DST` with the omitted {omitted}
+`job move --tree --state {state} SRC DST` with the omitted {omitted}
 defaulting to the enclosing workspace, else the project's default
 workspace, else the per-user default workspace (which this creates on first
-use). With one positional it names {named}: `httk job {verb} REMOTE:WS`;
+use). With one positional it names {named}: `httk {verb} REMOTE:WS`;
 with none the command is refused.
 
 --job, --state or --step replaces the implicit --state {state};
@@ -5901,9 +5851,9 @@ whose parent is in SRC moves only in its root's tree. A root moves only whole: o
 children are not all terminal or paused (a parent that an any_terminal,
 any_succeeded or at_least join let finish before its children) is refused
 and stays, never split. The workflows the jobs need that DST lacks and SRC
-has are installed there too (--no-workflows ships none; see `job transfer`).
+has are installed there too (--no-workflows ships none; see `job move`).
 {keeping}
-Every run re-drives the held transfers bound for DST; --resume, --release and --hold stay on `job transfer`, which also
+Every run re-drives the held transfers bound for DST; --resume, --release and --hold stay on `job move`, which also
 covers the general case."""
 
 _EVERYDAY = {
@@ -5918,7 +5868,7 @@ _EVERYDAY = {
         "keeping": (
             "SRC keeps each moved job as an away copy (state away, never run\n"
             "there; --no-keep keeps none, also for the held transfers this run\n"
-            "re-drives): `job pull` of the finished jobs replaces the copies, and\n"
+            "re-drives): `pull` of the finished jobs replaces the copies, and\n"
             "`job recover JOB` returns a copy whose job was lost there, to push again."
         ),
     },
@@ -5931,27 +5881,106 @@ _EVERYDAY = {
         "named": "SRC",
         "summary": "move the succeeded jobs of another workspace to one (by default this one)",
         "keeping": (
-            "A pull keeps no copies in SRC; the away copies a `job push` kept in\n"
-            "DST are replaced by the arriving jobs."
+            "A pull keeps no copies in SRC; the away copies a `push` kept in\nDST are replaced by the arriving jobs."
         ),
     },
 }
 
 
+def _add_move_arguments(parser: argparse.ArgumentParser, *, everyday: bool) -> None:
+    """Add the arguments of ``job move`` (or, *everyday*, of ``push`` and ``pull``, without its own options)."""
+
+    parser.add_argument(
+        "source",
+        metavar="SRC",
+        nargs="?",
+        help="the workspace the jobs leave" + ("" if everyday else " (with --release: the one holding it)"),
+    )
+    parser.add_argument("destination", metavar="DST", nargs="?", help="the workspace the jobs arrive in")
+    parser.add_argument(
+        "--job",
+        action="append",
+        default=[],
+        dest="jobs",
+        metavar="JOB",
+        help="a job UUID, key, unique prefix or path in SRC; a remote SRC requires canonical job UUIDs (repeatable)",
+    )
+    parser.add_argument(
+        "-s",
+        "--state",
+        action="append",
+        default=[],
+        metavar="STATE",
+        choices=_MOVABLE_STATES,
+        help="select every job of SRC in this state (repeatable; combinable with --job)",
+    )
+    _add_step_option(
+        parser,
+        help_text=(
+            "select only jobs at this step: the current activation's, else the initial step (repeatable; "
+            "narrows --job and --state; without --state, selects from every unowned state but away)"
+        ),
+    )
+    parser.add_argument(
+        "--placement",
+        metavar="PREFIX",
+        help="with --state, or --step without --job: only jobs under this placement prefix",
+    )
+    if not everyday:
+        parser.add_argument("--tree", action="store_true", help="move each job's descendants with it")
+        parser.add_argument("--resume", action="store_true", help="re-drive the held transfers of SRC (to DST)")
+        parser.add_argument(
+            "--release",
+            action="append",
+            default=[],
+            metavar="TRANSFER_ID",
+            help="discard a hold whose jobs DST already has (repeatable)",
+        )
+        parser.add_argument(
+            "--keep",
+            action="store_true",
+            help="keep an away copy of each moved job in SRC; a later transfer back replaces it "
+            "(with --release: keep the held jobs as away copies)",
+        )
+        parser.add_argument("--hold", action="store_true", help=argparse.SUPPRESS)
+        parser.add_argument(
+            "--destination-id",
+            metavar="WORKSPACE_ID",
+            help="with --release --keep: the destination workspace id the away copies record, for a hold "
+            "that records none",
+        )
+    parser.add_argument(
+        "--no-workflows",
+        action="store_true",
+        help="do not install the workflows the jobs need in DST (by default those DST lacks and SRC has travel)",
+    )
+    parser.add_argument("-q", "--quiet", action="store_true", help="print no progress lines to stderr")
+    _add_adapter_timeout(parser)
+    parser.add_argument("--json", action="store_true", help="print the outcomes as one JSON document")
+    add_durability_arguments(parser)
+
+
 def build_transfer_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
 ) -> None:
-    """Declare the ``job transfer``, ``job push`` and ``job pull`` verbs: move jobs between two workspaces."""
+    """Declare the ``job move`` verb: move jobs between two workspaces."""
 
-    transfer = _leaf(
+    move = _leaf(
         subparsers,
-        "transfer",
+        "move",
         summary="move jobs between two registered workspace names or workspace directories",
         description=_TRANSFER_DESCRIPTION,
         handler=handle_transfer,
     )
-    transfer.set_defaults(transfer_verb="transfer")
-    parsers = [transfer]
+    move.set_defaults(transfer_verb="move")
+    _add_move_arguments(move, everyday=False)
+
+
+def build_push_pull_parser(
+    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
+) -> None:
+    """Declare the top-level ``push`` and ``pull`` verbs, the everyday forms of ``job move``."""
+
     for verb, text in _EVERYDAY.items():
         parser = _leaf(
             subparsers,
@@ -5960,7 +5989,7 @@ def build_transfer_parser(
             description=_EVERYDAY_DESCRIPTION.format(verb=verb, **text),
             handler=handle_transfer,
         )
-        # The options job transfer keeps for itself; push and pull always move whole trees.
+        # The options job move keeps for itself; push and pull always move whole trees.
         parser.set_defaults(transfer_verb=verb, resume=False, release=[], hold=False, destination_id=None, tree=True)
         if verb == "push":
             parser.add_argument(
@@ -5971,97 +6000,4 @@ def build_transfer_parser(
             )
         else:
             parser.set_defaults(keep=False)  # a pull never keeps copies in SRC
-        parsers.append(parser)
-    for parser in parsers:
-        everyday = parser is not transfer
-        parser.add_argument(
-            "source",
-            metavar="SRC",
-            nargs="?",
-            help="the workspace the jobs leave" + ("" if everyday else " (with --release: the one holding it)"),
-        )
-        parser.add_argument("destination", metavar="DST", nargs="?", help="the workspace the jobs arrive in")
-        parser.add_argument(
-            "--job",
-            action="append",
-            default=[],
-            dest="jobs",
-            metavar="JOB",
-            help="a job UUID, key, unique prefix or path in SRC; a remote SRC requires canonical job UUIDs (repeatable)",
-        )
-        parser.add_argument(
-            "-s",
-            "--state",
-            action="append",
-            default=[],
-            metavar="STATE",
-            choices=_MOVABLE_STATES,
-            help="select every job of SRC in this state (repeatable; combinable with --job)",
-        )
-        _add_step_option(
-            parser,
-            help_text=(
-                "select only jobs at this step: the current activation's, else the initial step (repeatable; "
-                "narrows --job and --state; without --state, selects from every unowned state but away)"
-            ),
-        )
-        parser.add_argument(
-            "--placement",
-            metavar="PREFIX",
-            help="with --state, or --step without --job: only jobs under this placement prefix",
-        )
-        if not everyday:
-            parser.add_argument("--tree", action="store_true", help="move each job's descendants with it")
-            parser.add_argument("--resume", action="store_true", help="re-drive the held transfers of SRC (to DST)")
-            parser.add_argument(
-                "--release",
-                action="append",
-                default=[],
-                metavar="TRANSFER_ID",
-                help="discard a hold whose jobs DST already has (repeatable)",
-            )
-            parser.add_argument(
-                "--keep",
-                action="store_true",
-                help="keep an away copy of each moved job in SRC; a later transfer back replaces it "
-                "(with --release: keep the held jobs as away copies)",
-            )
-            parser.add_argument("--hold", action="store_true", help=argparse.SUPPRESS)
-            parser.add_argument(
-                "--destination-id",
-                metavar="WORKSPACE_ID",
-                help="with --release --keep: the destination workspace id the away copies record, for a hold "
-                "that records none",
-            )
-        parser.add_argument(
-            "--no-workflows",
-            action="store_true",
-            help="do not install the workflows the jobs need in DST (by default those DST lacks and SRC has travel)",
-        )
-        parser.add_argument("-q", "--quiet", action="store_true", help="print no progress lines to stderr")
-        _add_adapter_timeout(parser)
-        parser.add_argument("--json", action="store_true", help="print the outcomes as one JSON document")
-        add_durability_arguments(parser)
-
-
-def build_transfer_operator_parser(
-    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
-) -> None:
-    """Declare the ``transfer`` group: inspecting held transfers."""
-
-    _, group = _group(
-        subparsers,
-        "transfer",
-        summary="inspect held workspace transfers",
-        description="Inspect the held transfers of a workspace (move jobs with `httk job transfer`)",
-    )
-    status = _leaf(
-        group,
-        "status",
-        summary="list held transfers",
-        description="List the held transfers of a workspace: transfer id, root job, members, destination and age",
-        handler=handle_transfer_status,
-    )
-    status.add_argument("workspace", metavar="WS", nargs="?", help="the workspace (default: the selected one)")
-    status.add_argument("--json", action="store_true", help="print the holds as one JSON document")
-    _add_adapter_timeout(status)
+        _add_move_arguments(parser, everyday=True)

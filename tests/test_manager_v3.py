@@ -576,7 +576,7 @@ def test_job_why_points_a_failed_job_whose_workflow_was_reinstalled_to_a_rerun(
     diagnosis = explain_job(ws, only(ws, "failed"))
     assert any(check.name == "workflow pin" and check.satisfied is False for check in diagnosis.checks)
     assert (
-        "rerun it on the installed tree ('httk job request restart --reason TEXT JOB', or 'continue --tree' when it "
+        "rerun it on the installed tree ('httk job restart JOB', or 'httk job resume --tree JOB' when it "
         "failed waiting on failed children), or reinstall the tree it ran with"
     ) in diagnosis.hints
 

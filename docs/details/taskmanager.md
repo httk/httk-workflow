@@ -54,7 +54,7 @@ From a desk, the same operations reach that workspace through a remote as
 `kappa:runs`; `run --workspace kappa:runs` invokes
 `httk workflow manager run --workspace runs --count 4 --detach` on kappa, which
 uses the owning workspace's launcher. Move jobs there and back with
-`job transfer` ({doc}`remotes`).
+`job move` ({doc}`remotes`).
 
 ### Workspace policy
 
@@ -177,12 +177,12 @@ and builds a `[workflow.build]` package for this platform (unless
 platform, and `httk workflow uninstall --workspace WORKSPACE SELECTOR` removes
 one; `--check` warns about unfinished jobs that still use it.
 
-`job transfer` (and `job push`/`job pull`) installs the workflows its jobs need
+`job move` (and `push`/`pull`) installs the workflows its jobs need
 in the destination when it lacks them and the source has them, never replacing
 an installation (see {doc}`remotes`). Otherwise a job ejected, adopted, or
 transferred with `--no-workflows` into a workspace that lacks its workflow
 stays `ready` and unclaimed until the workflow is installed there; `job adopt`
-and `job transfer` warn about it, and `job why` and `workflow precheck` name
+and `job move` warn about it, and `job why` and `job precheck` name
 it. Do not reinstall a workflow that unfinished jobs
 use: an id is one workflow, and the installed digest is recorded at each launch
 (`workflow_pin`), not enforced. Nothing refuses a reinstall, but each
@@ -192,8 +192,8 @@ new one); the manager logs a warning when a job's next launch runs a different
 tree than its last; `job why` reports a `workflow pin` check when the installed
 tree differs from the last launch's pin; and `httk collect` refuses such a job
 with both digests and the remedies: reinstall the tree it ran with, or rerun
-the job on the installed tree (`httk job request restart --reason TEXT JOB`
-for a failed or paused job, or `continue --tree` when it failed waiting on
+the job on the installed tree (`httk job restart --reason TEXT JOB`
+for a failed or paused job, or `job resume --tree` when it failed waiting on
 failed children; a succeeded job is deleted with `httk job delete` and created
 again).
 To edit the runner for one job only, unlock the job and edit its own copy of
@@ -224,8 +224,8 @@ refuse such a placement (spawned children default to a nested
 Run the read-only precheck before starting managers:
 
 ```console
-httk workflow precheck --workspace WORKSPACE
-httk workflow precheck --workspace WORKSPACE --json
+httk job precheck --workspace WORKSPACE
+httk job precheck --workspace WORKSPACE --json
 ```
 
 For `ready`, `waiting` and `paused` jobs it reports environment entries and
@@ -877,29 +877,29 @@ releases it; a job a manager is running gets a `cancel` at once and every other
 request at the next attempt boundary.
 
 ```console
-httk job request pause --workspace WORKSPACE --reason "inspection" JOB
-httk job request override_step --override-step relax --reason "redo relax" JOB
-httk job request set_priority --priority 100 --reason "urgent" JOB
-httk job request set_budget --max-attempts-per-activation 3 --reason "flaky node" JOB
-httk job request set_workflow --workflow relax@v1.3.0 --state ready --reason "bump"
+httk job pause --workspace WORKSPACE --reason "inspection" JOB
+httk job set JOB step=relax --reason "redo relax"
+httk job set JOB priority=100 --reason "urgent"
+httk job set JOB budget.max_attempts_per_activation=3 --reason "flaky node"
+httk job set workflow=relax@v1.3.0 --state ready --reason "bump"
 ```
 
-| Action | Applies to | Effect |
+| Action (command) | Applies to | Effect |
 | --- | --- | --- |
-| `cancel` | any non-terminal job | `cancelled`; a running attempt is stopped first |
-| `pause` | a job not terminal, paused or waiting | `paused`, at the next boundary when running |
-| `continue` | a failed or paused job (a succeeded one when unlocked) | `waiting` with the retained join when the job failed at its wait on children (no new attempt); otherwise `ready`, the failure cleared and a new attempt; the declared retry allowance is restored first unless `--keep-budget` |
-| `restart` | a failed or paused job (a succeeded one when unlocked) | `ready`; the failure is cleared, a retained join is dropped, and a new attempt is recorded; the declared retry allowance is restored first unless `--keep-budget` |
-| `override_step` | a failed or paused job (a succeeded one when unlocked) | `ready` with a new activation of `--override-step`; a retained join is dropped; the declared retry allowance is restored first unless `--keep-budget` |
-| `set_priority` | any job | the new `--priority` (0 is highest) |
-| `set_budget` | any job not succeeded (unless unlocked) or cancelled | the retry budgets raised or lifted per `--max-*` option; merged into `state.json` `budget_override`, state and priority unchanged; a limit set below what the job has used ends it at the next budget check |
-| `set_workflow` | any job not succeeded (unless unlocked) or cancelled whose workflow `--workflow` may replace | the job runs the installed `--workflow` from its next attempt; recorded as `state.json` `workflow_override`, `runner_steps` cleared, state and priority unchanged; refused naming the failed compatibility rule (see {doc}`/restarting_jobs`) |
-| `detach` | a spawned job | independent of its parent, permanently |
-| `unlock` | a job that is not already unlocked with its copy (a succeeded job only once unsealed) | debug mode: the one-way `state.json` `unlocked` marker, a copy of the installed package at `workflow/` in the job directory the runner is launched from (unless `--no-copy`), and the integrity rules relaxed; see {doc}`/restarting_jobs` |
-| `eject` | a quiescent job | moved out as a bundle to `--destination` (not into an exchange inbox when unlocked) |
-| `delete` | a terminal or paused job; a succeeded one only after `unseal` (not for an unlocked job); no waiting parent | removed |
-| `seal` | a succeeded job without a seal (refused for an unlocked job) | sealed |
-| `unseal` | a sealed succeeded job | released from its seal |
+| `cancel` (`job cancel`) | any non-terminal job | `cancelled`; a running attempt is stopped first |
+| `pause` (`job pause`) | a job not terminal, paused or waiting | `paused`, at the next boundary when running |
+| `continue` (`job resume`) | a failed or paused job (a succeeded one when unlocked) | `waiting` with the retained join when the job failed at its wait on children (no new attempt); otherwise `ready`, the failure cleared and a new attempt; the declared retry allowance is restored first unless `--keep-budget` |
+| `restart` (`job restart`) | a failed or paused job (a succeeded one when unlocked) | `ready`; the failure is cleared, a retained join is dropped, and a new attempt is recorded; the declared retry allowance is restored first unless `--keep-budget` |
+| `override_step` (`job set step=STEP`) | a failed or paused job (a succeeded one when unlocked) | `ready` with a new activation of `STEP`; a retained join is dropped; the declared retry allowance is restored first unless `--keep-budget` |
+| `set_priority` (`job set priority=N`) | any job | the new priority `N` (0 is highest) |
+| `set_budget` (`job set budget.*=N`) | any job not succeeded (unless unlocked) or cancelled | the retry budgets raised or lifted per `budget.*` key; merged into `state.json` `budget_override`, state and priority unchanged; a limit set below what the job has used ends it at the next budget check |
+| `set_workflow` (`job set workflow=W`) | any job not succeeded (unless unlocked) or cancelled whose workflow `W` may replace | the job runs the installed `W` from its next attempt; recorded as `state.json` `workflow_override`, `runner_steps` cleared, state and priority unchanged; refused naming the failed compatibility rule (see {doc}`/restarting_jobs`) |
+| `detach` (`job detach`) | a spawned job | independent of its parent, permanently |
+| `unlock` (`job unlock`) | a job that is not already unlocked with its copy (a succeeded job only once unsealed) | debug mode: the one-way `state.json` `unlocked` marker, a copy of the installed package at `workflow/` in the job directory the runner is launched from (unless `--no-copy`), and the integrity rules relaxed; see {doc}`/restarting_jobs` |
+| `eject` (`job eject`) | a quiescent job | moved out as a bundle to its destination (not into an exchange inbox when unlocked) |
+| `delete` (`job delete`) | a terminal or paused job; a succeeded one only after `unseal` (not for an unlocked job); no waiting parent | removed |
+| `seal` (`job seal`) | a succeeded job without a seal (refused for an unlocked job) | sealed |
+| `unseal` (`job unseal`) | a sealed succeeded job | released from its seal |
 
 Requests apply once, in posting order. A request that does not apply where the
 job now is is dropped and recorded in the job's `state.json` history with the
@@ -908,7 +908,7 @@ job cannot be found, is moved to quarantine by `gc` after a day. `continue`,
 `restart` and `override_step` of a child that a parent's observations name are
 refused unless `--force` is given. The exception is a child that its parent's
 join still names: the parent failed at its wait with a retained join, or waits
-on the child again. Fixing the child and continuing it needs no `--force`. `continue --tree PARENT` resumes such a parent's failed
+on the child again. Fixing the child and continuing it needs no `--force`. `job resume --tree PARENT` resumes such a parent's failed
 descendants, deepest first, before the parent itself. `restart` of a job that
 recorded a failed or cancelled child, which its rerun spawning step would
 reuse, is refused unless `--force` is given; see {doc}`/restarting_jobs`.
@@ -923,13 +923,13 @@ limits in history; `--keep-budget` keeps the limits as they are, so a job that
 failed for lack of budget then needs `set_budget` first. Automatic retries never
 raise a limit; see {doc}`/restarting_jobs`.
 
-`job request` posts the files and, as a short-lived CLI owner, applies each
+Each request verb (`job cancel`, `pause`, `resume`, `restart`, `set`) posts the files and, as a short-lived CLI owner, applies each
 request at once to a job no owner holds. A job held by an owner (a manager, or
 a dead one until `gc` or reconciliation) gets it at that owner's next
 boundary, and its outcome prints `queued`. It exits `1` when a request is
-refused or uncertain. `--wait` (only for `pause`) waits until each job was
+refused or uncertain. `job pause --wait` waits until each job was
 observed `paused`, and exits `1` when a pause was superseded, dropped or timed
-out (`--timeout SECONDS`). `override_step` is checked against the steps the
+out (`--timeout SECONDS`). `job set step=` is checked against the steps the
 runner recorded after its first attempt; `--force` publishes anyway.
 
 When the operator has an identity from `httk setup`, the request carries an

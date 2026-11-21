@@ -1,6 +1,6 @@
 """Batched Release and Drop chunks in ``syncfs`` mode (plan WORKFLOW_LOCAL_COMMANDS phase L3b, §5 amendment 14).
 
-A local ``job request`` of a Release or Drop action serves each contiguous run of at least eight eligible jobs as one
+A local request verb (``job cancel`` and its siblings) of a Release or Drop action serves each contiguous run of at least eight eligible jobs as one
 batch: post (C0, A), claim (B), run-log lines and state temporaries (C1), state replaces (C2), request unlinks (D1) and
 release moves (D2), each phase made durable by one commit point. Everything else stays on the serial path, in input
 order: fsync mode, short runs, every other action and every ineligible job (batched Discard, phase L3c, is in
@@ -331,7 +331,7 @@ def test_job_request_cancel_prints_what_the_serial_code_prints(
         refs[4] = _at(workspace, refs[4], "cancelled")
         labels = {ref.job_id: f"j{number}" for number, ref in enumerate(refs)}
         status = command(
-            ["job", "request", "cancel", "--workspace", name, "--reason", "r", *(ref.job_id for ref in refs)],
+            ["job", "cancel", "--workspace", name, "--reason", "r", *(ref.job_id for ref in refs)],
             _context(tmp_path),
         )
         normalize = _normalizer(labels)
