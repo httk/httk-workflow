@@ -293,6 +293,7 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`manager run`."""
 
     parser.add_argument(
+        "-w",
         "--workspace",
         metavar="WORKSPACE",
         help="the workspace this manager serves (default: the enclosing workspace, this project's workspace, or the per-user default)",
@@ -318,8 +319,9 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="advertise this capability to the scheduler (repeatable)",
     )
     parser.add_argument(
-        "--placement-prefix",
+        "--placement",
         action="append",
+        dest="placement_prefix",
         metavar="PREFIX",
         help=(
             "restrict every scheduling scan to jobs at or below this placement subtree "
@@ -347,22 +349,23 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="how often this manager looks for work (default: 1)",
     )
     parser.add_argument(
-        "--idle",
+        "--keep-running",
         action="store_true",
+        dest="idle",
         help="keep serving the workspace when nothing is left to do",
     )
     parser.add_argument(
         "--idle-timeout",
         type=float,
         metavar="SECONDS",
-        help="without --idle, give up after this long if the workspace never becomes idle (default: 3600)",
+        help="without --keep-running, give up after this long if the workspace never becomes idle (default: 3600)",
     )
     parser.add_argument(
         "--idle-grace",
         type=float,
         metavar="SECONDS",
         help=(
-            "without --idle, a manager serving the workspace's exchange, or whose ready jobs wait for "
+            "without --keep-running, a manager serving the workspace's exchange, or whose ready jobs wait for "
             "confinement, does not exit as idle this soon after it starts; still blocked by confinement "
             "after it, it exits 2 (default: 120)"
         ),
@@ -425,6 +428,7 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare the streamlined top-level :command:`run` leaf."""
 
     parser.add_argument(
+        "-w",
         "--workspace",
         metavar="WORKSPACE",
         help="the workspace this manager serves (default: the enclosing workspace, this project's workspace, or the per-user default)",
@@ -442,24 +446,27 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="advertise this capability to the scheduler, so capability-gated jobs become claimable (repeatable)",
     )
     parser.add_argument(
-        "--placement-prefix",
+        "--placement",
         action="append",
+        dest="placement_prefix",
         metavar="PREFIX",
         help="restrict every scheduling scan to jobs at or below this placement subtree (repeatable)",
     )
-    parser.add_argument("--idle", action="store_true", help="keep serving the workspace when nothing is left to do")
+    parser.add_argument(
+        "--keep-running", action="store_true", dest="idle", help="keep serving the workspace when nothing is left to do"
+    )
     parser.add_argument(
         "--idle-timeout",
         type=float,
         metavar="SECONDS",
-        help="without --idle, give up after this long if the workspace never becomes idle (default: 3600)",
+        help="without --keep-running, give up after this long if the workspace never becomes idle (default: 3600)",
     )
     parser.add_argument(
         "--idle-grace",
         type=float,
         metavar="SECONDS",
         help=(
-            "without --idle, a manager serving the workspace's exchange, or whose ready jobs wait for "
+            "without --keep-running, a manager serving the workspace's exchange, or whose ready jobs wait for "
             "confinement, does not exit as idle this soon after it starts; still blocked by confinement "
             "after it, it exits 2 (default: 120)"
         ),
@@ -551,7 +558,7 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
     for capability in getattr(arguments, "capability", []):
         argv += ["--capability", capability]
     for prefix in getattr(arguments, "placement_prefix", []):
-        argv += ["--placement-prefix", prefix]
+        argv += ["--placement", prefix]
     if changed("heartbeat_interval"):
         argv += ["--heartbeat-interval", str(arguments.heartbeat_interval)]
     if changed("poll_interval"):
@@ -569,7 +576,7 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         # The path of exec:PATH may only exist where the manager runs.
         argv += ["--allocation", parse_allocation_spec(arguments.allocation)]
     if getattr(arguments, "idle", False):
-        argv.append("--idle")
+        argv.append("--keep-running")
     else:
         if changed("idle_timeout"):
             argv += ["--idle-timeout", str(arguments.idle_timeout)]
@@ -601,8 +608,6 @@ def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
         argv.append("--json-logs")
     if getattr(arguments, "no_durable", False):
         argv.append("--no-durable")
-    elif getattr(arguments, "durable", False):
-        argv.append("--durable")
     return argv
 
 
@@ -969,7 +974,7 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
     """Run one task manager with the workspace manager log.
 
     A local binding runs the manager in this process. A remote binding submits
-    managers through the remote's scheduler over its adapter. ``--idle`` keeps
+    managers through the remote's scheduler over its adapter. ``--keep-running`` keeps
     a local manager serving after the workspace becomes idle; otherwise the
     command exits when it becomes idle.
     """

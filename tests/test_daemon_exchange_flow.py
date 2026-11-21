@@ -130,7 +130,7 @@ def test_a_job_round_trips_through_the_exchange(
         exchange_pool(AUTHORIZED_KEY),
         "--allocation",
     ]
-    assert "--idle" not in argv
+    assert "--keep-running" not in argv
     pins = dict(argv[index + 1].split("=", 1) for index, word in enumerate(argv) if word == "--setting")
     assert pins["manager.confine"] == "bwrap"
     pools = [exchange_pool(AUTHORIZED_KEY)]

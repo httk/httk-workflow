@@ -11,6 +11,7 @@ from httk.workflow.adapters import (
     REMOTE_WORKSPACE_CONFIGURE_COMMAND,
     REMOTE_WORKSPACE_POLICY_COMMAND,
     REMOTE_WORKSPACE_SETTINGS_COMMAND,
+    REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND,
 )
 from httk.workflow.errors import SealedError
 from httk.workflow.models import WorkspacePolicy
@@ -225,13 +226,27 @@ def test_remote_settings_set_forwards_every_pair_in_one_call(tmp_path: Path, mon
         return original(binding, context, argv, **kwargs)
 
     monkeypatch.setattr(_common, "remote_workspace_output", spy)
-    argv = ["workspace", "settings", "set", "--key", "a", "--value", "1", "--key", "b", "--value", "x", "cluster:far"]
-    assert command(argv, CLIContext("httk", project)) == 0
+    argv = ["workspace", "settings", "set", "--no-durable", "--key", "a", "--value", "1", "--key", "b", "--value", "x"]
+    assert command([*argv, "cluster:far"], CLIContext("httk", project)) == 0
     assert json.loads(capsys.readouterr().out) == {"a": 1, "b": "x"}
     assert calls == [
-        [*REMOTE_WORKSPACE_SETTINGS_COMMAND, "set", "--key", "a", "--value", "1", "--key", "b", "--value", "x", "far"]
+        [
+            *REMOTE_WORKSPACE_SETTINGS_COMMAND,
+            "set",
+            "--no-durable",
+            *("--key", "a", "--value", "1", "--key", "b", "--value", "x", "far"),
+        ]
     ]
     assert Workspace(tmp_path / "far").settings == {"a": 1, "b": "x"}
+
+    # The workflow-prelude writes forward --no-durable the same way.
+    prelude = ["workspace", "workflow-prelude", "set", "--no-durable", "--workflow", "relax-vasp", "--value", "true"]
+    assert command([*prelude, "cluster:far"], CLIContext("httk", project)) == 0
+    assert calls[-1] == [
+        *REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND,
+        "set",
+        *("--no-durable", "--workflow", "relax-vasp", "--value", "true", "far"),
+    ]
 
 
 def _fake_remote_reply(monkeypatch, reply: tuple[int, str, str]) -> None:

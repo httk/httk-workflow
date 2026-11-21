@@ -154,6 +154,7 @@ def build_precheck_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         handler=handle_precheck,
     )
     parser.add_argument(
+        "-w",
         "--workspace",
         metavar="WORKSPACE",
         help="the workspace to precheck (default: the enclosing workspace, this project's workspace, or the per-user default)",

@@ -625,7 +625,7 @@ returned tree, verifies it and removes the source from the exchange.
 `--configuration` names one of the global `slurm` launchers the operator
 approved for the daemon (each sets `manager.confine=bwrap`); `daemon.json`
 lists them with their digests and published resource settings (task layout,
-CPUs, memory, GRES, partition, workers and time limits), and `show` prints it. Every unrestricted confined manager of the workspace (no `--placement-prefix` or pool restriction), and
+CPUs, memory, GRES, partition, workers and time limits), and `show` prints it. Every unrestricted confined manager of the workspace (no `--placement` or pool restriction), and
 every manager the daemon starts, adopts bundles from `inbox` and runs every job
 attempt confined to its own job directory; the daemon only starts, queries and
 cancels managers. Adoption puts the jobs you eject in your key's exchange pool,

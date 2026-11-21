@@ -257,15 +257,17 @@ def _unregistered_workspaces(project_root: Path, adopt: bool) -> dict[str, objec
 
     # Detection only: a workspace missing from members.json, or a member whose
     # recorded name is not registered centrally on this machine (a freshly copied
-    # tree), both need `httk workspace adopt` / `httk project adopt --repair`.
+    # tree), both need `httk workspace adopt` / `httk project repair`.
     central = {str(Path(record["path"]).resolve()) for record in _read_global().values()}
     unregistered = [relpath for relpath in on_disk if relpath not in registered]
-    # Only a member with a recorded *name* is adoptable by name; an unnamed local
-    # init has nothing to adopt and is left alone.
+    # Only a workspace member with a recorded *name* is adoptable by name; an unnamed
+    # local init has nothing to adopt and is left alone, and other kinds are not ours.
     unadopted = [
         member.path
         for member in members
-        if member.name is not None and str((project / member.path).resolve()) not in central
+        if member.kind == "workspace"
+        and member.name is not None
+        and str((project / member.path).resolve()) not in central
     ]
     problems = sorted(set(unregistered) | set(unadopted))
     if not problems:
@@ -276,7 +278,7 @@ def _unregistered_workspaces(project_root: Path, adopt: bool) -> dict[str, objec
         "workspace_members",
         "error",
         f"{len(problems)} workspace(s) are not registered members or not adopted on this machine "
-        f"({', '.join(problems)}); run `httk project adopt`",
+        f"({', '.join(problems)}); run `httk project repair`",
         repairable=True,
         details={"workspaces": problems},
     ).as_mapping()

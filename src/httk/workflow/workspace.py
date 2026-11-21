@@ -135,7 +135,7 @@ def _refuse_format(root: object, version: object, profile: object) -> FormatErro
     return FormatError(
         f"workspace at {root} uses httk-workflow-filesystem format version {version} (profile {profile!r}); "
         f"this version of httk-workflow reads only format 3 ({CORE_PROFILE}). "
-        "There is no migration: remove old per-user state with `httk system reset` "
+        "There is no migration: remove old per-user state with `httk setup --reset` "
         "and recreate the workspace with `httk workspace init`."
     )
 

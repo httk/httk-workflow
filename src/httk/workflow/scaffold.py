@@ -1200,14 +1200,14 @@ def resolve_workflow(
         resolved = registered_workflow(text)
     if resolved is not None and format is not None:
         raise ValueError(
-            "--format applies only to bare workflow documents or directories; registered workflows use their manifest language"
+            "--language applies only to bare workflow documents or directories; registered workflows use their manifest language"
         )
     if resolved is None:
         path = Path(text).expanduser()
         if path.is_dir() and (path / "httk_workflow.toml").is_file():
             if format is not None:
                 raise ValueError(
-                    "--format cannot be used with a workflow package directory; its language comes from the manifest"
+                    "--language cannot be used with a workflow package directory; its language comes from the manifest"
                 )
             from .packages import load_workflow_package
 
@@ -1267,11 +1267,11 @@ def resolve_workflow(
                 lang = compat.language(format)
                 if lang.document_policy == "forbidden" and not resolved_path.is_dir():
                     raise ValueError(
-                        f"workflow format {lang.name!r} forbids documents; --format {format!r} requires a directory target"
+                        f"workflow format {lang.name!r} forbids documents; --language {format!r} requires a directory target"
                     )
                 if lang.document_policy != "forbidden" and not resolved_path.is_file():
                     raise ValueError(
-                        f"workflow format {lang.name!r} expects a document file for --format {format!r}: {resolved_path}"
+                        f"workflow format {lang.name!r} expects a document file for --language {format!r}: {resolved_path}"
                     )
             if lang is not None:
                 ports = lang.ports(resolved_path)

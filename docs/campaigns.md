@@ -41,7 +41,7 @@ httk campaign configure --set partitions.east=screening-c
 httk campaign configure --unset partitions.east
 httk campaign configure --set assignment=explicit
 httk campaign configure --unset assignment
-httk campaign remove --force
+httk campaign remove --yes
 ```
 
 Unsetting `assignment` restores `hash`. Removing the campaign clears its
@@ -122,11 +122,11 @@ cheaper to list than one flat directory of jobs. The engine
 imposes no scheme; common ones are a short hash prefix of the job key
 (`project/<hash-prefix>/<batch>`), one subtree per submission batch
 (`project/<date>/<run>`), or one per structure family. A manager started with
-`--placement-prefix` serves exactly one such subtree.
+`--placement` serves exactly one such subtree.
 
 Spawned children go, by default, to `<parent placement>/<parent job key>.children`,
 so a tree is visible as a tree within each state directory and a
-`--placement-prefix` manager serves a root's whole tree. The workspace setting
+`--placement` manager serves a root's whole tree. The workspace setting
 `children.placement=flat` puts children at their parent's placement instead,
 for tools that need short absolute paths to other jobs' files; an explicit
 `placement=` always wins.

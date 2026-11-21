@@ -2587,7 +2587,7 @@ and a workspace of another format version or profile with:
 ```text
 workspace at <root> uses httk-workflow-filesystem format version <v> (profile '<p>'); this version of
 httk-workflow reads only format 3 (core-v3). There is no migration: remove old per-user state with
-`httk system reset` and recreate the workspace with `httk workspace init`.
+`httk setup --reset` and recreate the workspace with `httk workspace init`.
 ```
 
 Bundles of the old transfer format and old remotes are refused likewise.

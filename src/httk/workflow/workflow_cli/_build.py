@@ -144,6 +144,7 @@ def build_build_parser(subparsers: "argparse._SubParsersAction[argparse.Argument
     )
     parser.add_argument("targets", nargs="*", metavar="WORKFLOW", help="an installed workflow id or short name")
     parser.add_argument(
+        "-w",
         "--workspace",
         metavar="WORKSPACE",
         help="the workspace whose installed workflows to build (default: the enclosing workspace, this "

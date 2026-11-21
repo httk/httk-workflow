@@ -277,7 +277,7 @@ def test_d_double_prime_unlinks_every_request_of_a_deleted_job(
 
 
 def _scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any, *, batched: bool) -> dict[str, Any]:
-    """A mixed delete chunk through ``job delete --force``: cancelled and failed jobs (Discard), ready ones (Drop), one
+    """A mixed delete chunk through ``job delete --yes``: cancelled and failed jobs (Discard), ready ones (Drop), one
     held by another owner (queued), an exchange-origin one (evicted, serial), a parent with its child (a component,
     serial), an unknown one, a duplicate and a planted ``logs``; served with or without batching."""
 
@@ -308,7 +308,7 @@ def _scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any, *, b
     capsys.readouterr()
     with _held(workspace, jobs["held"]):
         status = command(
-            ["job", "delete", "--force", "--workspace", name, *(jobs[label].job_id for label in order)],
+            ["job", "delete", "--yes", "--workspace", name, *(jobs[label].job_id for label in order)],
             _context(tmp_path),
         )
     normalize = _normalizer(labels)

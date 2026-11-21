@@ -743,7 +743,7 @@ def test_a_normal_run_never_reports_an_orphaned_attempt(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # A real deployment has a signing key from ``httk init``, so sealing a
+    # A real deployment has a signing key from ``httk setup``, so sealing a
     # succeeded job stays quiet; a keyless workspace would warn on every job.
     configure_identity()
     workspace = initialize_workspace(tmp_path / "workspace")

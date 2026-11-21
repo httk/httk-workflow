@@ -509,7 +509,7 @@ def handle_workspace_unseal(arguments: argparse.Namespace, context: CLIContext) 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_unseal)
     workspace = Workspace(_local_root(arguments, context, action="unseal it"))
-    if not confirm(f"Unseal the workspace {workspace.workspace_id}?", force=arguments.force):
+    if not confirm(f"Unseal the workspace {workspace.workspace_id}?", yes=arguments.yes):
         return 1
     unseal_workspace(workspace)
     print(f"{workspace.root}\tunsealed")
@@ -639,7 +639,7 @@ def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) ->
         return _workspace_batch(arguments, context, handle_workspace_fsck)
     if arguments.repair:
         prompt = "Make sure no other operations are ongoing in this workspace. Continue?"
-        if not confirm(prompt, force=arguments.yes, flag="--yes", declined="not repaired"):
+        if not confirm(prompt, yes=arguments.yes, declined="not repaired"):
             return 1
         arguments.yes = True  # answered here: a remote repair runs without asking again
     binding, root = _resolve_binding(arguments, context)
@@ -775,35 +775,40 @@ def handle_workspace_forget(arguments: argparse.Namespace, context: CLIContext) 
 def handle_workspace_delete(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Destroy a registered workspace and deregister it.
 
-    Destruction is irreversible, so it is refused without ``--force``.
+    Destruction is irreversible, so it is confirmed first: on the terminal, or by ``--yes``.
     """
 
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_delete)
+    # The target is resolved before the prompt, so a mistyped name never asks.
+    prompt = f"Destroy the workspace {arguments.workspace!r}? This is irreversible."
     if _by_path(arguments):
         # The protocol form one machine runs on another: destroy the workspace at
         # a literal path, with no registry involved.
-        if not arguments.force:
-            raise ValueError("workspace delete requires --force")
-        remove_local_workspace(Path(arguments.workspace))
+        path = Path(arguments.workspace)
+        if not (path.expanduser() / WORKSPACE_DIRECTORY / "format.json").is_file():
+            raise ValueError(f"not an httk execution workspace: {path}")
+        if not confirm(prompt, yes=arguments.yes, declined="not deleted"):
+            return 1
+        remove_local_workspace(path)
         print(arguments.workspace)
         return 0
     binding = resolve_workspace(arguments.workspace, project=context.cwd)
-    if binding.remote != LOCAL_REMOTE and not arguments.force:
-        raise ValueError("workspace delete requires --force")
-    if binding.remote != LOCAL_REMOTE:
-        target = resolve_remote(binding.remote, project=context.cwd)
+    target = None if binding.remote == LOCAL_REMOTE else resolve_remote(binding.remote, project=context.cwd)
+    if not confirm(prompt, yes=arguments.yes, declined="not deleted"):
+        return 1
+    if target is not None:
         name = binding.name.split(":", 1)[1]
         result = run_adapter(
             target.bundle,
             "invoke",
-            {"argv": [*REMOTE_WORKSPACE_DELETE_COMMAND, "--force", name]},
+            {"argv": [*REMOTE_WORKSPACE_DELETE_COMMAND, "--yes", name]},
         )
         if result.get("returncode") != 0:
             raise RuntimeError(f"remote workspace delete failed: {result.get('stderr', '')}")
         print(f"deleted {name}")
         return 0
-    delete_workspace(arguments.workspace, force=arguments.force)
+    delete_workspace(arguments.workspace, force=True)
     print(f"deleted {binding.name}")
     return 0
 
@@ -933,7 +938,7 @@ def handle_workspace_configure(arguments: argparse.Namespace, context: CLIContex
             context,
             REMOTE_WORKSPACE_CONFIGURE_COMMAND,
             arguments,
-            flags=("--json", "--durable", "--no-durable"),
+            flags=("--json", "--no-durable"),
             tail=[
                 *(part for text in arguments.settings or () for part in ("--set", text)),
                 *(part for key in arguments.unset or () for part in ("--unset", key)),
@@ -968,7 +973,7 @@ def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLICon
             context,
             (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "set"),
             arguments,
-            flags=("--durable", "--no-durable"),
+            flags=("--no-durable",),
             tail=[part for key, text in pairs for part in ("--key", key, "--value", text)],
         )
         if stderr:
@@ -1016,7 +1021,7 @@ def handle_workspace_settings_unset(arguments: argparse.Namespace, context: CLIC
             context,
             (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "unset"),
             arguments,
-            flags=("--durable", "--no-durable"),
+            flags=("--no-durable",),
             tail=[part for key in keys for part in ("--key", key)],
         )
         if stderr:
@@ -1116,7 +1121,7 @@ def handle_workspace_workflow_prelude_set(arguments: argparse.Namespace, context
             context,
             (*REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND, "set"),
             arguments,
-            flags=("--durable", "--no-durable"),
+            flags=("--no-durable",),
             tail=("--workflow", arguments.workflow, "--value", arguments.value),
         )
     # Resolve ``@file`` only for a local store: a remote store forwards the raw
@@ -1147,7 +1152,7 @@ def handle_workspace_workflow_prelude_unset(arguments: argparse.Namespace, conte
             context,
             (*REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND, "unset"),
             arguments,
-            flags=("--durable", "--no-durable"),
+            flags=("--no-durable",),
             tail=("--workflow", arguments.workflow),
         )
     workspace = Workspace(root, durable=_durable(arguments))
@@ -1404,11 +1409,11 @@ def build_workspace_parser(
         group,
         "delete",
         summary="destroy a workspace and deregister it",
-        description="Destroy a registered workspace and deregister it; refused without --force",
+        description="Destroy a registered workspace and deregister it, after confirmation",
         handler=handle_workspace_delete,
     )
     delete.add_argument("workspace", metavar="NAME", nargs="+", help="the registered workspace to destroy")
-    delete.add_argument("--force", action="store_true", help="confirm the irreversible destruction")
+    delete.add_argument("--yes", action="store_true", help="skip the confirmation of the irreversible destruction")
     _add_by_path_argument(delete)
 
     move = _leaf(
@@ -1600,6 +1605,7 @@ def build_workspace_parser(
     )
     _add_workspace_targets(collect, help_text="the workspace to collect")
     collect.add_argument(
+        "-n",
         "--dry-run",
         action="store_true",
         help="report what would be removed without touching it",
@@ -1638,7 +1644,7 @@ def build_workspace_parser(
         handler=handle_workspace_unseal,
     )
     _add_workspace_targets(unseal, help_text="the workspace to unseal")
-    unseal.add_argument("--force", action="store_true", help="skip the confirmation prompt")
+    unseal.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
 
     verify = _leaf(
         group,

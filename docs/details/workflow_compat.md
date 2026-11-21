@@ -502,9 +502,9 @@ httk job new --workspace WS --from-runner workflow.json \
 httk job new --workspace WS --from-runner maker.json
 ```
 
-When path matching is not appropriate, `--format FORMAT` selects the reader:
-`cwl`, `pwd` or `jobflow`. A package directory rejects `--format`, since its
-format is already declared. `httk workflow install --format FORMAT` installs a
+When path matching is not appropriate, `--language LANGUAGE` selects the reader:
+`cwl`, `pwd` or `jobflow`. A package directory rejects `--language`, since its
+language is already declared. `httk workflow install --language LANGUAGE` installs a
 bare document, or with `httk-v1` a bare task directory
 ({doc}`/details/v1_compatibility`), the same way without creating a job.
 

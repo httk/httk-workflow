@@ -286,11 +286,11 @@ def handle_remote_show(arguments: argparse.Namespace, context: CLIContext) -> in
 
 
 def handle_remote_remove(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Remove one remote bundle, after asking unless told not to (``--force`` skips the confirmation)."""
+    """Remove one remote bundle, after asking unless told not to (``--yes`` skips the confirmation)."""
 
     if isinstance(arguments.name, list):
         return _remote_batch(arguments, context, handle_remote_remove, "name", json_output=True)
-    if not confirm(f"remove the remote {arguments.name!r} and everything configured in it?", force=arguments.force):
+    if not confirm(f"remove the remote {arguments.name!r} and everything configured in it?", yes=arguments.yes):
         return 1
     print(json.dumps(remove_remote(arguments.name, project=context.cwd), indent=2, sort_keys=True))
     return 0
@@ -428,7 +428,7 @@ def build_remote_parser(
     )
     remove.add_argument("name", metavar="NAME", nargs="+", help="the remote to remove")
     remove.add_argument(
-        "--force",
+        "--yes",
         action="store_true",
         help="skip the confirmation",
     )
@@ -5851,9 +5851,7 @@ the --keep of the run that releases it). `transfer status` and
 SRC with `job adopt SRC/.httk-workspace/transfers/outgoing/<transfer id>`,
 which is safe only after checking that DST does not have the jobs.
 `job transfer --release T [--release T ...] [--keep] [WS]` discards holds
-whose jobs DST has (with --keep, keeps them as away copies); `job transfer --hold (--job JOB | --state STATE | --step STEP) ... SRC DST` only
-holds jobs of a local SRC, recording DST as given, for a later --resume or
-release."""
+whose jobs DST has (with --keep, keeps them as away copies)."""
 
 
 _EVERYDAY_DESCRIPTION = """\
@@ -5960,6 +5958,7 @@ def build_transfer_parser(
             help="a job UUID, key, unique prefix or path in SRC; a remote SRC requires canonical job UUIDs (repeatable)",
         )
         parser.add_argument(
+            "-s",
             "--state",
             action="append",
             default=[],
@@ -5995,16 +5994,12 @@ def build_transfer_parser(
                 help="keep an away copy of each moved job in SRC; a later transfer back replaces it "
                 "(with --release: keep the held jobs as away copies)",
             )
-            parser.add_argument(
-                "--hold",
-                action="store_true",
-                help="only hold the jobs of a local SRC, recording DST as given (for a later --resume or release)",
-            )
+            parser.add_argument("--hold", action="store_true", help=argparse.SUPPRESS)
             parser.add_argument(
                 "--destination-id",
                 metavar="WORKSPACE_ID",
-                help="with --hold: the destination workspace's id, recorded so that the transfer adopts only there "
-                "(with --release --keep: the id the away copies record when the hold records none)",
+                help="with --release --keep: the destination workspace id the away copies record, for a hold "
+                "that records none",
             )
         parser.add_argument(
             "--no-workflows",

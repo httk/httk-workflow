@@ -91,7 +91,7 @@ def test_project_seal_end_to_end_via_the_core_cli(tmp_path: Path) -> None:
     context = CLIContext("httk", project)
     assert project_command(["seal"], context) == 0
     assert is_project_sealed(project)
-    assert project_command(["verify-seal"], context) == 0
+    assert project_command(["verify"], context) == 0
 
 
 def test_delete_workspace_unregisters_the_member(tmp_path: Path, monkeypatch) -> None:
@@ -164,13 +164,27 @@ def test_adopt_registers_the_copied_workspace_under_its_recorded_name(tmp_path: 
     assert Path(binding.path).resolve() == (copied / "work").resolve()
 
 
-def test_project_adopt_adopts_every_member(tmp_path: Path, monkeypatch) -> None:
+def test_project_repair_adopts_every_member(tmp_path: Path, monkeypatch) -> None:
     copied = _copied_named_project(tmp_path, monkeypatch)
     context = CLIContext("httk", copied)
-    assert project_command(["adopt"], context) == 0
+    assert project_command(["repair"], context) == 0
     adopted = resolve_workspace("myws")
     assert adopted.path is not None
     assert Path(adopted.path).resolve() == (copied / "work").resolve()
+
+
+def test_a_named_member_of_another_kind_is_not_an_unadopted_workspace(tmp_path: Path, monkeypatch) -> None:
+    from httk.core.project.members import register_project_member
+
+    from httk.workflow.project_member import _unregistered_workspaces
+
+    _fresh_home(tmp_path, monkeypatch, "home")
+    project = tmp_path / "project"
+    initialize_project(project, name="p")
+    (project / "notes").mkdir()
+    register_project_member(project, project / "notes", "notebook", name="notes")
+    finding = _unregistered_workspaces(project, adopt=False)
+    assert finding["status"] == "ok", finding
 
 
 def test_adopt_refuses_a_name_already_registered_to_a_different_path(tmp_path: Path, monkeypatch) -> None:
@@ -202,7 +216,7 @@ def test_project_repair_on_a_clean_copy_wires_everything(tmp_path: Path, monkeyp
     copied = _copied_named_project(tmp_path, monkeypatch)
     from httk.workflow.registry import _read_global
 
-    # --dry-run: the copied member is not adopted on this machine, so it is flagged
+    # check (apply=False): the copied member is not adopted on this machine, so it is flagged
     # and nothing is written.
     report = project_repair(copied, apply=False, adopt=True)
     findings = report["findings"]

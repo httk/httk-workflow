@@ -109,7 +109,7 @@ an `adhoc:defects@<sha12>` workflow, and every job, parent and child, runs that
 installation:
 
 ```console
-httk job new --workspace workflow-workspace --from-runner defects.sh --step characterize \
+httk job new --workspace workflow-workspace --from-runner defects.sh --start-step characterize \
     --parameter encut=520 --placement project/si-vacancies
 ```
 

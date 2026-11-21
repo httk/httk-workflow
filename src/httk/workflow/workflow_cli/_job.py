@@ -156,6 +156,7 @@ _FORCE_ACTIONS = ("continue", "restart", "override_step")
 
 def _add_workspace_option(parser: argparse.ArgumentParser, *, help_text: str) -> None:
     parser.add_argument(
+        "-w",
         "--workspace",
         metavar="WORKSPACE",
         help=f"{help_text} (default: the enclosing workspace, this project's workspace, or the per-user default)",
@@ -1576,12 +1577,12 @@ def ensure_identity_key(identity: OperatorIdentity) -> None:
 
 
 def _resolve_request_identity(selector: str | None) -> OperatorIdentity:
-    """Resolve a request identity and guide an unconfigured user to ``httk init``."""
+    """Resolve a request identity and guide an unconfigured user to ``httk setup``."""
 
     if selector is None:
         identity = configured_operator_identity()
         if identity is None:
-            raise ValueError("no operator identity is configured; run `httk init` to establish one")
+            raise ValueError("no operator identity is configured; run `httk setup` to establish one")
         return identity
     return resolve_operator_identity(selector)
 
@@ -1756,7 +1757,7 @@ def _confirm_job_delete(rows: Sequence[tuple[str, str]]) -> bool:
 
     for job_key, state in rows:
         print(f"{job_key}\t{state}")
-    return confirm(f"Delete {len(rows)} jobs?", force=False)
+    return confirm(f"Delete {len(rows)} jobs?", yes=False)
 
 
 def _remote_delete_rows(
@@ -1795,16 +1796,16 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
     if root is None:
         assert binding is not None
         _validate_remote_job_ids(arguments.jobs, "delete")
-        if not arguments.force and not sys.stdin.isatty():
-            print("job delete without a terminal requires --force", file=sys.stderr)
+        if not arguments.yes and not sys.stdin.isatty():
+            print("job delete without a terminal requires --yes", file=sys.stderr)
             return 1
         status, rows = _remote_delete_rows(binding, context, arguments)
         if status:
             return status
-        if not arguments.force and not _confirm_job_delete(rows):
+        if not arguments.yes and not _confirm_job_delete(rows):
             return 1
         remote_name = binding.name.split(":", 1)[1]
-        option = "--force" if arguments.force else "--confirmed"
+        option = "--yes" if arguments.yes else "--confirmed"
         argv = [*REMOTE_JOB_DELETE_COMMAND, option, *arguments.jobs, "--workspace", remote_name]
         status, stdout, stderr = remote_workspace_output(binding, context, argv, timeout=arguments.adapter_timeout)
         sys.stdout.write(stdout)
@@ -1813,7 +1814,7 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
     workspace = _modifiable(arguments, context, action="delete jobs in it")
     index = _location_index(workspace)
     refs = _resolve_selectors(workspace, context.cwd, arguments.jobs, index)
-    if not (arguments.force or arguments.confirmed or _confirm_job_delete([(ref.job_key, ref.state) for ref in refs])):
+    if not (arguments.yes or arguments.confirmed or _confirm_job_delete([(ref.job_key, ref.state) for ref in refs])):
         return 1
     # Each chunk's outcomes are printed once served, and those known when the command stops before it propagates.
     return _removal_status(_remove_jobs(workspace, refs, index, report=_print_removal_outcomes))
@@ -1871,7 +1872,7 @@ def _request_now(arguments: argparse.Namespace, context: CLIContext, action: str
     workspace = _modifiable(arguments, context, action=f"{action} jobs in it")
     index = _location_index(workspace)
     refs = _resolve_selectors(workspace, context.cwd, arguments.jobs, index)
-    if action == "unseal" and not confirm(f"Unseal {len(refs)} job(s)?", force=arguments.force):
+    if action == "unseal" and not confirm(f"Unseal {len(refs)} job(s)?", yes=arguments.yes):
         return 1
     copy = not getattr(arguments, "no_copy", False)
     reason = getattr(arguments, "reason", None) or f"job {action}"
@@ -2768,6 +2769,7 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
         help="one parameter of the workflow bound to call slot ALIAS, spelled as for --parameter (repeatable)",
     )
     new.add_argument(
+        "-p",
         "--parameter",
         action="append",
         default=[],
@@ -2785,9 +2787,10 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
         help="override one declared workflow environment value; VALUE is JSON when it parses as JSON (repeatable)",
     )
     new.add_argument(
-        "--format",
-        metavar="FORMAT",
-        help="force FORMAT (cwl, pwd, jobflow, httk-v1) for a bare workflow document or directory",
+        "--language",
+        dest="format",
+        metavar="LANGUAGE",
+        help="force LANGUAGE (cwl, pwd, jobflow, httk-v1) for a bare workflow document or directory",
     )
     new.add_argument(
         "--file",
@@ -2806,6 +2809,7 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
         help="stage every regular file directly in DIR under its own name (repeatable; subdirectories are skipped)",
     )
     new.add_argument(
+        "-i",
         "--input",
         action="append",
         default=[],
@@ -2838,7 +2842,9 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
         "--placement", metavar="PLACEMENT", default=DEFAULT_PLACEMENT, help="placement subtree (default: the jobs root)"
     )
     new.add_argument("--priority", type=int, metavar="PRIORITY", help="scheduling priority (default: the workflow's)")
-    new.add_argument("--step", metavar="STEP", help="the step the job starts at (default: the workflow's own)")
+    new.add_argument(
+        "--start-step", dest="step", metavar="STEP", help="the step the job starts at (default: the workflow's own)"
+    )
     new.add_argument(
         "--duplicate-tag",
         choices=("refuse", "skip", "allow"),
@@ -2894,6 +2900,7 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
         "job_id", metavar="JOB_ID", nargs="*", help="job UUIDs, unique prefixes, or paths inside the workspace"
     )
     request.add_argument(
+        "-s",
         "--state",
         action="append",
         default=[],
@@ -2947,7 +2954,7 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
         hidden=True,
     )
     envelopes.add_argument("action", choices=_requests.ACTIONS, help="the request action")
-    envelopes.add_argument("--workspace", metavar="WORKSPACE", required=True, help="the far-side workspace name")
+    envelopes.add_argument("-w", "--workspace", metavar="WORKSPACE", required=True, help="the far-side workspace name")
     envelopes.add_argument("job_id", metavar="JOB_ID", nargs="+", help="one or more job ids or unique prefixes")
     envelopes.add_argument("--operator", required=True, help="the operator attribution label")
     envelopes.add_argument("--reason", required=True, help="why the request is being made")
@@ -2965,7 +2972,7 @@ def _build_request_parsers(group: "argparse._SubParsersAction[argparse.ArgumentP
         handler=handle_job_publish_requests,
         hidden=True,
     )
-    publish.add_argument("--workspace", metavar="WORKSPACE", required=True, help="the far-side workspace name")
+    publish.add_argument("-w", "--workspace", metavar="WORKSPACE", required=True, help="the far-side workspace name")
     publish.add_argument(
         "--document", action="append", dest="documents", required=True, metavar="JSON", help="one request document"
     )
@@ -3021,6 +3028,7 @@ def build_job_parser(
     )
     _add_workspace_option(listing, help_text="the workspace to list")
     listing.add_argument(
+        "-s",
         "--state",
         action="append",
         metavar="STATE",
@@ -3050,7 +3058,7 @@ def build_job_parser(
         handler=handle_job_delete,
     )
     _add_job_selector(delete)
-    delete.add_argument("--force", action="store_true", help="skip the confirmation")
+    delete.add_argument("--yes", action="store_true", help="skip the confirmation")
     delete.add_argument("--confirmed", action="store_true", help=argparse.SUPPRESS)
     _add_adapter_timeout(delete)
 
@@ -3092,7 +3100,7 @@ def build_job_parser(
         )
         _add_job_selector(leaf)
         if name == "unseal":
-            leaf.add_argument("--force", action="store_true", help="skip the confirmation prompt")
+            leaf.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     unlock = _leaf(
         group,
         "unlock",
@@ -3114,26 +3122,18 @@ def build_job_parser(
         summary="move a job (and with --tree its descendants) out of a workspace",
         description=(
             "Move a quiescent job out of the workspace into DEST/<job key>, a bundle that job adopt takes in; "
-            "with --tree its terminal or paused descendants go along. With --hold the bundle is held in the "
-            "workspace's own .httk-workspace/transfers/outgoing/<transfer id> (the first leg of job transfer) and "
-            "DEST, when given, is only recorded as the transfer's destination"
+            "with --tree its terminal or paused descendants go along"
         ),
         handler=handle_job_eject,
     )
     _add_workspace_option(eject, help_text="the workspace holding the job")
     eject.add_argument("job", metavar="JOB", help="job UUID, job key, unique prefix, or a path inside the workspace")
-    eject.add_argument(
-        "destination", metavar="DEST", nargs="?", help="the directory to put the bundle in (with --hold: recorded only)"
-    )
-    eject.add_argument("--hold", action="store_true", help="hold the bundle in the workspace for a transfer")
+    eject.add_argument("destination", metavar="DEST", nargs="?", help="the directory to put the bundle in")
+    eject.add_argument("--hold", action="store_true", help=argparse.SUPPRESS)
     eject.add_argument(
         "--operator", metavar="IDENTITY", help='configured identity short name or a literal "Name <email>"'
     )
-    eject.add_argument(
-        "--destination-id",
-        metavar="WORKSPACE_ID",
-        help="with --hold: the destination workspace's id, recorded so that the transfer adopts only there",
-    )
+    eject.add_argument("--destination-id", metavar="WORKSPACE_ID", help=argparse.SUPPRESS)
     eject.add_argument("--tree", action="store_true", help="eject the job's descendants too")
     eject.add_argument("--wait", action="store_true", help="pause a running job and wait until it can move")
     eject.add_argument(
@@ -3219,7 +3219,7 @@ def build_job_parser(
         metavar="JOB",
         help="a payload directory to submit, or a job UUID, unique prefix, or path inside the workspace",
     )
-    debug.add_argument("--step", metavar="STEP", help="initial step of a freshly submitted payload")
+    debug.add_argument("--start-step", dest="step", metavar="STEP", help="initial step of a freshly submitted payload")
     debug.add_argument(
         "--placement",
         metavar="PLACEMENT",

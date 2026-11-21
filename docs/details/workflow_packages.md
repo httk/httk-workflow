@@ -733,7 +733,7 @@ the foreground:
 ```console
 httk workflow install --workspace WORKSPACE ./my-workflow
 httk workflow build --workspace WORKSPACE examples.chain-rust
-httk job new --workspace WORKSPACE --workflow examples.chain-rust --step prepare
+httk job new --workspace WORKSPACE --workflow examples.chain-rust --start-step prepare
 httk workflow run --workspace WORKSPACE
 ```
 

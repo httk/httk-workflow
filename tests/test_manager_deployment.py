@@ -290,13 +290,17 @@ def test_manager_option_defaults_match_the_parsers_and_cover_the_argv_tail(tmp_p
         assert {name: parsed[name] for name in defaults} == defaults
     tail = _manager.manager_argv_tail(argparse.Namespace(**defaults))
     assert tail == [] == _manager.manager_argv_tail(parser.parse_args(["manager", "run"]))
-    # The startup grace travels to launched managers, and --idle makes it moot.
+    # The startup grace travels to launched managers, and --keep-running makes it moot.
     assert _manager.manager_argv_tail(parser.parse_args(["manager", "run", "--idle-grace", "5"])) == [
         "--idle-grace",
         "5.0",
     ]
-    assert _manager.manager_argv_tail(parser.parse_args(["run", "--idle", "--idle-grace", "5"])) == ["--idle"]
+    assert _manager.manager_argv_tail(parser.parse_args(["run", "--keep-running", "--idle-grace", "5"])) == [
+        "--keep-running"
+    ]
     source = inspect.getsource(_manager.manager_argv_tail)
     read = set(re.findall(r'(?:getattr\(arguments, |changed\()"(\w+)"', source))
-    # The durability switches default to argparse.SUPPRESS; absent reads as false.
-    assert read - {"durable", "no_durable"} <= set(defaults)
+    # The durability switch defaults to argparse.SUPPRESS; absent reads as false.
+    assert read - {"no_durable"} <= set(defaults)
+    # A spawned manager is durable by default, so only the opt-out travels.
+    assert _manager.manager_argv_tail(parser.parse_args(["manager", "run", "--no-durable"])) == ["--no-durable"]

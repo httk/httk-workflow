@@ -202,7 +202,7 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
             raise ValueError(f"remote {arguments.remote!r} is not a configured mount-daemon remote")
         identity = configured_operator_identity()
         if identity is None:
-            raise ValueError("no operator identity is configured; run httk init to establish one")
+            raise ValueError("no operator identity is configured; run httk setup to establish one")
         _, response = job_request_status(
             target.bundle,
             Endpoint.from_settings(settings),

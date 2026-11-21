@@ -304,7 +304,7 @@ def test_failed_seal_and_eject_are_reported_as_refused_with_jobs_returned(
 
     with TaskManager(workspace) as manager:
         manager.run_until_idle(timeout=60)
-    assert command(["job", "unseal", "--workspace", name, "--force", sealed.job_id], _context(tmp_path)) == 0
+    assert command(["job", "unseal", "--workspace", name, "--yes", sealed.job_id], _context(tmp_path)) == 0
     capsys.readouterr()
     monkeypatch.setattr(seals, "seal_payload", lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("bad payload")))
     assert command(_request_args(name, sealed.job_id, action="seal"), _context(tmp_path)) == 1

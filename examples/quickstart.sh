@@ -54,7 +54,7 @@ Direct
 0.5000000000 0.5000000000 0.5000000000
 END
 
-# One-time per-user setup is `httk init --name "Your Name" --email you@example.org`;
+# One-time per-user setup is `httk setup --name "Your Name" --email you@example.org`;
 # deliberately not run here so this example leaves your per-user configuration untouched.
 
 # 1. The project anchor and a workspace in its own directory.

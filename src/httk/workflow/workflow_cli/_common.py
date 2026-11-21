@@ -143,18 +143,12 @@ def _leaf(
 
 
 def add_durability_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add the durability switches to one command that publishes protocol state.
+    """Add the durability switch to one command that publishes protocol state.
 
-    Both default to ``argparse.SUPPRESS`` so that the value an alias
+    It defaults to ``argparse.SUPPRESS`` so that the value an alias
     executable parsed before its subcommand survives into the handler.
     """
 
-    parser.add_argument(
-        "--durable",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="fsync protocol publications (the default; accepted for compatibility)",
-    )
     parser.add_argument(
         "--no-durable",
         action="store_true",
@@ -206,26 +200,25 @@ def _required(
     return result
 
 
-def confirm(prompt: str, *, force: bool, flag: str = "--force", declined: str = "not removed") -> bool:
+def confirm(prompt: str, *, yes: bool, declined: str = "not removed") -> bool:
     """Ask for confirmation on a terminal, or refuse without one.
 
-    This is the one destructive-action gate every ``remove``/``unseal`` leaf and
-    ``workspace fsck --repair`` share. *flag* answers yes without asking; without a terminal and
-    without *flag* the action is refused with a hint rather than blocking on
+    This is the one destructive-action gate every ``delete``/``remove``/``unseal`` leaf and
+    ``workspace fsck --repair`` share. ``--yes`` answers yes without asking; without a terminal and
+    without ``--yes`` the action is refused with a hint rather than blocking on
     an unanswerable prompt. It calls the builtin :func:`input` so a test that
     patches it still drives the prompt.
 
     :param prompt: The question to ask, without the ``[y/N]`` suffix.
-    :param force: Whether *flag* was given, which answers yes unconditionally.
-    :param flag: The option that answers yes, named in the refusal without a terminal.
+    :param yes: Whether ``--yes`` was given, which answers yes unconditionally.
     :param declined: What is printed when the answer is no.
     :return: Whether the action was confirmed.
     """
 
-    if force:
+    if yes:
         return True
     if not sys.stdin.isatty():
-        print(f"this operation without a terminal requires {flag}", file=sys.stderr)
+        print("this operation without a terminal requires --yes", file=sys.stderr)
         return False
     if input(f"{prompt} [y/N] ").strip().lower() in {"y", "yes"}:
         return True
@@ -587,7 +580,7 @@ def _remote_workspace_read(
     command: Sequence[str],
     arguments: argparse.Namespace,
     *,
-    flags: Sequence[str] = (),
+    flags: tuple[str, ...] = (),
     tail: Sequence[str] = (),
     unwrap_json_array: bool | None = None,
 ) -> int:
@@ -630,7 +623,7 @@ def remote_workspace_read_output(
     command: Sequence[str],
     arguments: argparse.Namespace,
     *,
-    flags: Sequence[str] = (),
+    flags: tuple[str, ...] = (),
     tail: Sequence[str] = (),
     unwrap_json_array: bool | None = None,
 ) -> tuple[int, str, str]:

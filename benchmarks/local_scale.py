@@ -4,7 +4,7 @@ This is a script, not a test. One invocation measures, on N jobs in a local work
 
     job new --workspace WS --workflow URI --install --input-from structure DIR --duplicate-tag skip
     job request cancel --reason bench SEL...      (on the N fresh ready jobs)
-    job delete --force SEL...                     (on the N cancelled jobs)
+    job delete --yes SEL...                       (on the N cancelled jobs)
     job request pause --reason bench SEL...       (on N fresh ready jobs, a second workspace)
     job request continue --reason bench SEL...    (on the N paused jobs)
 
@@ -537,7 +537,7 @@ def command_arguments(
         source = ["--input-from", "structure", str(structures), "--duplicate-tag", "skip"]
         return ["job", "new", "--workspace", str(workspace), "--workflow", workflow, "--install", *source]
     if command == "delete":
-        return ["job", "delete", "--workspace", str(workspace), "--force", *selection]
+        return ["job", "delete", "--workspace", str(workspace), "--yes", *selection]
     return ["job", "request", command, "--workspace", str(workspace), "--reason", "bench", *selection]
 
 
@@ -1104,12 +1104,12 @@ def run(arguments: argparse.Namespace) -> int:
     print(f"local_scale: {run_id}: preparing {p['jobs']} structures", flush=True)
     state.tags = set(_prepare_structures(state.structures, Path(p["structures"]), p["jobs"]))
     name, email = OPERATOR
-    init = ["init", "--name", name, "--email", email, "--non-interactive"]
-    initialized = state.httk(init, state.work, state.logs / "init")
+    setup = ["setup", "--name", name, "--email", email, "--non-interactive"]
+    initialized = state.httk(setup, state.work, state.logs / "setup")
     try:
         state.operator_key = str(json.loads(initialized["stdout"])["public_key"])
     except (ValueError, KeyError, TypeError) as exc:
-        raise SystemExit(f"local_scale: httk init failed ({initialized['exit_status']}): {exc}") from exc
+        raise SystemExit(f"local_scale: httk setup failed ({initialized['exit_status']}): {exc}") from exc
 
     chains: list[dict[str, Any]] = []
     kinds = ["plain"] * p["repeat"] + ["trace"] * p["traced"]

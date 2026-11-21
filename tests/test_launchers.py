@@ -94,7 +94,7 @@ def test_launcher_cli_round_trip_project_and_global(
     assert shown["settings"] == {"slurm.partition": "devel"}
     assert command(["launcher", "check", "cluster"], context) == 0
     assert json.loads(capsys.readouterr().out)[0]["ok"] is True
-    assert command(["launcher", "remove", "--force", "cluster"], context) == 0
+    assert command(["launcher", "remove", "--yes", "cluster"], context) == 0
     assert not local_bundle.exists()
 
 

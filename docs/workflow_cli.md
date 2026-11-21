@@ -4,8 +4,8 @@ Everything is one nested command tree under `httk`, and every group and
 command answers `--help`:
 
 ```text
-httk init | identity     operator identities (core-owned)
-httk project             init | show | repair | manifest | seal | unseal | verify-seal | import-v1
+httk setup | identity     operator identities (core-owned)
+httk project             init | show | check | repair | manifest | verify | seal | unseal | import-v1
 httk workspace           init | list | default | show | configure | status | owners | attest-dead | settings | policy | workflow-prelude | fsck | gc | seal | unseal | verify | exchange | daemon | ...
 httk job                 new | submit | request | delete | detach | seal | unseal | unlock | list | show | log | why | debug | push | pull | transfer | eject | adopt
 httk collect             workspaces and calculation trees

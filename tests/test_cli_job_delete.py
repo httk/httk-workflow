@@ -101,7 +101,7 @@ def test_cli_delete_removes_unowned_failed_and_paused_jobs_and_refuses_the_other
     )
     selectors = [failed.job_id, paused.job_id, ready.job_id, succeeded.job_id]
 
-    assert command(["job", "delete", "--force", "--workspace", name, *selectors], _context(tmp_path)) == 1
+    assert command(["job", "delete", "--yes", "--workspace", name, *selectors], _context(tmp_path)) == 1
     out = capsys.readouterr().out
     assert f"{failed.job_key}\tfailed\tremoved" in out and f"{paused.job_key}\tpaused\tremoved" in out
     assert f"{ready.job_key}\tready\trefused\tonly terminal or paused jobs are deleted, not ready" in out
@@ -118,7 +118,7 @@ def test_cli_delete_of_a_held_job_leaves_the_request_to_its_owner(tmp_path: Path
     with cli_owner(workspace) as owner:
         owned = _kernel.claim(workspace, owner, failed)
         assert owned is not None
-        assert command(["job", "delete", "--force", "--workspace", name, failed.job_id], _context(tmp_path)) == 0
+        assert command(["job", "delete", "--yes", "--workspace", name, failed.job_id], _context(tmp_path)) == 0
         assert (
             f"{failed.job_key}\towned\tqueued\tanother owner holds the job; the request applies at its next boundary"
             in capsys.readouterr().out
@@ -141,7 +141,7 @@ def test_delete_prompt_decline_and_non_tty_refusal_leave_job(
 
     monkeypatch.setattr(job_cli.sys.stdin, "isatty", lambda: False)
     assert command(["job", "delete", "--workspace", name, failed.job_id], _context(tmp_path)) == 1
-    assert "without a terminal requires --force" in capsys.readouterr().err
+    assert "without a terminal requires --yes" in capsys.readouterr().err
     monkeypatch.setattr(job_cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _prompt: "n")
     assert command(["job", "delete", "--workspace", name, failed.job_id], _context(tmp_path)) == 1
@@ -155,14 +155,14 @@ def test_delete_path_glob_and_batch_resolution_are_safe(tmp_path: Path) -> None:
     first, second = (_at(workspace, "failed", f"silicon-{index}") for index in ("one", "two"))
     context = _context(workspace.root)
 
-    assert command(["job", "delete", "--force", "--workspace", name, "jobs/failed/silicon*"], context) == 0
+    assert command(["job", "delete", "--yes", "--workspace", name, "jobs/failed/silicon*"], context) == 0
     assert all(
         _kernel.locate(workspace, ref.job_id, placement_hint=None, exhaustive=True) is None for ref in (first, second)
     )
 
     # Every selector resolves before anything is requested.
     third = _at(workspace, "failed", "protected")
-    assert command(["job", "delete", "--force", "--workspace", name, "missing-selector", third.job_id], context) != 0
+    assert command(["job", "delete", "--yes", "--workspace", name, "missing-selector", third.job_id], context) != 0
     assert find(workspace, third.job_id).state == "failed"
 
 
@@ -208,7 +208,7 @@ def test_remote_delete_confirms_locally_and_forwards_confirmed(monkeypatch: pyte
 
     monkeypatch.setattr(job_cli.sys.stdin, "isatty", lambda: False)
     assert command(["job", "delete", "--workspace", binding.name, job_id], _context(Path.cwd())) == 1
-    assert "requires --force" in capsys.readouterr().err
+    assert "requires --yes" in capsys.readouterr().err
     assert calls == []
 
     monkeypatch.setattr(job_cli.sys.stdin, "isatty", lambda: True)
@@ -229,10 +229,10 @@ def test_remote_delete_confirms_locally_and_forwards_confirmed(monkeypatch: pyte
         ["httk", "job", "delete", "--confirmed", job_id, "--workspace", "station"],
     ]
 
-    assert command(["job", "delete", "--force", "--workspace", binding.name, job_id], _context(Path.cwd())) == 0
+    assert command(["job", "delete", "--yes", "--workspace", binding.name, job_id], _context(Path.cwd())) == 0
     assert calls[-2:] == [
         ["httk", "job", "show", "--json", "--no-children", job_id, "--workspace", "station"],
-        ["httk", "job", "delete", "--force", job_id, "--workspace", "station"],
+        ["httk", "job", "delete", "--yes", job_id, "--workspace", "station"],
     ]
 
 
@@ -252,7 +252,7 @@ def test_remote_delete_rejects_path_selectors_before_confirmation(monkeypatch: p
         fake_output,
     )
 
-    assert command(["job", "delete", "--force", "--workspace", binding.name, unknown_id], _context(Path.cwd())) == 1
+    assert command(["job", "delete", "--yes", "--workspace", binding.name, unknown_id], _context(Path.cwd())) == 1
     assert "not found" in capsys.readouterr().err
     assert calls == [["httk", "job", "show", "--json", "--no-children", unknown_id, "--workspace", "station"]]
 

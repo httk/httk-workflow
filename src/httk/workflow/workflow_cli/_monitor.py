@@ -68,6 +68,7 @@ def build_monitor_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
         handler=handle_monitor,
     )
     parser.add_argument(
+        "-w",
         "--workspace",
         action="append",
         metavar="WORKSPACE",

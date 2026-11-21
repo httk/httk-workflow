@@ -23,7 +23,7 @@ here teaches them a compatibility format.
 This module is the registry of those runner realizations. A subpackage
 self-describes via a module-level ``LANGUAGE``, in its package or in its
 ``realization`` module, and the ``format`` key of a package's
-``[workflow.runner]`` table (or ``--format``) names it.
+``[workflow.runner]`` table (or ``--language``) names it.
 
 None of these subpackages imports another, none imports the manager or the
 generic CLI internals, and none is imported by the common execution layer; the

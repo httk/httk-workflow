@@ -7,7 +7,7 @@
 * If you have not done so already, make sure to initialize an identity for yourself:
 
     ```bash
-    httk init --name 'Your Name' --email 'you@example.org'
+    httk setup --name 'Your Name' --email 'you@example.org'
     ```
 
 * Print out the public key for your identity:
@@ -50,7 +50,7 @@ A complication for this HPC system is that its system Python is quite old, so we
 * Also initialize your identity also on the HPC system:
 
     ```
-    httk init --name 'Your Name' --email 'you@example.org'
+    httk setup --name 'Your Name' --email 'you@example.org'
     ```
 
 ## 3 On the HPC system: create the workspace and install the VASP workflows

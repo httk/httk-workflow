@@ -153,7 +153,7 @@ def test_the_measured_command_lines() -> None:
         "--input-from", "structure", "/w/structures", "--duplicate-tag", "skip",
     ]  # fmt: skip
     assert bench.command_arguments("delete", root, "", structures, ["x--"]) == [
-        "job", "delete", "--workspace", "/w/ws", "--force", "x--",
+        "job", "delete", "--workspace", "/w/ws", "--yes", "x--",
     ]  # fmt: skip
     assert bench.command_arguments("cancel", root, "", structures, ["--state", "ready"]) == [
         "job", "request", "cancel", "--workspace", "/w/ws", "--reason", "bench", "--state", "ready",

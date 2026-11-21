@@ -54,7 +54,7 @@ check it. Every member must be sealed before the project can be.
 
 ### Signatures and verification
 
-`httk project seal | unseal | verify-seal | repair | manifest` are core
+`httk project seal | unseal | verify | check | repair | manifest` are core
 commands; this guide describes what a workflow workspace contributes to them.
 The signature covers a domain-separated digest of the document body, the same
 way a signed project manifest is signed, so a seal digest cannot be replayed as
@@ -223,7 +223,7 @@ should be covered. A succeeded unlocked job
 can never be sealed, so it is always among the unsealed ones.
 
 `job unseal`, `workspace unseal` and `project unseal` ask for confirmation,
-which `--force` skips. Without a terminal and without `--force` they refuse
+which `--yes` skips. Without a terminal and without `--yes` they refuse
 rather than block.
 
 ## Verifying

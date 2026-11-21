@@ -166,7 +166,7 @@ httk config import-v1
 When no identity is configured, this creates a named identity from the legacy
 name and email, imports the public key into the core-owned `identity.json` and
 records where it came from. Otherwise, set up a fresh identity with
-`httk init`.
+`httk setup`.
 
 ### Project metadata
 

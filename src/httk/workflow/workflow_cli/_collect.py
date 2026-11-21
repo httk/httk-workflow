@@ -478,11 +478,13 @@ def build_collect_parser(
         ),
     )
     parser.add_argument(
+        "-w",
         "--workspace",
         metavar="WORKSPACE",
         help="the workspace to collect from (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
     parser.add_argument(
+        "-s",
         "--state",
         action="append",
         metavar="STATE",
@@ -581,6 +583,7 @@ def build_collect_parser(
         help="id-ledger database location (default: <into>.ids.sqlite; on by default with --into)",
     )
     parser.add_argument(
+        "-n",
         "--dry-run",
         action="store_true",
         help="for a calculation tree, print how each directory would be claimed instead of collecting",

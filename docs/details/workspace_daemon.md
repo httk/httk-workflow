@@ -333,7 +333,7 @@ On each client, initialize or select an *httk* identity and give its public
 key to the destination operator; the private key stays on the client:
 
 ```console
-httk init --name "Your Name" --email you@example.org
+httk setup --name "Your Name" --email you@example.org
 httk identity key
 ```
 
@@ -462,7 +462,7 @@ jobs, never `default`, so it runs only the jobs that key submitted and
 cancelling it touches no other client's work. It still serves the exchange:
 adoption, returns and `status.json` are global and run nobody's jobs. It probes
 its Slurm allocation like any manager the `slurm` launcher starts and places
-attempts on the allocation's nodes. It runs without `--idle`: it exits once it
+attempts on the allocation's nodes. It runs without `--keep-running`: it exits once it
 has nothing left to progress (no attempt running, no claimable job of its key's
 pool, no inbox entry it may still adopt, whoever sent it, and no finished tree
 of its key's pool whose return it can request or has requested), but not within the first 120 seconds

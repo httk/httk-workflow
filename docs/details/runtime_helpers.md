@@ -90,7 +90,7 @@ an `adhoc:defects@<sha12>` workflow, and every job, parent and child, runs that
 installation:
 
 ```console
-httk job new --workspace workflow-workspace --from-runner defects.py --step characterize \
+httk job new --workspace workflow-workspace --from-runner defects.py --start-step characterize \
     --parameter encut=520 --parameter 'supercell=[2, 2, 2]' --placement project/si-vacancies
 ```
 

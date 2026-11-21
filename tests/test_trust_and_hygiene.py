@@ -123,7 +123,7 @@ def test_fresh_project_manifest_is_valid_and_trusted(tmp_path: Path, monkeypatch
     assert verification.public_key == read_project(project)["public_key"]
     assert key_fingerprint(str(verification.public_key)) in verification.reason
 
-    assert project_command(["manifest", "verify", str(project)], CLIContext("httk", project)) == 0
+    assert project_command(["verify", "--manifest", str(project)], CLIContext("httk", project)) == 0
     printed = capsys.readouterr().out
     assert printed.splitlines()[0] == "valid"
     assert VALID_TRUSTED in printed
@@ -164,13 +164,13 @@ def test_resigning_with_a_fresh_key_is_valid_but_not_trusted(tmp_path: Path, mon
     assert "not among this project's trusted keys" in verification.reason
 
     context = CLIContext("httk", project)
-    assert project_command(["manifest", "verify", str(project)], context) == 3
+    assert project_command(["verify", "--manifest", str(project)], context) == 3
     assert VALID_UNKNOWN_KEY in capsys.readouterr().out
 
     # Naming the key explicitly is the one-off way to accept it.
     public = project / PROJECT_DIRECTORY / "keys" / "project.pub"
-    assert project_command(["manifest", "verify", "--trusted-key", str(public), str(project)], context) == 0
-    assert project_command(["manifest", "verify", "--trusted-key", forged_key, str(project)], context) == 0
+    assert project_command(["verify", "--manifest", "--trusted-key", str(public), str(project)], context) == 0
+    assert project_command(["verify", "--manifest", "--trusted-key", forged_key, str(project)], context) == 0
     assert verify_manifest(project, trusted_keys=[forged_key]).verdict == VALID_TRUSTED
 
 
@@ -184,7 +184,7 @@ def test_tampered_tree_is_invalid(tmp_path: Path, monkeypatch, capsys) -> None:
     assert not verification.valid and verification.exit_code == 1
     assert "does not match" in verification.reason
 
-    assert project_command(["manifest", "verify", str(project)], CLIContext("httk", project)) == 1
+    assert project_command(["verify", "--manifest", str(project)], CLIContext("httk", project)) == 1
     assert capsys.readouterr().out.splitlines()[0] == "invalid"
 
 
@@ -457,7 +457,7 @@ def test_project_repair_is_reachable_from_the_command_line(
     context = CLIContext("httk", project)
 
     # A project with no manifest yet is a warning, and a warning is not a failure.
-    assert project_command(["repair", "--dry-run"], context) == 0
+    assert project_command(["check"], context) == 0
     report = capsys.readouterr().out
     assert "manifest" in report and "problem(s)" in report
 
@@ -488,9 +488,9 @@ def test_remote_show_and_remove_are_reachable_from_the_command_line(
     assert command(["remote", "show", "nowhere"], context) == 1
     assert "unknown remote" in capsys.readouterr().err
 
-    # --force skips the confirmation this non-interactive test cannot answer.
+    # --yes skips the confirmation this non-interactive test cannot answer.
     assert command(["remote", "remove", "cluster"], context) == 1
-    assert "requires --force" in capsys.readouterr().err
+    assert "requires --yes" in capsys.readouterr().err
     assert bundle.is_dir()
-    assert command(["remote", "remove", "--force", "cluster"], context) == 0
+    assert command(["remote", "remove", "--yes", "cluster"], context) == 0
     assert not bundle.exists()

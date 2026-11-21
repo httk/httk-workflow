@@ -252,7 +252,7 @@ def test_job_delete_outcomes_match_the_serial_code(
 
     monkeypatch.setattr(job_cli, "_resolve_selectors", moving_after_selection)
     with _held(workspace, jobs["held"]):
-        status = command(["job", "delete", "--workspace", name, "--force", *chosen], _context(tmp_path))
+        status = command(["job", "delete", "--workspace", name, "--yes", *chosen], _context(tmp_path))
         output = capsys.readouterr()
     observed = {
         "status": status,
@@ -274,7 +274,7 @@ def test_an_unknown_selector_posts_nothing(tmp_path: Path, capsys) -> None:
     ready = _job(tmp_path, workspace, "par-known")
     unknown = "00000000-0000-4000-8000-000000000000"
     observed: dict[str, object] = {}
-    for verb in (["request", "cancel", "--reason", "parity"], ["delete", "--force"]):
+    for verb in (["request", "cancel", "--reason", "parity"], ["delete", "--yes"]):
         try:
             status: object = command(["job", *verb, "--workspace", name, ready.job_id, unknown], _context(tmp_path))
         except ValueError as exc:
@@ -920,7 +920,7 @@ def test_the_fsync_sequence_of_one_job_is_unchanged(tmp_path: Path, fsyncs: list
     assert command(["job", "request", "cancel", "--workspace", name, "--reason", "r", ref.job_id], context) == 0
     cancel = _normalized(fsyncs, workspace.root)
     fsyncs.clear()
-    assert command(["job", "delete", "--workspace", name, "--force", ref.job_id], context) == 0
+    assert command(["job", "delete", "--workspace", name, "--yes", ref.job_id], context) == 0
     delete = _normalized(fsyncs, workspace.root)
     capsys.readouterr()
     _pinned("fsync-sequence", {"cancel": cancel, "delete": delete}, _SEQUENCE)

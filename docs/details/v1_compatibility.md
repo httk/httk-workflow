@@ -127,14 +127,14 @@ Resolution order is the job override, the declared setting's `HTTK_*`
 variable, the workspace setting, then the declaration default; see
 {doc}`/details/workflow_packages`.
 
-## Bare directories and `--format`
+## Bare directories and `--language`
 
 `job new` does not accept a bare v1 directory, but the installer does when the
-format is given: it wraps the directory in a generated package named
+language is given: it wraps the directory in a generated package named
 `httk-v1.<directory name>`, installed as `adhoc:httk-v1.<directory name>@<sha12>`.
 
 ```console
-httk workflow install --workspace WORKSPACE --format httk-v1 ./legacy
+httk workflow install --workspace WORKSPACE --language httk-v1 ./legacy
 httk job new --workspace WORKSPACE --workflow httk-v1.legacy
 ```
 

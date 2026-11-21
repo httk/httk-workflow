@@ -488,7 +488,7 @@ def test_request_without_any_identity_is_refused(tmp_path: Path, capsys) -> None
 
     assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 2
     error = capsys.readouterr().err
-    assert "no operator identity is configured" in error and "run `httk init`" in error
+    assert "no operator identity is configured" in error and "run `httk setup`" in error
     assert not _requests(workspace)
 
 

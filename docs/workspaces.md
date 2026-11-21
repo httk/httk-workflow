@@ -9,13 +9,13 @@ sets all of that up; {doc}`running` then creates and runs jobs in it.
 ## Project and workspace
 
 ```console
-httk init --name "Your Name" --email you@example.org
+httk setup --name "Your Name" --email you@example.org
 httk project init --name campaign .
 httk workspace init --name default workspace
 httk workspace status
 ```
 
-`httk init` creates your per-user operator identity, used to attribute and
+`httk setup` creates your per-user operator identity, used to attribute and
 sign what you publish; it is idempotent. `project init` writes the project
 anchor `httk_project/`. `workspace init` creates a workspace and registers it
 under a name in the per-user registry, so every later command can address it

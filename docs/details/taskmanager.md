@@ -34,8 +34,7 @@ and {doc}`/campaigns` for spreading a very large run across many workspaces.
 
 Protocol publications are synchronized to storage by default. `--no-durable`
 skips the `fsync` calls for throwaway workspaces: submission and transitions get
-faster, but a node crash may lose the latest publications. `--durable` is still
-accepted and has no effect, since it is the default.
+faster, but a node crash may lose the latest publications.
 
 ### Workspaces on a cluster
 
@@ -255,7 +254,7 @@ httk manager run --workspace WORKSPACE --pool vasp --capability gpu --workers 4
 Without pool configuration, a manager advertises the reserved `default` pool;
 `--pool` replaces it, so `--pool vasp` alone does not claim `default` jobs.
 By default it runs until idle, which suits batch invocations and tests; pass
-`--idle` to keep serving. Idle means no attempt running and no job it could
+`--keep-running` to keep serving. Idle means no attempt running and no job it could
 claim; a manager that serves the workspace's exchange also waits while the
 inbox holds an entry it may still adopt or a finished exchange tree of its
 pools can be (or was asked to be) returned, and does not exit as idle within
@@ -391,7 +390,7 @@ keeps committing their outcomes for up to `--drain-timeout` seconds (sending
 `SIGKILL` to any attempt still running 10 s into the drain), gives back the
 jobs it still holds, and exits successfully. Three things start a drain:
 
-- `SIGTERM` or `SIGINT`, which batch systems send at walltime, for an `--idle`
+- `SIGTERM` or `SIGINT`, which batch systems send at walltime, for an `--keep-running`
   manager;
 - `SIGTERM` (not `SIGINT`, which still stops at once) for a manager running
   until idle;
@@ -773,8 +772,8 @@ Placement prefixes restrict what a manager scans:
 
 ```console
 httk manager run --workspace WORKSPACE \
-  --placement-prefix project-a \
-  --placement-prefix project-b/2026
+  --placement project-a \
+  --placement project-b/2026
 ```
 
 The flag is repeatable, and every scheduling scan is confined to those
@@ -930,7 +929,7 @@ observed `paused`, and exits `1` when a pause was superseded, dropped or timed
 out (`--timeout SECONDS`). `override_step` is checked against the steps the
 runner recorded after its first attempt; `--force` publishes anyway.
 
-When the operator has an identity from `httk init`, the request carries an
+When the operator has an identity from `httk setup`, the request carries an
 Ed25519 signature over its canonical JSON; it is attribution, not
 authorization. See [the command guide](workflow_cli.md#operator-identity).
 
@@ -961,11 +960,11 @@ never changed by the protocol until it is released from its seal with
 `httk job unseal`, so delete it with:
 
 ```console
-httk job unseal --force JOB
-httk job delete --force JOB
+httk job unseal --yes JOB
+httk job delete --yes JOB
 ```
 
-A child that a non-terminal parent still waits on is refused. `--force` skips
+A child that a non-terminal parent still waits on is refused. `--yes` skips
 only the confirmation. Cancel a running or ready job first. Never delete a job
 directory with `rm -r`: a manager may hold it at that moment.
 
@@ -1042,7 +1041,7 @@ owners, old temporaries, and holds or incoming copies older than seven days.
 ## The foreground debug runner
 
 ```console
-httk job debug --workspace WORKSPACE --step relax PAYLOAD
+httk job debug --workspace WORKSPACE --start-step relax PAYLOAD
 httk job debug --workspace WORKSPACE --follow-children JOB
 ```
 

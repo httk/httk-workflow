@@ -102,7 +102,7 @@ def test_job_unseal_declined_then_forced_and_then_deletable(
 ) -> None:
     project_root, workspace, ref = _succeeded(tmp_path)
     assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
-    assert command(["job", "delete", "--force", ref.job_id], _context(project_root)) == 1
+    assert command(["job", "delete", "--yes", ref.job_id], _context(project_root)) == 1
     assert "release it with `job unseal` first" in capsys.readouterr().out
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
@@ -111,10 +111,10 @@ def test_job_unseal_declined_then_forced_and_then_deletable(
     assert "not removed" in capsys.readouterr().out
     assert is_job_sealed(v3.find(workspace, ref.job_id).path)
 
-    assert command(["job", "unseal", "--force", ref.job_id], _context(project_root)) == 0
+    assert command(["job", "unseal", "--yes", ref.job_id], _context(project_root)) == 0
     assert capsys.readouterr().out == f"{ref.job_id}\tunsealed\n"
     assert not is_job_sealed(v3.find(workspace, ref.job_id).path)
-    assert command(["job", "delete", "--force", ref.job_id], _context(project_root)) == 0
+    assert command(["job", "delete", "--yes", ref.job_id], _context(project_root)) == 0
     assert _kernel.locate(workspace, ref.job_id, placement_hint=None, exhaustive=True) is None
 
 
@@ -136,7 +136,7 @@ def test_workspace_seal_lists_unsealed_jobs_and_refuses_a_second_seal(tmp_path: 
     settings = ["workspace", "settings", "set", "--key", "answer", "--value", "1"]
     assert command(settings, _context(project_root)) == 1
     assert "sealed" in capsys.readouterr().err
-    assert command(["workspace", "unseal", "--force"], _context(project_root)) == 0
+    assert command(["workspace", "unseal", "--yes"], _context(project_root)) == 0
     assert command(settings, _context(project_root)) == 0
     capsys.readouterr()
 
@@ -198,14 +198,14 @@ def test_seal_verify_json_shape(tmp_path: Path, capsys) -> None:
     assert set(first) >= {"level", "subject", "valid", "verdict", "reason", "signers", "discrepancies"}
 
 
-def test_confirm_non_tty_refuses_without_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_confirm_non_tty_refuses_without_yes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     project_root, workspace, ref = _succeeded(tmp_path)
     assert command(["job", "seal", ref.job_id], _context(project_root)) == 0
     capsys.readouterr()
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     assert command(["job", "unseal", ref.job_id], _context(project_root)) == 1
-    assert "requires --force" in capsys.readouterr().err
+    assert "requires --yes" in capsys.readouterr().err
     assert is_job_sealed(v3.find(workspace, ref.job_id).path)
 
 

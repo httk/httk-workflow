@@ -509,10 +509,10 @@ def handle_workflow_describe(arguments: argparse.Namespace, context: Any) -> int
         binding, root = _resolve_binding(arguments, context)
         if root is None:
             assert binding is not None
-            format_flags = () if arguments.format is None else ("--format", arguments.format)
+            format_flags = () if arguments.format is None else ("--language", arguments.format)
             return _remote_relay(binding, context, arguments, "describe", *format_flags, *arguments.targets)
         if arguments.format is not None:
-            raise ValueError("--format describes a bare document on this machine; an installation names its format")
+            raise ValueError("--language describes a bare document on this machine; an installation names its language")
         workspace = Workspace(root)
     descriptions: list[dict[str, object]] = []
     failed = False
@@ -886,7 +886,7 @@ def _install_remote(binding: WorkspaceBinding, context: Any, arguments: argparse
     _, root = probe_remote_workspace(target, name, timeout=arguments.adapter_timeout)
     flags = [flag for flag in ("--no-calls", "--no-build", "--json") if getattr(arguments, flag[2:].replace("-", "_"))]
     if arguments.format is not None:
-        flags += ["--format", arguments.format]
+        flags += ["--language", arguments.format]
     status = 0
     for source in arguments.sources:
         try:
@@ -1022,7 +1022,7 @@ def _uninstall_on_this_machine(arguments: argparse.Namespace) -> int:
 
 
 def _add_store_options(parser: argparse.ArgumentParser, help_text: str) -> None:
-    parser.add_argument("--workspace", metavar="WORKSPACE", help=help_text)
+    parser.add_argument("-w", "--workspace", metavar="WORKSPACE", help=help_text)
     parser.add_argument("--json", action="store_true", help="print the result as one JSON array")
     _add_adapter_timeout(parser)
 
@@ -1066,9 +1066,10 @@ def build_describe_parser(subparsers: argparse._SubParsersAction[argparse.Argume
         help="workflow id, alias, git+https://…@ref#subdir URI, runner file, or package directory",
     )
     describe.add_argument(
-        "--format",
-        metavar="FORMAT",
-        help="force FORMAT (cwl, pwd, jobflow, httk-v1) for a bare workflow document or directory",
+        "--language",
+        dest="format",
+        metavar="LANGUAGE",
+        help="force LANGUAGE (cwl, pwd, jobflow, httk-v1) for a bare workflow document or directory",
     )
     _add_store_options(describe, "describe workflows installed in this workspace")
 
@@ -1097,7 +1098,9 @@ def build_install_parser(subparsers: argparse._SubParsersAction[argparse.Argumen
     _add_by_path_argument(install)
     install.add_argument("--no-calls", action="store_true", help="do not install the declared calls")
     install.add_argument("--no-build", action="store_true", help="do not build a [workflow.build] package")
-    install.add_argument("--format", metavar="FORMAT", help="force FORMAT for a bare workflow document or directory")
+    install.add_argument(
+        "--language", dest="format", metavar="LANGUAGE", help="force LANGUAGE for a bare workflow document or directory"
+    )
     install.add_argument("--consume", action="store_true", help=argparse.SUPPRESS)
     uninstall = _leaf(
         subparsers,

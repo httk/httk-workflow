@@ -97,7 +97,7 @@ def _namespace(parsed: argparse.Namespace) -> dict[str, object]:
     return {
         key: value
         for key, value in vars(parsed).items()
-        if key not in {"handler", "help_parser", "command", "durable", "no_durable"}
+        if key not in {"handler", "help_parser", "command", "no_durable"}
     }
 
 
@@ -192,11 +192,11 @@ def test_an_unknown_action_under_a_known_group_names_that_group(tmp_path: Path, 
 
 
 def test_an_unknown_action_under_a_nested_group_names_that_nested_group(capsys) -> None:
-    # `project manifest` moved to the core `httk project` command, mounted there
-    # by httk-workflow; a mistyped action still names the nested group it is under.
-    assert main(["project", "manifest", "sign"]) == 2
+    # `workspace settings` is a nested group of a tree httk-workflow mounts on the core
+    # `httk` command; a mistyped action still names the nested group it is under.
+    assert main(["workspace", "settings", "frobnicate"]) == 2
     captured = capsys.readouterr().err
-    assert "httk project manifest" in captured and "invalid choice: 'sign'" in captured
+    assert "httk workspace settings" in captured and "invalid choice: 'frobnicate'" in captured
 
 
 def test_an_unknown_group_names_the_tree(tmp_path: Path, capsys) -> None:
@@ -280,7 +280,7 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         parser.parse_args(["manager", "run", "--workspace", "WS", "--fore" + "ground"])
     assert parser.parse_args(["run"]).workspace is None
-    assert parser.parse_args(["run", "--workspace", "WS", "--idle"]).idle is True
+    assert parser.parse_args(["run", "--workspace", "WS", "--keep-running"]).idle is True
     assert parser.parse_args(["run", "--launcher", "gpu"]).launcher == "gpu"
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--inline", "--launcher", "gpu"])
@@ -292,8 +292,8 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
 
 def test_top_level_run_is_manager_run_with_pinned_defaults(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    top_level = _namespace(parser.parse_args(["run", "--workspace", "WS", "--workers", "4", "--idle"]))
-    manager = _namespace(parser.parse_args(["manager", "run", "--workspace", "WS", "--workers", "4", "--idle"]))
+    top_level = _namespace(parser.parse_args(["run", "--workspace", "WS", "--workers", "4", "--keep-running"]))
+    manager = _namespace(parser.parse_args(["manager", "run", "--workspace", "WS", "--workers", "4", "--keep-running"]))
     assert top_level == manager
 
 
@@ -443,3 +443,51 @@ def test_operator_transfer_help_and_status(tmp_path, monkeypatch, capsys):
         assert "invalid choice" in capsys.readouterr().err
     assert main(["workflow", "transfer", "receive", "--workspace", "/w", "--bundle", "/b"]) == 2
     capsys.readouterr()
+
+
+def test_renamed_options_and_short_flags_parse_to_their_destinations(tmp_path: Path, monkeypatch) -> None:
+    from httk.workflow.registry import WorkspaceBinding
+    from httk.workflow.workflow_cli import _describe
+
+    parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
+    parsed = parser.parse_args(["job", "new", "--workflow", "W", "--start-step", "s", "-p", "a=1", "-i", "b=2"])
+    assert (parsed.step, parsed.parameters, parsed.inputs) == ("s", ["a=1"], ["b=2"])
+    assert parser.parse_args(["job", "debug", "J", "--start-step", "s"]).step == "s"
+    assert parser.parse_args(["describe", "T", "--language", "cwl"]).format == "cwl"
+    assert parser.parse_args(["install", "S", "--language", "cwl"]).format == "cwl"
+    assert parser.parse_args(["launcher", "check", "N", "--adapter-timeout", "5"]).launcher_timeout == 5.0
+    listed = parser.parse_args(["job", "list", "-w", "WS", "-s", "ready"])
+    assert (listed.workspace, listed.state) == ("WS", ["ready"])
+    assert parser.parse_args(["workspace", "gc", "-n"]).dry_run is True
+
+    # The far side of a remote describe and install receives --language.
+    binding = WorkspaceBinding("cluster:far", "cluster", None)
+    relayed: list[tuple[str, ...]] = []
+    monkeypatch.setattr(_describe, "_resolve_binding", lambda *_args: (binding, None))
+
+    def relay(_binding: object, _context: object, _arguments: object, *argv: str) -> int:
+        relayed.append(argv)
+        return 0
+
+    monkeypatch.setattr(_describe, "_remote_relay", relay)
+    described = parser.parse_args(["describe", "T", "--language", "cwl", "--workspace", "cluster:far"])
+    assert _describe.handle_workflow_describe(described, _context(tmp_path)) == 0
+    assert relayed == [("describe", "--language", "cwl", "T")]
+
+    invoked: list[list[str]] = []
+
+    def adapter(
+        _bundle: object, operation: str, payload: dict[str, list[str]], **_options: object
+    ) -> dict[str, object]:
+        invoked.append(payload["argv"])
+        return {"returncode": 0}
+
+    monkeypatch.setattr(_describe, "resolve_remote", lambda *_args, **_options: argparse.Namespace(bundle=None))
+    monkeypatch.setattr(_describe, "probe_remote_workspace", lambda *_args, **_options: (None, "/far"))
+    monkeypatch.setattr(_describe, "_push_source", lambda source: source)
+    monkeypatch.setattr(_describe, "run_adapter", adapter)
+    installing = parser.parse_args(["install", "git+https://x/r", "--language", "cwl", "--workspace", "cluster:far"])
+    assert _describe._install_remote(binding, _context(tmp_path), installing) == 0
+    assert invoked == [
+        [*_describe._WORKFLOW_COMMAND, "install", "--language", "cwl", "--workspace", "far", "git+https://x/r"]
+    ]

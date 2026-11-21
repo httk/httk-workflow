@@ -400,7 +400,7 @@ labels are unique per parent job). See
   `placement=`, its placement is `<parent placement>/<parent job key>.children`;
   the workspace setting `children.placement=flat` gives it the parent's
   placement instead. Either way the whole tree below a root stays under the
-  root's placement, so a `--placement-prefix` manager serves it, which
+  root's placement, so a `--placement` manager serves it, which
   {doc}`/campaigns` relies on. A `placement=` must not
   contain a component that parses as a job key, since job directories never
   nest; see the

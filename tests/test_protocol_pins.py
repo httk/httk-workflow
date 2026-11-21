@@ -289,5 +289,5 @@ def test_the_cli_one_job_cancel_and_delete_register_nothing(tmp_path: Path, caps
     ref = _cli_job(tmp_path, workspace, "seq-1")
     context = _context(tmp_path)
     assert command(["job", "request", "cancel", "--workspace", name, "--reason", "r", ref.job_id], context) == 0
-    assert command(["job", "delete", "--workspace", name, "--force", ref.job_id], context) == 0
+    assert command(["job", "delete", "--workspace", name, "--yes", ref.job_id], context) == 0
     capsys.readouterr()

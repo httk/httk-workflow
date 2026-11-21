@@ -144,7 +144,7 @@ def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
         "--pool",
         exchange_pool(_KEY),
     ]
-    # Only the signing key's exchange pool, never default, and no --idle: the manager exits when idle.
+    # Only the signing key's exchange pool, never default, and no --keep-running: the manager exits when idle.
     assert exchange_pool(_KEY) == "exchange-" + hashlib.sha256(_KEY.encode()).hexdigest()[:16]
 
 
@@ -446,7 +446,7 @@ def test_mailbox_to_scheduler_replays_after_reopening_private_state(policy: Poli
     # The manager claims only the jobs of the start request's signing key.
     command = shlex.split(script.read_text().splitlines()[-1])
     assert command[command.index("--pool") + 1] == exchange_pool(response_public_key(client_seed))
-    assert "--idle" not in command and command.count("--pool") == 1
+    assert "--keep-running" not in command and command.count("--pool") == 1
     assert json.loads(cancelled_calls.read_text()) == [
         "--ctld",
         "--clusters=cluster",

@@ -34,7 +34,7 @@ the `vasp.relax` workflow of
 [workflows-vasp](https://github.com/httk/workflows-vasp) by its git URI:
 
 ```console
-httk init --name "Your Name" --email you@example.org
+httk setup --name "Your Name" --email you@example.org
 httk project init --name quickstart .
 httk workspace init --name default workspace
 httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --install --input structure=POSCAR --tag silicon
@@ -43,7 +43,7 @@ httk workflow run
 httk collect
 ```
 
-`httk init` sets up your per-user operator identity, used to attribute and sign
+`httk setup` sets up your per-user operator identity, used to attribute and sign
 what you publish, and is idempotent.
 
 [`docs/quickstart.md`](docs/quickstart.md) explains each command, and
@@ -133,6 +133,6 @@ local clone. Module CI does not set it yet, so these tests skip there.
 
 ```console
 httk project init --name example .
-httk project manifest create .
+httk project manifest .
 httk workspace status
 ```

@@ -208,7 +208,7 @@ def handle_launcher_remove(arguments: Namespace, context: CLIContext) -> int:
 
     if isinstance(arguments.name, list):
         return _launcher_batch(arguments, context, handle_launcher_remove, json_output=True)
-    if not confirm(f"remove the launcher {arguments.name!r} and everything configured in it?", force=arguments.force):
+    if not confirm(f"remove the launcher {arguments.name!r} and everything configured in it?", yes=arguments.yes):
         return 1
     print(json.dumps(remove_launcher(arguments.name, project=context.cwd), indent=2, sort_keys=True))
     return 0
@@ -315,7 +315,8 @@ def build_launcher_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
     )
     check.add_argument("name", metavar="NAME", nargs="+", help="the launcher to check")
     check.add_argument(
-        "--launcher-timeout",
+        "--adapter-timeout",
+        dest="launcher_timeout",
         type=float,
         metavar="SECONDS",
         help="bound this launcher operation (default: the launcher's timeout_seconds)",
@@ -329,4 +330,4 @@ def build_launcher_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         handler=handle_launcher_remove,
     )
     remove.add_argument("name", metavar="NAME", nargs="+", help="the launcher to remove")
-    remove.add_argument("--force", action="store_true", help="skip the confirmation")
+    remove.add_argument("--yes", action="store_true", help="skip the confirmation")

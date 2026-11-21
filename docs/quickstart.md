@@ -48,7 +48,7 @@ END
 ## The eight commands
 
 ```console
-$ httk init --name "Your Name" --email you@example.org
+$ httk setup --name "Your Name" --email you@example.org
 $ httk project init --name quickstart .
 $ httk workspace init --name default workspace
 $ httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --install --input structure=POSCAR --tag silicon
@@ -107,7 +107,7 @@ from the job's resources. A real environment variable remains a deployment
 override and wins over the workspace setting.
 
 **`run`** ran a task manager until nothing was ready, driving the job through
-`prepare`, `run`, and `publish`, and sealed it when it succeeded. With `--idle` the same manager keeps serving
+`prepare`, `run`, and `publish`, and sealed it when it succeeded. With `--keep-running` the same manager keeps serving
 the workspace, which is how a campaign is run.
 
 **`collect --into`** printed one JSON summary per finished job and stored its

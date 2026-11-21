@@ -29,7 +29,7 @@ def test_campaign_configuration_and_removal(tmp_path: Path, capsys) -> None:
     retained = tmp_path / "workspace" / "job.txt"
     retained.parent.mkdir()
     retained.write_text("job payload")
-    assert command(["campaign", "remove", "--force"], context) == 0
+    assert command(["campaign", "remove", "--yes"], context) == 0
     assert read_campaign(tmp_path).partitions == {}
     assert read_project(tmp_path)["unrelated"] == {"keep": True}
     assert retained.read_text() == "job payload"
@@ -52,5 +52,5 @@ def test_campaign_invalid_and_sealed_edits_preserve_saved_configuration(tmp_path
         assert (tmp_path / "httk_project" / "project.json").read_bytes() == saved
     (tmp_path / "httk_project" / "seal.json").write_text("{}")
     assert command(["campaign", "configure", "--set", "partitions.b=beta"], context) == 2
-    assert command(["campaign", "remove", "--force"], context) == 2
+    assert command(["campaign", "remove", "--yes"], context) == 2
     assert (tmp_path / "httk_project" / "project.json").read_bytes() == saved

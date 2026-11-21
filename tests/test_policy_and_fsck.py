@@ -96,7 +96,7 @@ def test_a_version_2_workspace_is_refused_with_a_teaching_message(tmp_path: Path
     stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
     stored["format_version"] = 2
     (workspace.control / "format.json").write_text(json.dumps(stored), encoding="utf-8")
-    with pytest.raises(FormatError, match="httk system reset"):
+    with pytest.raises(FormatError, match="httk setup --reset"):
         Workspace(workspace.root)
 
 

@@ -598,7 +598,7 @@ def test_a_failed_hand_off_to_gc_keeps_the_tree_in_the_trash_and_loses_no_outcom
 
 def _job_delete(workspace: Workspace, name: str, refs: list[_kernel.JobRef], capsys: Any, root: Path) -> list[str]:
     capsys.readouterr()
-    status = command(["job", "delete", "--force", "--workspace", name, *(ref.job_id for ref in refs)], _context(root))
+    status = command(["job", "delete", "--yes", "--workspace", name, *(ref.job_id for ref in refs)], _context(root))
     assert status != 0
     return capsys.readouterr().out.splitlines()
 

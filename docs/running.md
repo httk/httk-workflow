@@ -90,7 +90,7 @@ its `job.json`.
 
 ```console
 httk workflow run                      # serve ready jobs until nothing is left
-httk workflow run --idle               # keep serving; this is how a campaign runs
+httk workflow run --keep-running               # keep serving; this is how a campaign runs
 httk workflow run --count 4 --workers 8
 httk workflow run --workspace kappa:runs --count 4
 ```

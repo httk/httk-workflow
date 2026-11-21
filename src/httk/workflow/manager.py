@@ -277,7 +277,7 @@ class WorkCensus:
             resource_flags = " ".join(f"--worker-resource {name} COUNT" for name in resources)
             return (
                 f"{count} ready job(s) need resource {names} beyond this manager's capacity; "
-                f"start a manager with {resource_flags}, or pass --idle to keep serving"
+                f"start a manager with {resource_flags}, or pass --keep-running to keep serving"
             )
         lacks: list[str] = []
         remedies: list[str] = []
@@ -305,7 +305,7 @@ class WorkCensus:
         advice = (
             f"{self.ready_blocked_total - sum(self.ready_blocked.get('time', {}).values())} job(s) cannot be "
             f"claimed here because this manager does not serve {'; '.join(lacks)}; {remedy}, "
-            "or pass --idle to keep serving"
+            "or pass --keep-running to keep serving"
         )
         return advice if time_advice is None else f"{advice}; {time_advice}"
 
@@ -323,7 +323,7 @@ class WorkCensus:
             parts.append(f"exchange work pending: {self.exchange_inbox} inbox entries, {self.exchange_returns} returns")
         if advice is None and (self.actionable or not self.exchange_pending):
             parts.append(
-                "jobs are still running or claimable — rerun, raise --idle-timeout, or pass --idle to keep serving"
+                "jobs are still running or claimable — rerun, raise --idle-timeout, or pass --keep-running to keep serving"
             )
         return f"{base}; {'; '.join(parts)}"
 

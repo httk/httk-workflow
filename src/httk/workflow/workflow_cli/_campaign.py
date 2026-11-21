@@ -99,7 +99,7 @@ def handle_campaign_configure(arguments: argparse.Namespace, context: CLIContext
 def handle_campaign_remove(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Remove this project's campaign map while preserving its jobs and workspaces."""
 
-    if not confirm("remove the campaign configuration?", force=arguments.force):
+    if not confirm("remove the campaign configuration?", yes=arguments.yes):
         return 1
     remove_campaign(context.cwd)
     return 0
@@ -367,7 +367,7 @@ def build_campaign_parser(
         description="Clear the project's campaign configuration; workspaces and jobs remain intact",
         handler=handle_campaign_remove,
     )
-    remove.add_argument("--force", action="store_true", help="skip the confirmation")
+    remove.add_argument("--yes", action="store_true", help="skip the confirmation")
 
     submit = _leaf(
         group,
@@ -402,6 +402,7 @@ def build_campaign_parser(
         help="the batch position, for round-robin (default: 0)",
     )
     submit.add_argument(
+        "-p",
         "--parameter",
         action="append",
         default=[],
@@ -418,6 +419,7 @@ def build_campaign_parser(
         help="one staged file (repeatable)",
     )
     submit.add_argument(
+        "-i",
         "--input",
         action="append",
         default=[],
@@ -458,6 +460,7 @@ def build_campaign_parser(
         help="collect only this partition (repeatable, default: all of them)",
     )
     collect_parser.add_argument(
+        "-s",
         "--state",
         action="append",
         metavar="STATE",

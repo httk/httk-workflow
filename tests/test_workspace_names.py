@@ -137,7 +137,7 @@ def test_remote_workspace_adapter_requests_are_exact_argv(tmp_path: Path, monkey
         ["workspace", "settings", "show", "--json", "cluster:runs"],
         ["workspace", "list", "--json", "cluster:"],
         ["workspace", "move", "cluster:runs", "moved"],
-        ["workspace", "delete", "--force", "cluster:runs"],
+        ["workspace", "delete", "--yes", "cluster:runs"],
     )
     for argv in commands:
         assert command(argv, context) == 0
@@ -151,7 +151,7 @@ def test_remote_workspace_adapter_requests_are_exact_argv(tmp_path: Path, monkey
         ("httk", "workspace", "settings", "show", "--json", "runs"),
         ("httk", "workspace", "list", "--json"),
         ("httk", "workspace", "move", "runs", "moved"),
-        ("httk", "workspace", "delete", "--force", "runs"),
+        ("httk", "workspace", "delete", "--yes", "runs"),
     ]
 
 
@@ -256,7 +256,7 @@ def test_an_unknown_bare_name_keeps_the_registry_hint(tmp_path: Path, capsys) ->
     assert "unknown workspace: nosuch" in capsys.readouterr().err
 
 
-def test_remote_delete_requires_force_before_contacting_remote(tmp_path: Path, remote: Remote, capsys) -> None:
+def test_remote_delete_requires_yes_before_contacting_remote(tmp_path: Path, remote: Remote, capsys) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="remote-delete")
     fake_remote(project)
@@ -266,12 +266,12 @@ def test_remote_delete_requires_force_before_contacting_remote(tmp_path: Path, r
     before = remote.commands()
 
     assert command(["workspace", "delete", "cluster:runs"], context) == 1
-    assert "requires --force" in capsys.readouterr().err
+    assert "requires --yes" in capsys.readouterr().err
     assert remote.commands() == before
 
-    assert command(["workspace", "delete", "--force", "cluster:runs"], context) == 0
+    assert command(["workspace", "delete", "--yes", "cluster:runs"], context) == 0
     capsys.readouterr()
-    assert any("workspace delete --force runs" in item for item in remote.commands())
+    assert any("workspace delete --yes runs" in item for item in remote.commands())
 
 
 def test_move_updates_the_registry_and_refuses_while_an_owner_is_not_proven_dead(tmp_path: Path, capsys) -> None:
@@ -306,15 +306,45 @@ def test_delete_refuses_while_an_owner_is_not_proven_dead_also_by_path(tmp_path:
         Workspace(tmp_path / "doomed"), kind="cli", label="test", allocation=None, advertised={}
     )
     for argv in (["doomed"], ["--by-path", str(tmp_path / "doomed")]):
-        assert command(["workspace", "delete", "--force", *argv], context) == 1
+        assert command(["workspace", "delete", "--yes", *argv], context) == 1
         assert f"in use: manifest requires a quiescent workspace; owners not proven dead: {owner.owner_id}" in (
             capsys.readouterr().err
         )
         assert (tmp_path / "doomed" / ".httk-workspace" / "format.json").is_file()
     owner.close()
-    assert command(["workspace", "delete", "--force", "doomed"], context) == 0
+    assert command(["workspace", "delete", "--yes", "doomed"], context) == 0
     capsys.readouterr()
     assert not (tmp_path / "doomed").exists()
+
+
+def test_delete_asks_on_a_terminal_and_refuses_without_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    context = _context(tmp_path)
+    assert command(["workspace", "init", "doomed"], context) == 0
+    capsys.readouterr()
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    # An unknown target is refused before any confirmation is asked for.
+    assert command(["workspace", "delete", "nosuch"], context) == 1
+    error = capsys.readouterr().err
+    assert "nosuch" in error and "--yes" not in error
+    assert command(["workspace", "delete", "doomed"], context) == 1
+    assert "this operation without a terminal requires --yes" in capsys.readouterr().err
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    prompts: list[str] = []
+    answers = iter(("n", "y"))
+
+    def answer(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
+    assert command(["workspace", "delete", "doomed"], context) == 1
+    assert "not deleted" in capsys.readouterr().out
+    assert (tmp_path / "doomed" / ".httk-workspace" / "format.json").is_file()
+    assert command(["workspace", "delete", "doomed"], context) == 0
+    assert not (tmp_path / "doomed").exists()
+    assert prompts == ["Destroy the workspace 'doomed'? This is irreversible. [y/N] "] * 2
 
 
 def test_move_refuses_cross_filesystem_without_copying(tmp_path: Path, monkeypatch, capsys) -> None:
