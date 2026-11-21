@@ -1,0 +1,636 @@
+httk.workflow.adapters
+======================
+
+.. py:module:: httk.workflow.adapters
+
+.. autoapi-nested-parse::
+
+   Versioned JSON remote-adapter bundles.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.adapters.ADAPTER_OPERATIONS
+   httk.workflow.adapters.ADAPTER_EXECUTABLE
+   httk.workflow.adapters.CREDENTIALS_FILE
+   httk.workflow.adapters.METADATA_FILE
+   httk.workflow.adapters.ADAPTER_FORMAT
+   httk.workflow.adapters.REQUEST_FORMAT
+   httk.workflow.adapters.RESULT_FORMAT
+   httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS
+   httk.workflow.adapters.REMOTE_WORKSPACE_INIT_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_DELETE_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_FSCK_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_GC_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_LIST_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_MOVE_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_EJECT_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_ADOPT_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_TRANSFER_COMMAND
+   httk.workflow.adapters.REMOTE_TRANSFER_STATUS_COMMAND
+   httk.workflow.adapters.REMOTE_STATUS_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_SETTINGS_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_CONFIGURE_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_POLICY_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND
+   httk.workflow.adapters.REMOTE_MANAGER_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_REQUEST_ENVELOPES_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_PUBLISH_REQUESTS_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_LIST_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_DELETE_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_SHOW_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_LOG_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_WHY_COMMAND
+   httk.workflow.adapters.REMOTE_SESSION_COMMAND
+   httk.workflow.adapters.SESSION_FORMAT
+   httk.workflow.adapters.SESSION_FORMAT_VERSION
+   httk.workflow.adapters.REMOTE_TRANSFER_SESSION_COMMAND
+   httk.workflow.adapters.TRANSFER_SESSION_FORMAT
+   httk.workflow.adapters.TRANSFER_PROTOCOL
+   httk.workflow.adapters.SEED_SETTING_MAP
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.workflow.adapters.SessionUnsupported
+   httk.workflow.adapters.SessionFailed
+   httk.workflow.adapters.RequestAborted
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.adapters.RemoteTarget
+   httk.workflow.adapters.AdapterSession
+   httk.workflow.adapters.TransferSession
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.adapters.probe_remote_workspace
+   httk.workflow.adapters.seed_application_settings
+   httk.workflow.adapters.metadata_path
+   httk.workflow.adapters.read_metadata
+   httk.workflow.adapters.validate_adapter_bundle
+   httk.workflow.adapters.valid_remote_name
+   httk.workflow.adapters.resolve_remote
+   httk.workflow.adapters.project_remote_roots
+   httk.workflow.adapters.list_remotes
+   httk.workflow.adapters.add_remote
+   httk.workflow.adapters.split_settings
+   httk.workflow.adapters.read_credentials
+   httk.workflow.adapters.store_credentials
+   httk.workflow.adapters.remote_settings
+   httk.workflow.adapters.import_v1_remote
+   httk.workflow.adapters.run_adapter
+
+
+Module Contents
+---------------
+
+.. py:data:: ADAPTER_OPERATIONS
+   :value: ('configure', 'daemon', 'install', 'invoke', 'push', 'pull', 'session', 'status')
+
+
+.. py:data:: ADAPTER_EXECUTABLE
+   :value: 'adapter'
+
+
+.. py:data:: CREDENTIALS_FILE
+   :value: 'credentials.json'
+
+
+.. py:data:: METADATA_FILE
+   :value: 'remote.json'
+
+
+.. py:data:: ADAPTER_FORMAT
+   :value: 'httk-computer-adapter'
+
+
+.. py:data:: REQUEST_FORMAT
+   :value: 'httk-computer-request'
+
+
+.. py:data:: RESULT_FORMAT
+   :value: 'httk-computer-result'
+
+
+.. py:data:: PERSISTABLE_REMOTE_SETTINGS
+
+.. py:data:: REMOTE_WORKSPACE_INIT_COMMAND
+   :value: ('httk', 'workspace', 'init')
+
+
+.. py:data:: REMOTE_WORKSPACE_DELETE_COMMAND
+   :value: ('httk', 'workspace', 'delete')
+
+
+.. py:data:: REMOTE_WORKSPACE_FSCK_COMMAND
+   :value: ('httk', 'workspace', 'fsck')
+
+
+.. py:data:: REMOTE_WORKSPACE_GC_COMMAND
+   :value: ('httk', 'workspace', 'gc')
+
+
+.. py:data:: REMOTE_WORKSPACE_LIST_COMMAND
+   :value: ('httk', 'workspace', 'list')
+
+
+.. py:data:: REMOTE_WORKSPACE_MOVE_COMMAND
+   :value: ('httk', 'workspace', 'move')
+
+
+.. py:data:: REMOTE_JOB_EJECT_COMMAND
+   :value: ('httk', 'job', 'eject')
+
+
+.. py:data:: REMOTE_JOB_ADOPT_COMMAND
+   :value: ('httk', 'job', 'adopt')
+
+
+.. py:data:: REMOTE_JOB_TRANSFER_COMMAND
+   :value: ('httk', 'job', 'transfer')
+
+
+.. py:data:: REMOTE_TRANSFER_STATUS_COMMAND
+   :value: ('httk', 'transfer', 'status')
+
+
+.. py:data:: REMOTE_STATUS_COMMAND
+   :value: ('httk', 'workspace', 'status')
+
+
+.. py:data:: REMOTE_WORKSPACE_SETTINGS_COMMAND
+   :value: ('httk', 'workspace', 'settings')
+
+
+.. py:data:: REMOTE_WORKSPACE_CONFIGURE_COMMAND
+   :value: ('httk', 'workspace', 'configure')
+
+
+.. py:data:: REMOTE_WORKSPACE_POLICY_COMMAND
+   :value: ('httk', 'workspace', 'policy')
+
+
+.. py:data:: REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND
+   :value: ('httk', 'workspace', 'workflow-prelude')
+
+
+.. py:data:: REMOTE_MANAGER_COMMAND
+   :value: ('httk', 'workflow', 'manager', 'run')
+
+
+.. py:data:: REMOTE_JOB_REQUEST_ENVELOPES_COMMAND
+   :value: ('httk', 'job', 'request-envelopes')
+
+
+.. py:data:: REMOTE_JOB_PUBLISH_REQUESTS_COMMAND
+   :value: ('httk', 'job', 'publish-requests')
+
+
+.. py:data:: REMOTE_JOB_LIST_COMMAND
+   :value: ('httk', 'job', 'list')
+
+
+.. py:data:: REMOTE_JOB_DELETE_COMMAND
+   :value: ('httk', 'job', 'delete')
+
+
+.. py:data:: REMOTE_JOB_SHOW_COMMAND
+   :value: ('httk', 'job', 'show')
+
+
+.. py:data:: REMOTE_JOB_LOG_COMMAND
+   :value: ('httk', 'job', 'log')
+
+
+.. py:data:: REMOTE_JOB_WHY_COMMAND
+   :value: ('httk', 'job', 'why')
+
+
+.. py:data:: REMOTE_SESSION_COMMAND
+   :value: ('httk', 'workflow', 'session')
+
+
+.. py:data:: SESSION_FORMAT
+   :value: 'httk-workflow-session'
+
+
+.. py:data:: SESSION_FORMAT_VERSION
+   :value: 1
+
+
+.. py:data:: REMOTE_TRANSFER_SESSION_COMMAND
+   :value: ('httk', 'workflow', 'transfer-session')
+
+
+.. py:data:: TRANSFER_SESSION_FORMAT
+   :value: 'httk-workflow-transfer-session'
+
+
+.. py:data:: TRANSFER_PROTOCOL
+   :value: 3
+
+
+.. py:function:: probe_remote_workspace(target, name, *, timeout, noun = 'workspace', adapter = None)
+
+   Return the UUID and current root reported for a remote workspace name.
+
+   :param target: The resolved remote adapter bundle.
+   :param name: The remote workspace name.
+   :param timeout: The adapter operation timeout.
+   :param noun: The noun used in diagnostic messages.
+   :param adapter: The adapter callable, or :func:`run_adapter` when omitted.
+   :return: The remote workspace identifier and root.
+   :raises RuntimeError: If the remote status operation fails.
+   :raises ValueError: If the remote returns an incompatible status document.
+
+
+.. py:data:: SEED_SETTING_MAP
+   :type:  collections.abc.Mapping[str, str]
+
+.. py:function:: seed_application_settings(bundle)
+
+   Return the application settings a remote seeds a workspace with.
+
+   :param bundle: The adapter bundle path.
+   :return: The whitelisted application settings derived from the bundle.
+
+
+.. py:class:: RemoteTarget
+
+   Resolved remote bundle.
+
+   :param name: The remote name.
+   :param bundle: The resolved adapter bundle path.
+   :param project_local: Whether the bundle came from project data.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: bundle
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: project_local
+      :type:  bool
+
+
+.. py:function:: metadata_path(bundle)
+
+   Return the metadata file of one adapter bundle.
+
+   :param bundle: The adapter bundle path.
+   :return: The bundle metadata path.
+
+
+.. py:function:: read_metadata(bundle)
+
+   Read the metadata of one adapter bundle.
+
+   :param bundle: The adapter bundle path.
+   :return: The decoded metadata document.
+   :raises ValueError: If the metadata cannot be read as an object.
+
+
+.. py:function:: validate_adapter_bundle(bundle)
+
+   Validate static adapter metadata and the single dispatcher executable.
+
+   :param bundle: The adapter bundle path.
+   :return: The validated metadata document.
+   :raises ValueError: If metadata, the dispatcher, or a required binary is invalid or unavailable.
+
+
+.. py:function:: valid_remote_name(name)
+
+   Validate and return one remote name.
+
+   :param name: The remote name to validate.
+   :return: The validated remote name.
+   :raises httk.workflow.errors.ResolutionMiss: If the name is not valid for remote resolution.
+
+
+.. py:function:: resolve_remote(value, *, project = None)
+
+   Resolve project-local before global remote definitions.
+
+   :param value: The remote name to resolve.
+   :param project: The project path, or the discovered project when omitted.
+   :return: The resolved remote target.
+   :raises httk.workflow.errors.ResolutionMiss: If the name is invalid or no bundle is found.
+
+
+.. py:function:: project_remote_roots(project_root)
+
+   Return where one project keeps its remotes.
+
+   :param project_root: The project root.
+   :return: The project remote roots in precedence order.
+
+
+.. py:function:: list_remotes(project = None)
+
+   List definitions with project entries shadowing global entries.
+
+   :param project: The project path, or the discovered project when omitted.
+   :return: Remote definitions with scope and bundle path.
+
+
+.. py:function:: add_remote(name, *, template, global_scope = False, project = None)
+
+   Copy one maintained adapter template into user/project data.
+
+   :param name: The remote name to create.
+   :param template: The maintained adapter template name.
+   :param global_scope: Whether to create the remote in global data.
+   :param project: The project path for a project-local remote.
+   :return: The newly created adapter bundle path.
+   :raises ValueError: If the name, template, or scope is invalid.
+   :raises FileExistsError: If the destination already exists.
+
+
+.. py:function:: split_settings(settings)
+
+   Partition ``--set`` values into persistable settings and credentials.
+
+   :param settings: The settings supplied by the caller.
+   :return: Persistable settings followed by manifest-excluded credentials.
+   :raises ValueError: If a setting name is retired, renamed or unsupported.
+
+
+.. py:function:: read_credentials(bundle)
+
+   Read remote credentials that never enter a project manifest.
+
+   :param bundle: The adapter bundle path.
+   :return: The stored credential document, or an empty mapping when absent.
+   :raises ValueError: If the credentials file is not a JSON object.
+
+
+.. py:function:: store_credentials(bundle, settings, *, unset = ())
+
+   Merge *settings* into the manifest-excluded remote credentials.
+
+   :param bundle: The adapter bundle path.
+   :param settings: Credential members to merge.
+   :param unset: Credential members to remove before applying ``settings``.
+   :return: The credentials file path.
+   :raises ValueError: If the existing credentials file is invalid.
+
+
+.. py:function:: remote_settings(bundle)
+
+   Return persisted remote settings with credentials merged back in.
+
+   :param bundle: The adapter bundle path.
+   :return: Persisted settings and manifest-excluded credentials.
+   :raises ValueError: If adapter metadata or credentials are invalid.
+
+
+.. py:function:: import_v1_remote(source, *, name = None, global_scope = False, project = None)
+
+   Map a recognizable legacy executable bundle to the versioned contract.
+
+   Legacy shell programs are never copied or executed. Only their simple
+   assignment-only ``config`` files are read, and the result uses a maintained
+   v2 adapter implementation. What is read is an *httk v1* computer definition,
+   so the legacy names below are the names that tree really uses.
+
+   :param source: The legacy executable bundle path.
+   :param name: The imported remote name, or the source directory name when omitted.
+   :param global_scope: Whether to create the imported remote in global data.
+   :param project: The project path for a project-local import.
+   :return: The created versioned adapter bundle path.
+   :raises ValueError: If the legacy bundle cannot be recognized or imported.
+
+
+.. py:function:: run_adapter(bundle, operation, request, *, timeout = None, unset_settings = (), interactive = True)
+
+   Execute one JSON adapter operation without invoking a shell.
+
+   :param bundle: The adapter bundle path.
+   :param operation: The adapter operation name.
+   :param request: The operation request members.
+   :param timeout: The operation timeout, or the bundle default when omitted.
+   :param unset_settings: Stored settings to omit when validating a configuration change.
+   :param interactive: Whether the adapter may see this process's terminal (and
+       so let ssh prompt); False gives it no stdin and no controlling terminal,
+       e.g. under a curses display.
+   :return: The adapter result document.
+   :raises TimeoutError: If the adapter exceeds its timeout.
+   :raises ValueError: If the request or result violates the adapter protocol.
+   :raises RuntimeError: If the adapter refuses or fails the operation.
+
+
+.. py:exception:: SessionUnsupported(message, *, kind = 'adapter')
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   The adapter refused the ``session`` operation, or its far side cannot serve a session.
+
+   The monitor's :class:`AdapterSession` callers fall back to one ``invoke`` per read; a transfer stops before
+   anything is held or changed (:class:`TransferSession`).
+
+   :param message: What failed.
+   :param kind: ``adapter`` when the adapter cannot open a session (it refuses the operation, answers with its own
+       result document, or its channel does not carry binary data intact), ``version`` when the far side's ``httk``
+       speaks another protocol (or has no such command), ``missing`` when the far side's shell found no ``httk`` or
+       a command in its ``cli_prelude`` was not found (exit status 127), ``other`` for any other failure before the session was open (the far side crashed or refused
+       for a reason of its own, ...).
+
+
+   .. py:attribute:: kind
+      :value: 'adapter'
+
+
+
+.. py:class:: AdapterSession(bundle, *, timeout = None)
+
+   A long-lived far-side ``httk workflow session`` reached through the adapter ``session`` operation.
+
+   Each :meth:`run` is one request/response round trip over the session's pipes, so a caller that polls
+   logs in once instead of once per read. A failed round trip closes the session; the next :meth:`run`
+   opens a new one. Use it as a context manager, or call :meth:`close`.
+
+   :param bundle: The adapter bundle path.
+   :param timeout: The bound in seconds on opening the session and on each round trip, or the bundle's
+       ``timeout_seconds`` when omitted.
+
+
+   .. py:method:: open(*, interactive = False)
+
+      Start the session unless it is open, and wait for the far side's hello line.
+
+      :param interactive: Whether the adapter keeps this process's controlling terminal (and so lets ssh
+          prompt); False starts it in a new session without one.
+      :raises SessionUnsupported: If the adapter refuses the operation or the far side cannot serve a
+          session; the monitor then falls back to ``invoke``.
+      :raises TimeoutError: If no hello arrives within the timeout.
+      :raises RuntimeError: If ssh itself fails (status 255), such as a refused login.
+
+
+
+   .. py:method:: run(argv, *, cwd = None)
+
+      Run one pinned remote command in the session, opening it non-interactively first if needed.
+
+      :param argv: The pinned ``httk`` command vector.
+      :param cwd: The far-side working directory, or the session's own when omitted.
+      :return: The command's exit status, standard output and standard error.
+      :raises TimeoutError: If the round trip exceeds the timeout; the session is closed.
+      :raises RuntimeError: If the session ends during the round trip or answers out of protocol; it is
+          closed, and the next call opens a new one.
+
+
+
+   .. py:method:: close()
+
+      End the session: close its input so the far side exits, and kill it if it lingers.
+
+      A round trip in flight is not waited for: its process is killed, and that round trip fails, as
+      does a session still opening. A later :meth:`open` or :meth:`run` opens a new session.
+
+
+
+.. py:exception:: SessionFailed(message, *, response = None)
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   A transfer-session request failed with an unknown outcome; the session is closed and never reopened.
+
+   :param message: What failed.
+   :param response: The far side's ``fatal`` response document, when one arrived.
+
+
+   .. py:attribute:: response
+      :value: None
+
+
+
+.. py:exception:: RequestAborted(message, *, response)
+
+   Bases: :py:obj:`RuntimeError`
+
+
+   A transfer-session request whose stream was aborted; the far side answered, and the session stays usable.
+
+   Raised once the response arrived, from (``__cause__``) what aborted the stream: the upload source or the download
+   consumer raising, or :class:`~httk.workflow.errors.StreamAborted` for a download that ended without a successful
+   terminal. The far side saw an upload abort as such, never as a complete upload.
+
+   :param message: What was aborted.
+   :param response: The far side's response document.
+
+
+   .. py:attribute:: response
+
+
+.. py:class:: TransferSession(bundle, *, timeout = None)
+
+   A far-side ``httk workflow transfer-session`` reached through the adapter ``session`` operation.
+
+   One connection and one far-side ``httk`` start carry every request of a transfer, each a :meth:`request` in binary
+   frames (the grammar is in ``httk.workflow._frames``). Whether the session can be used is decided by :meth:`open`
+   alone, before anything is changed: :class:`SessionUnsupported` means that it cannot be (the adapter cannot open
+   one, or the far side speaks another :data:`TRANSFER_PROTOCOL`), and the transfer stops there. After
+   that, any failure (a bound expiring, the far side ending, a protocol error, a fatal op) is :class:`SessionFailed`,
+   an unknown outcome of the request in flight: the session is closed and every later request raises; it never
+   reconnects. Use it as a context manager, or call :meth:`close`.
+
+   The far side's frames are read by a thread into a queue of 512 MiB (each frame counted with 64 bytes of overhead;
+   a JSON frame is at most 512 MiB, so every frame fits). The reader stops reading while the queue is full, so a slow
+   download consumer holds back the far side instead of growing this process. Upload and download run in the
+   calling thread.
+
+   A failed or closed non-interactive session kills the far side's whole process group. An interactive one (started
+   with the terminal, so ssh can prompt) shares this process's group, so only the adapter process itself is killed:
+   an accepted limitation, under which a descendant that keeps the pipes open can delay the end of :meth:`close` (by
+   the reader threads' joins, 2 seconds each) and survive it.
+
+   :param bundle: The adapter bundle path.
+   :param timeout: The bound in seconds, or the bundle's ``timeout_seconds`` when omitted: on the far side's hello,
+       and, per request, on the far side being idle (no frame, no upload bytes taken) or stalled (no progress, no data
+       moving outside the ``sync``, ``settle`` and ``build`` phases). A request's bound is at least three progress intervals
+       (30 seconds), since the far side reports progress only every 10 seconds.
+
+
+   .. py:property:: is_open
+      :type: bool
+
+
+      Return whether the session is open (opened, and neither failed nor closed since).
+
+
+   .. py:method:: open(*, interactive = False)
+
+      Start the far side and check it: its hello, which must name :data:`TRANSFER_PROTOCOL`, and a binary
+      ``echo``, whose header carries that protocol for the far side to check in turn.
+
+      :param interactive: Whether the adapter keeps this process's controlling terminal (and so lets ssh
+          prompt); False starts it in a new session without one.
+      :raises SessionUnsupported: Of kind ``adapter`` if the adapter refuses the operation (or prints its own
+          result document instead of a session) or the echo does not come back intact (a channel that mangles
+          binary data); of kind ``version`` if the far side prints another format's hello, its hello names another
+          protocol, it refuses this one (naming its own), or it ends with exit status 2 before its hello after
+          ``httk workflow``'s argparse refused ``invalid choice: 'transfer-session'`` (an older ``httk workflow``
+          without the command); of kind ``missing`` if it ends before its hello with exit
+          status 127 (no ``httk`` there, or a command of its ``cli_prelude`` not found); of kind ``other`` for any
+          other end before the session was open (a crash, a refusal for a reason of its own). The caller stops;
+          nothing was changed. Raised again by a later call, without starting anything.
+      :raises SessionFailed: If the session was opened, failed or closed before.
+      :raises TimeoutError: If no hello arrives within the bound.
+      :raises RuntimeError: If ssh itself fails (status 255, an ``ssh`` remote only), such as a refused login, at
+          any stage; or if :meth:`close` ended the opening.
+
+
+
+   .. py:method:: request(op, header = None, *, upload = None, download = None)
+
+      Run one request: send it and its upload, hand its download to *download*, and return its response.
+
+      :param op: The op name.
+      :param header: The op's own request members.
+      :param upload: Writes the upload to the writable stream it is given (in this thread; each write goes out as
+          ``D`` frames). If it raises, the far side gets an aborting terminal and the request raises
+          :class:`RequestAborted` once the response arrived.
+      :param download: Reads the download from the readable stream it is given (in this thread), which reads as
+          ended at a successful terminal and raises :class:`~httk.workflow.errors.StreamAborted` at an aborting
+          one. It is called only when a download arrives; a refusal may come without one, but an ``ok`` response
+          without a download breaks the protocol. What it leaves unread is dropped, provided the download ends
+          successfully.
+      :return: The response document (``ok`` and the op's members).
+      :raises SessionFailed: If the session is not open, or the request failed with an unknown outcome (a
+          bound expired, the far side ended or broke the protocol, the op was fatal); the session is closed.
+      :raises RequestAborted: If the upload or the download was aborted; the session stays usable.
+      :raises RuntimeError: If called from within a request's own callback.
+
+
+
+   .. py:method:: close()
+
+      End the session: say ``bye`` (5 seconds at most) when it is idle and healthy, then stop the far side.
+
+      A request in flight (in another thread, or this one's callback) is not waited for: the far side is killed
+      and that request fails. A closed session is never reopened.
+
+
+
