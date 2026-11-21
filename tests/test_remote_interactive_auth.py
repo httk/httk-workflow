@@ -1,8 +1,9 @@
-"""Remote error output and the ssh adapter's opt-in interactive authentication."""
+"""Remote error output and the ssh adapter's opt-in interactive authentication and connection reuse."""
 
+import json
 import os
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,8 +14,9 @@ from httk.core.cli import CLIContext
 from conftest import Remote, fake_remote
 from httk.workflow import adapter_runtime, adapters
 from httk.workflow.adapters import add_remote, run_adapter, split_settings
+from httk.workflow.configuration import configure_config, read_config, set_config_key
 from httk.workflow.projects import initialize_project
-from httk.workflow.workflow_cli import command
+from httk.workflow.workflow_cli import _transfer, command
 
 
 def test_failed_remote_check_prints_no_empty_json_array(
@@ -51,9 +53,9 @@ def _transport(
     monkeypatch.setattr(adapter_runtime.subprocess, "run", ssh_config)
     argv = adapter_runtime._ssh_transport({"host": "h.example.test", **settings}, share_connection=share_connection)
     # Only a sharing call asks ssh what the user's configuration resolves.
-    mode = settings.get("interactive_auth", "no")
+    reuse = settings.get("connection_reuse")
     assert all(call[-3:] == ["-G", "--", "h.example.test"] for call in calls)
-    assert bool(calls) == (mode == "yes" or (mode == "no" and share_connection))
+    assert bool(calls) == (share_connection if reuse is None else reuse == "yes")
     return argv
 
 
@@ -63,25 +65,36 @@ def test_default_transport_is_batch_mode(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert not any(item.startswith("Control") for item in argv)
 
 
-def test_interactive_yes_shares_a_private_connection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_interactive_yes_prompts_without_sharing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     argv = _transport(monkeypatch, tmp_path, terminal=True, interactive_auth="yes")
     assert "BatchMode=yes" not in argv
-    assert "NumberOfPasswordPrompts=2" in argv
-    assert {"ControlMaster=auto", "ControlPersist=600", f"ControlPath={tmp_path}/httk/%C"} <= set(argv)
-    assert ((tmp_path / "httk").stat().st_mode & 0o777) == 0o700
-
-
-def test_interactive_yes_reuses_the_users_configured_control_path(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    argv = _transport(monkeypatch, tmp_path, terminal=True, controlpath="/home/u/.ssh/cm-%C", interactive_auth="yes")
     assert "NumberOfPasswordPrompts=2" in argv
     assert not any(item.startswith("Control") for item in argv)
 
 
-def test_interactive_per_call_prompts_without_sharing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    argv = _transport(monkeypatch, tmp_path, terminal=True, interactive_auth="per-call")
+def test_connection_reuse_shares_a_private_connection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    argv = _transport(monkeypatch, tmp_path, terminal=True, interactive_auth="yes", connection_reuse="yes")
     assert "BatchMode=yes" not in argv
+    assert "NumberOfPasswordPrompts=2" in argv
+    assert {"ControlMaster=auto", "ControlPersist=600", f"ControlPath={tmp_path}/httk/%C"} <= set(argv)
+    assert ((tmp_path / "httk").stat().st_mode & 0o777) == 0o700
+    # Reuse does not need interactive_auth: a key-based batch login shares too.
+    batch = _transport(monkeypatch, tmp_path, terminal=True, connection_reuse="yes")
+    assert "BatchMode=yes" in batch
+    assert "ControlMaster=auto" in batch
+
+
+def test_connection_reuse_honors_the_users_configured_control_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    argv = _transport(
+        monkeypatch,
+        tmp_path,
+        terminal=True,
+        controlpath="/home/u/.ssh/cm-%C",
+        interactive_auth="yes",
+        connection_reuse="yes",
+    )
     assert "NumberOfPasswordPrompts=2" in argv
     assert not any(item.startswith("Control") for item in argv)
 
@@ -90,8 +103,8 @@ def test_interactive_without_a_terminal_keeps_batch_mode(monkeypatch: pytest.Mon
     default = _transport(monkeypatch, tmp_path, terminal=False)
     assert "BatchMode=yes" in default
     assert "NumberOfPasswordPrompts=2" not in default
-    # Without a terminal, ``yes`` still joins the connection a foreground command opened.
-    shared = _transport(monkeypatch, tmp_path, terminal=False, interactive_auth="yes")
+    # Without a terminal, connection reuse still joins the connection a foreground command opened.
+    shared = _transport(monkeypatch, tmp_path, terminal=False, interactive_auth="yes", connection_reuse="yes")
     assert shared[: len(default)] == default
     assert {"ControlMaster=auto", "ControlPersist=600", f"ControlPath={tmp_path}/httk/%C"} <= set(shared)
 
@@ -108,21 +121,108 @@ def test_polling_caller_shares_a_batch_mode_connection(monkeypatch: pytest.Monke
     assert not any(item.startswith("Control") for item in configured)
 
 
-def test_per_call_never_shares(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_connection_reuse_no_never_shares(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for terminal in (True, False):
-        argv = _transport(monkeypatch, tmp_path, terminal=terminal, share_connection=True, interactive_auth="per-call")
+        argv = _transport(
+            monkeypatch,
+            tmp_path,
+            terminal=terminal,
+            share_connection=True,
+            interactive_auth="yes",
+            connection_reuse="no",
+        )
         assert not any(item.startswith("Control") for item in argv)
 
 
-def test_unknown_interactive_mode_is_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="interactive_auth"):
+def test_malformed_modes_are_refused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="interactive_auth must be yes or no"):
         _transport(monkeypatch, tmp_path, terminal=True, interactive_auth="maybe")
+    with pytest.raises(ValueError, match="connection_reuse must be yes or no"):
+        _transport(monkeypatch, tmp_path, terminal=True, connection_reuse="maybe")
+    # The retired per-call value names its replacement.
+    with pytest.raises(ValueError, match="was split in two"):
+        _transport(monkeypatch, tmp_path, terminal=True, interactive_auth="per-call")
 
 
-def test_interactive_auth_is_persisted_not_a_credential() -> None:
-    persistable, credentials = split_settings({"interactive_auth": "yes"})
-    assert persistable == {"interactive_auth": "yes"}
+def test_interactive_auth_and_connection_reuse_are_persisted_not_credentials() -> None:
+    persistable, credentials = split_settings({"interactive_auth": "yes", "connection_reuse": "yes"})
+    assert persistable == {"interactive_auth": "yes", "connection_reuse": "yes"}
     assert credentials == {}
+
+
+def _requested_settings(
+    bundle: Path, request: dict[str, object] | None = None, *, unset_settings: Sequence[str] = ()
+) -> dict[str, object]:
+    """Return the ``remote_settings`` one adapter request file would carry."""
+
+    path = adapters._request_file(bundle, "status", request or {}, unset_settings)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))["remote_settings"]
+    finally:
+        path.unlink()
+
+
+def test_user_configuration_supplies_the_connection_reuse_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The autouse fixture isolates the per-user configuration (HTTK_CONFIG_HOME).
+    project = tmp_path / "project"
+    initialize_project(project, name="reuse")
+    bundle = add_remote("cluster", template="ssh", project=project)
+    assert "connection_reuse" not in _requested_settings(bundle)
+
+    set_config_key("connection_reuse", "YES")
+    assert read_config()["connection_reuse"] == "yes"
+    assert _requested_settings(bundle)["connection_reuse"] == "yes"
+    # A pending --set value (which the adapter lays over remote_settings) is not shadowed by the default.
+    assert "connection_reuse" not in _requested_settings(bundle, {"settings": {"connection_reuse": "no"}})
+    adapters.write_json_atomic(
+        bundle / "remote.json",
+        {**adapters.read_metadata(bundle), "settings": {"connection_reuse": "no"}},
+    )
+    assert _requested_settings(bundle)["connection_reuse"] == "no"
+    assert _requested_settings(bundle, unset_settings=["connection_reuse"])["connection_reuse"] == "yes"
+
+    with pytest.raises(ValueError, match="must be one of yes, no"):
+        set_config_key("connection_reuse", "sometimes")
+    with pytest.raises(ValueError, match="applies to name lists"):
+        configure_config((("add", "connection_reuse=yes"),))
+    configure_config((("unset", "connection_reuse"),))
+    assert "connection_reuse" not in read_config()
+    assert _requested_settings(bundle, unset_settings=["connection_reuse"]) == {}
+
+
+def test_configure_refuses_a_malformed_yes_no_setting() -> None:
+    for key in ("interactive_auth", "connection_reuse"):
+        request = {"settings": {key: "maybe", "check_connectivity": "no"}}
+        with pytest.raises(ValueError, match=f"{key} must be yes or no"):
+            adapter_runtime._configure("ssh", request)
+
+
+def test_configure_notices_connection_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="notice")
+    add_remote("cluster", template="ssh", project=project)
+    monkeypatch.setattr(
+        _transfer, "run_adapter", lambda *_args, **_kwargs: {"ok": True, "operation": "configure", "returncode": 0}
+    )
+    context = CLIContext("httk", project)
+
+    def configure(*settings: str) -> str:
+        argv = ["remote", "configure", "cluster", "--set", "host=h.example.test"]
+        for item in settings:
+            argv += ["--set", item]
+        assert command(argv, context) == 0
+        return capsys.readouterr().err
+
+    assert "--set connection_reuse=yes" in configure()
+    assert "notice" not in configure("connection_reuse=no")
+    assert command(["remote", "configure", "cluster", "--unset", "connection_reuse"], context) == 0
+    assert "notice" in capsys.readouterr().err
+    set_config_key("connection_reuse", "no")
+    assert "notice" not in configure()
 
 
 _DENIED = "someone@fake.example.test: Permission denied (keyboard-interactive)."
@@ -160,6 +260,7 @@ def test_denied_login_hints_at_interactive_auth(
     message = _denied_install(tmp_path, monkeypatch)
     assert "Permission denied" in message
     assert "interactive_auth=yes" in message
+    assert "connection_reuse=yes" in message
 
 
 def test_denied_login_without_a_terminal_says_so(

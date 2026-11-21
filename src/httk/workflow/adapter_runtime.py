@@ -57,6 +57,7 @@ RESULT_FORMAT = "httk-computer-result"
 
 _CONNECT_TIMEOUT = 20
 _FALSE_SETTINGS = frozenset({"0", "false", "no", "off"})
+_TRUE_SETTINGS = frozenset({"1", "on", "true", "yes"})
 _WHITESPACE = re.compile(r"\s")
 # OpenSSH's own denial lists the methods it tried; this keeps a remote command's
 # "mkdir: ...: Permission denied" or tar's "...: Permission denied" unhinted.
@@ -285,22 +286,44 @@ def _terminal_present() -> bool:
         os.close(terminal)
 
 
-def _interactive_auth(settings: Mapping[str, object]) -> str:
-    """Return the ``interactive_auth`` mode: ``no``, ``yes`` or ``per-call``.
+# interactive_auth used to carry connection sharing too; the old value names its replacement.
+_PER_CALL_SPLIT = (
+    "remote setting interactive_auth=per-call was split in two: interactive_auth=yes lets ssh prompt, "
+    "and connection reuse is the separate connection_reuse setting (connection_reuse=no for a site "
+    "that forbids sharing); fix it with: httk remote configure NAME --set interactive_auth=yes"
+)
+
+
+def _yes_no(settings: Mapping[str, object], key: str) -> bool | None:
+    """Return a ``yes``/``no`` setting, or ``None`` when it is absent.
 
     :param settings: The persisted remote settings and their credentials.
-    :return: The normalised mode; ``no`` when the setting is absent.
-    :raises ValueError: If the setting names no known mode.
+    :param key: The setting name.
+    :return: The setting's truth value, or ``None`` when unset.
+    :raises ValueError: If the setting is neither yes nor no.
     """
 
-    value = _text(settings, "interactive_auth")
-    if value is None or value.lower() in _FALSE_SETTINGS:
-        return "no"
-    if value.lower() in {"yes", "true", "1", "on"}:
-        return "yes"
-    if value.lower() == "per-call":
-        return "per-call"
-    raise ValueError(f"remote setting interactive_auth must be no, yes or per-call: {value!r}")
+    value = _text(settings, key)
+    if value is None:
+        return None
+    if value.lower() in _TRUE_SETTINGS:
+        return True
+    if value.lower() in _FALSE_SETTINGS:
+        return False
+    if key == "interactive_auth" and value.lower() == "per-call":
+        raise ValueError(_PER_CALL_SPLIT)
+    raise ValueError(f"remote setting {key} must be yes or no: {value!r}")
+
+
+def _interactive_auth(settings: Mapping[str, object]) -> bool:
+    """Return whether ssh may prompt for a password or second factor.
+
+    :param settings: The persisted remote settings and their credentials.
+    :return: The ``interactive_auth`` setting; False when it is absent.
+    :raises ValueError: If the setting is neither yes nor no.
+    """
+
+    return _yes_no(settings, "interactive_auth") is True
 
 
 def _control_directory() -> Path:
@@ -330,19 +353,19 @@ def _ssh_transport(settings: Mapping[str, object], *, share_connection: bool = F
     prompt. The ``interactive_auth`` setting lifts that only while a foreground
     terminal is attached (:func:`_terminal_present`), so ssh can ask for a
     password or second factor on ``/dev/tty``; httk never sees the answer.
-    ``yes`` also shares one connection for ten minutes through a control socket,
-    so the following ssh calls do not prompt again, also when they run without
-    a terminal, unless the user's own ssh configuration already names a
-    ``ControlPath`` for the destination: ssh then reuses that master and httk
-    adds no control options. *share_connection* asks for the same sharing in
-    the default mode, for a caller that polls (``workflow monitor``) and would
-    otherwise log in once per read. ``per-call`` never shares, for sites that
-    forbid connection sharing.
+    ``connection_reuse=yes`` shares one connection for ten minutes through a
+    control socket, so the following ssh calls do not log in again, also when
+    they run without a terminal, unless the user's own ssh configuration
+    already names a ``ControlPath`` for the destination: ssh then reuses that
+    master and httk adds no control options. *share_connection* asks for the
+    same sharing while ``connection_reuse`` is unset, for a caller that polls
+    (``workflow monitor``) and would otherwise log in once per read;
+    ``connection_reuse=no`` never shares, for sites that forbid it.
 
     :param settings: The persisted remote settings and their credentials.
-    :param share_connection: Whether to share a connection in the default mode.
+    :param share_connection: Whether to share a connection while ``connection_reuse`` is unset.
     :return: The ssh argument vector without destination or command.
-    :raises ValueError: If ``port`` or ``interactive_auth`` is malformed.
+    :raises ValueError: If ``port``, ``interactive_auth`` or ``connection_reuse`` is malformed.
     """
 
     argv = ["ssh"]
@@ -351,14 +374,14 @@ def _ssh_transport(settings: Mapping[str, object], *, share_connection: bool = F
         if not port.isdigit():
             raise ValueError(f"remote setting port must be numeric: {port!r}")
         argv += ["-p", port]
-    mode = _interactive_auth(settings)
-    if mode == "no" or not _terminal_present():
+    if not _interactive_auth(settings) or not _terminal_present():
         argv += ["-o", "BatchMode=yes", "-o", f"ConnectTimeout={_CONNECT_TIMEOUT}"]
     else:
         # OpenSSH counts prompts per method, and a site may enter keyboard-interactive twice
         # (password, then one-time code); 2 allows that and bounds a typo to one retry.
         argv += ["-o", f"ConnectTimeout={_CONNECT_TIMEOUT}", "-o", "NumberOfPasswordPrompts=2"]
-    share = mode == "yes" or (mode == "no" and share_connection)
+    reuse = _yes_no(settings, "connection_reuse")
+    share = share_connection if reuse is None else reuse
     if share and not _configured_control_path(argv, settings):
         argv += [
             "-o",
@@ -421,11 +444,11 @@ def _login_hint(settings: Mapping[str, object], completed: "subprocess.Completed
 
     if completed.returncode != 255 or not _SSH_DENIED.search(completed.stderr):
         return ""
-    if _interactive_auth(settings) == "no":
+    if not _interactive_auth(settings):
         return (
             "; ssh ran without a terminal prompt (BatchMode): if this site asks for a password or a "
-            "second factor, keep a shared ssh connection open or set interactive_auth=yes "
-            "(see the remotes guide)"
+            "second factor, keep a shared ssh connection open or set interactive_auth=yes, with "
+            "connection_reuse=yes to log in once per 10 minutes (see the remotes guide)"
         )
     if _terminal_present():
         return ""  # ssh prompted; the answer itself was refused
@@ -842,6 +865,9 @@ def _configure(kind: str, request: Mapping[str, object]) -> None:
     if kind == "mount":
         _configure_mount(settings)
         return
+    # Refuse a malformed value now, not on the first call that reads it.
+    _yes_no(settings, "interactive_auth")
+    _yes_no(settings, "connection_reuse")
     if _text(settings, "host") is None or not _flag(settings, "check_connectivity", default=True):
         _result("configure", configured=True, connectivity="skipped")
         return

@@ -41,7 +41,7 @@ from ._frames import (
 )
 from ._util import write_json_atomic
 from .adapter_runtime import _PRELUDE_RENAMED
-from .configuration import remotes_home
+from .configuration import connection_reuse_default, remotes_home
 from .errors import ResolutionMiss, StreamAborted, TransferProtocolError
 from .models import CORE_PROFILE
 from .projects import PROJECT_DIRECTORY, discover_project
@@ -149,6 +149,7 @@ PERSISTABLE_REMOTE_SETTINGS = frozenset(
         "check_connectivity",
         "check_mount",
         "cli_prelude",
+        "connection_reuse",
         "daemon_enrollment_id",
         "daemon_public_key",
         "daemon_workspace_id",
@@ -718,6 +719,13 @@ def _request_file(
     :return: The request file path.
     """
 
+    settings = {key: value for key, value in remote_settings(root).items() if key not in unset_settings}
+    pending = request.get("settings")
+    if "connection_reuse" not in settings and not (isinstance(pending, Mapping) and "connection_reuse" in pending):
+        # The per-user default reaches the adapter as an ordinary setting, so adapters never read user config.
+        default = connection_reuse_default()
+        if default is not None:
+            settings["connection_reuse"] = default
     payload = {
         "format": REQUEST_FORMAT,
         "format_version": 2,
@@ -726,7 +734,7 @@ def _request_file(
         # Persisted settings and their manifest-excluded credentials reach the
         # adapter together, so splitting the two storage locations is invisible.
         **dict(request),
-        "remote_settings": {key: value for key, value in remote_settings(root).items() if key not in unset_settings},
+        "remote_settings": settings,
     }
     descriptor, temporary_name = tempfile.mkstemp(prefix="httk-adapter-", suffix=".json")
     request_path = Path(temporary_name)

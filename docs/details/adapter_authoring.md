@@ -258,7 +258,10 @@ did.
 | `cwd` | string, optional | the directory to run it in |
 | `share_connection` | boolean, optional | the caller polls (`workflow monitor`): keep one connection open across calls instead of logging in for each |
 
-An adapter that has no connection to share ignores `share_connection`.
+An adapter that has no connection to share ignores `share_connection`. The
+`ssh` template honors it only while `connection_reuse` is absent from
+`remote_settings`; a `connection_reuse` value, the remote's own or the
+per-user default, takes precedence.
 
 ```json
 {"argv": ["httk", "workflow", "workspace", "status", "/scratch/me/runs", "--json"],
@@ -429,8 +432,8 @@ then stops).
 key:
 
 - Keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS`
-  (`check_connectivity`, `host`, `httk_command`, `interactive_auth`,
-  `legacy_settings`, `port`,
+  (`check_connectivity`, `connection_reuse`, `host`, `httk_command`,
+  `interactive_auth`, `legacy_settings`, `port`,
   `username`, the mount settings, `exchange` and the three `daemon_*` identity settings documented in
   {doc}`/details/remotes`, `vasp_command` and `vasp_pseudo_library`) are written
   into the flat `settings` object of the shareable, signable `remote.json`.
@@ -439,7 +442,10 @@ key:
 
 {py:func}`httk.workflow.adapters.remote_settings` merges the two back together,
 `remote.json` first and `credentials.json` over it. That single object arrives
-as the request's `remote_settings`. **An adapter never sees the split:** it
+as the request's `remote_settings`, with one addition: when neither file nor a
+pending `settings` value sets `connection_reuse` and the per-user configuration
+does (`httk config set connection_reuse yes`), that value is filled in, so an
+adapter never reads user configuration. **An adapter never sees the split:** it
 reads one flat settings object and must not depend on which file a value came
 from. `httk remote show NAME` reports which file each setting came
 from, and shows only the *name* of each credential, never its value.

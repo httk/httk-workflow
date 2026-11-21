@@ -388,7 +388,7 @@ def test_read_config_refuses_a_foreign_format_or_version(tmp_path: Path, monkeyp
 
 def test_config_set_is_restricted_to_the_registry_and_unset_removes(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
-    assert settable_config_keys() == ("machine_names",)
+    assert settable_config_keys() == ("connection_reuse", "machine_names")
     assert not CONFIG_KEYS["format"].settable
 
     set_config_key("machine_names", "node-a")

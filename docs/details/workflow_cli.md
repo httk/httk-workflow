@@ -1589,10 +1589,10 @@ See {doc}`/details/remotes` for configuration and request-ID retry rules.
 ### Remote settings
 
 `remote configure --set KEY=VALUE` persists only the machine-level keys
-`check_connectivity`, `check_mount`, `cli_prelude`, `exec_command`, `exchange`,
-`host`, `httk_command`, `interactive_auth`, `legacy_settings`, `mount_root`,
-`port`, `remote_root`, `username`, `vasp_command`, and `vasp_pseudo_library` in the
-shareable `remote.json`. Scheduler profile values are workspace settings
+`check_connectivity`, `check_mount`, `cli_prelude`, `connection_reuse`,
+`exec_command`, `exchange`, `host`, `httk_command`, `interactive_auth`,
+`legacy_settings`, `mount_root`, `port`, `remote_root`, `username`,
+`vasp_command`, and `vasp_pseudo_library` in the shareable `remote.json`. Scheduler profile values are workspace settings
 (`slurm.*`, `manager.workers`) and are refused as remote settings. Other keys
 are stored in the remote's `credentials.json` beside it, with mode `0600`;
 project manifests exclude that file.
@@ -1627,7 +1627,7 @@ shell, use the remote's `cli_prelude` setting, or point `httk_command` at it.
 | --- | --- | --- |
 | `config show [KEY]` | print the configuration, or one member | `--json` |
 | `config configure` | set/unset keys or add/remove machine names | `--set`, `--unset`, `--add machine_names=NAME`, `--remove machine_names=NAME` |
-| `config set KEY VALUE` | store one member | `machine_names` is a comma-separated list of names this machine answers to |
+| `config set KEY VALUE` | store one member | `machine_names` is a comma-separated list of names this machine answers to; `connection_reuse` (`yes`/`no`) is the `connection_reuse` of every remote that sets none |
 | `config unset KEY` | remove one member | |
 | `config import-v1 [SOURCE]` | read a legacy `~/.httk` configuration | |
 

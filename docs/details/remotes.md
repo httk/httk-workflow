@@ -114,44 +114,66 @@ reaches the remote; a manager that runs unattended cannot reopen it.
 
 Where connection sharing is not an option, set `interactive_auth=yes`. ssh then
 prompts in your terminal for the password or code; httk never sees the secret.
-Connection reuse comes from your own ssh `ControlMaster` configuration, which
-httk's ssh calls honor: when `~/.ssh/config` names a `ControlPath` for the
-host, httk adds no control options and ssh reuses your open master connection.
-That reuse needs a running master or `ControlMaster auto`: with `ControlMaster
-no` and no master open, every call authenticates again.
-Only when the configuration defines no `ControlPath` does httk keep its own
-shared connection open for 10 minutes after its last use
-(`ControlPersist=600`, with the socket under `$XDG_RUNTIME_DIR/httk` or
-`/tmp/httk-ssh-UID`), so a command such as `remote check` prompts once.
-That connection sends a keepalive every 15 seconds, so one that died (after a
-suspend or a network change) is noticed within a minute. To close it at once,
-name its socket: `ssh -O exit -o ControlPath=$XDG_RUNTIME_DIR/httk/%C HOST`.
-Configuring checks connectivity,
-so the configure command itself already prompts:
+Configuring checks connectivity, so the configure command itself already
+prompts:
 
 ```console
 $ httk remote configure --set interactive_auth=yes kappa
 ```
 
-For sites that forbid connection sharing, `interactive_auth=per-call` prompts on
-every ssh call instead. Either way, prompts happen only when the
-command runs in a foreground terminal. Anything without one (a detached
-manager, a cron job, a backgrounded shell job) keeps batch mode and fails with a
-hint instead of hanging. The adapter's `timeout_seconds` (300 s for the `ssh`
-template) still bounds each operation, including the time you spend typing.
+Prompts happen only when the command runs in a foreground terminal. Anything
+without one (a detached manager, a cron job, a backgrounded shell job) keeps
+batch mode and fails with a hint instead of hanging. The adapter's
+`timeout_seconds` (300 s for the `ssh` template) still bounds each operation,
+including the time you spend typing.
+
+### Connection reuse
+
+On its own, `interactive_auth=yes` prompts on every ssh call. Set
+`connection_reuse=yes` to have httk keep one shared connection open for 10
+minutes after its last use (`ControlPersist=600`, with the socket under
+`$XDG_RUNTIME_DIR/httk` or `/tmp/httk-ssh-UID`), so a command such as
+`remote check` prompts once and the following calls, also those without a
+terminal, log in no more:
+
+```console
+$ httk remote configure --set interactive_auth=yes --set connection_reuse=yes kappa
+```
+
+Connection reuse is a separate setting, and off unless set, because some sites
+forbid connection sharing; it speeds up key-based logins too. `remote
+configure` on an `ssh` remote that leaves it unset prints a notice naming the
+setting. To make reuse the default for every remote that sets none, set it in
+the per-user configuration; a remote then opts out with
+`--set connection_reuse=no`:
+
+```console
+$ httk config set connection_reuse yes
+```
+
+When `~/.ssh/config` names a `ControlPath` for the host, httk adds no control
+options and ssh reuses your own master connection instead. That reuse needs a
+running master or `ControlMaster auto`: with `ControlMaster no` and no master
+open, every call authenticates again. httk's own connection sends a keepalive
+every 15 seconds, so one that died (after a suspend or a network change) is
+noticed within a minute. To close it at once, name its socket:
+`ssh -O exit -o ControlPath=$XDG_RUNTIME_DIR/httk/%C HOST`. Calls join a shared
+connection only when they resolve the same socket directory: a cron job without
+`XDG_RUNTIME_DIR` looks under `/tmp/httk-ssh-UID` and does not find a
+connection opened from a desktop session.
+
 `httk workflow monitor` prompts at most once per remote workspace, when it
 starts and before its display opens, if `interactive_auth` is `yes` and a
 terminal is attached; it then keeps that one connection, a far-side
-`httk workflow session`, for its whole run. Since the session is a single
-connection, `per-call` makes no difference to it. Calls without a terminal,
-including the monitor's reconnect after `r`, join a shared connection opened
-earlier, for example by `httk remote check NAME`, while it is open, provided
-they resolve the same socket directory: a cron job without `XDG_RUNTIME_DIR`
-looks under `/tmp/httk-ssh-UID` and does not find a connection opened from a
-desktop session. Against a far side that cannot serve a session, the monitor
-falls back to one call per read and shares a connection even with the default
-batch-mode login, so its reads and actions log in once and then reuse it until
-it has been idle for 10 minutes; `per-call` turns that sharing off as well.
+`httk workflow session`, for its whole run, whatever `connection_reuse` says.
+The monitor's reconnect after `r` runs without a terminal and joins a shared
+connection opened earlier, for example by `httk remote check NAME`, while it is
+open. Against a far side that cannot serve a session, the monitor falls back to
+one call per read and, while `connection_reuse` is unset (on the remote and in
+the per-user configuration), shares a connection anyway, so its reads and
+actions log in once and then reuse it until it has been idle for 10 minutes;
+`connection_reuse=no`, on the remote or as the per-user default, turns that
+sharing off as well.
 
 ## Working with remote workspaces
 

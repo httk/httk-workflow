@@ -60,6 +60,7 @@ from ..adapters import (
     split_settings,
     store_credentials,
 )
+from ..configuration import connection_reuse_default
 from ..errors import StreamAborted, TransferProtocolError, WorkflowError
 from ..hygiene import describe_remote, remove_remote
 from ..introspection import iter_jobs, read_job, read_state, resolve_job_selectors
@@ -217,6 +218,13 @@ def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIC
         f"configured; verify httk is available there with: httk remote check {arguments.remote}",
         file=sys.stderr,
     )
+    if metadata.get("kind") == "ssh" and "connection_reuse" not in configured and connection_reuse_default() is None:
+        print(
+            f"notice: add --set connection_reuse=yes to keep ssh connections to {target.name} alive for "
+            "10 minutes, so later calls do not log in again (httk config set connection_reuse yes "
+            "makes that the default for every remote)",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -361,9 +369,10 @@ def build_remote_parser(
                 "cli_prelude= (shell run before each httk command the CLI runs on the remote "
                 "over ssh/mount, e.g. module loads and a venv activation; not at job start "
                 "-- see environment.prelude; the tar push/pull stream is exempt), or "
-                "interactive_auth= (yes|per-call lets ssh prompt in the "
-                "terminal for a password or second factor); a secret one is stored in "
-                "credentials.json (repeatable)"
+                "interactive_auth=yes (lets ssh prompt in the terminal for a password or "
+                "second factor), or connection_reuse=yes|no (keep ssh connections alive "
+                "for 10 minutes; default: httk config connection_reuse, else no); a secret "
+                "one is stored in credentials.json (repeatable)"
             ),
         )
         parser.add_argument(

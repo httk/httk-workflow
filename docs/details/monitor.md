@@ -72,11 +72,11 @@ implementations.
 
 If the remote's adapter or its `httk` cannot serve a session (an older far
 side), the monitor falls back to one bounded adapter call per read and action.
-Those calls ask the adapter to share one connection (`share_connection`): the
-`ssh` template then keeps a control socket open, as `interactive_auth=yes`
-does, and closes it after 10 idle minutes, so the monitor logs in once rather
-than once per refresh (a `--refresh` longer than that logs in once per
-refresh). When your own ssh configuration names a `ControlPath` for the host,
+Those calls ask the adapter to share one connection (`share_connection`): unless
+`connection_reuse` is `no` (set on the remote or as the per-user default), the `ssh` template then keeps a control
+socket open, as `connection_reuse=yes` does, and closes it after 10 idle
+minutes, so the monitor logs in once rather than once per refresh (a
+`--refresh` longer than that logs in once per refresh). When your own ssh configuration names a `ControlPath` for the host,
 ssh uses that instead; see [Remotes](remotes.md).
 
 A timed refresh keeps the current page, counts and detail on screen until the

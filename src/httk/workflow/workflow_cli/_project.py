@@ -159,7 +159,7 @@ def build_config_parser(
         handler=handle_config_configure,
     )
     for operation, help_text in (
-        ("set", "set machine_names to comma-separated names"),
+        ("set", "set machine_names to comma-separated names, or connection_reuse to yes or no"),
         ("unset", "remove a configured key"),
         ("add", "append machine_names, skipping existing names"),
         ("remove", "remove machine_names; removing the last name unsets the key"),

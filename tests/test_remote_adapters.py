@@ -274,11 +274,13 @@ def test_ssh_pull_reports_a_truncated_stream(tmp_path: Path, remote: Remote) -> 
         _pull(bundle, remote.root, tmp_path / "back")
 
 
-def test_ssh_transfer_shares_the_interactive_connection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_ssh_transfer_shares_the_reused_connection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(adapter_runtime, "_terminal_present", lambda: True)
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(adapter_runtime, "_configured_control_path", lambda *_args: False)
-    argv = adapter_runtime._ssh_tar_argv({"host": FAKE_HOST, "interactive_auth": "yes"}, "true")
+    settings = {"host": FAKE_HOST, "interactive_auth": "yes"}
+    assert not any(item.startswith("ControlPath=") for item in adapter_runtime._ssh_tar_argv(settings, "true"))
+    argv = adapter_runtime._ssh_tar_argv({**settings, "connection_reuse": "yes"}, "true")
     assert any(item.startswith("ControlPath=") for item in argv)
 
 

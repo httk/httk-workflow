@@ -26,6 +26,7 @@ __all__ = [
     "config_home",
     "config_path",
     "configure_config",
+    "connection_reuse_default",
     "data_home",
     "import_v1_configuration",
     "launchers_home",
@@ -49,11 +50,14 @@ class ConfigKey:
     :param name: Configuration member name.
     :param description: Human-readable explanation shown to operators.
     :param settable: Whether ``config set`` may change the member.
+    :param choices: The values a single-valued member accepts; empty for a
+        comma-separated name list.
     """
 
     name: str
     description: str
     settable: bool = True
+    choices: tuple[str, ...] = ()
 
 
 #: Every member ``config.json`` may hold. A key that nothing reads is a typo
@@ -62,6 +66,11 @@ class ConfigKey:
 #: Operator identity (name, email, named identities, and the default) lives in
 #: ``identity.json`` managed by ``httk.core.identity``, not here.
 CONFIG_KEYS: Mapping[str, ConfigKey] = {
+    "connection_reuse": ConfigKey(
+        "connection_reuse",
+        "yes or no: the connection_reuse of every remote that sets none (yes keeps ssh connections alive 10 minutes)",
+        choices=("yes", "no"),
+    ),
     "machine_names": ConfigKey("machine_names", "comma-separated names this machine answers to"),
     "format": ConfigKey("format", "the document format; written by httk", settable=False),
     "format_version": ConfigKey("format_version", "the document format version; written by httk", settable=False),
@@ -151,6 +160,21 @@ def machine_names() -> frozenset[str]:
     return frozenset(names)
 
 
+def connection_reuse_default() -> str | None:
+    """Return the configured ``connection_reuse`` for remotes that set none.
+
+    :return: ``yes``, ``no``, or ``None`` when the key is not configured.
+    :raises ValueError: If the configured value is neither yes nor no.
+    """
+
+    value = read_config().get("connection_reuse")
+    if value is None:
+        return None
+    if value not in CONFIG_KEYS["connection_reuse"].choices:
+        raise ValueError(f"configuration key 'connection_reuse' must be yes or no: {value!r}")
+    return str(value)
+
+
 def write_config(values: Mapping[str, object]) -> Path:
     """Write a versioned user configuration.
 
@@ -226,11 +250,18 @@ def configure_config(changes: Sequence[tuple[str, str]]) -> Path:
                 raise ValueError(f"--unset expects KEY: {item!r}")
         elif not separator:
             raise ValueError(f"--{operation} expects KEY=VALUE: {item!r}")
-        _settable(key)
+        entry = _settable(key)
         if operation == "unset":
             if key not in values:
                 raise ValueError(f"configuration key is not set: {key}")
             del values[key]
+            continue
+        if entry.choices:
+            if operation != "set":
+                raise ValueError(f"--{operation} applies to name lists; set {key} with --set {key}=VALUE")
+            if value.strip().lower() not in entry.choices:
+                raise ValueError(f"configuration key {key!r} must be one of {', '.join(entry.choices)}: {value!r}")
+            values[key] = value.strip().lower()
             continue
         names = [name.strip() for name in value.split(",")]
         if any(not name for name in names):
