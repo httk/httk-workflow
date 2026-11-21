@@ -1,16 +1,23 @@
 """Private filesystem and JSON helpers."""
 
 import json
+import logging
+import lzma
 import math
 import os
 import sys
 import tempfile
 import time
+import zlib
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
+from httk.core.digests import content_sha256_file
+
 from .errors import FormatError
+
+_LOGGER = logging.getLogger(__name__)
 
 #: The visibility deadline used by a caller that has no workspace policy to read.
 DEFAULT_VISIBILITY_DEADLINE_SECONDS = 5.0
@@ -21,6 +28,31 @@ FIRST_RETRY_DELAY_SECONDS = 0.01
 #: The longest single sleep in a visibility retry schedule, so that even a
 #: minute-long deadline keeps re-probing instead of blocking on one long sleep.
 MAXIMUM_RETRY_DELAY_SECONDS = 5.0
+
+
+def decode_errors() -> tuple[type[Exception], ...]:
+    """Return what a registered compression codec raises on data that does not decode."""
+
+    from .runtime_utils import _zstd
+
+    return (OSError, EOFError, zlib.error, lzma.LZMAError, _zstd().ZstdError)
+
+
+#: A collected file is decompressed for its content digest up to this many bytes plus
+#: :data:`_CONTENT_RATIO` times its stored size, so a tiny job-written bomb cannot stall collect.
+_CONTENT_BASE_BYTES = 64 << 20
+_CONTENT_RATIO = 1024
+
+
+def content_sha256_or_none(path: Path) -> str | None:
+    """Return the bounded :func:`httk.core.digests.content_sha256_file` of *path*, or ``None`` with a warning."""
+
+    try:
+        bound = _CONTENT_BASE_BYTES + _CONTENT_RATIO * path.stat().st_size
+        return content_sha256_file(path, max_bytes=bound)
+    except decode_errors() + (ValueError,) as exc:
+        _LOGGER.warning("%s does not decompress within bounds, so no content digest is recorded for it: %s", path, exc)
+        return None
 
 
 def utc_now() -> str:

@@ -1663,7 +1663,7 @@ Verify the whole tree with `httk project verify-seal` or `httk seal verify`.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `seal verify [PATH]` | verify the seal at `PATH` (a project, workspace, or job payload; default `.`) and, unless `--shallow`, every seal it references | `--json`, `--trusted-key KEY_OR_FINGERPRINT` (repeatable), `--shallow` |
+| `seal verify [PATH]` | verify the seal at `PATH` (a project, workspace, or job payload; default `.`) and, unless `--shallow`, every seal it references | `--json`, `--trusted-key KEY_OR_FINGERPRINT` (repeatable), `--shallow`, `--content` |
 
 The final status word and exit code mirror `manifest verify`: `ok` (exit 0)
 when every entry is `valid_trusted`, `UNTRUSTED` (exit 3) when no entry is

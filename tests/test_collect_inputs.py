@@ -263,6 +263,8 @@ def test_a_compressed_structure_input_is_recorded_as_its_stored_file(
     assert (value.name, value.format, value.size) == ("POSCAR.gz", "vasp-poscar", 8)
     assert value.sha256 == hashlib.sha256(b"not gzip").hexdigest()
     assert "files/POSCAR.gz is recorded as a file only: it is compressed" in caplog.text
+    # It does not decompress either, so no content digest, with a warning.
+    assert value.content_sha256 is None and "POSCAR.gz does not decompress" in caplog.text
 
 
 def test_a_structure_input_over_the_read_limit_is_recorded_as_its_file(

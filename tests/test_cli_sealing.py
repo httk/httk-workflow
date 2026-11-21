@@ -249,3 +249,34 @@ def test_seal_verify_unsealed_subject_renders_not_sealed(tmp_path: Path, capsys)
     out = capsys.readouterr().out
     assert "not sealed" in out
     assert out.strip().splitlines()[-1] == "FAILED"
+
+
+@pytest.mark.parametrize(("flags", "content"), [([], False), (["--content"], True)])
+def test_seal_verify_passes_content_to_verify_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str], content: bool
+) -> None:
+    from httk.workflow.seals import SealReport
+    from httk.workflow.workflow_cli import _seal
+
+    calls: list[bool] = []
+
+    def fake_verify_tree(path: Path, *, trusted_keys: list[str], deep: bool, content: bool) -> SealReport:
+        calls.append(content)
+        return SealReport((), True)
+
+    monkeypatch.setattr(_seal, "verify_tree", fake_verify_tree)
+    assert command(["seal", "verify", *flags, str(tmp_path)], _context(tmp_path)) == 0
+    assert calls == [content]
+
+
+def test_seal_verify_content_refuses_a_project_root(tmp_path: Path, capsys) -> None:
+    from httk.workflow.errors import FormatError
+    from httk.workflow.seals import verify_tree
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    initialize_project(project_root, name="sealing")
+    with pytest.raises(FormatError, match="run it on each workspace"):
+        verify_tree(project_root, content=True)
+    assert command(["seal", "verify", "--content"], _context(project_root)) == 2
+    assert "--content verifies workspaces and jobs" in capsys.readouterr().err

@@ -3,23 +3,28 @@
 import ast
 import bz2
 import gzip
+import hashlib
 import importlib
 import lzma
 import math
 import os
+import re
 import shutil
 import stat
 import string
 import tempfile
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "DIGEST_MANIFEST_NAME",
     "compress_files",
     "decompress_files",
     "evaluate_expression",
+    "read_digest_manifest",
     "render_template",
 ]
 
@@ -138,6 +143,72 @@ def _zstd() -> Any:
 
 _SUFFIXES = {"bz2": ".bz2", "gz": ".gz", "xz": ".xz", "zst": ".zst"}
 
+DIGEST_MANIFEST_NAME = "uncompressed.sha256"
+"""The digest manifest ``compress_files(record_digests=True)`` keeps next to the files it compresses."""
+
+_MANIFEST_LINE = re.compile(r"([0-9a-f]{64})  (.+)")
+# Pooled compressions of one directory update its manifest one at a time.
+_MANIFEST_LOCK = threading.Lock()
+
+
+def _manifest_entries(path: Path, *, strict: bool) -> dict[str, str]:
+    """Return the name → digest entries of the manifest at *path*; lenient mode drops bad lines."""
+
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return {}
+    except FileNotFoundError:
+        return {}
+    lines = path.read_text(encoding="utf-8", errors="surrogateescape").split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    entries: dict[str, str] = {}
+    for number, line in enumerate(lines, start=1):
+        match = _MANIFEST_LINE.fullmatch(line)
+        if match is not None:
+            entries[match.group(2)] = match.group(1)
+        elif strict:
+            raise ValueError(f"{path}:{number}: not a '<sha256 hex>  <name>' line")
+    return entries
+
+
+def read_digest_manifest(directory: str | os.PathLike[str]) -> dict[str, str]:
+    """Read the digest manifest (:data:`DIGEST_MANIFEST_NAME`) of *directory*.
+
+    Each line is ``<64 lowercase hex>  <name>``, the format of ``sha256sum``: the
+    SHA-256 of the uncompressed content of the file *name* in that directory.
+
+    :param directory: The directory that holds the manifest.
+    :return: The digests by uncompressed base name; empty when the directory has no
+        regular-file manifest.
+    :raises ValueError: If a line is malformed (the message names file and line).
+    """
+
+    return _manifest_entries(Path(directory) / DIGEST_MANIFEST_NAME, strict=True)
+
+
+def _record_digests(directory: Path, digests: Mapping[str, str]) -> None:
+    """Merge *digests* into *directory*'s manifest in one atomic write, dropping entries of vanished files."""
+
+    manifest = directory / DIGEST_MANIFEST_NAME
+    with _MANIFEST_LOCK:
+        entries = _manifest_entries(manifest, strict=False) | dict(digests)
+        kept = {
+            name: value
+            for name, value in entries.items()
+            if any((directory / (name + suffix)).exists() for suffix in ("", *_SUFFIXES.values()))
+        }
+        temporary = directory / f".{DIGEST_MANIFEST_NAME}.{os.getpid()}.tmp"
+        try:
+            temporary.write_text(
+                "".join(f"{kept[name]}  {name}\n" for name in sorted(kept)),
+                encoding="utf-8",
+                errors="surrogateescape",
+            )
+            os.replace(temporary, manifest)
+        finally:
+            temporary.unlink(missing_ok=True)
+
 
 def _level_bounds(method: str) -> tuple[int, int, int]:
     """Return ``(minimum, maximum, default)`` compression levels for ``method``."""
@@ -155,6 +226,7 @@ def compress_files(
     remove_source: bool = False,
     level: int | None = None,
     workers: int = 1,
+    record_digests: bool = False,
 ) -> tuple[Path, ...]:
     """Compress regular files atomically.
 
@@ -163,11 +235,18 @@ def compress_files(
     existing output is replaced atomically and gets the source's permission bits; a gzip
     header records no file name or time stamp. A file named twice is compressed once.
 
+    With ``record_digests`` each source's SHA-256 is computed while it is compressed and
+    recorded in the manifest :data:`DIGEST_MANIFEST_NAME` of its directory (see
+    :func:`read_digest_manifest`), one update per directory after every file is compressed
+    and before any source is removed; the update also drops
+    entries whose file is gone, compressed or not.
+
     :param paths: Locate the regular files to compress.
     :param method: Select ``bz2``, ``gz``, ``xz``, or ``zst`` (Zstandard) compression.
     :param remove_source: Remove each source after successful compression.
     :param level: Select the codec level; ``None`` uses the codec default (bz2 9, gz 9, xz 6, zst 3).
     :param workers: Bound the parallelism, at least 1.
+    :param record_digests: Record each source's content digest in its directory's manifest.
     :return: The compressed output paths.
     :raises ValueError: If a method, level, worker count or source file is invalid.
     """
@@ -186,6 +265,8 @@ def compress_files(
         source = Path(raw)
         if not source.is_file() or source.is_symlink():
             raise ValueError(f"compression source must be a regular file: {source}")
+        if record_digests and source.name == DIGEST_MANIFEST_NAME:
+            raise ValueError(f"the digest manifest cannot be compressed while recording digests: {source}")
         identity = source.stat()
         unique.setdefault((identity.st_dev, identity.st_ino), source)
     sources = list(unique.values())
@@ -204,29 +285,45 @@ def compress_files(
             return gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=chosen, mtime=0)
         return bz2.BZ2File(raw, "wb", compresslevel=chosen)
 
-    def compress(source: Path) -> Path:
+    def compress(source: Path) -> tuple[Path, str | None]:
         destination = source.with_name(source.name + _SUFFIXES[method])
         temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+        digest = hashlib.sha256() if record_digests else None
         try:
             with source.open("rb") as input_stream:
                 with temporary.open("wb") as raw, open_output(raw) as output_stream:
                     # An explicit write starts the stream: ZstdFile writes no frame at all for an
                     # empty source unless it saw one, and an empty .zst is not a valid stream.
                     output_stream.write(b"")
-                    shutil.copyfileobj(input_stream, output_stream)
+                    while chunk := input_stream.read(1 << 20):
+                        output_stream.write(chunk)
+                        if digest is not None:
+                            digest.update(chunk)
                 os.chmod(temporary, stat.S_IMODE(os.fstat(input_stream.fileno()).st_mode))
             os.replace(temporary, destination)
-            if remove_source:
-                source.unlink()
         finally:
             temporary.unlink(missing_ok=True)
-        return destination
+        return destination, None if digest is None else digest.hexdigest()
 
     if method == "zst" or workers == 1:
-        return tuple(compress(source) for source in sources)
-    # ponytail: at most 16 files at once; an xz encoder alone holds ~94 MiB, so more threads mostly cost memory.
-    with ThreadPoolExecutor(max_workers=min(workers, 16)) as pool:
-        return tuple(pool.map(compress, sources))
+        results = [compress(source) for source in sources]
+    else:
+        # ponytail: at most 16 files at once; an xz encoder alone holds ~94 MiB, so more threads mostly cost memory.
+        with ThreadPoolExecutor(max_workers=min(workers, 16)) as pool:
+            results = list(pool.map(compress, sources))
+    # Every digest is recorded before any source goes: a crash never leaves a compressed file without either.
+    by_directory: dict[Path, dict[str, str]] = {}
+    for source, (_destination, digest) in zip(sources, results, strict=True):
+        # ponytail: names with a newline or backslash are not recorded (sha256sum escapes them);
+        # implement its escaping if such names ever need a digest.
+        if digest is not None and "\n" not in source.name and "\\" not in source.name:
+            by_directory.setdefault(source.parent, {})[source.name] = digest
+    for directory, digests in by_directory.items():
+        _record_digests(directory, digests)
+    if remove_source:
+        for source in sources:
+            source.unlink()
+    return tuple(destination for destination, _digest in results)
 
 
 def decompress_files(

@@ -36,6 +36,7 @@ from dataclasses import dataclass, replace
 from itertools import islice
 from pathlib import Path, PurePosixPath
 
+from httk.core.digests import content_sha256_file, sha256_file
 from httk.core.project.sealing import (
     INVALID,
     VALID_TRUSTED,
@@ -59,11 +60,12 @@ from httk.core.project.sealing import (
 from . import _fs, _kernel
 from ._job import JobDefinition
 from ._kernel import JobRef
-from ._util import json_bytes, utc_now
+from ._util import decode_errors, json_bytes, utc_now
 from .errors import FormatError, SealedError, SealError, WorkflowError
 from .manifests import payload_file_records
 from .models import JOB_STATE_DIRECTORY, WORKSPACE_DIRECTORY, placement_text
 from .projects import PROJECT_DIRECTORY, discover_project
+from .runtime_utils import DIGEST_MANIFEST_NAME, read_digest_manifest
 from .workspace import Workspace
 
 __all__ = [
@@ -836,10 +838,10 @@ def unseal_workspace(workspace: Workspace) -> None:
 
 
 def _combine(base: SealVerification, discrepancies: Sequence[Discrepancy]) -> SealVerification:
-    """Fold record discrepancies into a signature verdict."""
+    """Fold record discrepancies into a signature verdict; ``reencoded`` alone is reported, not invalidating."""
 
-    if not discrepancies:
-        return base
+    if all(item.kind == "reencoded" for item in discrepancies):
+        return replace(base, discrepancies=tuple(discrepancies))
     reason = base.reason if base.verdict == INVALID else "the sealed subject no longer matches the seal"
     return replace(base, valid=False, verdict=INVALID, reason=reason, discrepancies=tuple(discrepancies))
 
@@ -849,6 +851,7 @@ def verify_job_seal(
     *,
     trusted_keys: Iterable[str] = (),
     expected_roles: Iterable[str] = (),
+    content: bool = False,
 ) -> SealVerification:
     """Verify a job seal's signature and that it still describes the payload.
 
@@ -857,9 +860,18 @@ def verify_job_seal(
     file that is missing because it was moved to another job is not a
     discrepancy while a valid release record covers it (:func:`valid_job_releases`).
 
+    With *content*, every sealed digest manifest
+    (:data:`httk.workflow.runtime_utils.DIGEST_MANIFEST_NAME`) is checked too: every
+    existing form of each file it names, compressed by any registered codec or
+    not, must decompress to the recorded digest (``content_missing``,
+    ``content_mismatch``; a malformed manifest is ``invalid``). When all do, the
+    changed, added or absent forms are reported as one ``reencoded``, which does
+    not invalidate the seal.
+
     :param payload: The job payload directory.
     :param trusted_keys: Trust anchors to classify the signers against.
     :param expected_roles: Signing roles the seal is expected to carry.
+    :param content: Also verify the content digests of the sealed digest manifests.
     :return: The verdict, including any payload discrepancies; a symlinked or
         special ``.httk-job`` or ``seal.json`` is an ``invalid`` discrepancy.
     """
@@ -893,13 +905,87 @@ def verify_job_seal(
     base = verify_signed_body(
         seal.body_bytes, seal.body_sha256, seal.signatures, trusted_keys=trusted_keys, expected_roles=expected_roles
     )
-    discrepancies = diff_records(list(seal.records), payload_file_records(payload))
+    actual = payload_file_records(payload)
+    discrepancies = diff_records(list(seal.records), actual)
     if any(item.kind == "missing" for item in discrepancies):
         # A file moved out to another job is covered by a valid release record, not missing.
         missing = [item.path for item in discrepancies if item.kind == "missing"]
         released = valid_job_releases(payload, seal, missing)
         discrepancies = [item for item in discrepancies if not (item.kind == "missing" and item.path in released)]
+    if content:
+        discrepancies = _content_discrepancies(payload, actual, discrepancies)
     return _combine(base, discrepancies)
+
+
+def _uncompressed_path(path: str) -> str | None:
+    """Return *path* without its registered compression suffix, or ``None`` when it has none."""
+
+    # Lazy: lean CLI paths must not load httk.core.datastream.
+    from httk.core.datastream.compression import split_compression_suffix
+
+    stripped, codec = split_compression_suffix(path)
+    return None if codec is None else stripped
+
+
+def _content_discrepancies(
+    payload: Path, actual: Sequence[Mapping[str, object]], discrepancies: Sequence[Discrepancy]
+) -> list[Discrepancy]:
+    """Check the payload's sealed digest manifests against the content of the files they name.
+
+    Only a manifest without a discrepancy of its own is trusted. Every existing form
+    of a named file (compressed by a registered codec, or plain) must decode to the
+    manifest's digest, else each form that does not is a ``content_mismatch``. When
+    all do, the ordinary discrepancies of its forms are settled into one ``reencoded``.
+    """
+
+    errors = decode_errors()
+    flagged = {item.path for item in discrepancies}
+    files = sorted(str(record["path"]) for record in actual if record["type"] == "file")
+    # Every form of each logical path: compressed forms first (sorted), then the plain file.
+    forms: dict[str, list[str]] = {}
+    for path in files:
+        if (stripped := _uncompressed_path(path)) is not None:
+            forms.setdefault(stripped, []).append(path)
+    for path in files:
+        forms.setdefault(path, []).append(path)
+    result = list(discrepancies)
+    for manifest in files:
+        if PurePosixPath(manifest).name != DIGEST_MANIFEST_NAME or manifest in flagged:
+            continue
+        directory = PurePosixPath(manifest).parent
+        try:
+            entries = read_digest_manifest(payload / directory)
+        except ValueError:
+            result.append(Discrepancy(manifest, "invalid"))
+            continue
+        for name, expected in entries.items():
+            logical = (directory / name).as_posix()
+            candidates = forms.get(logical, [])
+            if not candidates:
+                result.append(Discrepancy(logical, "content_missing"))
+                continue
+            failing = []
+            for candidate in candidates:
+                try:
+                    digest = (content_sha256_file if candidate != logical else sha256_file)(payload / candidate)
+                except errors:
+                    digest = None  # a form that fails to decode does not match
+                if digest != expected:
+                    failing.append(candidate)
+            if failing:
+                result.extend(Discrepancy(candidate, "content_mismatch") for candidate in failing)
+                continue
+            # Every existing form is verified: settle its changes, and the absence of any other form.
+            settled = [
+                item
+                for item in result
+                if (item.kind in ("mismatch", "extra") and item.path in candidates)
+                or (item.kind == "missing" and logical in (item.path, _uncompressed_path(item.path)))
+            ]
+            if settled:
+                result = [item for item in result if item not in settled]
+                result.append(Discrepancy(candidates[0], "reencoded"))
+    return sorted(result, key=lambda item: item.path)
 
 
 def verify_workspace_seal(
@@ -960,6 +1046,7 @@ def verify_tree(
     *,
     trusted_keys: Iterable[str] = (),
     deep: bool = True,
+    content: bool = False,
 ) -> SealReport:
     """Verify the seal at *path* and, when deep, every seal it references.
 
@@ -971,13 +1058,20 @@ def verify_tree(
     :param path: The project root, workspace root, or job payload to verify.
     :param trusted_keys: Trust anchors to classify signers against.
     :param deep: Whether to recurse into every referenced child seal.
+    :param content: Also verify job payload content against their sealed digest
+        manifests (:func:`verify_job_seal`); a workspace root or job payload only.
     :return: The flat report of every verdict, with an overall ``ok``.
-    :raises httk.workflow.errors.FormatError: If *path* is not inside any seal-able subject.
+    :raises httk.workflow.errors.FormatError: If *path* is not inside any seal-able subject,
+        or *content* is asked for a project root or a shallow workspace verification.
     :raises OSError: If a seal file cannot be read.
     """
 
     location = Path(path).expanduser().resolve()
     if (location / PROJECT_DIRECTORY).is_dir():
+        if content:
+            raise FormatError(
+                f"{location} is a project root; --content verifies workspaces and jobs, so run it on each workspace"
+            )
         # The project level is core-owned: core seals a project's members and
         # verifies them through their registered handlers.
         from httk.core.project.sealing import verify_project
@@ -985,6 +1079,8 @@ def verify_tree(
         return verify_project(location, trusted_keys=list(trusted_keys), deep=deep)
     entries: list[dict[str, object]] = []
     if (location / WORKSPACE_DIRECTORY).is_dir():
+        if content and not deep:
+            raise FormatError(f"{location} is a workspace root; --content needs a deep verification")
         workspace = Workspace(location)
         verification = verify_workspace_seal(workspace, trusted_keys=trusted_keys)
         entries.append(verification.as_entry("workspace", workspace.workspace_id))
@@ -995,13 +1091,15 @@ def verify_tree(
                 if located is None or record["seal_sha256"] is None:
                     continue  # a missing job is a discrepancy of the workspace verdict; an unsealed one has no seal
                 entries.append(
-                    verify_job_seal(located, trusted_keys=trusted_keys).as_entry("job", str(record["job_key"]))
+                    verify_job_seal(located, trusted_keys=trusted_keys, content=content).as_entry(
+                        "job", str(record["job_key"])
+                    )
                 )
     elif (location / "job.json").is_file():
         # A job seal lives in its payload, so a job verifies from its own
         # directory alone, inside a workspace or free-standing.
         definition = JobDefinition.from_path(location / "job.json")
-        verification = verify_job_seal(location, trusted_keys=trusted_keys)
+        verification = verify_job_seal(location, trusted_keys=trusted_keys, content=content)
         entries.append(verification.as_entry("job", definition.job_key))
     else:
         raise FormatError(f"{location} is not a project, workspace, or job payload")

@@ -452,6 +452,16 @@ codecs compress up to `workers` (at most 16) files concurrently. Outputs keep th
 source's permission bits. `decompress_files(paths)`
 reverses it. Every *httk₂* reader decompresses these suffixes transparently.
 
+`record_digests=True` also hashes each source while compressing it and records
+its SHA-256 in `uncompressed.sha256` (`DIGEST_MANIFEST_NAME`) in the same
+directory, before the source is removed. The manifest has the `sha256sum`
+format, one `<hex>  <name>` line per uncompressed base name, sorted, so after
+decompressing the directory `sha256sum -c uncompressed.sha256` checks it;
+`read_digest_manifest(directory)` reads it. Each update drops entries whose file
+is gone. A name holding a newline or backslash is compressed but not recorded.
+The manifest is an ordinary payload file, so a job seal covers it; `httk
+workflow seal verify --content` checks the files against it.
+
 ```python
 from httk.workflow.runtime_utils import compress_files
 

@@ -264,6 +264,39 @@ trusted, so a tree sealed by its own project or identity verifies as
 `valid_trusted` without naming a key. `--trusted-key` adds more, as an
 `ed25519:` key, a `sha256:` fingerprint, or a `*.pub` file.
 
+### Uncompressed content digests
+
+A job that compresses its outputs with
+`compress_files(..., record_digests=True)` (as the VASP workflows do when they
+finalize) leaves an `uncompressed.sha256` beside the compressed files: one
+`<sha256>  <name>` line per file, in `sha256sum` format, giving the SHA-256 of
+the *uncompressed* content of `<name>` (for `run/EIGENVAL.zst`, the line for
+`EIGENVAL`). The manifest is an ordinary payload file, so the job seal covers
+it; after decompressing a directory, `sha256sum -c uncompressed.sha256` checks
+it.
+
+The default verification checks stored bytes only: a decompressed or
+re-compressed file is a `missing`, `extra` or `mismatch` discrepancy.
+`httk seal verify --content` additionally decompresses every existing form of
+each file a sealed manifest names (`X` and `X.<ext>` for every registered
+compression format) and checks each against the job's stated digest. A
+manifest that itself changed since sealing is not used. The added discrepancy
+kinds are `content_missing` (no form of the file is left), `content_mismatch`
+(on each form that does not match; the file's ordinary discrepancies then
+stay) and `invalid` (a sealed manifest that cannot be parsed). Only when every
+existing form matches are the file's ordinary discrepancies (a changed or
+added form, an absent one) replaced by one `reencoded` line, which is reported
+but keeps the entry valid. A manifest that names both `X` (stored as `X.zst`)
+and a file literally named `X.zst` (stored as `X.zst.zst`) gives a false
+`content_mismatch` on `X.zst`, since that path is also taken as the plain form
+of the entry `X.zst`; this errs on the safe side, and VASP finalization never
+produces it. In that mode, bytes of a compressed container that
+do not affect its decompressed content (headers, compression level) are not
+vouched for, and the cost follows the decompressed size of the files.
+`--content` needs a deep verification of a workspace root, or a job payload;
+on a project root or with `--shallow` on a workspace it is refused, so run it
+on each workspace.
+
 ## Not to be confused with
 
 - **A transfer bundle.** An ejected or held bundle is a plain directory with a

@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any
 from httk.core.digests import sha256_file
 
 from . import _fs
-from ._util import interpreter_first_path, json_bytes, utc_now
+from ._util import content_sha256_or_none, interpreter_first_path, json_bytes, utc_now
 from .models import POSTPROCESS_DIRECTORY
 
 if TYPE_CHECKING:
@@ -432,6 +432,7 @@ def _collect_one(
                     size=path.stat().st_size,
                     sha256=sha256_file(path),
                     format=reader_format_for(path.name),
+                    content_sha256=content_sha256_or_none(path),
                 ),
             )
             for relative, path in sorted(matched.items())

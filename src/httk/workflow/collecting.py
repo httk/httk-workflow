@@ -66,7 +66,7 @@ from ._job import JobDefinition
 from ._kernel import JobRef
 from ._manager_scheduling import current_step
 from ._state import TERMINAL_STATES, UNOWNED_STATES, StateDoc, _thaw
-from ._util import require_mapping, require_string
+from ._util import content_sha256_or_none, require_mapping, require_string
 from .errors import FormatError, WorkflowError
 from .hookapi import COLLECT_STREAM_FORMAT, COLLECT_STREAM_VERSION, Collected
 from .introspection import JobSelectorResolver, iter_jobs, job_events, read_job, read_state
@@ -1222,6 +1222,7 @@ def _workspace_file_record(
         size=actual.stat().st_size,
         sha256=sha256_file(actual),
         format=reader_format_for(file_name),
+        content_sha256=content_sha256_or_none(actual),
     )
 
 
@@ -2354,6 +2355,7 @@ def _staged_input(
     if release is not None and not os.path.lexists(record.payload.joinpath(*relative.parts)):
         return _released_file(record, release, name, f"input {label!r} ({path})", logging.INFO)
     data: bytes | None = None
+    content_sha256: str | None = None
     if confirmed and not load:
         assert staging is not None
         size, sha256 = staging
@@ -2375,7 +2377,10 @@ def _staged_input(
         size, sha256, data = digested
         if staging is not None and sha256 != staging[1]:
             return lost("mutated")
-    file_record = FileRecord(url=url, name=name, size=size, sha256=sha256, format=reader_format_for(name))
+        content_sha256 = content_sha256_or_none(record.payload.joinpath(*relative.parts))
+    file_record = FileRecord(
+        url=url, name=name, size=size, sha256=sha256, format=reader_format_for(name), content_sha256=content_sha256
+    )
     if entry_type in (None, "files"):
         return file_record
     if entry_type != "structures":

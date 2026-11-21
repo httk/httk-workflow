@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import time
@@ -467,6 +468,49 @@ def test_cwl_empty_basename_is_preserved(tmp_path: Path) -> None:
     (tmp_path / "result.txt").write_text("result", encoding="utf-8")
     result = _file_record(_record(tmp_path), {"path": "result.txt", "basename": ""}, "prefix", "port", 0)
     assert result.name == ""
+
+
+@pytest.mark.parametrize("method", ["zst", "gz"])
+def test_a_compressed_output_records_its_content_digest(tmp_path: Path, method: str) -> None:
+    from httk.core.digests import sha256_file
+
+    from httk.workflow.collecting import _workspace_file_record
+    from httk.workflow.runtime_utils import compress_files
+
+    content = b"EIGENVAL content\n" * 100
+    (tmp_path / "EIGENVAL").write_bytes(content)
+    (stored,) = compress_files([tmp_path / "EIGENVAL"], method=method, remove_source=True)
+    (tmp_path / "plain.txt").write_bytes(content)
+    result = cast(FileRecord, _workspace_file_record(_record(tmp_path), stored.name))
+    plain = cast(FileRecord, _workspace_file_record(_record(tmp_path), "plain.txt"))
+    assert result.content_sha256 == hashlib.sha256(content).hexdigest()
+    assert result.sha256 == sha256_file(stored) and result.media_type == plain.media_type
+    assert plain.content_sha256 is None
+
+
+def test_a_corrupt_compressed_output_is_collected_without_a_content_digest(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from httk.workflow.collecting import _workspace_file_record
+
+    (tmp_path / "EIGENVAL.zst").write_bytes(b"not a zstd stream")
+    result = cast(FileRecord, _workspace_file_record(_record(tmp_path), "EIGENVAL.zst"))
+    assert result.content_sha256 is None and result.size == len(b"not a zstd stream")
+    assert "EIGENVAL.zst does not decompress" in caplog.text
+
+
+def test_a_decompression_bomb_output_is_collected_without_a_content_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from httk.workflow import _util
+    from httk.workflow.collecting import _workspace_file_record
+    from httk.workflow.runtime_utils import _zstd
+
+    monkeypatch.setattr(_util, "_CONTENT_BASE_BYTES", 1 << 20)
+    (tmp_path / "WAVECAR.zst").write_bytes(_zstd().compress(bytes(32 << 20)))
+    result = cast(FileRecord, _workspace_file_record(_record(tmp_path), "WAVECAR.zst"))
+    assert result.content_sha256 is None and result.sha256 is not None
+    assert "WAVECAR.zst does not decompress within bounds" in caplog.text
 
 
 def test_in_process_and_executable_collectors_have_identical_results(

@@ -46,7 +46,7 @@ def handle_seal_verify(arguments: argparse.Namespace, context: Any) -> int:
 
     path = (Path(context.cwd) / Path(arguments.path).expanduser()).resolve()
     trusted = _default_trusted_keys(path, list(arguments.trusted_key))
-    report = verify_tree(path, trusted_keys=trusted, deep=not arguments.shallow)
+    report = verify_tree(path, trusted_keys=trusted, deep=not arguments.shallow, content=arguments.content)
     # Two independent axes, exactly as a signed manifest reports them: whether the
     # seals still describe the tree (report.ok), and whether every signer is a
     # trusted anchor. Exit codes mirror manifests.VERDICT_EXIT_CODES.
@@ -115,4 +115,9 @@ def build_seal_parser(
         "--shallow",
         action="store_true",
         help="verify only the top seal, not every seal it references",
+    )
+    verify.add_argument(
+        "--content",
+        action="store_true",
+        help="also decompress job files and check them against their sealed uncompressed.sha256 manifests",
     )

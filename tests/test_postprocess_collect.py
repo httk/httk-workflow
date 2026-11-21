@@ -1,5 +1,6 @@
 """Reading declared postprocess outputs back through their receipts."""
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -68,6 +69,16 @@ def test_collects_declared_files_with_workspace_urls(tmp_path: Path) -> None:
         assert file.name == path.name
         assert file.size == path.stat().st_size
         assert file.sha256 == sha256_file(path)
+
+
+def test_a_compressed_postprocess_output_records_its_content_digest(tmp_path: Path) -> None:
+    script = "#!/bin/sh\nset -e\nprintf 'figure data' > plot.dat\ngzip -n plot.dat\nprintf 'plain' > note.txt\n"
+    package, provider, workspace, _job, record = _setup(tmp_path, ("*",))
+    (package / "scripts" / "report.sh").write_text(script, encoding="utf-8")
+    assert run_postprocess_script(provider, "report", record).returncode == 0
+    files = dict(_only(workspace).files)
+    assert files["plot.dat.gz"].content_sha256 == hashlib.sha256(b"figure data").hexdigest()
+    assert files["note.txt"].content_sha256 is None
 
 
 def test_skip_reasons(tmp_path: Path) -> None:
