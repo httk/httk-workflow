@@ -473,7 +473,7 @@ def test_remote_prelude_failure_aborts_before_the_command(tmp_path: Path, remote
     assert not sentinel.exists()
 
 
-_RENAMED = "renamed to 'cli_prelude'.*--unset prelude --set cli_prelude="
+_RENAMED = "renamed to 'cli_prelude'.*httk remote unset NAME prelude, then httk remote set NAME cli_prelude="
 
 
 def test_an_old_prelude_key_is_refused_where_it_would_run(tmp_path: Path, remote: Remote) -> None:
@@ -503,14 +503,14 @@ def test_remote_configure_refuses_and_fixes_the_old_prelude_key(
     assert command(["remote", "show", "cluster"], context) == 0
     assert "prelude=module load old" in capsys.readouterr().out
 
-    # --set prelude= is refused before anything is written (it would otherwise be a credential).
-    assert command(["remote", "configure", "--set", "prelude=x", "cluster"], context) == 1
-    assert "--unset prelude --set cli_prelude=" in capsys.readouterr().err
+    # Setting prelude= is refused before anything is written (it would otherwise be a credential).
+    assert command(["remote", "set", "cluster", "prelude=x"], context) == 2
+    assert "httk remote unset NAME prelude, then httk remote set NAME cli_prelude=" in capsys.readouterr().err
     assert (bundle / "remote.json").read_text(encoding="utf-8") == stored
     assert not (bundle / "credentials.json").exists()
 
-    fix = ["remote", "configure", "--unset", "prelude", "--set", "cli_prelude=export HTTK_SITE=new", "cluster"]
-    assert command(fix, context) == 0
+    assert command(["remote", "unset", "cluster", "prelude"], context) == 0
+    assert command(["remote", "set", "cluster", "cli_prelude=export HTTK_SITE=new"], context) == 0
     capsys.readouterr()
     assert command(["remote", "show", "--json", "cluster"], context) == 0
     settings = json.loads(capsys.readouterr().out)[0]["settings"]

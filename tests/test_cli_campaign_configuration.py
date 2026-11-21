@@ -15,12 +15,10 @@ def test_campaign_configuration_and_removal(tmp_path: Path, capsys) -> None:
     write_project_section(tmp_path, "unrelated", {"keep": True})
     context = CLIContext("httk", tmp_path)
     assert command(["campaign", "init", "--partition", "a=alpha"], context) == 0
-    assert (
-        command(["campaign", "configure", "--set", "partitions.b=beta", "--set", "assignment=explicit"], context) == 0
-    )
+    assert command(["campaign", "set", "partitions.b=beta", "assignment=explicit"], context) == 0
     assert read_campaign(tmp_path).partitions == {"a": "alpha", "b": "beta"}
     assert read_campaign(tmp_path).assignment == "explicit"
-    assert command(["campaign", "configure", "--unset", "partitions.a", "--unset", "assignment"], context) == 0
+    assert command(["campaign", "unset", "partitions.a", "assignment"], context) == 0
     assert read_campaign(tmp_path).partitions == {"b": "beta"}
     assert read_campaign(tmp_path).assignment == "hash"
     capsys.readouterr()
@@ -40,17 +38,20 @@ def test_campaign_invalid_and_sealed_edits_preserve_saved_configuration(tmp_path
     context = CLIContext("httk", tmp_path)
     assert command(["campaign", "init", "--partition", "a=alpha"], context) == 0
     saved = (tmp_path / "httk_project" / "project.json").read_bytes()
-    assert command(["campaign", "configure"], context) == 2
+    for empty in (["campaign", "set"], ["campaign", "unset"], ["campaign", "configure", "--set", "assignment=hash"]):
+        assert command(empty, context) == 2
     assert (tmp_path / "httk_project" / "project.json").read_bytes() == saved
     for changes in (
-        ["--set", "partitions.b=beta", "--set", "assignment=invalid"],
-        ["--set", "partitions.b=beta", "--unset", "partitions.missing"],
-        ["--set", "partitions.b="],
-        ["--set", "unknown=value"],
+        ["set", "partitions.b=beta", "assignment=invalid"],
+        ["unset", "partitions.missing"],
+        ["unset", "partitions.a=alpha"],
+        ["set", "partitions.b="],
+        ["set", "unknown=value"],
+        ["set", "partitions.b"],
     ):
-        assert command(["campaign", "configure", *changes], context) == 2
+        assert command(["campaign", *changes], context) == 2
         assert (tmp_path / "httk_project" / "project.json").read_bytes() == saved
     (tmp_path / "httk_project" / "seal.json").write_text("{}")
-    assert command(["campaign", "configure", "--set", "partitions.b=beta"], context) == 2
+    assert command(["campaign", "set", "partitions.b=beta"], context) == 2
     assert command(["campaign", "remove", "--yes"], context) == 2
     assert (tmp_path / "httk_project" / "project.json").read_bytes() == saved

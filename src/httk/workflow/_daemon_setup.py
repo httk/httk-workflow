@@ -289,7 +289,7 @@ def _approved_launcher(name: str, workspace: Path, *, force: bool) -> ApprovedLa
     if kind != "slurm":
         raise ValueError(
             f"launcher {name!r} is a {kind!r} launcher; the workspace daemon approves only global slurm launchers "
-            "('httk launcher add --template slurm --global')"
+            "('httk launcher add NAME --kind slurm --global')"
         )
     settings = _validate_launcher_metadata(bundle, metadata, check_binaries=False).get("settings", {})
     assert isinstance(settings, Mapping)

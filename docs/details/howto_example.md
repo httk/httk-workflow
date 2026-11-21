@@ -64,8 +64,8 @@ httk workflow install --workspace main 'git+https://github.com/httk/workflows-va
 ```
 We configure the workspace with necessary system settings for these workflows:
 ```bash
-httk workspace settings set --key vasp.pseudo_library --value /software/sse2/tetralith_el9/manual/vasp/POTCARs/PBE/2024-03-19 main
-httk workspace settings set --key vasp.command --value 'vasp_std' main
+httk workspace set -w main vasp.pseudo_library=/software/sse2/tetralith_el9/manual/vasp/POTCARs/PBE/2024-03-19
+httk workspace set -w main vasp.command='vasp_std'
 ```
 Jobs created on the client must reference workflows installed on sigma, including the same pinned revision. `vasp.general` runs the input files supplied by the job; `vasp.relax` supplies the relaxation sequence.
 
@@ -79,40 +79,40 @@ Other HPC systems will require these to be adjusted.
 ```bash
 SLURM_ACCOUT="<your slurm account>"
 
-httk launcher add --template slurm --global small --set slurm.nodes=2 --set slurm.ntasks=64 --set slurm.ntasks_per_node=32
-httk launcher configure small \
-    --set "slurm.account=$SLURM_ACCOUNT" \
-    --set slurm.cpus_per_task=1 \
-    --set slurm.time_limit=0:30:00 \
-    --set manager.workers=1 \
-    --set manager.confine=bwrap \
-    --set manager.launch_mpi=pmi2 \
-    --set confine.isolate_network=false \
-    --set "confine.readonly_paths=/etc:$HOME/sandbox/setup:/usr:/software:/sys" \
-    --set confine.devices=/dev/hfi1_0 \
-    --set 'confine.environment.FI_PROVIDER=psm2,shm' \
-    --set 'confine.environment.FI_PROVIDER_PATH=/software/sse2/tetralith_el9/easybuild/pure/software/impi/2021.9.0-intel-compilers-2023.1.0/mpi/2021.9.0/libfabric/lib/prov' \
-    --set 'environment.prelude=source ~/sandbox/setup/setup.sh && module load VASP/6.6.0.06032026-omp-hpc2-intel-2023a-eb'
+httk launcher add --kind slurm --global small slurm.nodes=2 slurm.ntasks=64 slurm.ntasks_per_node=32
+httk launcher set small \
+    "slurm.account=$SLURM_ACCOUNT" \
+    slurm.cpus_per_task=1 \
+    slurm.time_limit=0:30:00 \
+    manager.workers=1 \
+    manager.confine=bwrap \
+    manager.launch_mpi=pmi2 \
+    confine.isolate_network=false \
+    "confine.readonly_paths=/etc:$HOME/sandbox/setup:/usr:/software:/sys" \
+    confine.devices=/dev/hfi1_0 \
+    'confine.environment.FI_PROVIDER=psm2,shm' \
+    'confine.environment.FI_PROVIDER_PATH=/software/sse2/tetralith_el9/easybuild/pure/software/impi/2021.9.0-intel-compilers-2023.1.0/mpi/2021.9.0/libfabric/lib/prov' \
+    'environment.prelude=source ~/sandbox/setup/setup.sh && module load VASP/6.6.0.06032026-omp-hpc2-intel-2023a-eb'
 
-httk launcher add --template slurm --global large --set slurm.nodes=6 --set slurm.ntasks=192 --set slurm.ntasks_per_node=32
-httk launcher configure large \
-    --set "slurm.account=$SLURM_ACCOUNT" \
-    --set slurm.cpus_per_task=1 \
-    --set slurm.time_limit=23:59:59 \
-    --set manager.workers=1 \
-    --set manager.confine=bwrap \
-    --set manager.launch_mpi=pmi2 \
-    --set confine.isolate_network=false \
-    --set "confine.readonly_paths=/etc:$HOME/sandbox/setup:/usr:/software:/sys" \
-    --set confine.devices=/dev/hfi1_0 \
-    --set 'confine.environment.FI_PROVIDER=psm2,shm' \
-    --set 'confine.environment.FI_PROVIDER_PATH=/software/sse2/tetralith_el9/easybuild/pure/software/impi/2021.9.0-intel-compilers-2023.1.0/mpi/2021.9.0/libfabric/lib/prov' \
-    --set 'environment.prelude=source ~/sandbox/setup/setup.sh && module load VASP/6.6.0.06032026-omp-hpc2-intel-2023a-eb'
+httk launcher add --kind slurm --global large slurm.nodes=6 slurm.ntasks=192 slurm.ntasks_per_node=32
+httk launcher set large \
+    "slurm.account=$SLURM_ACCOUNT" \
+    slurm.cpus_per_task=1 \
+    slurm.time_limit=23:59:59 \
+    manager.workers=1 \
+    manager.confine=bwrap \
+    manager.launch_mpi=pmi2 \
+    confine.isolate_network=false \
+    "confine.readonly_paths=/etc:$HOME/sandbox/setup:/usr:/software:/sys" \
+    confine.devices=/dev/hfi1_0 \
+    'confine.environment.FI_PROVIDER=psm2,shm' \
+    'confine.environment.FI_PROVIDER_PATH=/software/sse2/tetralith_el9/easybuild/pure/software/impi/2021.9.0-intel-compilers-2023.1.0/mpi/2021.9.0/libfabric/lib/prov' \
+    'environment.prelude=source ~/sandbox/setup/setup.sh && module load VASP/6.6.0.06032026-omp-hpc2-intel-2023a-eb'
 ```
-(For launchers that already exist, use `httk launcher configure NAME --set ...` to alter their configuration.)
+(For launchers that already exist, use `httk launcher set NAME KEY=VALUE...` to alter their configuration.)
 
 ```bash
-httk workspace settings set --key manager.launch --value small main
+httk workspace set -w main manager.launch=small
 ```
 You can take a look at the configurations we set up by:
 ```bash
@@ -169,7 +169,7 @@ httk workspace daemon configure main --add launchers=large
 httk workspace daemon configure main --add "authorized_keys=<ANOTHER KEY>"
 httk workspace daemon reload main
 ```
-`reload` activates the changed configuration (also after `httk launcher configure`); a running `httk workspace daemon run` restarts on it by itself, and queued and running managers keep running. As a saftey feature, a deamon has a default quota of running 128 "managers".
+`reload` activates the changed configuration (also after `httk launcher set`); a running `httk workspace daemon run` restarts on it by itself, and queued and running managers keep running. As a saftey feature, a deamon has a default quota of running 128 "managers".
 
 ## 6 Mount the exchange on the client
 
@@ -190,7 +190,7 @@ Be careful to *only* mount the exchange directory as shown above, not the whole 
 **Client.** With the exchange mounted and the sigma daemon running:
 
 ```bash
-httk remote add --template mount-daemon sigma
+httk remote add --kind mount-daemon sigma
 httk remote daemon configure sigma --exchange "<EXCHANGE_MOUNT_DIR>"
 httk remote check sigma
 httk remote daemon health sigma
@@ -229,7 +229,7 @@ To change an allocation's time limit, for example:
 
 ```bash
 # Sigma
-httk launcher configure large --set slurm.time_limit=02:00:00
+httk launcher set large slurm.time_limit=02:00:00
 ```
 
 A single start can instead ask for a shorter allocation, or a longer one up to the launcher's `slurm.time_limit_max`:

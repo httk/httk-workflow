@@ -70,16 +70,15 @@ __all__ = [
     "REMOTE_STATUS_COMMAND",
     "REMOTE_TRANSFER_SESSION_COMMAND",
     "REMOTE_TRANSFER_STATUS_COMMAND",
-    "REMOTE_WORKSPACE_CONFIGURE_COMMAND",
     "REMOTE_WORKSPACE_DELETE_COMMAND",
     "REMOTE_WORKSPACE_FSCK_COMMAND",
     "REMOTE_WORKSPACE_GC_COMMAND",
     "REMOTE_WORKSPACE_INIT_COMMAND",
     "REMOTE_WORKSPACE_LIST_COMMAND",
     "REMOTE_WORKSPACE_MOVE_COMMAND",
-    "REMOTE_WORKSPACE_POLICY_COMMAND",
-    "REMOTE_WORKSPACE_SETTINGS_COMMAND",
-    "REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND",
+    "REMOTE_WORKSPACE_SET_COMMAND",
+    "REMOTE_WORKSPACE_SHOW_COMMAND",
+    "REMOTE_WORKSPACE_UNSET_COMMAND",
     "REQUEST_FORMAT",
     "RESULT_FORMAT",
     "SEED_SETTING_MAP",
@@ -201,10 +200,9 @@ REMOTE_JOB_ADOPT_COMMAND = ("httk", "job", "adopt")
 REMOTE_JOB_TRANSFER_COMMAND = ("httk", "job", "transfer")
 REMOTE_TRANSFER_STATUS_COMMAND = ("httk", "transfer", "status")
 REMOTE_STATUS_COMMAND = ("httk", "workspace", "status")
-REMOTE_WORKSPACE_SETTINGS_COMMAND = ("httk", "workspace", "settings")
-REMOTE_WORKSPACE_CONFIGURE_COMMAND = ("httk", "workspace", "configure")
-REMOTE_WORKSPACE_POLICY_COMMAND = ("httk", "workspace", "policy")
-REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND = ("httk", "workspace", "workflow-prelude")
+REMOTE_WORKSPACE_SHOW_COMMAND = ("httk", "workspace", "show")
+REMOTE_WORKSPACE_SET_COMMAND = ("httk", "workspace", "set")
+REMOTE_WORKSPACE_UNSET_COMMAND = ("httk", "workspace", "unset")
 REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
 REMOTE_JOB_REQUEST_ENVELOPES_COMMAND = ("httk", "job", "request-envelopes")
 REMOTE_JOB_PUBLISH_REQUESTS_COMMAND = ("httk", "job", "publish-requests")
@@ -510,7 +508,7 @@ def add_remote(
 
 
 def split_settings(settings: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
-    """Partition ``--set`` values into persistable settings and credentials.
+    """Partition ``remote set`` values into persistable settings and credentials.
 
     :param settings: The settings supplied by the caller.
     :return: Persistable settings followed by manifest-excluded credentials.
@@ -678,8 +676,8 @@ def import_v1_remote(
         settings["username"] = selected.get("USERNAME", "")
     if any(key.startswith("SLURM_") for key in selected):
         print(
-            "notice: scheduler settings belong to the workspace: `httk launcher add --template slurm NAME` "
-            "and `httk workspace settings set --key manager.launch --value NAME`",
+            "notice: scheduler settings belong to the workspace: `httk launcher add NAME --kind slurm` "
+            "and `httk workspace set manager.launch=NAME`",
             file=sys.stderr,
         )
     metadata["settings"] = settings

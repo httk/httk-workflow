@@ -761,8 +761,8 @@ class _Run:
         install = ["workflow", "install", "--workspace", str(root), self.arguments.workflow]
         self.checked(install, project, logs / f"{name}-install")
         if self.arguments.io_sync != "auto":
-            setting = ["workspace", "settings", "set", "--key", "io.sync", "--value", self.arguments.io_sync]
-            self.checked([*setting, str(root)], project, logs / f"{name}-io-sync")
+            setting = ["workspace", "set", "-w", str(root), f"io.sync={self.arguments.io_sync}"]
+            self.checked(setting, project, logs / f"{name}-io-sync")
         self.setup["workspace_seconds"].append(round(time.monotonic() - began, 3))
         from httk.workflow import Workspace, _fs
 

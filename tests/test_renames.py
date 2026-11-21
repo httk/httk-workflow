@@ -77,7 +77,7 @@ def test_the_computer_group_is_gone(isolated: Path) -> None:
 
 def test_adding_a_remote_writes_remote_json_below_remotes(isolated: Path) -> None:
     context = CLIContext("httk", isolated)
-    assert command(["remote", "add", "--template", "local", "cluster"], context) == 0
+    assert command(["remote", "add", "--kind", "local", "cluster"], context) == 0
 
     bundle = isolated / PROJECT_DIRECTORY / "remotes" / "cluster"
     assert (bundle / METADATA_FILE).is_file()
@@ -88,7 +88,7 @@ def test_adding_a_remote_writes_remote_json_below_remotes(isolated: Path) -> Non
 
 
 def test_a_global_remote_lands_in_the_configuration_home(isolated: Path) -> None:
-    assert command(["remote", "add", "--template", "local", "--global", "shared"], CLIContext("httk", isolated)) == 0
+    assert command(["remote", "add", "--kind", "local", "--global", "shared"], CLIContext("httk", isolated)) == 0
     assert (config_home() / "remotes" / "shared" / METADATA_FILE).is_file()
     assert not (data_home() / "computers").exists()
 
@@ -263,8 +263,6 @@ def test_retired_lifecycle_spellings_are_gone() -> None:
         r"packaged_template|JobTemplate|HarvestRecord|campaign_harvest)\b|--template|\bharvest\b"
     )
     for path in root.rglob("*.py"):
-        if path.name in {"_transfer.py", "adapters.py", "_daemon_setup.py"}:
-            continue
         assert not retired.search(path.read_text(encoding="utf-8")), path
 
 

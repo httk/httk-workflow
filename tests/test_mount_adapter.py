@@ -424,7 +424,7 @@ def test_invoke_refuses_the_old_prelude_key(tmp_path: Path, mount: Mount) -> Non
     initialize_project(project, name="mount-old-prelude")
     bundle = _mount_remote(project, mount, prelude="true")
 
-    with pytest.raises(RuntimeError, match="renamed to 'cli_prelude'.*--unset prelude --set cli_prelude="):
+    with pytest.raises(RuntimeError, match="renamed to 'cli_prelude'.*httk remote unset NAME prelude"):
         run_adapter(bundle, "invoke", {"argv": ["true"]})
 
 

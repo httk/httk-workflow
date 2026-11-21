@@ -11,7 +11,7 @@ Use it exactly the way a deployment names the real thing:
 
 .. code-block:: console
 
-    httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
+    httk workspace set -w default vasp.command="$PWD/examples/mock_vasp.py"
     httk workflow run
 
 ``HTTK_MOCK_VASP_FAIL_ONCE=1`` makes the first run in a directory fail with a

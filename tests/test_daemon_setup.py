@@ -319,7 +319,9 @@ def test_only_slurm_launchers_are_approved(kind: str | None, tmp_path: Path) -> 
     else:
         value["kind"] = kind
     path.write_text(json.dumps(value), encoding="utf-8")
-    with pytest.raises(ValueError, match=f"is a {kind!r} launcher; .*only global slurm launchers.*--template slurm"):
+    with pytest.raises(
+        ValueError, match=f"is a {kind!r} launcher; .*only global slurm launchers.*--kind slurm --global"
+    ):
         _initialize(layout, "small")
     assert not _state(layout).exists() and not layout.exchange.exists()
 

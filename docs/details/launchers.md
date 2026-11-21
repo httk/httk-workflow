@@ -16,34 +16,35 @@ bundle lives at `httk_project/launchers/NAME`, a global one at
 
 ```console
 httk launcher show cluster --json
-httk launcher configure cluster --set slurm.partition=gpu
-httk launcher configure cluster --unset slurm.partition
-httk launcher configure cluster --add confine.devices=/dev/example
-httk launcher configure cluster --remove confine.devices=/dev/example
+httk launcher set cluster slurm.partition=gpu
+httk launcher unset cluster slurm.partition
+httk launcher set cluster --add confine.devices=/dev/example
+httk launcher set cluster --remove confine.devices=/dev/example
 httk launcher remove cluster
 ```
 
-`--set` replaces a whole value and `--unset` restores fallback behavior.
-`--add` and `--remove` edit the colon-separated `confine.devices`,
-`confine.pmix_roots` and `confine.readonly_paths` lists. Removing the last
-path leaves an explicit empty list; unsetting the key restores its default.
-`--add-path` and `--remove-path` are equivalent descriptive spellings.
+`set NAME KEY=VALUE` replaces a whole value and `unset NAME KEY` restores
+fallback behavior. `set --add` and `set --remove` edit the colon-separated
+`confine.devices`, `confine.pmix_roots` and `confine.readonly_paths` lists; one
+`set` applies its `KEY=VALUE` pairs, then `--add`, then `--remove`, and saves
+only when all of them are valid. Removing the last path leaves an explicit
+empty list; unsetting the key restores its default.
 Removing a launcher removes its bundle, not workspaces or running managers.
 
 ## Setting one up
 
-The packaged template is `slurm`. Create a global launcher profile on a machine
+The packaged kind is `slurm`. Create a global launcher profile on a machine
 where `sbatch` is available:
 
 ```console
-$ httk launcher add --template slurm --global cluster
+$ httk launcher add --kind slurm --global cluster
 $ httk launcher check cluster
 ```
 
 Settings can also be given at creation:
 
 ```console
-$ httk launcher add --template slurm --global --set slurm.partition=batch cluster
+$ httk launcher add cluster --kind slurm --global slurm.partition=batch
 ```
 
 Launcher settings are non-secret configuration stored in `launcher.json` and
@@ -54,11 +55,11 @@ from the bundle, so several workspaces can use the same launcher with different
 workspace-level values:
 
 ```console
-$ httk workspace settings set --key manager.launch --value cluster default
-$ httk workspace settings set --key manager.workers --value 4 default
-$ httk workspace settings set --key slurm.account --value project-123 default
-$ httk workspace settings set --key slurm.time_limit --value 02:00:00 default
-$ httk workspace settings set --key environment.prelude --value 'module load httk' default
+$ httk workspace set -w default manager.launch=cluster
+$ httk workspace set -w default manager.workers=4
+$ httk workspace set -w default slurm.account=project-123
+$ httk workspace set -w default slurm.time_limit=02:00:00
+$ httk workspace set -w default environment.prelude='module load httk'
 $ httk workflow run --count 4 --workspace default
 ```
 
@@ -95,7 +96,7 @@ $ httk workflow run --count 4 --workspace default
 
 Keys outside these tables under `manager.`, `slurm.` or `environment.` have
 no effect, and an unknown `confine.*` key makes managers refuse to start:
-`workspace settings show` and `launcher show` mark them *unrecognized*, and
+`workspace show` and `launcher show` mark them *unrecognized*, and
 setting one prints a warning. `launcher show` also marks a key a `slurm`
 launcher does not read, such as `manager.launch`; a launcher of another kind
 reads its settings with its own executable, so its keys are only *undeclared*.
@@ -114,12 +115,12 @@ interpreter that started the command.
 becomes one `#SBATCH` line, after httk's own directives:
 
 ```console
-$ httk launcher configure cluster --set 'slurm.sbatch_options=--qos=high --constraint=rome --mail-type=END'
+$ httk launcher set cluster 'slurm.sbatch_options=--qos=high --constraint=rome --mail-type=END'
 ```
 
 Write long options only (`--qos=high`, not `-q high`); quote a value with
 spaces in shell style (`--comment="nightly run"`). An empty setting passes no
-options (use `--unset slurm.sbatch_options` to drop the key). Backslashes,
+options (use `httk launcher unset NAME slurm.sbatch_options` to drop the key). Backslashes,
 control characters, empty option values and repeated options are refused. So
 are the options httk sets itself (`--job-name`, `--chdir`, `--output`,
 `--error`, `--input`, `--export`, `--export-file`, `--parsable`, `--clusters`,
@@ -161,13 +162,13 @@ by the launcher's) set a bound, `slurm.time_limit` or `slurm.time_limit_max`,
 `--time-limit DURATION` replaces `slurm.time_limit` as
 the jobs' `--time` for this start, and the managers follow that allocation's
 end. The launcher refuses a duration above `slurm.time_limit_max` (by default
-`slurm.time_limit`); `launcher add` and `launcher configure` refuse a
+`slurm.time_limit`); `launcher add` and `launcher set` refuse a
 `slurm.time_limit` above `slurm.time_limit_max`. With any other launcher, or a
 Slurm launcher whose `slurm.time_limit` is unset, `0` or `UNLIMITED` without a
 `slurm.time_limit_max`, `--time-limit` stays the managers' own deadline:
 
 ```console
-$ httk launcher configure --set slurm.time_limit_max=1-00:00:00 cluster
+$ httk launcher set cluster slurm.time_limit_max=1-00:00:00
 $ httk workflow run --workspace default --launcher cluster --time-limit 12:00:00
 ```
 
@@ -205,9 +206,9 @@ Create separate profiles when, for example, CPU and GPU managers need different
 queues or reservations:
 
 ```console
-$ httk launcher add --template slurm --global --set slurm.partition=cpu cpu
-$ httk launcher add --template slurm --global --set slurm.partition=gpu gpu
-$ httk launcher configure --set slurm.reservation=gpu-a100 gpu
+$ httk launcher add cpu --kind slurm --global slurm.partition=cpu
+$ httk launcher add gpu --kind slurm --global slurm.partition=gpu
+$ httk launcher set gpu slurm.reservation=gpu-a100
 $ httk workflow run --workspace default --launcher cpu --count 4
 $ httk workflow run --workspace default --launcher gpu --count 2
 ```
@@ -240,7 +241,7 @@ launcher or as workspace settings:
 
 Values are strings; an unknown `confine.*` key or a malformed value refuses the
 manager's start, and is refused already by `launcher add` and
-`launcher configure` for a `slurm` launcher. With `bwrap`, a manager probes
+`launcher set` for a `slurm` launcher. With `bwrap`, a manager probes
 Bubblewrap once when it starts and refuses to start if it cannot build the
 sandbox. If confinement becomes unavailable later, for example after a
 workspace setting changes, the manager stops claiming work and reports the
@@ -261,7 +262,7 @@ option is not shown in `--help` and accepts only these keys). Job parameters
 and declared job environment never reach these keys.
 
 ```console
-$ httk launcher add --template slurm --global --set manager.confine=bwrap confined
+$ httk launcher add confined --kind slurm --global manager.confine=bwrap
 $ httk workflow run --workspace default --launcher confined --count 2
 ```
 
@@ -269,11 +270,11 @@ $ httk workflow run --workspace default --launcher confined --count 2
 
 For the colon-separated path settings of a `slurm` launcher
 (`confine.readonly_paths`, `confine.devices`, `confine.pmix_roots`),
-`launcher configure --add-path KEY=PATH[:PATH...]` appends absolute paths in
-order without duplicates, after any `--set`, and prints the resulting value:
+`launcher set NAME --add KEY=PATH[:PATH...]` appends absolute paths in
+order without duplicates, after any `KEY=VALUE` pairs, and prints the resulting value:
 
 ```console
-$ httk launcher configure confined --add-path confine.readonly_paths=/software:/opt/modules
+$ httk launcher set confined --add confine.readonly_paths=/software:/opt/modules
 ```
 
 When `confine.readonly_paths` is not set yet, the list starts from the default
@@ -333,7 +334,7 @@ print(result)
 `add_launcher` creates the bundle from the maintained template and
 `check_launcher` runs its environment check. Pass a `settings` mapping to
 `add_launcher`, or update an existing bundle with `configure_launcher` (the CLI
-equivalent is `httk launcher configure --set KEY=VALUE NAME`).
+equivalent is `httk launcher set NAME KEY=VALUE...`).
 
 For local debugging, bypass launcher submission and run one manager
 in-process:

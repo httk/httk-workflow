@@ -107,36 +107,38 @@ def test_installed_workflow_declarations_recognize_workspace_keys(zz_code: None)
     assert status.state == "undeclared" and "future workflow" in status.note
 
 
-def test_settings_show_annotates_and_settings_set_warns(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_workspace_show_annotates_and_workspace_set_warns(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     settings = {"slurm.account": "p", "slurm.qos": "high", "foo.bar": 1}
     create_workspace("ws", tmp_path / "ws", settings=settings)
     context = CLIContext("httk", tmp_path)
-    assert command(["workspace", "settings", "show", "ws"], context) == 0
+    assert command(["workspace", "show", "-w", "ws"], context) == 0
     rows = [line.split("\t") for line in capsys.readouterr().out.splitlines()]
-    assert [(row[0], row[2].split(" ")[0]) for row in rows] == [
+    # Policy and prelude rows carry no annotation column.
+    assert all(len(row) == 2 for row in rows if row[0].startswith("policy."))
+    assert [(row[0], row[2].split(" ")[0]) for row in rows if len(row) == 3] == [
         ("foo.bar", "undeclared:"),
         ("slurm.account", "recognized"),
         ("slurm.qos", "unrecognized:"),
     ]
-    assert command(["workspace", "settings", "show", "--json", "ws"], context) == 0
-    assert json.loads(capsys.readouterr().out) == [settings]
+    assert command(["workspace", "show", "-w", "ws", "--json", *settings], context) == 0
+    assert json.loads(capsys.readouterr().out) == settings
 
-    assert command(["workspace", "settings", "set", "--key", "slurm.qos", "--value", "low", "ws"], context) == 0
+    assert command(["workspace", "set", "-w", "ws", "slurm.qos=low"], context) == 0
     captured = capsys.readouterr()
     assert captured.out == '{"slurm.qos": "low"}\n'
     warnings = captured.err.splitlines()
     assert len(warnings) == 1 and "slurm.qos" in warnings[0] and "slurm.sbatch_options" in warnings[0]
     assert Workspace(tmp_path / "ws").settings["slurm.qos"] == "low"
-    assert command(["workspace", "settings", "set", "--key", "vasp.command", "--value", "v", "ws"], context) == 0
+    assert command(["workspace", "set", "-w", "ws", "vasp.command=v"], context) == 0
     assert capsys.readouterr().err == ""
-    assert command(["workspace", "settings", "set", "--key", "foo.bar", "--value", "2", "ws"], context) == 0
+    assert command(["workspace", "set", "-w", "ws", "foo.bar=2", "policy.retention.trash_days=2"], context) == 0
     captured = capsys.readouterr()
-    assert captured.out == '{"foo.bar": 2}\n'
+    assert captured.out == '{"foo.bar": 2, "policy.retention.trash_days": 2.0}\n'
     (notice,) = captured.err.splitlines()
     assert notice.startswith("notice: setting foo.bar is undeclared:")
-    assert command(["workspace", "configure", "--set", "manager.workerz=2", "ws"], context) == 0
+    assert command(["workspace", "set", "-w", "ws", "manager.workerz=2"], context) == 0
     assert "manager.workers" in capsys.readouterr().err
-    assert command(["workspace", "init", "--setting", "slurm.qos=x", str(tmp_path / "other")], context) == 0
+    assert command(["workspace", "init", str(tmp_path / "other"), "slurm.qos=x"], context) == 0
     assert "slurm.qos" in capsys.readouterr().err
 
 
@@ -147,21 +149,21 @@ def test_remote_init_relays_the_far_side_warning(
     initialize_project(project, name="remote-warn")
     fake_remote(project)
     context = CLIContext("httk", project)
-    assert command(["workspace", "init", "--setting", "slurm.qos=x", "cluster:runs"], context) == 0
+    assert command(["workspace", "init", "cluster:runs", "slurm.qos=x"], context) == 0
     assert "warning: setting slurm.qos" in capsys.readouterr().err
 
 
-def test_launcher_show_annotates_and_configure_warns(
+def test_launcher_show_annotates_and_set_warns(
     tmp_path: Path, remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="catalog")
     context = CLIContext("httk", project)
-    assert command(["launcher", "add", "--template", "slurm", "--set", "slurm.partition=p", "cluster"], context) == 0
+    assert command(["launcher", "add", "cluster", "--kind", "slurm", "slurm.partition=p"], context) == 0
     assert capsys.readouterr().err == ""
-    assert command(["launcher", "add", "--template", "slurm", "--set", "slurm.qos=x", "other"], context) == 0
+    assert command(["launcher", "add", "other", "--kind", "slurm", "slurm.qos=x"], context) == 0
     assert "slurm.qos" in capsys.readouterr().err
-    assert command(["launcher", "configure", "--set", "vasp.command=x", "cluster"], context) == 0
+    assert command(["launcher", "set", "cluster", "vasp.command=x"], context) == 0
     assert "vasp.command" in capsys.readouterr().err
     assert command(["launcher", "show", "cluster"], context) == 0
     out = capsys.readouterr().out
@@ -174,15 +176,15 @@ def test_color_follows_tty_and_no_color(
 ) -> None:
     create_workspace("ws", tmp_path / "ws", settings={"slurm.qos": "high"})
     context = CLIContext("httk", tmp_path)
-    assert command(["workspace", "settings", "show", "ws"], context) == 0
+    assert command(["workspace", "show", "-w", "ws"], context) == 0
     assert "\x1b[" not in capsys.readouterr().out
     monkeypatch.setattr(_setting_catalog.sys.stdout, "isatty", lambda: True)
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.delenv("TERM", raising=False)
-    assert command(["workspace", "settings", "show", "ws"], context) == 0
+    assert command(["workspace", "show", "-w", "ws"], context) == 0
     assert "\x1b[" in capsys.readouterr().out
     monkeypatch.setenv("NO_COLOR", "1")
-    assert command(["workspace", "settings", "show", "ws"], context) == 0
+    assert command(["workspace", "show", "-w", "ws"], context) == 0
     assert "\x1b[" not in capsys.readouterr().out
 
 
@@ -192,31 +194,31 @@ def test_custom_kind_launcher_settings_are_undeclared_without_warnings(
     project = tmp_path / "project"
     initialize_project(project, name="custom-kind")
     context = CLIContext("httk", project)
-    assert command(["launcher", "add", "--template", "slurm", "pbs"], context) == 0
+    assert command(["launcher", "add", "--kind", "slurm", "pbs"], context) == 0
     metadata_path = project / "httk_project" / "launchers" / "pbs" / "launcher.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["kind"] = "pbs"
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     capsys.readouterr()
-    assert command(["launcher", "configure", "--set", "pbs.queue=gpu", "pbs"], context) == 0
+    assert command(["launcher", "set", "pbs", "pbs.queue=gpu"], context) == 0
     assert capsys.readouterr().err == ""
     assert command(["launcher", "show", "pbs"], context) == 0
     assert "pbs.queue=gpu  # undeclared:" in capsys.readouterr().out
 
 
-def test_settings_show_counts_installed_workflow_declarations(
+def test_workspace_show_counts_installed_workflow_declarations(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     create_workspace("ws", tmp_path / "ws", settings={"mywf.threshold": 1, "other.key": 2})
     install(Workspace(tmp_path / "ws"), tmp_path / "package", name="mywf", workflow='settings = ["mywf.threshold"]')
     context = CLIContext("httk", tmp_path)
-    assert command(["workspace", "settings", "show", "ws"], context) == 0
-    rows = {row[0]: row[2] for row in (line.split("\t") for line in capsys.readouterr().out.splitlines())}
+    assert command(["workspace", "show", "-w", "ws"], context) == 0
+    rows = {row[0]: row[-1] for row in (line.split("\t") for line in capsys.readouterr().out.splitlines())}
     assert rows["mywf.threshold"] == "recognized by workflow mywf"
     assert rows["other.key"].startswith("undeclared:")
-    assert command(["workspace", "settings", "set", "--key", "mywf.threshold", "--value", "3", "ws"], context) == 0
+    assert command(["workspace", "set", "-w", "ws", "mywf.threshold=3"], context) == 0
     assert capsys.readouterr().err == ""
-    assert command(["workspace", "configure", "--set", "other.key=3", "ws"], context) == 0
+    assert command(["workspace", "set", "-w", "ws", "other.key=3"], context) == 0
     assert capsys.readouterr().err.startswith("notice: setting other.key is undeclared:")
 
 
@@ -230,9 +232,9 @@ def test_environment_entries_declare_and_engine_keys_still_warn(
     )
     install(Workspace(tmp_path / "ws"), tmp_path / "package", name="wfa", manifest=manifest)
     context = CLIContext("httk", tmp_path)
-    assert command(["workspace", "settings", "show", "ws"], context) == 0
+    assert command(["workspace", "show", "-w", "ws"], context) == 0
     assert "tool.command\t\"x\"\trecognized by workflow wfa" in capsys.readouterr().out
-    assert command(["workspace", "settings", "set", "--key", "confine.foo", "--value", "1", "ws"], context) == 0
+    assert command(["workspace", "set", "-w", "ws", "confine.foo=1"], context) == 0
     assert capsys.readouterr().err.startswith("warning: setting confine.foo is unrecognized:")
 
 
@@ -250,5 +252,5 @@ def test_broken_or_unreadable_installations_leave_keys_undeclared(
 
     monkeypatch.setattr(_store, "list_installed", unreadable)
     context = CLIContext("httk", tmp_path)
-    assert command(["workspace", "settings", "set", "--key", "mywf.x", "--value", "1", "ws"], context) == 0
+    assert command(["workspace", "set", "-w", "ws", "mywf.x=1"], context) == 0
     assert capsys.readouterr().err.startswith("notice: setting mywf.x is undeclared:")

@@ -109,7 +109,7 @@ through that workspace's own launcher and preludes.
 To keep jobs from writing anything but their own job directory, confine them:
 
 ```console
-httk workspace settings set --key manager.confine --value bwrap default
+httk workspace set -w default manager.confine=bwrap
 ```
 
 Each attempt then runs in a Bubblewrap sandbox that sees the workspace

@@ -36,7 +36,7 @@ and the stem of its environment variable (`HTTK_WORKFLOW_VASP_BASH_API`).
 
 A code package declares the application settings its workflows read, in its
 own namespace, with `register_code(..., settings=("vasp.command", ...))`, so
-`httk workspace settings show` marks them recognized by that code support.
+`httk workspace show` marks them recognized by that code support.
 
 ## The bridge module
 

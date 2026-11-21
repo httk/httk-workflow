@@ -21,19 +21,21 @@ Create an SSH remote, configure its connection, and check that a compatible
 `httk` answers on the other machine:
 
 ```console
-$ httk remote add --template ssh kappa
-$ httk remote configure \
-      --set host=login.example.org \
-      --set username=me \
-      --set check_connectivity=yes kappa
+$ httk remote add kappa --kind ssh \
+      host=login.example.org \
+      username=me \
+      check_connectivity=yes
 $ httk remote check kappa
 ```
 
 `remote check` invokes the adapter's `install` operation. The name is
 historical: the maintained adapters only verify the remote and install nothing.
 Settings that are credentials go into `credentials.json`, which is excluded from
-signed project manifests. `remote configure NAME --unset KEY` removes a stored connection setting or
-private credential; use repeatable `--set KEY=VALUE` to add or replace it.
+signed project manifests. `remote set NAME KEY=VALUE...` adds or replaces
+settings and credentials after the adapter's `configure` operation accepts them,
+and `remote unset NAME KEY...` removes stored ones. `remote add` with
+`KEY=VALUE` pairs runs exactly what `remote set` runs; if that step fails, the
+remote stays created and `remote set` fixes its settings.
 `remote show [--json]` inspects a definition without
 printing credential values. `remote list`, `remote remove` and
 `remote import-v1` cover the other common management tasks.
@@ -54,8 +56,8 @@ setting rather than in `~/.bashrc`, so it applies only to httk's ssh commands
 and not to every other tool that logs in over ssh:
 
 ```text
-$ httk remote configure --set cli_prelude='module load Python/3.13.5-bundle
-source ~/venv/bin/activate' kappa
+$ httk remote set kappa cli_prelude='module load Python/3.13.5-bundle
+source ~/venv/bin/activate'
 ```
 
 The prelude runs under `set -e`, so a failing line aborts before anything else.
@@ -76,9 +78,9 @@ that `httk` can run at all; it does not run at job start. The manager applies
 prelude when a job of that workflow runs.
 
 Earlier releases called this setting `prelude`. A remote that still stores
-`prelude` is refused when a command would use it, and `--set prelude=...` is
-refused; rename it with
-`httk remote configure NAME --unset prelude --set cli_prelude=...`.
+`prelude` is refused when a command would use it, and setting `prelude=...` is
+refused; rename it with `httk remote unset NAME prelude`, then
+`httk remote set NAME cli_prelude=...`.
 
 ### Passwords and second factors
 
@@ -114,11 +116,11 @@ reaches the remote; a manager that runs unattended cannot reopen it.
 
 Where connection sharing is not an option, set `interactive_auth=yes`. ssh then
 prompts in your terminal for the password or code; httk never sees the secret.
-Configuring checks connectivity, so the configure command itself already
+Configuring checks connectivity, so `remote set` itself already
 prompts:
 
 ```console
-$ httk remote configure --set interactive_auth=yes kappa
+$ httk remote set kappa interactive_auth=yes
 ```
 
 Prompts happen only when the command runs in a foreground terminal. Anything
@@ -137,18 +139,18 @@ minutes after its last use (`ControlPersist=600`, with the socket under
 terminal, log in no more:
 
 ```console
-$ httk remote configure --set interactive_auth=yes --set connection_reuse=yes kappa
+$ httk remote set kappa interactive_auth=yes connection_reuse=yes
 ```
 
 Connection reuse is a separate setting, and off unless set, because some sites
 forbid connection sharing; it speeds up key-based logins too. `remote
-configure` on an `ssh` remote that leaves it unset prints a notice naming the
+set` on an `ssh` remote that leaves it unset prints a notice naming the
 setting. To make reuse the default for every remote that sets none, set it in
 the per-user configuration; a remote then opts out with
-`--set connection_reuse=no`:
+`httk remote set NAME connection_reuse=no`:
 
 ```console
-$ httk config set connection_reuse yes
+$ httk config set connection_reuse=yes
 ```
 
 When `~/.ssh/config` names a `ControlPath` for the host, httk adds no control
@@ -416,9 +418,9 @@ messages:
 
 Holds an earlier run left stay held, untouched, and `--resume` drives them once
 both ends run the same *httk* (or the cause of the third kind is gone). The remote setting `transfer_session` was
-removed with the transfers that did not use a session: `httk remote configure
---set transfer_session=…` is refused as an unknown setting, and a value an
-earlier version persisted is ignored (`--unset transfer_session` removes it).
+removed with the transfers that did not use a session: `httk remote set NAME
+transfer_session=…` is refused as an unknown setting, and a value an
+earlier version persisted is ignored (`httk remote unset NAME transfer_session` removes it).
 
 Once open, a session is never reopened: a request that fails (the far side
 ends, breaks the protocol, or fails the request fatally) has an unknown
@@ -479,7 +481,7 @@ through the adapter contract, create a separate remote with the `local`
 template:
 
 ```console
-$ httk remote add --template local local-tree
+$ httk remote add --kind local local-tree
 $ httk workspace init --name scratch local-tree:/tmp/me/httk/scratch
 ```
 
@@ -528,11 +530,10 @@ Three settings describe it:
   a hold left by an earlier run is never taken back (`failed`, held).
 
 ```console
-$ httk remote add --template mount sigma
-$ httk remote configure \
-      --set mount_root=/home/me/work/mounts/sigma \
-      --set remote_root=/proj/x/users/me/httk \
-      --set exec_command="/home/me/bin/hpc run" sigma
+$ httk remote add sigma --kind mount \
+      mount_root=/home/me/work/mounts/sigma \
+      remote_root=/proj/x/users/me/httk \
+      exec_command="/home/me/bin/hpc run"
 ```
 
 `configure` refuses unless `mount_root` is an existing directory (set
@@ -575,7 +576,7 @@ mount point must be outside every local workspace. Then pin the identities the
 exchange publishes in `exchange.json` and `daemon.json`:
 
 ```console
-$ httk remote add --template mount-daemon confined
+$ httk remote add --kind mount-daemon confined
 $ httk remote daemon configure confined --exchange /mnt/cluster/exchange
 $ httk remote check confined
 ```
@@ -747,7 +748,7 @@ destination: run `httk workflow postprocess` on the adopted job locally.
 The low-level adapter API is in `httk.workflow.adapters`. This example uses the
 `local` template so it runs without an SSH server. Use the CLI to configure an
 SSH remote's persisted settings; there is no single high-level Python
-equivalent of `remote configure --set`.
+equivalent of `remote set`.
 
 ```python
 from pathlib import Path

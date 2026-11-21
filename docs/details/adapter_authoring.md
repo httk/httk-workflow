@@ -190,7 +190,7 @@ Request members beyond the envelope:
 
 | Member | Type | Meaning |
 | --- | --- | --- |
-| `settings` | object | the **pending** `--set KEY=VALUE` values, not yet stored anywhere |
+| `settings` | object | the **pending** `KEY=VALUE` values of `httk remote set`, not yet stored anywhere |
 
 Pending settings are passed separately because they are stored only after this
 operation succeeds; an adapter that looked only at `remote_settings` could
@@ -428,7 +428,7 @@ then stops).
 
 ## Settings and credentials
 
-`httk remote configure --set KEY=VALUE NAME` sorts every assignment by
+`httk remote set NAME KEY=VALUE...` sorts every assignment by
 key:
 
 - Keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS`
@@ -444,7 +444,7 @@ key:
 `remote.json` first and `credentials.json` over it. That single object arrives
 as the request's `remote_settings`, with one addition: when neither file nor a
 pending `settings` value sets `connection_reuse` and the per-user configuration
-does (`httk config set connection_reuse yes`), that value is filled in, so an
+does (`httk config set connection_reuse=yes`), that value is filled in, so an
 adapter never reads user configuration. **An adapter never sees the split:** it
 reads one flat settings object and must not depend on which file a value came
 from. `httk remote show NAME` reports which file each setting came

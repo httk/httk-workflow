@@ -45,6 +45,7 @@ from .._util import write_json_atomic
 from ..adapters import (
     REMOTE_JOB_TRANSFER_COMMAND,
     REMOTE_TRANSFER_STATUS_COMMAND,
+    RemoteTarget,
     RequestAborted,
     SessionFailed,
     SessionUnsupported,
@@ -78,6 +79,7 @@ from ._common import (
     _leaf,
     _required,
     _run_remote_workspace,
+    _setting_pair,
     _settings,
     _workspace_argument,
     add_durability_arguments,
@@ -142,47 +144,67 @@ def handle_remote_list(arguments: argparse.Namespace, context: CLIContext) -> in
 
 
 def handle_remote_add(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Create one remote bundle from a packaged adapter template."""
+    """Create one remote bundle from a packaged adapter, then apply any given settings as ``remote set`` does."""
 
-    if isinstance(arguments.name, list):
-        return _remote_batch(arguments, context, handle_remote_add, "name")
-    template = _required(
-        arguments.template,
-        "adapter template",
+    kind = _required(
+        arguments.kind,
+        "adapter kind",
         non_interactive=arguments.non_interactive,
         default="local",
     )
-    print(
-        add_remote(
-            arguments.name,
-            template=template,
-            global_scope=arguments.global_scope,
-            project=context.cwd,
-        )
-    )
-    return 0
+    name = arguments.name
+    bundle = add_remote(name, template=kind, global_scope=arguments.global_scope, project=context.cwd)
+    print(bundle)
+    if not arguments.pairs:
+        return 0
+    hint = f"remote {name} was created, but configuring it failed; fix its settings with: httk remote set {name} KEY=VALUE..."
+    # Configure the bundle just created, not whatever the name resolves to (a project remote shadows a global one).
+    target = RemoteTarget(name, bundle, project_local=not arguments.global_scope)
+    try:
+        code = _configure_remote(target, _settings(arguments.pairs), [], arguments.adapter_timeout)
+    except _ERRORS as exc:
+        exc.add_note(hint)
+        raise
+    if code:
+        print(hint, file=sys.stderr)
+    return code
 
 
-def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Run the ``configure`` or ``check`` verb of one remote adapter.
+def handle_remote_check(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Check that httk answers on one remote with its stored settings.
 
-    ``check`` runs the adapter operation that keeps its historical protocol
-    spelling ``install``: it verifies the target has a working httk and never
-    installs anything.
+    It runs the adapter operation that keeps its historical protocol spelling
+    ``install``: it verifies the target has a working httk and never installs
+    anything.
     """
 
     if isinstance(arguments.remote, list):
-        return _remote_batch(arguments, context, handle_remote_adapter_operation, "remote", json_output=True)
-    operation = arguments.operation
+        return _remote_batch(arguments, context, handle_remote_check, "remote", json_output=True)
     target = resolve_remote(arguments.remote, project=context.cwd)
-    settings = _settings(arguments.set)
-    if operation != "configure":
-        result = run_adapter(target.bundle, operation, {"settings": settings}, timeout=arguments.adapter_timeout)
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 1 if result.get("returncode") not in (None, 0) else 0
-    unset = arguments.unset
+    result = run_adapter(target.bundle, "install", {"settings": {}}, timeout=arguments.adapter_timeout)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 1 if result.get("returncode") not in (None, 0) else 0
+
+
+def handle_remote_set(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Store settings of one remote after its adapter's configure operation accepts them."""
+
+    target = resolve_remote(arguments.remote, project=context.cwd)
+    return _configure_remote(target, _settings(arguments.pairs), [], arguments.adapter_timeout)
+
+
+def handle_remote_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove settings or credentials of one remote after its adapter's configure operation accepts the rest."""
+
+    target = resolve_remote(arguments.remote, project=context.cwd)
+    return _configure_remote(target, {}, arguments.keys, arguments.adapter_timeout)
+
+
+def _configure_remote(target: RemoteTarget, settings: dict[str, str], unset: list[str], timeout: float | None) -> int:
+    """Run one remote adapter's configure operation, then persist its settings and credentials."""
+
     if any(not key or "=" in key for key in unset):
-        raise ValueError("--unset requires a nonempty KEY without '='")
+        raise ValueError("unset requires a nonempty KEY without '='")
     persistable, credentials = split_settings(settings)
     metadata = read_metadata(target.bundle)
     configured = metadata.setdefault("settings", {})
@@ -194,9 +216,9 @@ def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIC
     configured.update(persistable)
     result = run_adapter(
         target.bundle,
-        operation,
+        "configure",
         {"settings": settings},
-        timeout=arguments.adapter_timeout,
+        timeout=timeout,
         unset_settings=unset,
     )
     if result.get("returncode") not in (None, 0):
@@ -215,14 +237,14 @@ def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIC
             )
     print(json.dumps(result, indent=2, sort_keys=True))
     print(
-        f"configured; verify httk is available there with: httk remote check {arguments.remote}",
+        f"configured; verify httk is available there with: httk remote check {target.name}",
         file=sys.stderr,
     )
     if metadata.get("kind") == "ssh" and "connection_reuse" not in configured and connection_reuse_default() is None:
         print(
-            f"notice: add --set connection_reuse=yes to keep ssh connections to {target.name} alive for "
-            "10 minutes, so later calls do not log in again (httk config set connection_reuse yes "
-            "makes that the default for every remote)",
+            f"notice: run httk remote set {target.name} connection_reuse=yes to keep ssh connections to "
+            f"{target.name} alive for 10 minutes, so later calls do not log in again "
+            "(httk config set connection_reuse=yes makes that the default for every remote)",
             file=sys.stderr,
         )
     return 0
@@ -320,14 +342,17 @@ def build_remote_parser(
     add = _leaf(
         group,
         "add",
-        summary="create a remote from a packaged template",
-        description="Create one remote bundle from a packaged adapter template",
+        summary="create a remote from a packaged adapter",
+        description="Create one remote bundle from a packaged adapter, then apply any given settings as remote set does",
         handler=handle_remote_add,
     )
-    add.add_argument("name", metavar="NAME", nargs="+", help="the name this remote is addressed by")
+    add.add_argument("name", metavar="NAME", help="the name this remote is addressed by")
+    add.add_argument("pairs", metavar="KEY=VALUE", nargs="*", type=_setting_pair, help="settings, as for remote set")
+    add.set_defaults(pairs_parser=add)
+    _add_adapter_timeout(add)
     add.add_argument(
-        "--template",
-        metavar="TEMPLATE",
+        "--kind",
+        metavar="KIND",
         help="local, ssh, mount or mount-daemon (default: local)",
     )
     add.add_argument(
@@ -342,53 +367,60 @@ def build_remote_parser(
         help="never prompt; refuse a missing value",
     )
 
+    store = _leaf(
+        group,
+        "set",
+        summary="change the settings of one remote",
+        description="Run the adapter's configure operation with new settings, and store them when it succeeds",
+        handler=handle_remote_set,
+    )
+    store.add_argument("remote", metavar="NAME", help="the remote name; ':' addresses a workspace on a remote")
+    store.add_argument(
+        "pairs",
+        metavar="KEY=VALUE",
+        nargs="+",
+        type=_setting_pair,
+        help=(
+            "adapter settings, e.g. host=, username=, port=, httk_command=, or "
+            "cli_prelude= (shell run before each httk command the CLI runs on the remote "
+            "over ssh/mount, e.g. module loads and a venv activation; not at job start "
+            "-- see environment.prelude; the tar push/pull stream is exempt), or "
+            "interactive_auth=yes (lets ssh prompt in the terminal for a password or "
+            "second factor), or connection_reuse=yes|no (keep ssh connections alive "
+            "for 10 minutes; default: httk config connection_reuse, else no); a secret "
+            "one is stored in credentials.json"
+        ),
+    )
+    _add_adapter_timeout(store)
+    store.set_defaults(pairs_parser=store)
+
+    clear = _leaf(
+        group,
+        "unset",
+        summary="remove settings of one remote",
+        description=(
+            "Remove stored settings or credentials of one remote, running the adapter's configure operation "
+            "with the remaining settings"
+        ),
+        handler=handle_remote_unset,
+    )
+    clear.add_argument("remote", metavar="NAME", help="the remote name; ':' addresses a workspace on a remote")
+    clear.add_argument("keys", metavar="KEY", nargs="+", help="a stored setting or credential to remove")
+    _add_adapter_timeout(clear)
+
     # The check verb runs the adapter operation whose frozen protocol spelling
     # is "install"; the maintained adapters only ever verify, never install.
-    for verb, operation, summary in (
-        ("configure", "configure", "run the adapter's configure operation"),
-        ("check", "install", "check that httk answers on the remote"),
-    ):
-        parser = _leaf(
-            group,
-            verb,
-            summary=summary,
-            description=f"Run the {verb} operation of one remote adapter",
-            handler=handle_remote_adapter_operation,
-        )
-        parser.set_defaults(operation=operation)
-        parser.add_argument(
-            "remote", metavar="NAME", nargs="+", help="the remote name; ':' addresses a workspace on a remote"
-        )
-        parser.add_argument(
-            "--set",
-            action="append",
-            default=[],
-            metavar="KEY=VALUE",
-            help=(
-                "one adapter setting, e.g. host=, username=, port=, httk_command=, or "
-                "cli_prelude= (shell run before each httk command the CLI runs on the remote "
-                "over ssh/mount, e.g. module loads and a venv activation; not at job start "
-                "-- see environment.prelude; the tar push/pull stream is exempt), or "
-                "interactive_auth=yes (lets ssh prompt in the terminal for a password or "
-                "second factor), or connection_reuse=yes|no (keep ssh connections alive "
-                "for 10 minutes; default: httk config connection_reuse, else no); a secret "
-                "one is stored in credentials.json (repeatable)"
-            ),
-        )
-        parser.add_argument(
-            "--adapter-timeout",
-            type=float,
-            metavar="SECONDS",
-            help="bound this adapter operation (default: the remote's timeout_seconds)",
-        )
-        if operation == "configure":
-            parser.add_argument(
-                "--unset",
-                action="append",
-                default=[],
-                metavar="KEY",
-                help="remove a stored setting or credential before applying --set (repeatable)",
-            )
+    check = _leaf(
+        group,
+        "check",
+        summary="check that httk answers on the remote",
+        description="Check that httk answers on each remote, with its stored settings",
+        handler=handle_remote_check,
+    )
+    check.add_argument(
+        "remote", metavar="NAME", nargs="+", help="the remote name; ':' addresses a workspace on a remote"
+    )
+    _add_adapter_timeout(check)
 
     imported = _leaf(
         group,

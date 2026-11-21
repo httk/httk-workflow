@@ -239,7 +239,7 @@ def configure_config(changes: Sequence[tuple[str, str]]) -> Path:
     """
 
     if not changes:
-        raise ValueError("configuration requires at least one --set, --unset, --add or --remove")
+        raise ValueError("configuration requires at least one set, unset, add or remove change")
     values = read_config()
     for operation, item in changes:
         if operation not in {"set", "unset", "add", "remove"}:
@@ -247,9 +247,9 @@ def configure_config(changes: Sequence[tuple[str, str]]) -> Path:
         key, separator, value = item.partition("=")
         if operation == "unset":
             if separator:
-                raise ValueError(f"--unset expects KEY: {item!r}")
+                raise ValueError(f"unset expects KEY, not KEY=VALUE: {item!r}")
         elif not separator:
-            raise ValueError(f"--{operation} expects KEY=VALUE: {item!r}")
+            raise ValueError(f"{operation} expects KEY=VALUE: {item!r}")
         entry = _settable(key)
         if operation == "unset":
             if key not in values:
@@ -258,7 +258,7 @@ def configure_config(changes: Sequence[tuple[str, str]]) -> Path:
             continue
         if entry.choices:
             if operation != "set":
-                raise ValueError(f"--{operation} applies to name lists; set {key} with --set {key}=VALUE")
+                raise ValueError(f"{operation} applies to name lists; set {key} with: httk config set {key}=VALUE")
             if value.strip().lower() not in entry.choices:
                 raise ValueError(f"configuration key {key!r} must be one of {', '.join(entry.choices)}: {value!r}")
             values[key] = value.strip().lower()

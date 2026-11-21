@@ -34,9 +34,9 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "move",
         "forget",
         "delete",
-        "settings",
-        "workflow-prelude",
-        "policy",
+        "show",
+        "set",
+        "unset",
         "fsck",
         "gc",
         "seal",
@@ -65,8 +65,9 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "manager": ("run",),
     "v1": ("collect",),
     "config": ("show", "set", "unset", "import-v1"),
-    "remote": ("list", "add", "configure", "check", "import-v1", "show", "remove"),
-    "campaign": ("init", "show", "submit", "collect", "start-managers"),
+    "remote": ("list", "add", "set", "unset", "check", "import-v1", "show", "remove"),
+    "launcher": ("list", "add", "set", "unset", "show", "check", "remove"),
+    "campaign": ("init", "show", "set", "unset", "submit", "collect", "start-managers"),
     "seal": ("verify",),
 }
 
@@ -192,11 +193,11 @@ def test_an_unknown_action_under_a_known_group_names_that_group(tmp_path: Path, 
 
 
 def test_an_unknown_action_under_a_nested_group_names_that_nested_group(capsys) -> None:
-    # `workspace settings` is a nested group of a tree httk-workflow mounts on the core
+    # `workspace exchange` is a nested group of a tree httk-workflow mounts on the core
     # `httk` command; a mistyped action still names the nested group it is under.
-    assert main(["workspace", "settings", "frobnicate"]) == 2
+    assert main(["workspace", "exchange", "frobnicate"]) == 2
     captured = capsys.readouterr().err
-    assert "httk workspace settings" in captured and "invalid choice: 'frobnicate'" in captured
+    assert "httk workspace exchange" in captured and "invalid choice: 'frobnicate'" in captured
 
 
 def test_an_unknown_group_names_the_tree(tmp_path: Path, capsys) -> None:
@@ -206,8 +207,8 @@ def test_an_unknown_group_names_the_tree(tmp_path: Path, capsys) -> None:
 
 
 def test_a_missing_required_argument_names_the_leaf(tmp_path: Path, capsys) -> None:
-    assert command(["workspace", "policy", "set"], _context(tmp_path)) == 2
-    assert "httk workspace policy set" in capsys.readouterr().err
+    assert command(["workspace", "set"], _context(tmp_path)) == 2
+    assert "httk workspace set" in capsys.readouterr().err
 
 
 def test_workflow_rejects_the_standalone_groups(tmp_path: Path, capsys) -> None:
@@ -267,8 +268,27 @@ def test_the_job_options_of_the_runner_store_and_per_job_modes_are_removed(tmp_p
 def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
 
-    # But --set on `remote configure` is, and stays, KEY=VALUE settings.
-    assert parser.parse_args(["remote", "configure", "--set", "host=a", "cluster"]).set == ["host=a"]
+    # Settings are positional KEY=VALUE pairs of the set verbs; configure and --template are gone.
+    assert parser.parse_args(["remote", "set", "cluster", "host=a"]).pairs == ["host=a"]
+    for removed in (
+        ["remote", "configure", "--set", "host=a", "cluster"],
+        ["remote", "add", "--template", "ssh", "cluster"],
+        ["remote", "check", "cluster", "--set", "host=a"],
+        ["launcher", "configure", "--set", "a=b", "cluster"],
+        ["launcher", "add", "--template", "slurm", "cluster"],
+        ["launcher", "set", "cluster", "--add-path", "confine.devices=/dev/a"],
+        ["config", "configure", "--set", "machine_names=a"],
+        ["config", "set", "machine_names", "a"],
+        ["campaign", "configure", "--set", "assignment=hash"],
+        ["workspace", "configure", "--set", "a=1"],
+        ["workspace", "settings", "set", "--key", "a", "--value", "1"],
+        ["workspace", "policy", "show"],
+        ["workspace", "workflow-prelude", "show"],
+        ["workspace", "show", "--key", "a"],
+        ["workspace", "init", "--setting", "a=1", "path"],
+    ):
+        with pytest.raises(SystemExit):
+            parser.parse_args(removed)
 
     with pytest.raises(SystemExit):
         parser.parse_args(["remote", "check", "--timeout", "5", "c"])

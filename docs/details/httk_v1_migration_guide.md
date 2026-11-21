@@ -199,7 +199,7 @@ httk workspace init --name default cluster-a:/remote/path/to/workflow-workspace
 ```
 
 `workspace_root` is retired. `workspace init REMOTE:PATH` initializes and
-registers the remote workspace, and `workspace settings set REMOTE:NAME …`
+registers the remote workspace, and `workspace set -w REMOTE:NAME KEY=VALUE…`
 then sets its scheduler and application settings. `remote import-v1` does not
 create a workspace. It keeps the legacy Runs hint in the remote's
 `legacy_settings` so an operator can choose the path explicitly.

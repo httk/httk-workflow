@@ -24,7 +24,7 @@ bundle.
 The maintained Slurm template is installed with:
 
 ```console
-httk launcher add --template slurm --global cluster
+httk launcher add --kind slurm --global cluster
 httk launcher check cluster
 ```
 
@@ -395,7 +395,7 @@ The PBS dispatcher appends `--allocation exec:BUNDLE/allocation` by default;
 setting it explicitly is equivalent:
 
 ```console
-httk launcher configure --set manager.allocation=exec:/home/me/.config/httk/launchers/pbs-cluster/allocation pbs-cluster
+httk launcher set pbs-cluster manager.allocation=exec:/home/me/.config/httk/launchers/pbs-cluster/allocation
 ```
 
 ### Has the allocation ended?

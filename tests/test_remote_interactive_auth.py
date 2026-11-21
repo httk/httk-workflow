@@ -13,8 +13,8 @@ from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote
 from httk.workflow import adapter_runtime, adapters
-from httk.workflow.adapters import add_remote, run_adapter, split_settings
-from httk.workflow.configuration import configure_config, read_config, set_config_key
+from httk.workflow.adapters import add_remote, resolve_remote, run_adapter, split_settings
+from httk.workflow.configuration import config_home, configure_config, read_config, set_config_key
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _transfer, command
 
@@ -211,18 +211,84 @@ def test_configure_notices_connection_reuse(
     context = CLIContext("httk", project)
 
     def configure(*settings: str) -> str:
-        argv = ["remote", "configure", "cluster", "--set", "host=h.example.test"]
-        for item in settings:
-            argv += ["--set", item]
-        assert command(argv, context) == 0
+        assert command(["remote", "set", "cluster", "host=h.example.test", *settings], context) == 0
         return capsys.readouterr().err
 
-    assert "--set connection_reuse=yes" in configure()
+    notice = configure()
+    assert "httk remote set cluster connection_reuse=yes" in notice
+    assert "httk config set connection_reuse=yes" in notice
     assert "notice" not in configure("connection_reuse=no")
-    assert command(["remote", "configure", "cluster", "--unset", "connection_reuse"], context) == 0
+    # An option between NAME and the required pairs still parses.
+    assert command(["remote", "set", "cluster", "--adapter-timeout", "5", "host=h2.example.test"], context) == 0
+    # Required pairs on both sides of an option are all collected.
+    assert (
+        command(["remote", "set", "cluster", "host=h3.example.test", "--adapter-timeout", "5", "port=23"], context) == 0
+    )
+    stored = adapters.read_metadata(resolve_remote("cluster", project=project).bundle)["settings"]
+    assert stored["host"] == "h3.example.test" and stored["port"] == "23"
+    capsys.readouterr()
+    assert command(["remote", "unset", "cluster", "connection_reuse"], context) == 0
     assert "notice" in capsys.readouterr().err
+    assert (
+        "connection_reuse" not in adapters.read_metadata(resolve_remote("cluster", project=project).bundle)["settings"]
+    )
     set_config_key("connection_reuse", "no")
     assert "notice" not in configure()
+
+
+def test_remote_add_with_settings_runs_the_configure_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="add-configure")
+    calls: list[tuple[str, dict[str, object]]] = []
+    timeouts: list[object] = []
+    returncode = 0
+
+    def fake_run_adapter(_bundle: Path, operation: str, request: dict[str, object], **kwargs: object) -> dict:
+        calls.append((operation, request))
+        timeouts.append(kwargs.get("timeout"))
+        return {"ok": returncode == 0, "operation": operation, "returncode": returncode}
+
+    monkeypatch.setattr(_transfer, "run_adapter", fake_run_adapter)
+    context = CLIContext("httk", project)
+    assert command(["remote", "add", "cluster", "--kind", "ssh", "host=h.example.test"], context) == 0
+    assert calls == [("configure", {"settings": {"host": "h.example.test"}})]
+    bundle = resolve_remote("cluster", project=project).bundle
+    metadata = adapters.read_metadata(bundle)
+    assert metadata["kind"] == "ssh" and metadata["settings"]["host"] == "h.example.test"
+    assert "httk remote set cluster connection_reuse=yes" in capsys.readouterr().err
+
+    returncode = 3
+    assert command(["remote", "add", "other", "--kind", "ssh", "host=bad.example.test"], context) == 1
+    error = capsys.readouterr().err
+    assert "remote other was created" in error and "httk remote set other KEY=VALUE" in error
+    assert "host" not in adapters.read_metadata(resolve_remote("other", project=project).bundle).get("settings", {})
+
+    returncode = 0
+    assert command(["remote", "add", "third", "--kind", "ssh", "prelude=x"], context) == 2
+    error = capsys.readouterr().err
+    assert "cli_prelude" in error and "remote third was created" in error
+    assert resolve_remote("third", project=project).bundle.is_dir()
+
+    # A stranded word after an option is a pair or a parser error; other leaves keep argparse's refusal.
+    assert command(["remote", "add", "fourth", "--kind", "ssh", "host"], context) == 2
+    assert "expected KEY=VALUE, not 'host'" in capsys.readouterr().err
+    assert command(["remote", "add", "fourth", "--kind", "ssh", "host=x", "--bogus"], context) == 2
+    assert "unrecognized arguments: --bogus\n" in capsys.readouterr().err
+    assert command(["remote", "list", "extra"], context) == 2
+    assert "unrecognized arguments: extra" in capsys.readouterr().err
+    assert len(calls) == 2  # neither refused add reached the adapter
+
+    # --global configures the global bundle it created, even where a project remote shadows the name.
+    argv = ["remote", "add", "cluster", "--global", "--kind", "ssh", "--adapter-timeout", "5"]
+    assert command([*argv, "host=global.example.test", "password=pw"], context) == 0
+    shared = config_home() / "remotes" / "cluster"
+    assert adapters.read_metadata(shared)["settings"]["host"] == "global.example.test"
+    assert adapters.read_credentials(shared) == {"password": "pw"}
+    assert adapters.read_metadata(bundle)["settings"]["host"] == "h.example.test"
+    assert not (bundle / "credentials.json").exists()
+    assert timeouts[-1] == 5.0
 
 
 _DENIED = "someone@fake.example.test: Permission denied (keyboard-interactive)."

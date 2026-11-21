@@ -265,14 +265,14 @@ Approved manager configurations are global `slurm` launchers that set
 counts (see {doc}`launchers`):
 
 ```console
-httk launcher add --template slurm --global small \
-  --set manager.confine=bwrap --set slurm.cpus_per_task=2 --set slurm.mem=4G \
-  --set slurm.time_limit=01:00:00 --set slurm.time_limit_max=12:00:00 \
-  --set manager.workers=2
-httk launcher configure --add-path confine.readonly_paths=/software small
+httk launcher add --kind slurm --global small \
+  manager.confine=bwrap slurm.cpus_per_task=2 slurm.mem=4G \
+  slurm.time_limit=01:00:00 slurm.time_limit_max=12:00:00 \
+  manager.workers=2
+httk launcher set small --add confine.readonly_paths=/software
 ```
 
-`--add-path` extends a colon-separated `confine.*` path list without restating
+`--add` extends a colon-separated `confine.*` path list without restating
 its computed default. List the launchers in the daemon configuration (see
 [Daemon configuration](#daemon-configuration)). The daemon reads the bundles
 without executing them and refuses one that:
@@ -480,7 +480,7 @@ While it has work, Slurm's time limit drains it as usual. See
 
 ### Configuration changes
 
-Edit a launcher bundle with `httk launcher configure`, or the daemon
+Edit a launcher bundle with `httk launcher set`, or the daemon
 configuration with `httk workspace daemon configure`, then reload it:
 
 ```console
@@ -886,7 +886,7 @@ The history is the workspace retention setting
 when it starts; restart it after a change:
 
 ```console
-httk workspace policy set --key retention.daemon_history_days --value 14 WORKSPACE
+httk workspace set -w WORKSPACE policy.retention.daemon_history_days=14
 ```
 
 A request is retired that long after
@@ -1090,7 +1090,7 @@ Intel MPI under Slurm needs `srun --mpi=pmi2`. Set it on the daemon's approved
 launcher, then reload the daemon so it picks up the changed launcher:
 
 ```bash
-httk launcher configure --set manager.launch_mpi=pmi2 small
+httk launcher set small manager.launch_mpi=pmi2
 httk workspace daemon reload WORKSPACE
 ```
 

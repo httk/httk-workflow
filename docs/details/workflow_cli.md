@@ -24,7 +24,7 @@ overrides a safety check instead.
 ## The command tree
 
 ```text
-httk workspace          show | configure | init | adopt | list | default | move | forget | delete | status | owners (managers) | attest-dead | workflows | settings show|set|unset | workflow-prelude show|set|unset | policy show|set|unset | fsck | gc | seal | unseal | verify | exchange enable | daemon init|configure|show|check|run
+httk workspace          show | set | unset | init | adopt | list | default | move | forget | delete | status | owners (managers) | attest-dead | workflows | fsck | gc | seal | unseal | verify | exchange enable | daemon init|configure|show|check|run
 httk job                new | submit | request | delete | seal | unseal | detach | unlock | eject | adopt | list | show | log | why | debug | push | pull | transfer
 httk collect            [PATH] [--workspace WORKSPACE] [--into PATH] [--dry-run] …
 httk workflow list      [--workspace WORKSPACE] [--json]
@@ -35,14 +35,14 @@ httk workflow build     [--workspace WORKSPACE] [--list] WORKFLOW…
 httk workflow precheck  [--workspace WORKSPACE] [--placement P] [--json]
 httk workflow run       [--workspace WORKSPACE]  (the recommended spelling of `manager run`)
 httk manager            run
-httk launcher           list | add | configure | show | check | remove
+httk launcher           list | add | set | unset | show | check | remove
 httk workflow monitor   [--workspace WORKSPACE …] [--refresh SECONDS]
 httk workflow postprocess
 httk v1                 collect
-httk remote             list | add | configure | check | import-v1 | show | remove | daemon
-httk config             show | configure | set | unset | import-v1
+httk remote             list | add | set | unset | check | import-v1 | show | remove | daemon
+httk config             show | set | unset | import-v1
 httk seal               verify [PATH] [--json] [--trusted-key KEY] [--shallow]
-httk campaign           init | show | configure | remove | submit | collect | start-managers
+httk campaign           init | show | set | unset | remove | submit | collect | start-managers
 httk transfer           status
 httk setup | identity    (core-owned: per-user configuration and named operator identities)
 httk project            init | show | import-v1 | export | check | repair | manifest | verify | seal | unseal   (core-owned)
@@ -54,29 +54,33 @@ Concept groups live directly below `httk`: `httk launcher`, `httk remote`,
 `httk manager`, `httk campaign`, `httk config`, and `httk seal`. `workflow`
 retains workflow installation, inspection, building and execution.
 
-Use `show [--json]` to inspect configuration and `configure` to change it.
-Repeat `--set KEY=VALUE` to add or replace a value and `--unset KEY` to remove
-an override. Supported list settings also offer `--add KEY=VALUE` and
-`--remove KEY=VALUE`; these change individual members, whereas `--unset`
-removes the whole override. Workspace, launcher and remote configuration
-removes overrides before setting new values; user, campaign and daemon
-configuration applies flags in argument order.
+Use `show [--json]` to inspect configuration. Workspaces, launchers, remotes,
+the per-user configuration and campaigns change it with `set KEY=VALUE...`, which
+adds or replaces values, and `unset KEY...`, which removes overrides. Supported
+list settings also take `--add KEY=VALUE` and `--remove KEY=VALUE` on `set`;
+these change individual members, whereas `unset` removes the whole override.
+One `set` applies its pairs, then `--add`, then `--remove`, and saves only when
+every change is valid. A workspace's `show`, `set` and `unset` take the
+workspace with `-w/--workspace` and address one key namespace: application
+settings, `policy.*` members and `prelude.WORKFLOW_ID` preludes. Daemon
+configuration still uses `configure` with repeatable `--set KEY=VALUE` and
+`--unset KEY`, applying flags in argument order.
 
 | Configuration | Inspect | Modify | Remove the definition |
 | --- | --- | --- | --- |
-| Workspace application settings | `workspace show [NAME...]` | `workspace configure [NAME...] --set KEY=VALUE --unset KEY` | `workspace forget NAME` keeps files; `workspace delete NAME` deletes them after confirmation |
-| Workspace policy | `workspace policy show` | `workspace policy set --key KEY --value JSON` (pairs repeat; one write); `workspace policy unset --key KEY` restores the default | Required format members cannot be deleted |
-| Workflow preludes | `workspace workflow-prelude show` | `workspace workflow-prelude set` / `unset` | Unset a workflow's prelude |
+| Workspace application settings | `workspace show [KEY...]` | `workspace set KEY=VALUE...`, `workspace unset KEY...` | `workspace forget NAME` keeps files; `workspace delete NAME` deletes them after confirmation |
+| Workspace policy | `workspace show policy.KEY` | `workspace set policy.KEY=JSON...`; `workspace unset policy.KEY` restores the default | Required format members cannot be deleted |
+| Workflow preludes | `workspace show prelude.WORKFLOW_ID` | `workspace set prelude.WORKFLOW_ID=TEXT\|@FILE`, `workspace unset prelude.WORKFLOW_ID` | Unset a workflow's prelude |
 | Installed workflows | `workspace workflows`, `workflow list --workspace` | `workflow install --workspace` | `workflow uninstall --workspace` |
-| Launcher | `launcher show NAME` | `launcher configure NAME --set KEY=VALUE --unset KEY`; `--add` / `--remove` for confinement path lists | `launcher remove NAME` |
-| Remote | `remote show NAME` | `remote configure NAME --set KEY=VALUE --unset KEY`, including private credentials | `remote remove NAME` |
-| User configuration | `config show` | `config configure --set KEY=VALUE --unset KEY`; `--add` / `--remove` for `machine_names` | Unset its configurable keys |
-| Campaign | `campaign show` | `campaign configure --set partitions.NAME=WORKSPACE --unset partitions.NAME`; set or unset `assignment` | `campaign remove` clears the map, keeping jobs and workspaces |
+| Launcher | `launcher show NAME` | `launcher set NAME KEY=VALUE...`, `launcher unset NAME KEY...`; `set --add` / `--remove` for confinement path lists | `launcher remove NAME` |
+| Remote | `remote show NAME` | `remote set NAME KEY=VALUE...`, `remote unset NAME KEY...`, including private credentials | `remote remove NAME` |
+| User configuration | `config show` | `config set KEY=VALUE...`, `config unset KEY...`; `set --add` / `--remove` for `machine_names` | Unset its configurable keys |
+| Campaign | `campaign show` | `campaign set partitions.NAME=WORKSPACE`, `campaign unset partitions.NAME`; set or unset `assignment` | `campaign remove` clears the map, keeping jobs and workspaces |
 | Workspace daemon | `workspace daemon show PATH` | `workspace daemon configure PATH --set KEY=VALUE --unset KEY`; `--add` / `--remove` for launchers and authorized keys | Enrollment removal is not provided |
 
-Local workspace batches validate before writing; remote workspace batches use
-single-key operations sequentially, so a transport failure can leave earlier
-changes applied. Removing daemon enrollment or disabling the exchange is not
+A workspace `set` or `unset` validates every change and stores them in one
+write of the workspace's `format.json`, so either all of them apply or none
+does; on a remote workspace it is one forwarded command. Removing daemon enrollment or disabling the exchange is not
 offered: exchange clients, running managers and retained submission state must
 be settled first.
 
@@ -108,7 +112,7 @@ Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workspace init [OPTIONS] PATH...` | create a workspace in a new or empty directory of its own, or adopt an existing one, registering each name (basename or `--name`) and recording it in the project's `members.json` | `--name` (one path only), `--setting KEY=VALUE`, `--no-durable` |
+| `workspace init PATH [KEY=VALUE...]` | create a workspace in a new or empty directory of its own (`REMOTE:PATH` on a remote), or adopt an existing one, registering its name (basename or `--name`) and recording it in the project's `members.json`; the pairs seed application settings | `--name`, `--no-durable` |
 | `workspace exchange enable [WORKSPACE]` | enable the `exchange/` extension of a workspace (idempotent) | |
 | `workspace daemon init WORKSPACE` | approve global `slurm` launchers, enable the exchange when needed and enroll the workspace, then check the sandbox | `--set KEY=VALUE`, `--add KEY=VALUE` |
 | `workspace daemon configure WORKSPACE` | change the daemon configuration, activated by `reload` or when the daemon next starts | `--set`, `--add`, `--unset`, `--remove` |
@@ -126,11 +130,9 @@ Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 | `workspace owners [NAME...]` | list the owners (managers, CLI processes, daemons) with their liveness; `managers` is an alias | `--kind manager\|cli\|daemon`, `--json` |
 | `workspace attest-dead OWNER [NAME] --reason TEXT` | declare an owner and its launches ended, so the next manager tick or `workspace gc` recovers its jobs | `--operator NAME`, `--force` |
 | `workspace workflows [NAME...]` | list the workflows installed in a workspace | `--json` |
-| `workspace show [NAME...]` | print application settings, each marked recognized, unrecognized or undeclared | `--key KEY`, `--json` |
-| `workspace configure [NAME...]` | set and unset application settings in one write (remote: one forwarded command) | `--set KEY=VALUE`, `--unset KEY` (repeatable), `--json` |
-| `workspace settings show\|set\|unset` | print, store or remove application settings; `show` adds a column marking each key recognized, unrecognized or undeclared, `set` takes repeated `--key`/`--value` pairs in one write, warning about unrecognized keys and noting undeclared ones, and `unset` takes repeated `--key` in one write and prints the removed keys as a JSON list | `--key KEY`, `--value VALUE` |
-| `workspace workflow-prelude show\|set\|unset` | print, store or remove one workflow's prelude | `--workflow WORKFLOW`, `--value VALUE` (`@FILE` reads a file) |
-| `workspace policy show\|set\|unset` | print, store or reset policy members (remote: one forwarded command each); `set` takes repeated `--key`/`--value` pairs in one write | `--key KEY`, `--value JSON`, `--json` |
+| `workspace show [KEY...]` | print every key (application settings with a column marking each recognized, unrecognized or undeclared, then `policy.*`, then `prelude.*`), or the selected keys; one KEY prints its bare value | `-w`, `--json`, `--adapter-timeout` |
+| `workspace set KEY=VALUE...` | store application settings, policy members and preludes in one validated write, printing the changed keys as one JSON object; warns about unrecognized settings and notes undeclared ones (remote: one forwarded command) | `-w`, `--no-durable`, `--adapter-timeout` |
+| `workspace unset KEY...` | remove application settings and preludes and restore policy defaults in one write, printing the keys as a JSON list (remote: one forwarded command) | `-w`, `--no-durable`, `--adapter-timeout` |
 | `workspace fsck [NAME...]` | check the job tree for what the kernel cannot resolve; only while nothing else uses the workspace | `--repair` (quiescent workspace only, asks first), `--yes`, `--json` |
 | `workspace gc [NAME...]` | collect what the retention policy allows and recover dead owners (remote: over the adapter) | `--dry-run`, `--category CATEGORY` (repeatable), `--json` |
 | `workspace seal [NAME...]` | record every job's seal digest under one signed workspace seal, listing the unsealed jobs | `--keys REFS` |
@@ -173,29 +175,29 @@ commands; managers and jobs do not check it.
 
 Application settings are a flat map of small dotted values a runner resolves
 when it runs, such as `vasp.command`; a value that parses as JSON is stored as
-that scalar, a bare word as a string. `workspace init --setting KEY=VALUE` seeds
+that scalar, a bare word as a string. `workspace init PATH KEY=VALUE...` seeds
 them, and a workspace bound to a remote is also seeded from that remote's
 whitelisted settings (a cluster's `vasp_command` becomes `vasp.command`). They
 are snapshotted into each attempt, so never store credentials there; see
 [application settings](taskmanager.md#application-settings).
 
 ```console
-httk workspace settings set --key vasp.command --value vasp_std \
-  --key environment.prelude --value "module load httk" my-workspace
-httk workspace workflow-prelude set --workflow relax-vasp --value @prelude.sh my-workspace
-httk workspace workflow-prelude show --json my-workspace
+httk workspace set -w my-workspace vasp.command=vasp_std \
+  environment.prelude="module load httk" prelude.relax-vasp=@prelude.sh
+httk workspace show -w my-workspace prelude.relax-vasp
 ```
 
-`environment.prelude` applies to every job and `workflow-prelude` only to the
+`environment.prelude` applies to every job and `prelude.WORKFLOW_ID` only to the
 jobs of one workflow id, after it; both run under `set -e`. A workflow prelude
-`VALUE` is stored verbatim, and `@FILE` reads it from a file. Preludes are
+value is stored verbatim, never parsed as JSON, and `@FILE` reads it from a file
+(on the far side for a remote workspace, which receives the pairs as given). Preludes are
 workspace-local: a transferred job runs under the destination's preludes. See
 [environment preludes](../workspaces.md#environment-preludes).
 
 ### Policy, owners, and checks
 
-The workspace policy (`visibility_deadline_seconds` and the `retention.*`
-limits) is stored in `format.json`; see
+The workspace policy (`policy.visibility_deadline_seconds` and the
+`policy.retention.*` limits) is stored in `format.json`; see
 [workspace policy](taskmanager.md#workspace-policy). `workspace owners` lists
 who holds jobs, with the liveness the read-only death proof gives from this
 host. An owner whose death no probe can prove is declared dead by the operator:
@@ -1438,8 +1440,9 @@ and required inputs. It exits `1` for any problem; see
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `launcher list` | list manager launchers visible to this project | `--json` |
-| `launcher add NAME...` | create launchers from the packaged `slurm` template | `--template`, `--set`, `--global`, `--non-interactive` |
-| `launcher configure NAME...` | update launcher settings | `--set`, `--unset`, `--add KEY=PATH[:PATH...]`, `--remove KEY=PATH[:PATH...]` |
+| `launcher add NAME [KEY=VALUE...]` | create a launcher from the packaged `slurm` kind, with initial settings | `--kind`, `--global`, `--non-interactive` |
+| `launcher set NAME [KEY=VALUE...]` | update launcher settings: the pairs, then `--add`, then `--remove`, validated together | `--add KEY=PATH[:PATH...]`, `--remove KEY=PATH[:PATH...]` |
+| `launcher unset NAME KEY...` | remove launcher setting overrides | |
 | `launcher show NAME...` | describe launchers and their settings, each marked by whether the launcher reads it | `--json` |
 | `launcher check NAME...` | check a launcher's required binaries | `--adapter-timeout` |
 | `launcher remove NAME...` | remove launcher bundles | `--yes` |
@@ -1553,9 +1556,10 @@ remote meaning "this machine", so `remote add local` is refused.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `remote list` | list the remotes this project can reach | `--json` |
-| `remote add NAME...` | create remotes from a packaged adapter template | `--template`, `--global`, `--non-interactive` |
-| `remote configure REMOTE...` | run adapters' `configure` operation | `--set KEY=VALUE`, `--unset KEY`, `--adapter-timeout` |
-| `remote check REMOTE...` | check that `httk` answers on remotes | `--set KEY=VALUE`, `--adapter-timeout` |
+| `remote add NAME [KEY=VALUE...]` | create a remote from a packaged adapter; pairs then run exactly what `remote set` runs on the new bundle, and if that fails the remote stays created | `--kind`, `--global`, `--non-interactive`, `--adapter-timeout` |
+| `remote set NAME KEY=VALUE...` | run the adapter's `configure` operation with new settings and store them when it succeeds | `--adapter-timeout` |
+| `remote unset NAME KEY...` | remove stored settings or credentials, running `configure` with the remaining settings | `--adapter-timeout` |
+| `remote check NAME...` | check that `httk` answers on remotes, with their stored settings | `--adapter-timeout` |
 | `remote import-v1 SOURCE...` | map legacy *httk* v1 computer bundles | `--name` (one source only), `--global` |
 | `remote show NAME...` | describe remotes and their settings | `--json` |
 | `remote remove NAME...` | remove remote bundles; refused while a registered workspace holds a transfer bound for the remote | `--yes` skips only the confirmation |
@@ -1578,7 +1582,7 @@ executable `adapter`; project definitions shadow global ones. {doc}`adapter_auth
 is the reference for writing your own: the bundle layout, the request and
 result documents of the six operations (`configure`, `install`, `invoke`,
 `push`, `pull`, and `status`), and the optional `daemon` operation. The module
-packages four maintained templates for `remote add --template`:
+packages four maintained adapters for `remote add --kind`:
 
 - `local`: same-machine transport;
 - `ssh`: one `tar` stream per transfer plus command execution over SSH;
@@ -1593,7 +1597,7 @@ See {doc}`/details/remotes` for configuration and request-ID retry rules.
 
 ### Remote settings
 
-`remote configure --set KEY=VALUE` persists only the machine-level keys
+`remote set NAME KEY=VALUE...` persists only the machine-level keys
 `check_connectivity`, `check_mount`, `cli_prelude`, `connection_reuse`,
 `exec_command`, `exchange`, `host`, `httk_command`, `interactive_auth`,
 `legacy_settings`, `mount_root`, `port`, `remote_root`, `username`,
@@ -1631,9 +1635,8 @@ shell, use the remote's `cli_prelude` setting, or point `httk_command` at it.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `config show [KEY]` | print the configuration, or one member | `--json` |
-| `config configure` | set/unset keys or add/remove machine names | `--set`, `--unset`, `--add machine_names=NAME`, `--remove machine_names=NAME` |
-| `config set KEY VALUE` | store one member | `machine_names` is a comma-separated list of names this machine answers to; `connection_reuse` (`yes`/`no`) is the `connection_reuse` of every remote that sets none |
-| `config unset KEY` | remove one member | |
+| `config set [KEY=VALUE...]` | store members: the pairs, then `--add`, then `--remove`, validated together and saved once | `--add machine_names=NAME`, `--remove machine_names=NAME`; `machine_names` is a comma-separated list of names this machine answers to; `connection_reuse` (`yes`/`no`) is the `connection_reuse` of every remote that sets none |
+| `config unset KEY...` | remove members | |
 | `config import-v1 [SOURCE]` | read a legacy `~/.httk` configuration | |
 
 User configuration lives below `$XDG_CONFIG_HOME/httk/` (`config.json`, the
@@ -1742,7 +1745,8 @@ exception: the daemon accepts only commands signed by a key in its own
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `campaign init` | define the project's partition map and assignment policy | `--partition NAME=WORKSPACE`, `--assignment` |
-| `campaign configure` | edit individual partitions or the assignment policy | `--set partitions.NAME=WORKSPACE`, `--unset partitions.NAME`, `--set assignment=POLICY`, `--unset assignment` |
+| `campaign set KEY=VALUE...` | set individual partitions or the assignment policy | `partitions.NAME=WORKSPACE`, `assignment=POLICY` |
+| `campaign unset KEY...` | remove partitions or reset the assignment to `hash` | `partitions.NAME`, `assignment` |
 | `campaign remove` | clear campaign configuration, keeping jobs and workspaces | `--yes` skips confirmation |
 | `campaign show` | show the partition map | `--json` |
 | `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--install`, `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
@@ -1802,12 +1806,20 @@ some commands and options. These spellings no longer parse:
 | `workspace seal --force` | `job seal` the remaining jobs first, or seal the workspace with them listed as unsealed |
 | `manager run --lease-seconds`, `--takeover-grace-factor`, `--unsafe-persistent-takeover`, `--unsafe-isolated-takeover` | recovery only after the death proof or `workspace attest-dead` |
 | `transfer send`, `transfer fetch`, `transfer status REMOTE` (by remote) | `job transfer --job JOB … SRC DST`; `transfer status WS` lists one workspace's holds (`REMOTE:WS` for a remote one) |
-| the remote setting `transfer_session` (`off` forced the adapter operations) | nothing: transfers always use a transfer session, and both ends must run the same *httk* version; `remote configure --set transfer_session=…` is refused as an unknown setting |
+| the remote setting `transfer_session` (`off` forced the adapter operations) | nothing: transfers always use a transfer session, and both ends must run the same *httk* version; `remote set NAME transfer_session=…` is refused as an unknown setting |
 | `job adopt --stdin-tar` (with the hidden `--token`, `--sync`, `--built-for`), `workflow install --stdin-tar`, `--from-store`, `--source-label`, `--build`, `--also-build`, `workflow list --built-for` | the transfer session's own requests; `job adopt BUNDLE…` adopts bundles on disk |
 | the adapter operation `deliver` | the transfer session (`session` operation) |
 | `job list --kind`, `job transfer --kind` | `--state STATE` (and `--step STEP` to select by step) |
 | `--force` on `job delete`, `job unseal`, `workspace delete`, `workspace unseal`, `launcher remove`, `remote remove`, `campaign remove` | `--yes` (pre-confirms the prompt; `workspace delete` now asks too) |
 | `--durable` | nothing: durability is the default; `--no-durable` opts out |
+| `config configure --set/--unset/--add/--remove`, `config set KEY VALUE` | `config set KEY=VALUE... [--add KEY=VALUE] [--remove KEY=VALUE]`, `config unset KEY...` |
+| `campaign configure --set/--unset` | `campaign set KEY=VALUE...`, `campaign unset KEY...` |
+| `remote configure NAME... --set KEY=VALUE --unset KEY` | `remote set NAME KEY=VALUE...`, `remote unset NAME KEY...` (one remote per call) |
+| `remote add --template KIND` | `remote add --kind KIND NAME [KEY=VALUE...]` (one remote per call) |
+| `remote check --set KEY=VALUE` | `remote set` first: `remote check` checks the stored settings |
+| `launcher configure NAME... --set/--unset/--add/--remove`, `--add-path`, `--remove-path` | `launcher set NAME [KEY=VALUE...] [--add KEY=PATH[:PATH...]] [--remove KEY=PATH[:PATH...]]`, `launcher unset NAME KEY...` |
+| `launcher add --template KIND --set KEY=VALUE` | `launcher add --kind KIND NAME [KEY=VALUE...]` (one launcher per call) |
+| several NAMEs in one `remote add`/`configure` or `launcher add`/`configure` call; exit status 1 for their validation errors | one NAME per `remote add/set/unset` and `launcher add/set/unset` call; a validation error of these commands exits 2 |
 | `job new --step`, `job debug --step` | `--start-step` |
 | `--format` on `job new`, `workflow describe`, `workflow install` | `--language` |
 | `manager run --idle`, `workflow run --idle` | `--keep-running` |
@@ -1815,6 +1827,11 @@ some commands and options. These spellings no longer parse:
 | `launcher check --launcher-timeout` | `--adapter-timeout` |
 | `httk init` | `httk setup` |
 | `httk system reset [-f]` | `httk setup --reset [--yes]` |
+| `workspace configure NAME... --set KEY=VALUE --unset KEY`, `workspace settings set\|unset --key KEY --value VALUE` | `workspace set -w WS KEY=VALUE...`, `workspace unset -w WS KEY...` |
+| `workspace show NAME... [--key KEY]`, `workspace settings show` | `workspace show -w WS [KEY...]` (also lists `policy.*` and `prelude.*`) |
+| `workspace policy show\|set\|unset --key KEY --value JSON` | `workspace show\|set\|unset` with `policy.KEY` (e.g. `policy.retention.trash_days=14`) |
+| `workspace workflow-prelude show\|set\|unset --workflow ID --value TEXT` | `workspace show\|set\|unset` with `prelude.ID` (`prelude.ID=@FILE` reads a file) |
+| `workspace init --setting KEY=VALUE`, `workspace init PATH PATH...` | `workspace init PATH [KEY=VALUE...]` (one path per call) |
 | `httk project adopt` | `httk project repair` (adopts members unless `--no-adopt`) |
 | `httk project repair --dry-run` | `httk project check` |
 | `httk project manifest create` | `httk project manifest` |

@@ -43,21 +43,32 @@ A workspace carries a flat map of *application settings*, small values a
 runner resolves at run time, such as the VASP command:
 
 ```console
-httk workspace configure default --set vasp.command=vasp_std
-httk workspace show default
-httk workspace configure default --unset vasp.command
+httk workspace set -w default vasp.command=vasp_std
+httk workspace show -w default
+httk workspace show -w default vasp.command
+httk workspace unset -w default vasp.command
 ```
 
-One `configure` call applies every `--set` and `--unset` in one validated
-write; for a workspace on a remote it is one forwarded command, so one ssh
-connection.
+`workspace show`, `set` and `unset` address one key namespace: application
+settings under their dotted names, the [policy](details/taskmanager.md#workspace-policy) as
+`policy.visibility_deadline_seconds` and `policy.retention.MEMBER`, and the
+[per-workflow preludes](#environment-preludes) as `prelude.WORKFLOW_ID`; an application
+setting cannot start with `policy.` or `prelude.`. A setting an older release
+stored under such a name is not reachable through these verbs: remove it by
+editing the workspace's `.httk-workspace/format.json`, and store its value
+under a key outside those namespaces. One `set` or `unset` validates every
+change and stores them all in one write, or none; for a workspace on a remote
+each verb is one forwarded command, so one ssh connection. `show` with no key prints every key,
+one `key<TAB>value` line each (values as JSON, so a prelude's newlines appear
+as `\n`, and application settings get a third column, below); one key prints
+its bare value; `--json` prints one flat object.
 
 The manager exports each scalar setting into the attempt environment under its
 `HTTK_` name, so `vasp.command` becomes `HTTK_VASP_COMMAND`. A real
 environment variable is a deployment override and wins over the workspace
 setting; a job's own parameter of the same name wins over both.
 
-`httk workspace settings show` marks each setting by who reads it:
+`httk workspace show` marks each setting by who reads it:
 *recognized* (by *httk-workflow*, an installed code-support package, or a
 workflow installed in the workspace whose manifest declares the key; see
 {doc}`details/workflow_packages`), *unrecognized* (in a namespace
@@ -67,7 +78,7 @@ effect; an unknown `confine.` key even stops managers from starting), or
 still read it without declaring it, or a future workflow may):
 
 ```console
-$ httk workspace settings show default
+$ httk workspace show -w default
 foo.bar	1	undeclared: nothing installed declares reading it; a workflow may still read it without declaring it, or a future workflow may
 mywf.threshold	0.5	recognized by workflow mywf
 slurm.account	"proj"	recognized by httk-workflow
@@ -102,8 +113,8 @@ one-at-a-time processing. A value outside 1..32 is refused when set, and the
 end of a transfer uses its own workspace's value:
 
 ```console
-httk workspace settings set --key io.workers --value 16 default
-httk workspace settings set --key io.workers --value 4 cluster:default
+httk workspace set -w default io.workers=16
+httk workspace set -w cluster:default io.workers=4
 ```
 
 `io.sync` (`auto`, the default, `syncfs` or `fsync`) sets how jobs that a
@@ -252,7 +263,7 @@ unknown and the jobs stay held at the source, and `job transfer --resume`
 then reports those that arrived as `already_adopted` and releases them.
 
 ```console
-httk workspace settings set --key io.sync --value fsync default
+httk workspace set -w default io.sync=fsync
 ```
 
 `io.sync_errors` (`fail`, the default, or `ignore`) sets what a write error
@@ -282,13 +293,13 @@ refused when set, and one stored otherwise counts as `fail` (with a warning);
 like `io.sync`, it is read afresh at every landing.
 
 ```console
-httk workspace settings set --key io.sync_errors --value ignore default
+httk workspace set -w default io.sync_errors=ignore
 ```
 
 Engine tunables (the visibility deadline of a shared filesystem and the
 retention limits of `gc`) are *workspace policy*, kept apart from application
-settings and edited with `workspace policy show|set`; see
-{doc}`details/taskmanager`.
+settings and addressed as the `policy.*` keys of `workspace show|set|unset`;
+see {doc}`details/taskmanager`.
 
 ## Installed workflows
 
@@ -312,8 +323,8 @@ prelude, not in the command setting. There are two layers, both run under
 it in a half-configured environment:
 
 ```console
-httk workspace settings set --key environment.prelude --value "module load httk" default
-httk workspace workflow-prelude set --workflow vasp.relax --value "module load VASP/6.4.2" default
+httk workspace set -w default environment.prelude="module load httk"
+httk workspace set -w default prelude.vasp.relax="module load VASP/6.4.2"
 ```
 
 `environment.prelude` applies to every job of the workspace and runs before
@@ -330,15 +341,14 @@ launcher once, then select it per workspace together with the scheduler
 directives it should use:
 
 ```console
-httk launcher add --template slurm --global cluster
+httk launcher add --kind slurm --global cluster
 httk launcher check cluster
-httk workspace settings set --key manager.launch --value cluster \
-  --key slurm.partition --value batch --key slurm.time_limit --value 02:00:00 default
+httk workspace set -w default manager.launch=cluster \
+  slurm.partition=batch slurm.time_limit=02:00:00
 httk workflow run --count 4 --workspace default
 ```
 
-`--key` and `--value` repeat in pairs, the i-th `--key` taking the i-th
-`--value`; every pair is validated before any is stored, in one write.
+Every pair is validated and all of them are stored in one write, or none is.
 
 `httk workflow run --count 4` now submits four managers through Slurm and
 prints their scheduler job ids. `--inline` runs one manager in the current
@@ -358,9 +368,8 @@ A remote reaches another machine: it moves files and runs `httk` there. It
 does not schedule anything; the destination workspace's launcher does that.
 
 ```console
-httk remote add --template ssh kappa
-httk remote configure --set host=login.example.org --set username=me kappa
-httk remote configure --set cli_prelude='module load Python/3.13' kappa
+httk remote add kappa --kind ssh host=login.example.org username=me
+httk remote set kappa cli_prelude='module load Python/3.13'
 httk remote check kappa
 ```
 
@@ -373,7 +382,7 @@ remote is created and addressed by writing the remote name before it:
 
 ```console
 httk workspace init --name runs kappa:/scratch/me/httk/runs
-httk workspace settings set --key manager.launch --value cluster kappa:runs
+httk workspace set -w kappa:runs manager.launch=cluster
 httk workspace status kappa:runs
 httk workflow run --workspace kappa:runs --count 4
 ```

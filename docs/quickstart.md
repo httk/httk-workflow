@@ -52,7 +52,7 @@ $ httk setup --name "Your Name" --email you@example.org
 $ httk project init --name quickstart .
 $ httk workspace init --name default workspace
 $ httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --install --input structure=POSCAR --tag silicon
-$ httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
+$ httk workspace set -w default vasp.command="$PWD/examples/mock_vasp.py"
 $ httk workflow run
 $ httk collect --into results.sqlite --id-base httk.quickstart
 $ httk workflow postprocess --script relaxation-plot
@@ -98,7 +98,7 @@ silicon--0c4f…	/…/workspace/jobs/ready/silicon--0c4f…~p500~…
 A job's directory moves with its state (`jobs/ready/`, `jobs/owned/…`,
 `jobs/succeeded/`), so name a job by its key or UUID, not by its path.
 
-**`settings set`** stored workspace state that travels with the job wherever it
+**`workspace set`** stored workspace state that travels with the job wherever it
 runs. The manager exports scalar settings into each attempt environment, so
 `vasp.command` becomes `HTTK_VASP_COMMAND`; a real VASP machine can set it to
 `vasp_std`. The setting names only the program; the manager supplies the

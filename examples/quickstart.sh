@@ -71,7 +71,7 @@ httk_cmd job new \
 
 # 3. Workspace state follows the job. Without VASP, the mock beside this file
 #    writes plausible outputs.
-httk_cmd workspace settings set --key vasp.command --value "$here/mock_vasp.py" default
+httk_cmd workspace set -w default vasp.command="$here/mock_vasp.py"
 
 # 4. Run every ready job until nothing is left to do.
 httk_workflow run

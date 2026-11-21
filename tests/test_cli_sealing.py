@@ -133,8 +133,8 @@ def test_workspace_seal_lists_unsealed_jobs_and_refuses_a_second_seal(tmp_path: 
     capsys.readouterr()
 
     # The workspace seal blocks modifying CLI commands until it is removed.
-    settings = ["workspace", "settings", "set", "--key", "answer", "--value", "1"]
-    assert command(settings, _context(project_root)) == 1
+    settings = ["workspace", "set", "answer=1"]
+    assert command(settings, _context(project_root)) == 2
     assert "sealed" in capsys.readouterr().err
     assert command(["workspace", "unseal", "--yes"], _context(project_root)) == 0
     assert command(settings, _context(project_root)) == 0

@@ -37,10 +37,10 @@ registered workspace, never a bare path, because the campaign records it.
 Change individual entries without restating the whole map:
 
 ```console
-httk campaign configure --set partitions.east=screening-c
-httk campaign configure --unset partitions.east
-httk campaign configure --set assignment=explicit
-httk campaign configure --unset assignment
+httk campaign set partitions.east=screening-c
+httk campaign unset partitions.east
+httk campaign set assignment=explicit
+httk campaign unset assignment
 httk campaign remove --yes
 ```
 

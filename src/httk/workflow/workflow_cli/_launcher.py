@@ -22,7 +22,7 @@ from ..launchers import (
     remove_launcher,
     resolve_launcher,
 )
-from ._common import _group, _leaf, _required, _settings, confirm
+from ._common import _group, _leaf, _required, _setting_pair, _settings, confirm
 
 
 def _launcher_batch(
@@ -72,41 +72,57 @@ def handle_launcher_list(arguments: Namespace, context: CLIContext) -> int:
 
 
 def handle_launcher_add(arguments: Namespace, context: CLIContext) -> int:
-    """Create launcher bundles from a maintained template."""
+    """Create one launcher bundle from a maintained template."""
 
-    if isinstance(arguments.name, list):
-        return _launcher_batch(arguments, context, handle_launcher_add)
-    template = _required(
-        arguments.template,
-        "launcher template",
+    kind = _required(
+        arguments.kind,
+        "launcher kind",
         non_interactive=arguments.non_interactive,
         default="slurm",
     )
-    settings = _settings(arguments.set)
+    settings = _settings(arguments.pairs)
     print(
         add_launcher(
             arguments.name,
-            template=template,
+            template=kind,
             settings=settings,
             project=context.cwd,
             global_=arguments.global_scope,
         )
     )
-    report_written_settings(settings, layer="launcher", kind=template)
+    report_written_settings(settings, layer="launcher", kind=kind)
     return 0
 
 
-def handle_launcher_configure(arguments: Namespace, context: CLIContext) -> int:
-    """Update or remove settings in one or more launcher bundles."""
+def handle_launcher_set(arguments: Namespace, context: CLIContext) -> int:
+    """Update one launcher's settings: sets, then ``--add``, then ``--remove``."""
 
-    if isinstance(arguments.name, list):
-        return _launcher_batch(arguments, context, handle_launcher_configure)
-    settings = _settings(arguments.set)
-    changed = _changed_paths(arguments.name, settings, arguments.unset, arguments.add, arguments.remove, context.cwd)
-    print(configure_launcher(arguments.name, {**settings, **changed}, unset=arguments.unset, project=context.cwd))
+    if not (arguments.pairs or arguments.add or arguments.remove):
+        raise ValueError("launcher set requires at least one KEY=VALUE, --add or --remove")
+    return _configure(arguments.name, _settings(arguments.pairs), [], arguments.add, arguments.remove, context)
+
+
+def handle_launcher_unset(arguments: Namespace, context: CLIContext) -> int:
+    """Remove setting overrides from one launcher."""
+
+    return _configure(arguments.name, {}, arguments.keys, [], [], context)
+
+
+def _configure(
+    name: str,
+    settings: dict[str, str],
+    unset: list[str],
+    additions: list[str],
+    removals: list[str],
+    context: CLIContext,
+) -> int:
+    """Validate and store one launcher's changed settings, reporting the changed path lists."""
+
+    changed = _changed_paths(name, settings, unset, additions, removals, context.cwd)
+    print(configure_launcher(name, {**settings, **changed}, unset=unset, project=context.cwd))
     for key, value in changed.items():
         print(f"{key}={value}")
-    kind = describe_launcher(arguments.name, project=context.cwd)["kind"]
+    kind = describe_launcher(name, project=context.cwd)["kind"]
     report_written_settings(settings, layer="launcher", kind=kind if isinstance(kind, str) else None)
     return 0
 
@@ -239,9 +255,10 @@ def build_launcher_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         description="Create one manager launcher bundle from a packaged template",
         handler=handle_launcher_add,
     )
-    add.add_argument("name", metavar="NAME", nargs="+", help="the name this launcher is addressed by")
-    template_option = "--" + "template"
-    add.add_argument(template_option, metavar="TEMPLATE", help="slurm (default: slurm)")
+    add.add_argument("name", metavar="NAME", help="the name this launcher is addressed by")
+    add.add_argument("pairs", metavar="KEY=VALUE", nargs="*", type=_setting_pair, help="launcher settings")
+    add.set_defaults(pairs_parser=add)
+    add.add_argument("--kind", metavar="KIND", help="slurm (default: slurm)")
     add.add_argument(
         "--global",
         dest="global_scope",
@@ -249,52 +266,45 @@ def build_launcher_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         help="define the launcher for this user rather than for this project",
     )
     add.add_argument("--non-interactive", action="store_true", help="never prompt; refuse a missing value")
-    add.add_argument(
-        "--set",
-        action="append",
-        default=[],
-        metavar="KEY=VALUE",
-        help="one launcher setting (repeatable)",
-    )
 
-    configure = _leaf(
+    store = _leaf(
         group,
-        "configure",
-        summary="configure one launcher",
-        description="Update launcher settings; apply --unset, --set, --add, then --remove",
-        handler=handle_launcher_configure,
+        "set",
+        summary="change the settings of one launcher",
+        description="Update launcher settings; apply KEY=VALUE sets, then --add, then --remove",
+        handler=handle_launcher_set,
     )
-    configure.add_argument("name", metavar="NAME", nargs="+", help="the launcher to configure")
-    configure.add_argument(
-        "--set",
-        action="append",
-        default=[],
-        metavar="KEY=VALUE",
-        help="one launcher setting (repeatable)",
-    )
-    configure.add_argument(
-        "--unset", action="append", default=[], metavar="KEY", help="remove a setting override (repeatable)"
-    )
-    configure.add_argument(
+    store.add_argument("name", metavar="NAME", help="the launcher to configure")
+    store.add_argument("pairs", metavar="KEY=VALUE", nargs="*", type=_setting_pair, help="launcher settings")
+    store.set_defaults(pairs_parser=store)
+    store.add_argument(
         "--add",
-        "--add-path",
         action="append",
         default=[],
         metavar="KEY=PATH[:PATH...]",
         help=(
             "append absolute paths to a colon-separated confine.* path setting of a slurm launcher, skipping paths "
-            "already listed (repeatable, applied after --set); an unset confine.readonly_paths starts from the "
+            "already listed (repeatable, applied after the sets); an unset confine.readonly_paths starts from the "
             "default computed by this interpreter"
         ),
     )
-    configure.add_argument(
+    store.add_argument(
         "--remove",
-        "--remove-path",
         action="append",
         default=[],
         metavar="KEY=PATH[:PATH...]",
-        help="remove paths from a confine.* path setting (repeatable, applied after --add; --unset restores defaults)",
+        help="remove paths from a confine.* path setting (repeatable, applied after --add; unset restores defaults)",
     )
+
+    clear = _leaf(
+        group,
+        "unset",
+        summary="remove settings of one launcher",
+        description="Remove setting overrides from one launcher",
+        handler=handle_launcher_unset,
+    )
+    clear.add_argument("name", metavar="NAME", help="the launcher to configure")
+    clear.add_argument("keys", metavar="KEY", nargs="+", help="a setting override to remove")
 
     show = _leaf(
         group,

@@ -37,7 +37,7 @@ def test_plain_init_uses_path_basename_and_explicit_name(tmp_path: Path, capsys)
 
 def test_machine_name_init_uses_local_path_remainder(tmp_path: Path, capsys) -> None:
     context = _context(tmp_path)
-    assert command(["config", "set", "machine_names", "kappa"], context) == 0
+    assert command(["config", "set", "machine_names=kappa"], context) == 0
     capsys.readouterr()
     assert command(["workspace", "init", "kappa:runs"], context) == 0
     capsys.readouterr()
@@ -57,7 +57,7 @@ def test_existing_workspace_is_adopted_and_settings_are_refused(tmp_path: Path, 
     Workspace.initialize(root)
     context = _context(tmp_path)
     assert command(["workspace", "init", "--name", "adopted", str(root)], context) == 0
-    assert command(["workspace", "init", "--name", "other", "--setting", "answer=1", str(root)], context) == 1
+    assert command(["workspace", "init", "--name", "other", str(root), "answer=1"], context) == 2
     assert "adopted unchanged" in capsys.readouterr().err
 
 
@@ -65,7 +65,7 @@ def test_init_refuses_a_second_name_for_the_same_canonical_path(tmp_path: Path, 
     context = _context(tmp_path)
     assert command(["workspace", "init", "--name", "first", "runs"], context) == 0
     capsys.readouterr()
-    assert command(["workspace", "init", "--name", "second", str((tmp_path / "runs").resolve())], context) == 1
+    assert command(["workspace", "init", "--name", "second", str((tmp_path / "runs").resolve())], context) == 2
     assert "already registered as 'first'" in capsys.readouterr().err
 
 
@@ -134,7 +134,7 @@ def test_remote_workspace_adapter_requests_are_exact_argv(tmp_path: Path, monkey
         ["workspace", "status", "--json", "cluster:runs"],
         ["workspace", "fsck", "--json", "cluster:runs"],
         ["workspace", "gc", "--dry-run", "--json", "cluster:runs"],
-        ["workspace", "settings", "show", "--json", "cluster:runs"],
+        ["workspace", "show", "--json", "-w", "cluster:runs"],
         ["workspace", "list", "--json", "cluster:"],
         ["workspace", "move", "cluster:runs", "moved"],
         ["workspace", "delete", "--yes", "cluster:runs"],
@@ -148,7 +148,7 @@ def test_remote_workspace_adapter_requests_are_exact_argv(tmp_path: Path, monkey
         ("httk", "workspace", "status", "--json", "runs"),
         ("httk", "workspace", "fsck", "--json", "runs"),
         ("httk", "workspace", "gc", "--dry-run", "--json", "runs"),
-        ("httk", "workspace", "settings", "show", "--json", "runs"),
+        ("httk", "workspace", "show", "--json", "--workspace", "runs"),
         ("httk", "workspace", "list", "--json"),
         ("httk", "workspace", "move", "runs", "moved"),
         ("httk", "workspace", "delete", "--yes", "runs"),
@@ -226,7 +226,7 @@ def test_workspace_arguments_accept_a_workspace_directory(tmp_path: Path, capsys
     for argv in (
         ["job", "list", "--json", "--workspace", root],
         ["list", "--workspace", root],
-        ["workspace", "settings", "show", "../unregistered"],
+        ["workspace", "show", "-w", "../unregistered"],
     ):
         assert command(argv, context) == 0, argv
     capsys.readouterr()

@@ -41,7 +41,7 @@ job of it records that id. Once installed, the short name selects it, and
 
 ```console
 httk workflow install --workspace default 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-httk workspace settings set --key vasp.command --value vasp_std default
+httk workspace set -w default vasp.command=vasp_std
 httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon
 httk workflow run
 httk collect

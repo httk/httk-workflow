@@ -16,6 +16,7 @@ from httk.core.cli import CLIContext
 
 from ._common import (
     _ERRORS,
+    _setting_pair,
     remote_workspace_output,
 )
 from ._common import (
@@ -39,8 +40,9 @@ __all__ = [
     "REMOTE_WORKSPACE_INIT_COMMAND",
     "REMOTE_WORKSPACE_LIST_COMMAND",
     "REMOTE_WORKSPACE_MOVE_COMMAND",
-    "REMOTE_WORKSPACE_SETTINGS_COMMAND",
-    "REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND",
+    "REMOTE_WORKSPACE_SET_COMMAND",
+    "REMOTE_WORKSPACE_SHOW_COMMAND",
+    "REMOTE_WORKSPACE_UNSET_COMMAND",
     "add_manager_run_arguments",
     "add_run_arguments",
     "add_v1_collect_arguments",
@@ -95,20 +97,23 @@ __all__ = [
     "handle_job_why",
     "handle_launcher_add",
     "handle_launcher_check",
-    "handle_launcher_configure",
     "handle_launcher_list",
     "handle_launcher_remove",
+    "handle_launcher_set",
     "handle_launcher_show",
+    "handle_launcher_unset",
     "handle_manager_run",
     "handle_monitor",
     "handle_postprocess",
     "handle_precheck",
-    "handle_remote_adapter_operation",
     "handle_remote_add",
+    "handle_remote_check",
     "handle_remote_import_v1",
     "handle_remote_list",
     "handle_remote_remove",
+    "handle_remote_set",
     "handle_remote_show",
+    "handle_remote_unset",
     "handle_seal_verify",
     "handle_transfer",
     "handle_v1_collect",
@@ -122,14 +127,12 @@ __all__ = [
     "handle_workspace_gc",
     "handle_workspace_init",
     "handle_workspace_list",
-    "handle_workspace_policy_set",
-    "handle_workspace_policy_show",
     "handle_workspace_seal",
-    "handle_workspace_settings_set",
-    "handle_workspace_settings_show",
-    "handle_workspace_settings_unset",
+    "handle_workspace_set",
+    "handle_workspace_show",
     "handle_workspace_status",
     "handle_workspace_unseal",
+    "handle_workspace_unset",
     "handle_workspace_workflows",
     "job_command",
     "launch_workspace_managers",
@@ -157,8 +160,9 @@ _LAZY_EXPORTS = {
     "REMOTE_WORKSPACE_INIT_COMMAND": "..adapters",
     "REMOTE_WORKSPACE_LIST_COMMAND": "..adapters",
     "REMOTE_WORKSPACE_MOVE_COMMAND": "..adapters",
-    "REMOTE_WORKSPACE_SETTINGS_COMMAND": "..adapters",
-    "REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_SET_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_SHOW_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_UNSET_COMMAND": "..adapters",
     "build_build_parser": "._build",
     "handle_build": "._build",
     "build_campaign_parser": "._campaign",
@@ -195,10 +199,11 @@ _LAZY_EXPORTS = {
     "build_launcher_parser": "._launcher",
     "handle_launcher_add": "._launcher",
     "handle_launcher_check": "._launcher",
-    "handle_launcher_configure": "._launcher",
     "handle_launcher_list": "._launcher",
     "handle_launcher_remove": "._launcher",
+    "handle_launcher_set": "._launcher",
     "handle_launcher_show": "._launcher",
+    "handle_launcher_unset": "._launcher",
     "add_manager_run_arguments": "._manager",
     "add_run_arguments": "._manager",
     "build_manager_parser": "._manager",
@@ -222,12 +227,14 @@ _LAZY_EXPORTS = {
     "build_remote_parser": "._transfer",
     "build_transfer_operator_parser": "._transfer",
     "build_transfer_parser": "._transfer",
-    "handle_remote_adapter_operation": "._transfer",
     "handle_remote_add": "._transfer",
+    "handle_remote_check": "._transfer",
     "handle_remote_import_v1": "._transfer",
     "handle_remote_list": "._transfer",
     "handle_remote_remove": "._transfer",
+    "handle_remote_set": "._transfer",
     "handle_remote_show": "._transfer",
+    "handle_remote_unset": "._transfer",
     "handle_transfer": "._transfer",
     "add_workspace_init_arguments": "._workspace",
     "add_workspace_status_arguments": "._workspace",
@@ -238,14 +245,12 @@ _LAZY_EXPORTS = {
     "handle_workspace_gc": "._workspace",
     "handle_workspace_init": "._workspace",
     "handle_workspace_list": "._workspace",
-    "handle_workspace_policy_set": "._workspace",
-    "handle_workspace_policy_show": "._workspace",
     "handle_workspace_seal": "._workspace",
-    "handle_workspace_settings_set": "._workspace",
-    "handle_workspace_settings_show": "._workspace",
-    "handle_workspace_settings_unset": "._workspace",
+    "handle_workspace_set": "._workspace",
+    "handle_workspace_show": "._workspace",
     "handle_workspace_status": "._workspace",
     "handle_workspace_unseal": "._workspace",
+    "handle_workspace_unset": "._workspace",
     "handle_workspace_workflows": "._workspace",
 }
 
@@ -340,15 +345,21 @@ def dispatch(
 
     prog = prog or parser.prog
 
-    raw_argv = list(argv)
-    # ``argparse`` does not intermingle an optional workspace positional with
-    # the protocol's ``<path> --by-path KEY [VALUE]`` tail. Keep the frozen
-    # remote vector and move only this hidden switch for the local parse.
-    if raw_argv[:2] in (["workspace", "settings"], ["workspace", "workflow-prelude"]) and "--by-path" in raw_argv:
-        raw_argv.remove("--by-path")
-        raw_argv.append("--by-path")
     try:
-        arguments = parser.parse_args(raw_argv)
+        arguments, extras = parser.parse_known_args(list(argv))
+        if extras:
+            # Before Python 3.13 an optional KEY=VALUE positional after NAME takes only the words before the
+            # first option (``remote add NAME --kind ssh host=x`` strands ``host=x``); leaves whose pairs are
+            # optional mark themselves with ``pairs_parser`` and collect the stranded pairs here.
+            leaf = getattr(arguments, "pairs_parser", None)
+            options = [word for word in extras if word.startswith("-")]
+            if leaf is None or options:
+                parser.error(f"unrecognized arguments: {' '.join(options if leaf else extras)}")
+            for word in extras:
+                try:
+                    arguments.pairs.append(_setting_pair(word))
+                except argparse.ArgumentTypeError as exc:
+                    leaf.error(f"argument KEY=VALUE: {exc}")
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 1
     handler: _Handler | None = getattr(arguments, "handler", None)

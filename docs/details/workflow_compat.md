@@ -444,9 +444,9 @@ through with the key upper-cased and dots replaced by underscores, as text;
 boolean and structured values are not passed. For example:
 
 ```console
-httk workspace settings set --key vasp.command --value vasp_std default
-httk workspace settings set --key pymatgen.psp_dir --value /opt/potcars default
-httk workspace settings set --key atomate2.vasp_custodian_max_errors --value 3 default
+httk workspace set -w default vasp.command=vasp_std
+httk workspace set -w default pymatgen.psp_dir=/opt/potcars
+httk workspace set -w default atomate2.vasp_custodian_max_errors=3
 ```
 
 Without `vasp.command` no VASP variable is set and atomate2's own configuration

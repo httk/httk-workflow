@@ -86,14 +86,14 @@ def test_by_path_requires_an_explicit_path(tmp_path: Path, capsys) -> None:
     assert "--by-path requires an explicit path" in capsys.readouterr().err
 
 
-def test_settings_show_uses_explicit_key_option(tmp_path: Path, capsys) -> None:
+def test_show_takes_the_workspace_option_and_positional_keys(tmp_path: Path, capsys) -> None:
     create_workspace("named", tmp_path / "named", settings={"named.value": 7})
-    assert command(["workspace", "settings", "show", "named"], _context(tmp_path)) == 0
+    assert command(["workspace", "show", "-w", "named"], _context(tmp_path)) == 0
     assert "named.value" in capsys.readouterr().out
     default = default_workspace(project=tmp_path)
     assert default.path is not None
     Workspace(default.path).set_setting("answer", 42)
-    assert command(["workspace", "settings", "show", "--key", "answer"], _context(tmp_path)) == 0
+    assert command(["workspace", "show", "answer"], _context(tmp_path)) == 0
     assert capsys.readouterr().out.strip() == "42"
 
 
@@ -102,14 +102,11 @@ def test_mutating_workspace_commands_resolve_the_enclosing_workspace(tmp_path: P
     nested = enclosing.root / "subdir"
     nested.mkdir()
 
-    assert command(["workspace", "settings", "set", "--key", "vasp.command", "--value", "mock"], _context(nested)) == 0
+    assert command(["workspace", "set", "vasp.command=mock"], _context(nested)) == 0
     capsys.readouterr()
-    assert command(["workspace", "settings", "show", "--json"], _context(nested)) == 0
+    assert command(["workspace", "show", "--json"], _context(nested)) == 0
     settings = json.loads(capsys.readouterr().out)
-    assert settings[0]["vasp.command"] == "mock"
-    assert (
-        command(["workspace", "policy", "set", "--key", "retention.trash_days", "--value", "keep"], _context(nested))
-        == 0
-    )
+    assert settings["vasp.command"] == "mock"
+    assert command(["workspace", "set", "policy.retention.trash_days=keep"], _context(nested)) == 0
     capsys.readouterr()
     assert Workspace(enclosing.root).policy.retention.trash_days is None

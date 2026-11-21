@@ -134,45 +134,37 @@ def test_policy_refuses_unknown_keys_and_impossible_values(tmp_path: Path, chang
     assert Workspace(tmp_path / "workspace").policy == WorkspacePolicy()
 
 
-def test_policy_command_shows_sets_and_refuses(tmp_path: Path, capsys) -> None:
+def test_policy_keys_show_set_and_refuse(tmp_path: Path, capsys) -> None:
     root = tmp_path / "workspace"
     Workspace.initialize(root)
     context = CLIContext("httk", tmp_path)
     ws = register_ws(context, root)
-    assert command(["workspace", "policy", "show", "--json", ws], context) == 0
-    shown = json.loads(capsys.readouterr().out)[0]
-    assert shown["visibility_deadline_seconds"] == 5.0
-    assert shown["retention"] == {"trash_days": 1.0, "owner_tombstone_days": 30.0, "daemon_history_days": 30.0}
-    assert (
-        command(["workspace", "policy", "set", "--key", "visibility_deadline_seconds", "--value", "60", ws], context)
-        == 0
-    )
-    assert command(["workspace", "policy", "set", "--key", "retention.trash_days", "--value", "14", ws], context) == 0
+    assert command(["workspace", "show", "-w", ws, "--json"], context) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["policy.visibility_deadline_seconds"] == 5.0
+    assert {key: value for key, value in shown.items() if key.startswith("policy.retention.")} == {
+        "policy.retention.attempt_control_days": None,
+        "policy.retention.trash_days": 1.0,
+        "policy.retention.owner_tombstone_days": 30.0,
+        "policy.retention.daemon_history_days": 30.0,
+    }
+    assert command(["workspace", "set", "-w", ws, "policy.visibility_deadline_seconds=60"], context) == 0
+    assert command(["workspace", "set", "-w", ws, "policy.retention.trash_days=14"], context) == 0
     capsys.readouterr()
-    assert command(["workspace", "policy", "set", "--key", "lease_seconds", "--value", "60", ws], context) == 1
-    assert command(["workspace", "policy", "set", "--key", "no_such_key", "--value", "1", ws], context) == 1
-    assert (
-        command(
-            ["workspace", "policy", "set", "--key", "visibility_deadline_seconds", "--value", "not-json", ws], context
-        )
-        == 1
-    )
+    assert command(["workspace", "set", "-w", ws, "policy.lease_seconds=60"], context) == 2
+    assert command(["workspace", "set", "-w", ws, "policy.no_such_key=1"], context) == 2
+    assert command(["workspace", "set", "-w", ws, "policy.visibility_deadline_seconds=not-json"], context) == 2
     policy = Workspace(root).policy
     assert policy.visibility_deadline_seconds == 60.0
     assert policy.retention.trash_days == 14.0
-    assert command(["workspace", "policy", "set", "--key", "retention.trash_days", "--value", "null", ws], context) == 0
+    assert command(["workspace", "set", "-w", ws, "policy.retention.trash_days=null"], context) == 0
     assert Workspace(root).policy.retention.trash_days is None
-    assert (
-        command(
-            ["workspace", "policy", "set", "--key", "retention.owner_tombstone_days", "--value", "keep", ws], context
-        )
-        == 0
-    )
+    assert command(["workspace", "set", "-w", ws, "policy.retention.owner_tombstone_days=keep"], context) == 0
     assert Workspace(root).policy.retention.owner_tombstone_days is None
     # The retired journal retention is refused on write.
-    assert command(["workspace", "policy", "set", "--key", "retention.journal_days", "--value", "1", ws], context) == 1
-    assert command(["workspace", "policy", "show", ws], context) == 0
-    assert "visibility_deadline_seconds\t60.0" in capsys.readouterr().out
+    assert command(["workspace", "set", "-w", ws, "policy.retention.journal_days=1"], context) == 2
+    assert command(["workspace", "show", "-w", ws], context) == 0
+    assert "policy.visibility_deadline_seconds\t60.0" in capsys.readouterr().out
 
 
 def test_retention_keep_is_persisted_and_disables_collection(tmp_path: Path) -> None:

@@ -491,7 +491,7 @@ default, and description.
 
 The optional `[workflow]` member `settings` lists the workspace settings the
 workflow reads beyond its environment entries, such as keys it reads with
-`Attempt.setting`. It only informs: `httk workspace settings show` marks a key
+`Attempt.setting`. It only informs: `httk workspace show` marks a key
 an installed workflow declares as *recognized by workflow NAME*, and writing it
 prints no notice. Each item is a dotted setting name, listed once. A name in a
 namespace *httk-workflow* owns (`manager`, `slurm`, `confine`, `environment`,

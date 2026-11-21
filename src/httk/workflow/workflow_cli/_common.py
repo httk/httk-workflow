@@ -373,6 +373,15 @@ def _settings(values: Sequence[str]) -> dict[str, str]:
     return result
 
 
+def _setting_pair(value: str) -> str:
+    """Parse one positional ``KEY=VALUE`` argument of a ``set`` verb, refusing it without ``=``."""
+
+    key, separator, _ = value.partition("=")
+    if not separator or not key:
+        raise argparse.ArgumentTypeError(f"expected KEY=VALUE, not {value!r}")
+    return value
+
+
 def _field(name: str, value: object) -> str:
     """Render one name/value line of a human-readable description."""
 
@@ -583,20 +592,29 @@ def _remote_workspace_read(
     flags: tuple[str, ...] = (),
     tail: Sequence[str] = (),
     unwrap_json_array: bool | None = None,
+    workspace_option: bool = False,
 ) -> int:
-    """Dispatch one read-style workspace command to a remote binding.
+    """Dispatch one workspace command to a remote binding and relay its output and exit status.
 
     *command* is a pinned far-side vector, e.g. ``REMOTE_STATUS_COMMAND``; the
-    enabled *flags* and *tail* options precede the remote plain name. This is the single path every remote-capable read command runs
-    through, so ``status``, ``gc``, ``fsck``, ``job_records``, and the ``job`` reads
-    all reach a remote the same way.
+    enabled *flags* and *tail* options precede the remote plain name, or, with
+    *workspace_option*, follow ``--workspace NAME`` for a command whose
+    positionals are its own (``workspace show/set/unset``). This is the single
+    path the remote-capable workspace commands run through, so the reads
+    (``status``, ``gc``, ``fsck``, ``job_records``, the ``job`` reads) and the
+    ``workspace set``/``unset`` writes all reach a remote the same way.
     """
 
     enabled_flags: list[str] = []
     for flag in flags:
         if getattr(arguments, flag.lstrip("-").replace("-", "_"), False):
             enabled_flags.append(flag)
-    argv = [*command, *enabled_flags, *tail, binding.name.split(":", 1)[1]]
+    name = binding.name.split(":", 1)[1]
+    argv = (
+        [*command, *enabled_flags, "--workspace", name, *tail]
+        if workspace_option
+        else [*command, *enabled_flags, *tail, name]
+    )
     returncode, stdout, stderr = remote_workspace_output(
         binding,
         context,
@@ -615,40 +633,6 @@ def _remote_workspace_read(
     if returncode == 2 and ("unrecognized arguments" in stderr or "invalid choice" in stderr):
         sys.stderr.write("the remote may run an older httk-workflow; upgrade it\n")
     return returncode
-
-
-def remote_workspace_read_output(
-    binding: WorkspaceBinding,
-    context: CLIContext,
-    command: Sequence[str],
-    arguments: argparse.Namespace,
-    *,
-    flags: tuple[str, ...] = (),
-    tail: Sequence[str] = (),
-    unwrap_json_array: bool | None = None,
-) -> tuple[int, str, str]:
-    """Return one remote read's output without writing to process streams.
-
-    :param binding: Remote-qualified workspace binding.
-    :param context: CLI context used to resolve the adapter.
-    :param command: Pinned remote command vector.
-    :param arguments: Parsed arguments supplying enabled flags and timeout.
-    :param flags: Optional switches copied when true on *arguments*.
-    :param tail: Command arguments before the remote workspace name.
-    :param unwrap_json_array: Retained for API symmetry; output is not decoded.
-    :return: Remote return code, standard output, and standard error.
-    """
-
-    if ":" not in binding.name:
-        raise ValueError(f"remote workspace binding has no remote-qualified name: {binding.name}")
-    enabled_flags = [flag for flag in flags if getattr(arguments, flag.lstrip("-").replace("-", "_"), False)]
-    argv = [*command, *enabled_flags, *tail, binding.name.split(":", 1)[1]]
-    return remote_workspace_output(
-        binding,
-        context,
-        argv,
-        timeout=getattr(arguments, "adapter_timeout", None),
-    )
 
 
 def _add_by_path_argument(parser: argparse.ArgumentParser) -> None:

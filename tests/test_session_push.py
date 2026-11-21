@@ -1006,11 +1006,11 @@ def test_an_adapter_without_the_session_operation_stops_before_anything_is_held(
     assert_in(near if direction == "push" else far, plan)
 
 
-def test_the_removed_setting_is_refused_by_remote_configure(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_removed_setting_is_refused_by_remote_set(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="session-setting")
     fake_remote(project)
-    argv = ["remote", "configure", "--set", "transfer_session=off", "cluster"]
+    argv = ["remote", "set", "cluster", "transfer_session=off"]
     assert command(argv, CLIContext("httk", project)) != 0
     assert "unknown remote setting 'transfer_session'" in capsys.readouterr().err
 

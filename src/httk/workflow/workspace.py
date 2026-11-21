@@ -81,6 +81,11 @@ def _validate_setting_key(key: str) -> str:
     return key
 
 
+#: First name components ``httk workspace set`` routes to the policy and the per-workflow preludes; an
+#: application setting may not be written under them, so the one key namespace stays unambiguous.
+_RESERVED_SETTING_NAMESPACES = frozenset({"policy", "prelude"})
+
+
 def _validate_setting_value(key: str, value: object) -> object:
     """Return one application-setting value, refusing a non-scalar.
 
@@ -617,7 +622,8 @@ class Workspace:
         :param changes: Application setting values to store.
         :param unset: Existing setting names to remove before applying changes.
         :return: The resulting application settings.
-        :raises ValueError: If a name or value is invalid, a setting is absent, or environment names collide.
+        :raises ValueError: If a name or value is invalid or reserved, a setting is absent, or environment names
+            collide.
         :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
@@ -626,26 +632,92 @@ class Workspace:
         require_cli_modifiable(self)
 
         def configure(stored: dict[str, Any]) -> dict[str, object]:
-            settings = _validate_settings(_section(stored, "settings"))
-            for key in unset:
-                if key not in settings:
-                    raise ValueError(f"application setting is not set: {key}")
-                del settings[key]
-            for key, value in changes.items():
-                _validate_setting_key(key)
-                _validate_setting_value(key, value)
-                if key == IO_WORKERS:
-                    _validate_io_workers(value)
-                if key == IO_SYNC:
-                    _validate_io_sync(value)
-                if key == IO_SYNC_ERRORS:
-                    _validate_io_sync_errors(value)
-                self._check_setting_collision(key, settings)
-                settings[key] = value
-            stored["settings"] = settings
-            return dict(settings)
+            return dict(self._configure_stored_settings(stored, changes, unset))
 
         return self._update_format(configure)
+
+    def _configure_stored_settings(
+        self, stored: dict[str, Any], changes: Mapping[str, object], unset: Sequence[str]
+    ) -> dict[str, object]:
+        """Apply :meth:`configure_settings` to one ``format.json`` document in place and return its settings."""
+
+        settings = _validate_settings(_section(stored, "settings"))
+        for key in unset:
+            if key not in settings:
+                raise ValueError(f"application setting is not set: {key}")
+            del settings[key]
+        for key, value in changes.items():
+            _validate_setting_key(key)
+            if key.split(".", 1)[0] in _RESERVED_SETTING_NAMESPACES:
+                raise ValueError(f"application setting name {key!r} is reserved for the workspace policy or preludes")
+            _validate_setting_value(key, value)
+            if key == IO_WORKERS:
+                _validate_io_workers(value)
+            if key == IO_SYNC:
+                _validate_io_sync(value)
+            if key == IO_SYNC_ERRORS:
+                _validate_io_sync_errors(value)
+            self._check_setting_collision(key, settings)
+            settings[key] = value
+        stored["settings"] = settings
+        return settings
+
+    def update_configuration(
+        self,
+        settings: Mapping[str, object],
+        policy: Mapping[str, object],
+        preludes: Mapping[str, str],
+        *,
+        unset_settings: Sequence[str] = (),
+        unset_preludes: Sequence[str] = (),
+    ) -> None:
+        """Change application settings, policy members and workflow preludes in one verified ``format.json`` write.
+
+        Every change is validated against the one document before it is written, so either all of them are
+        stored or none is.
+
+        :param settings: Application setting values to store, after *unset_settings* are removed.
+        :param policy: Policy members to replace, as for :meth:`set_policy`.
+        :param preludes: Workflow preludes to store, by workflow id, after *unset_preludes* are removed.
+        :param unset_settings: Existing application settings to remove.
+        :param unset_preludes: Existing workflow preludes to remove.
+        :raises ValueError: If a change is invalid or names a setting or prelude that is not set.
+        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
+        """
+
+        from .seals import require_cli_modifiable
+
+        require_cli_modifiable(self)
+
+        def update(stored: dict[str, Any]) -> WorkspacePolicy | None:
+            if settings or unset_settings:
+                self._configure_stored_settings(stored, settings, unset_settings)
+            merged = None
+            if policy:
+                merged = WorkspacePolicy.from_mapping(_section(stored, "policy")).updated(policy)
+                stored["policy"] = merged.as_mapping()
+            if preludes or unset_preludes:
+                current = _validate_workflow_preludes(_section(stored, "workflow_preludes"))
+                for workflow_id in unset_preludes:
+                    if workflow_id not in current:
+                        raise ValueError(f"workflow prelude is not set: {workflow_id}")
+                    del current[workflow_id]
+                for workflow_id, value in preludes.items():
+                    current[_validate_workflow_prelude_id(workflow_id)] = _validate_workflow_prelude_value(
+                        workflow_id, value
+                    )
+                stored["workflow_preludes"] = current
+            return merged
+
+        merged = self._update_format(update)
+        if merged is not None:
+            self._policy = merged
+            _LOGGER.info(
+                "workspace %s policy updated: %s",
+                self.workspace_id,
+                ", ".join(f"{key}={value!r}" for key, value in sorted(policy.items())),
+                extra={"event": "policy_updated", "workspace_id": self.workspace_id},
+            )
 
     def seed_settings(self, seeds: Mapping[str, object]) -> dict[str, object]:
         """Merge *seeds* into the settings, keeping any value already set.

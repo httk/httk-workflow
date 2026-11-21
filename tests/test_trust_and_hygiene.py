@@ -405,11 +405,11 @@ def test_config_set_is_restricted_to_the_registry_and_unset_removes(tmp_path: Pa
         unset_config_key("machine_names")
 
     context = CLIContext("httk", tmp_path)
-    assert command(["config", "set", "machine_names", "node-b"], context) == 0
+    assert command(["config", "set", "machine_names=node-b"], context) == 0
     assert read_config()["machine_names"] == "node-b"
     assert command(["config", "unset", "machine_names"], context) == 0
     assert "machine_names" not in read_config()
-    assert command(["config", "set", "nickname", "x"], context) == 2
+    assert command(["config", "set", "nickname=x"], context) == 2
 
 
 def test_describe_remote_never_reports_a_credential_value(tmp_path: Path, monkeypatch) -> None:

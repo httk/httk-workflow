@@ -78,13 +78,13 @@ def test_launcher_cli_round_trip_project_and_global(
     project = tmp_path / "project"
     initialize_project(project, name="launcher-cli")
     context = CLIContext("httk", project)
-    assert command(["launcher", "add", "--template", "slurm", "cluster"], context) == 0
+    assert command(["launcher", "add", "--kind", "slurm", "cluster"], context) == 0
     local_bundle = project / "httk_project" / "launchers" / "cluster"
     assert (local_bundle / "launcher").is_file()
-    assert command(["launcher", "add", "--template", "slurm", "--global", "shared"], context) == 0
+    assert command(["launcher", "add", "--kind", "slurm", "--global", "shared"], context) == 0
     assert (Path(os.environ["HTTK_CONFIG_HOME"]) / "launchers" / "shared" / "launcher.json").is_file()
     assert [row["name"] for row in list_launchers(project)] == ["cluster", "shared"]
-    assert command(["launcher", "configure", "--set", "slurm.partition=devel", "cluster"], context) == 0
+    assert command(["launcher", "set", "cluster", "slurm.partition=devel"], context) == 0
     metadata = json.loads((local_bundle / "launcher.json").read_text(encoding="utf-8"))
     assert metadata["settings"] == {"slurm.partition": "devel"}
     capsys.readouterr()
@@ -670,16 +670,16 @@ def test_launcher_configure_add_path(
     project = tmp_path / "project"
     initialize_project(project, name="add-path")
     context = CLIContext("httk", project)
-    assert command(["launcher", "add", "--template", "slurm", "--global", "small"], context) == 0
+    assert command(["launcher", "add", "--kind", "slurm", "--global", "small"], context) == 0
     capsys.readouterr()
-    args = ["launcher", "configure", "small", "--add-path"]
+    args = ["launcher", "set", "small", "--add"]
     assert command([*args, "confine.readonly_paths=/software"], context) == 0
     assert _stored("small")["confine.readonly_paths"] == "/usr:/opt/py:/software"
     assert capsys.readouterr().out.splitlines()[-1] == "confine.readonly_paths=/usr:/opt/py:/software"
-    assert command(["launcher", "configure", "small", "--set", "confine.readonly_paths=/a:/b"], context) == 0
+    assert command(["launcher", "set", "small", "confine.readonly_paths=/a:/b"], context) == 0
     assert command([*args, "confine.readonly_paths=/b:/c"], context) == 0
     assert _stored("small")["confine.readonly_paths"] == "/a:/b:/c"
-    assert command([*args, "confine.devices=/dev/x", "--set", "slurm.partition=p"], context) == 0
+    assert command([*args, "confine.devices=/dev/x", "slurm.partition=p"], context) == 0
     assert _stored("small")["confine.devices"] == "/dev/x"
     assert _stored("small")["slurm.partition"] == "p"
     assert command([*args, "confine.pmix_roots=/var/spool/slurmd"], context) == 0
@@ -702,27 +702,30 @@ def test_launcher_configuration_removals(
     initialize_project(project, name="remove-settings")
     context = CLIContext("httk", project)
     bundle = add_launcher("small", template="slurm", global_=True)
-    configure = ["launcher", "configure", "small"]
+    configure = ["launcher", "set", "small"]
+    unset = ["launcher", "unset", "small"]
     monkeypatch.setattr(_launcher, "default_readonly_paths", lambda: (Path("/usr"),))
     assert command([*configure, "--remove", "confine.readonly_paths=/usr"], context) == 0
     assert _stored("small")["confine.readonly_paths"] == ""
     assert confine_settings(_stored("small")).readonly_paths == ()
-    assert command([*configure, "--unset", "confine.readonly_paths"], context) == 0
+    assert command([*unset, "confine.readonly_paths"], context) == 0
     assert "confine.readonly_paths" not in _stored("small")
     assert confine_settings(_stored("small")).readonly_paths == default_readonly_paths()
     assert command([*configure, "--add", "confine.devices=/dev/a:/dev/a:/dev/b"], context) == 0
     assert _stored("small")["confine.devices"] == "/dev/a:/dev/b"
-    assert command([*configure, "--remove-path", "confine.devices=/dev/a:/dev/b"], context) == 0
+    assert command([*configure, "--remove", "confine.devices=/dev/a:/dev/b"], context) == 0
     assert confine_settings(_stored("small")).devices == ()
-    assert command([*configure, "--add-path", "confine.devices=/dev/c"], context) == 0
+    assert command([*configure, "--add", "confine.devices=/dev/c"], context) == 0
     assert _stored("small")["confine.devices"] == "/dev/c"
     before = (bundle / "launcher.json").read_bytes()
     for invalid in ("confine.devices=relative", "confine.devices=/dev/a:", "confine.devices=", "slurm.partition=x"):
-        assert command([*configure, "--set", "slurm.partition=new", "--remove", invalid], context) == 1
+        assert command([*configure, "slurm.partition=new", "--remove", invalid], context) == 2
         assert (bundle / "launcher.json").read_bytes() == before
-    assert command([*configure, "--unset", "bad=key"], context) == 1
+    assert command([*unset, "bad=key"], context) == 2
+    assert command(configure, context) == 2
+    assert command([*configure, "slurm.partition"], context) == 2
     assert (bundle / "launcher.json").read_bytes() == before
-    assert command([*configure, "--unset", "confine.devices", "--set", "confine.devices=/dev/d"], context) == 0
+    assert command([*configure, "confine.devices=/dev/d"], context) == 0
     assert _stored("small")["confine.devices"] == "/dev/d"
     capsys.readouterr()
     assert command(["launcher", "list", "--json"], context) == 0

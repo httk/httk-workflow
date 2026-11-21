@@ -70,11 +70,11 @@ _MISSING_HTTK = (
     "httk_command=COMMAND, or set a cli_prelude=... that loads the environment "
     "(e.g. 'module load ...; source ~/venv/bin/activate') before each command"
 )
-# Refuses the old key where it would run; adapters.split_settings refuses it on --set.
+# Refuses the old key where it would run; adapters.split_settings refuses it on remote set.
 _PRELUDE_RENAMED = (
     "the remote setting 'prelude' was renamed to 'cli_prelude' (it runs before each httk "
     "command on the remote, not at job start); fix it with: "
-    "httk remote configure NAME --unset prelude --set cli_prelude=..."
+    "httk remote unset NAME prelude, then httk remote set NAME cli_prelude=..."
 )
 
 
@@ -290,7 +290,7 @@ def _terminal_present() -> bool:
 _PER_CALL_SPLIT = (
     "remote setting interactive_auth=per-call was split in two: interactive_auth=yes lets ssh prompt, "
     "and connection reuse is the separate connection_reuse setting (connection_reuse=no for a site "
-    "that forbids sharing); fix it with: httk remote configure NAME --set interactive_auth=yes"
+    "that forbids sharing); fix it with: httk remote set NAME interactive_auth=yes"
 )
 
 

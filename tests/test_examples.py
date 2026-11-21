@@ -201,7 +201,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     assert (payload / "files" / "POSCAR").read_text(encoding="utf-8").splitlines()[0] == "silicon"
 
     # And the last documented command printed one collected record and the sweep summary.
-    # Earlier commands also print JSON (e.g. settings set), so only the tail is the collect output.
+    # Earlier commands also print JSON (e.g. workspace set), so only the tail is the collect output.
     records = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{") and line != "{"]
     assert len(records) >= 2
     records = records[-2:]

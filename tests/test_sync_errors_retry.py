@@ -152,7 +152,7 @@ def test_io_sync_errors_takes_fail_and_ignore_and_is_a_recognized_engine_setting
     assert reader.io_sync() == "syncfs"  # io_sync() callers keep working
     assert workspace.seed_settings({"io.sync_errors": "ignore"})["io.sync_errors"] == "ignore"
     assert classify_setting("io.sync_errors", "ignore").state == "recognized"
-    argv = ["workspace", "settings", "set", "--key", "io.sync_errors", "--value", "never", name]
+    argv = ["workspace", "set", "-w", name, "io.sync_errors=never"]
     assert command(argv, CLIContext("httk", tmp_path)) != 0
     assert "io.sync_errors must be fail or ignore" in capsys.readouterr().err
     assert reader.io_sync_policy() == ("syncfs", "ignore")

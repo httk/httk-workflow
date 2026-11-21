@@ -28,6 +28,7 @@ from ._common import (
     _leaf,
     _load_inputs,
     _pairs,
+    _setting_pair,
     confirm,
 )
 
@@ -65,20 +66,16 @@ def handle_campaign_show(arguments: argparse.Namespace, context: CLIContext) -> 
     return 0
 
 
-def handle_campaign_configure(arguments: argparse.Namespace, context: CLIContext) -> int:
+def _configure_campaign(changes: list[tuple[str, str]], arguments: argparse.Namespace, context: CLIContext) -> int:
     """Validate all requested campaign changes before saving them together."""
 
-    if not arguments.changes:
-        raise ValueError("campaign configure requires at least one --set or --unset")
     config = read_campaign(context.cwd)
     partitions = dict(config.partitions)
     assignment = config.assignment
-    for operation, item in arguments.changes or ():
+    for operation, item in changes:
         key, separator, value = item.partition("=")
-        if operation == "set" and not separator:
-            raise ValueError(f"--set expects KEY=VALUE: {item!r}")
         if operation == "unset" and separator:
-            raise ValueError(f"--unset expects KEY: {item!r}")
+            raise ValueError(f"unset expects KEY, not KEY=VALUE: {item!r}")
         if key == "assignment":
             assignment = value if operation == "set" else "hash"
         elif key.startswith("partitions.") and key.removeprefix("partitions."):
@@ -94,6 +91,18 @@ def handle_campaign_configure(arguments: argparse.Namespace, context: CLIContext
     write_campaign(partitions, assignment=assignment, project=context.cwd)
     arguments.json = True
     return handle_campaign_show(arguments, context)
+
+
+def handle_campaign_set(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Set campaign assignment and partitions, saving only after every change is valid."""
+
+    return _configure_campaign([("set", item) for item in arguments.pairs], arguments, context)
+
+
+def handle_campaign_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove campaign partitions or reset the assignment, saving only after every change is valid."""
+
+    return _configure_campaign([("unset", key) for key in arguments.keys], arguments, context)
 
 
 def handle_campaign_remove(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -337,29 +346,25 @@ def build_campaign_parser(
     )
     show.add_argument("--json", action="store_true", help="print the campaign as one JSON object")
 
-    configure = _leaf(
+    store = _leaf(
         group,
-        "configure",
-        summary="change campaign assignment and partitions",
-        description="Apply campaign changes in argument order, saving only after every change is valid",
-        handler=handle_campaign_configure,
+        "set",
+        summary="set campaign assignment and partitions",
+        description="Set campaign assignment and partitions, saving only after every change is valid",
+        handler=handle_campaign_set,
     )
-    configure.add_argument(
-        "--set",
-        dest="changes",
-        action="append",
-        type=lambda value: ("set", value),
-        metavar="KEY=VALUE",
-        help="set assignment or partitions.NAME (repeatable)",
+    store.add_argument(
+        "pairs", metavar="KEY=VALUE", nargs="+", type=_setting_pair, help="assignment or partitions.NAME"
     )
-    configure.add_argument(
-        "--unset",
-        dest="changes",
-        action="append",
-        type=lambda value: ("unset", value),
-        metavar="KEY",
-        help="remove partitions.NAME or reset assignment to hash (repeatable)",
+    store.set_defaults(pairs_parser=store)
+    clear = _leaf(
+        group,
+        "unset",
+        summary="remove partitions or reset the assignment",
+        description="Remove campaign partitions or reset the assignment to hash, saving only when every change is valid",
+        handler=handle_campaign_unset,
     )
+    clear.add_argument("keys", metavar="KEY", nargs="+", help="partitions.NAME, or assignment to reset it to hash")
     remove = _leaf(
         group,
         "remove",

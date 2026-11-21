@@ -3,7 +3,6 @@
 import argparse
 import json
 import sys
-from collections.abc import Callable
 from contextlib import redirect_stdout
 from copy import copy
 from io import StringIO
@@ -11,11 +10,12 @@ from typing import Any
 
 from httk.core.cli import CLIContext
 
-from ..configuration import configure_config, import_v1_configuration, read_config, set_config_key, unset_config_key
+from ..configuration import configure_config, import_v1_configuration, read_config, unset_config_key
 from ._common import (
     _ERRORS,
     _group,
     _leaf,
+    _setting_pair,
 )
 
 # ---------------------------------------------------------------------------
@@ -91,9 +91,16 @@ def handle_config_show(arguments: argparse.Namespace, context: CLIContext) -> in
 
 
 def handle_config_set(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Store one member of the user configuration."""
+    """Apply positional sets, then ``--add``, then ``--remove``, validated together and saved once."""
 
-    print(set_config_key(arguments.key, arguments.value))
+    changes = [
+        *(("set", item) for item in arguments.pairs),
+        *(("add", item) for item in arguments.add),
+        *(("remove", item) for item in arguments.remove),
+    ]
+    if not changes:
+        raise ValueError("config set requires at least one KEY=VALUE, --add or --remove")
+    print(configure_config(changes))
     return 0
 
 
@@ -111,17 +118,6 @@ def handle_config_import_v1(arguments: argparse.Namespace, context: CLIContext) 
 
     print(json.dumps(import_v1_configuration(arguments.source), indent=2, sort_keys=True))
     return 0
-
-
-def handle_config_configure(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Validate and save all requested per-user configuration changes together."""
-
-    print(configure_config(arguments.changes or ()))
-    return 0
-
-
-def _configuration_change(operation: str) -> Callable[[str], tuple[str, str]]:
-    return lambda value: (operation, value)
 
 
 def build_config_parser(
@@ -151,37 +147,39 @@ def build_config_parser(
     )
     show.add_argument("--json", action="store_true", help="print selected keys as one JSON object")
 
-    configure = _leaf(
-        group,
-        "configure",
-        summary="change per-user configuration",
-        description="Apply configuration changes in argument order and save the validated result",
-        handler=handle_config_configure,
-    )
-    for operation, help_text in (
-        ("set", "set machine_names to comma-separated names, or connection_reuse to yes or no"),
-        ("unset", "remove a configured key"),
-        ("add", "append machine_names, skipping existing names"),
-        ("remove", "remove machine_names; removing the last name unsets the key"),
-    ):
-        configure.add_argument(
-            f"--{operation}",
-            dest="changes",
-            action="append",
-            type=_configuration_change(operation),
-            metavar="KEY" if operation == "unset" else "KEY=VALUE",
-            help=f"{help_text} (repeatable)",
-        )
-
     store = _leaf(
         group,
         "set",
-        summary="store one configuration member",
-        description="Store one member of the user configuration",
+        summary="change configuration members",
+        description=(
+            "Apply KEY=VALUE sets, then --add, then --remove, and save the result only when every change is valid"
+        ),
         handler=handle_config_set,
     )
-    store.add_argument("key", metavar="KEY", help="the configuration key to write")
-    store.add_argument("value", metavar="VALUE", help="the value to store")
+    store.add_argument(
+        "pairs",
+        metavar="KEY=VALUE",
+        nargs="*",
+        type=_setting_pair,
+        help="set machine_names to comma-separated names, or connection_reuse to yes or no",
+    )
+    store.set_defaults(pairs_parser=store)
+    store.add_argument(
+        "--add",
+        action="append",
+        default=[],
+        type=_setting_pair,
+        metavar="KEY=VALUE",
+        help="append machine_names, skipping existing names (repeatable)",
+    )
+    store.add_argument(
+        "--remove",
+        action="append",
+        default=[],
+        type=_setting_pair,
+        metavar="KEY=VALUE",
+        help="remove machine_names; removing the last name unsets the key (repeatable)",
+    )
 
     remove = _leaf(
         group,

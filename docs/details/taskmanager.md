@@ -42,11 +42,11 @@ Manager launch is a property of the workspace. On the cluster, install the
 packaged Slurm launcher and configure the workspace it owns:
 
 ```console
-httk launcher add --template slurm --global cluster
+httk launcher add --kind slurm --global cluster
 httk workspace init --name runs /scratch/rar/httk/runs
-httk workspace settings set --key manager.launch --value cluster runs
-httk workspace settings set --key slurm.partition --value batch runs
-httk workspace settings set --key vasp.command --value vasp_std runs
+httk workspace set -w runs manager.launch=cluster
+httk workspace set -w runs slurm.partition=batch
+httk workspace set -w runs vasp.command=vasp_std
 httk workflow run --workspace runs --count 4
 ```
 
@@ -63,10 +63,10 @@ manager, CLI and independent implementation attaching it agrees on them. They
 live in `.httk-workspace/format.json`:
 
 ```console
-httk workspace policy show WORKSPACE
-httk workspace policy set --key visibility_deadline_seconds --value 30 \
-  --key retention.attempt_control_days --value 14 WORKSPACE
-httk workspace policy unset --key retention.trash_days WORKSPACE
+httk workspace show -w WORKSPACE policy.visibility_deadline_seconds policy.retention
+httk workspace set -w WORKSPACE policy.visibility_deadline_seconds=30 \
+  policy.retention.attempt_control_days=14
+httk workspace unset -w WORKSPACE policy.retention.trash_days
 ```
 
 | Key | Default | Meaning |
@@ -77,8 +77,11 @@ httk workspace policy unset --key retention.trash_days WORKSPACE
 | `retention.owner_tombstone_days` | `30.0` | Age after which `gc` removes the tombstone of a recovered owner. |
 | `retention.daemon_history_days` | `30.0` | Age after which the [workspace daemon](workspace_daemon.md#quotas) retires settled requests and ended manager starts, freeing their quota; the daemon applies it, not `gc`, and never before a request's signed lifetime plus clock skew has passed. |
 
-Values are JSON, validated on write; `null` or `"keep"` keeps a retention
-category forever, and an unknown key is refused. A policy write is a
+On the command line each key carries a `policy.` prefix (`policy.retention`
+sets the whole object, `policy.retention.MEMBER` merges one member), and
+`workspace unset` restores a key's default. Values are JSON, validated on
+write; `null` or `"keep"` keeps a retention category forever, and an unknown
+key is refused. A policy write is a
 read-modify-write of `format.json`, verified by re-reading it and redone when
 a concurrent writer replaced it in between; writers are not serialized, so the
 last writer of a key wins. Managers read the policy when
@@ -96,8 +99,8 @@ they enter that snapshot. The manager launch profile is also a workspace
 setting, so each workspace carries its own scheduler requirements.
 
 ```console
-httk workspace settings set --key vasp.command --value vasp_std WORKSPACE
-httk workspace settings show WORKSPACE
+httk workspace set -w WORKSPACE vasp.command=vasp_std
+httk workspace show -w WORKSPACE
 ```
 
 The `slurm.*` settings become batch directives of the workspace's Slurm
@@ -679,8 +682,8 @@ allocation; it is split like shell words, and the placeholders are substituted
 in each word:
 
 ```console
-httk workspace settings set --key manager.launch_template \
-  --value 'mpirun -np {procs} --hostfile {nodefile}' WORKSPACE
+httk workspace set -w WORKSPACE \
+  manager.launch_template='mpirun -np {procs} --hostfile {nodefile}'
 ```
 
 A template naming any other placeholder fails the attempt's preparation with
@@ -717,7 +720,7 @@ locally, so the manager also binds it to its devices:
   counts such as `OMP_NUM_THREADS` are not set.
 
 ```console
-httk workspace settings set --key manager.bind_cpus --value true WORKSPACE
+httk workspace set -w WORKSPACE manager.bind_cpus=true
 ```
 
 Placement is in memory only: a replacement manager places its own attempts on
@@ -976,7 +979,7 @@ accumulates is collected by `workspace gc`, explicitly or from a long-lived
 manager:
 
 ```console
-httk workspace policy set --key retention.attempt_control_days --value 14 WORKSPACE
+httk workspace set -w WORKSPACE policy.retention.attempt_control_days=14
 httk workspace gc --dry-run WORKSPACE
 httk workspace gc WORKSPACE
 httk workspace gc --category requests --category tmp_entries WORKSPACE

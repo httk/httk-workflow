@@ -51,7 +51,7 @@ def test_manifest_guard_refuses_while_an_owner_is_not_proven_dead(tmp_path: Path
 def _configured(project: Path, *settings: str) -> tuple[Path, int]:
     remote = add_remote("cluster", template="local", project=project)
     code = command(
-        ["remote", "configure", *[argument for value in settings for argument in ("--set", value)], "cluster"],
+        ["remote", "set", "cluster", *settings],
         CLIContext("httk", project),
     )
     return remote, code
@@ -84,9 +84,9 @@ def test_scheduler_setting_is_refused_for_remote_configuration(tmp_path: Path, m
     project = _project(tmp_path, monkeypatch, name="scheduler-settings")
     remote = add_remote("cluster", template="local", project=project)
 
-    code = command(["remote", "configure", "--set", "partition=x", "cluster"], CLIContext("httk", project))
+    code = command(["remote", "set", "cluster", "partition=x"], CLIContext("httk", project))
 
-    assert code == 1
+    assert code == 2
     assert "unknown remote setting 'partition'" in capsys.readouterr().err
     assert json.loads((remote / "remote.json").read_text(encoding="utf-8"))["settings"] == {}
     assert not (remote / "credentials.json").exists()
@@ -96,9 +96,9 @@ def test_retired_bootstrap_setting_is_refused_as_unknown(tmp_path: Path, monkeyp
     project = _project(tmp_path, monkeypatch, name="bootstrap-retired")
     remote = add_remote("cluster", template="local", project=project)
 
-    code = command(["remote", "configure", "--set", "bootstrap=pip", "cluster"], CLIContext("httk", project))
+    code = command(["remote", "set", "cluster", "bootstrap=pip"], CLIContext("httk", project))
 
-    assert code == 1
+    assert code == 2
     assert "unknown remote setting 'bootstrap'" in capsys.readouterr().err
     assert json.loads((remote / "remote.json").read_text(encoding="utf-8"))["settings"] == {}
     assert not (remote / "credentials.json").exists()
@@ -148,7 +148,7 @@ def test_retired_workspace_root_setting_is_refused_as_unknown(tmp_path: Path, mo
     project = _project(tmp_path, monkeypatch, name="whitelisted")
     destination = tmp_path / "elsewhere"
     _remote, code = _configured(project, f"workspace_root={destination}", "username=someone")
-    assert code == 1
+    assert code == 2
     assert "unknown remote setting 'workspace_root'" in capsys.readouterr().err
 
 
@@ -157,16 +157,15 @@ def test_remote_unset_removes_settings_and_credentials(tmp_path: Path, monkeypat
     remote, code = _configured(project, "host=old", "password=secret", "token=retained")
     assert code == 0
     context = CLIContext("httk", project)
-    configure = ["remote", "configure", "cluster"]
-    assert command([*configure, "--unset", "host", "--unset", "password", "--unset", "absent"], context) == 0
+    assert command(["remote", "unset", "cluster", "host", "password", "absent"], context) == 0
     assert remote_settings(remote) == {"token": "retained"}
     assert json.loads((remote / "remote.json").read_text())["settings"] == {}
     assert json.loads((remote / "credentials.json").read_text()) == {"token": "retained"}
     assert (remote / "credentials.json").stat().st_mode & 0o777 == 0o600
-    assert command([*configure, "--unset", "token", "--set", "token=replaced"], context) == 0
+    assert command(["remote", "set", "cluster", "token=replaced"], context) == 0
     assert remote_settings(remote) == {"token": "replaced"}
     before = (remote / "remote.json").read_bytes(), (remote / "credentials.json").read_bytes()
-    assert command([*configure, "--unset", "token=wrong", "--set", "host=new"], context) == 1
+    assert command(["remote", "unset", "cluster", "token=wrong"], context) == 2
     assert ((remote / "remote.json").read_bytes(), (remote / "credentials.json").read_bytes()) == before
     capsys.readouterr()
     assert command(["remote", "list", "--json"], context) == 0
@@ -189,22 +188,16 @@ def test_remote_unset_validates_candidate_before_persisting(tmp_path: Path, monk
         "'operation':request['operation'],'ok':'host' in settings,'error':'host is required'}))\n"
     )
     before = (remote / "remote.json").read_bytes(), (remote / "credentials.json").read_bytes()
-    assert (
-        command(
-            ["remote", "configure", "cluster", "--unset", "host", "--unset", "password", "--set", "token=new"],
-            CLIContext("httk", project),
-        )
-        == 1
-    )
+    assert command(["remote", "unset", "cluster", "host", "password"], CLIContext("httk", project)) == 2
     assert "host is required" in capsys.readouterr().err
     assert ((remote / "remote.json").read_bytes(), (remote / "credentials.json").read_bytes()) == before
 
 
-def test_remote_check_honors_temporary_settings(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_remote_check_checks_the_stored_settings_only(tmp_path: Path, monkeypatch, capsys) -> None:
     project = _project(tmp_path, monkeypatch, name="check-overrides")
     remote = add_remote("cluster", template="local", project=project)
     assert (
-        command(["remote", "check", "cluster", "--set", "httk_command=/missing/httk"], CLIContext("httk", project)) == 1
+        command(["remote", "check", "cluster", "--set", "httk_command=/missing/httk"], CLIContext("httk", project)) == 2
     )
-    assert "httk" in capsys.readouterr().err
+    assert "--set" in capsys.readouterr().err
     assert remote_settings(remote) == {}

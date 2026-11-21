@@ -20,16 +20,15 @@ from .. import _death, _kernel, _store
 from .._setting_catalog import annotate_setting, installed_workflow_settings, report_written_settings, use_color
 from ..adapters import (
     REMOTE_STATUS_COMMAND,
-    REMOTE_WORKSPACE_CONFIGURE_COMMAND,
     REMOTE_WORKSPACE_DELETE_COMMAND,
     REMOTE_WORKSPACE_FSCK_COMMAND,
     REMOTE_WORKSPACE_GC_COMMAND,
     REMOTE_WORKSPACE_INIT_COMMAND,
     REMOTE_WORKSPACE_LIST_COMMAND,
     REMOTE_WORKSPACE_MOVE_COMMAND,
-    REMOTE_WORKSPACE_POLICY_COMMAND,
-    REMOTE_WORKSPACE_SETTINGS_COMMAND,
-    REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND,
+    REMOTE_WORKSPACE_SET_COMMAND,
+    REMOTE_WORKSPACE_SHOW_COMMAND,
+    REMOTE_WORKSPACE_UNSET_COMMAND,
     resolve_remote,
     run_adapter,
     seed_application_settings,
@@ -69,9 +68,15 @@ from ..seals import (
     unseal_workspace,
     verify_workspace_seal,
 )
-from ..workspace import Workspace, _validate_setting_key, _validate_settings
+from ..workspace import (
+    _RESERVED_SETTING_NAMESPACES,
+    Workspace,
+    _validate_setting_key,
+    _validate_workflow_prelude_id,
+)
 from ._common import (
     _ERRORS,
+    _add_adapter_timeout,
     _add_by_path_argument,
     _by_path,
     _durable,
@@ -82,10 +87,10 @@ from ._common import (
     _pairs,
     _remote_workspace_read,
     _resolve_binding,
+    _setting_pair,
     add_durability_arguments,
     add_workspace_argument,
     confirm,
-    remote_workspace_read_output,
 )
 from ._seal import _default_trusted_keys
 
@@ -138,32 +143,34 @@ def _add_workspace_targets(parser: argparse.ArgumentParser, *, help_text: str, r
 def add_workspace_init_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`workspace init`."""
 
-    parser.add_argument("workspace", metavar="PATH", nargs="+", help="the local path, or REMOTE:PATH, to initialize")
-    parser.add_argument("--name", metavar="NAME", help="the registry name (default: the path basename)")
+    parser.add_argument("workspace", metavar="PATH", help="the local path, or REMOTE:PATH, to initialize")
     parser.add_argument(
-        "--setting",
-        action="append",
-        default=[],
+        "pairs",
         metavar="KEY=VALUE",
-        help="seed one application setting at creation, e.g. vasp.command=... (repeatable)",
+        nargs="*",
+        type=_setting_pair,
+        help="seed application settings at creation, e.g. vasp.command=...",
     )
+    parser.add_argument("--name", metavar="NAME", help="the registry name (default: the path basename)")
+    parser.set_defaults(pairs_parser=parser)
     _add_by_path_argument(parser)
     add_durability_arguments(parser)
 
 
 def _init_settings(arguments: argparse.Namespace) -> dict[str, object]:
-    """Return the application settings ``workspace init --setting`` carried."""
+    """Return the application settings ``workspace init`` carried; policy and prelude keys are refused."""
 
-    return {name: _json_value(text, f"setting {name}") for name, text in _pairs(arguments.setting, "a setting")}
+    settings: dict[str, object] = {}
+    for key, text in _pairs(arguments.pairs, "a setting"):
+        if key.partition(".")[0] in _RESERVED_SETTING_NAMESPACES:
+            raise ValueError(f"workspace init seeds application settings only; set {key} with `httk workspace set`")
+        settings[_validate_setting_key(key)] = _json_value(text, f"setting {key}")
+    return settings
 
 
 def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Initialize a local path or ask its owning machine to do so."""
 
-    if isinstance(arguments.workspace, list):
-        if arguments.name and len(arguments.workspace) != 1:
-            raise ValueError("workspace init --name requires exactly one PATH")
-        return _workspace_batch(arguments, context, handle_workspace_init)
     settings = _init_settings(arguments)
     if _by_path(arguments):
         workspace = Workspace.initialize(
@@ -187,9 +194,7 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
         if arguments.name:
             argv += ["--name", name]
         merged = {**seed_application_settings(target.bundle), **settings}
-        for key, value in merged.items():
-            argv += ["--setting", f"{key}={json.dumps(value)}"]
-        argv.append(remote_path)
+        argv += [remote_path, *(f"{key}={json.dumps(value)}" for key, value in merged.items())]
         result = run_adapter(target.bundle, "invoke", {"argv": argv})
         if result.get("returncode") != 0:
             raise RuntimeError(f"remote workspace init failed: {result.get('stderr', '')}")
@@ -205,7 +210,7 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
     format_path = root / WORKSPACE_DIRECTORY / "format.json"
     if format_path.exists():
         if settings:
-            raise ValueError("existing workspace adopted unchanged; use `workspace settings set`")
+            raise ValueError("existing workspace adopted unchanged; use `httk workspace set`")
         Workspace(root)
         created = register_workspace(name, root, durable=_durable(arguments))
     else:
@@ -516,120 +521,6 @@ def handle_workspace_unseal(arguments: argparse.Namespace, context: CLIContext) 
     return 0
 
 
-def _key_value_pairs(arguments: argparse.Namespace) -> list[tuple[str, str]]:
-    """Pair the i-th ``--key`` with the i-th ``--value``, refusing unequal counts."""
-
-    keys, values = arguments.key, arguments.value
-    if len(keys) != len(values):
-        raise ValueError(f"--key and --value must come in pairs: got {len(keys)} --key and {len(values)} --value")
-    return list(zip(keys, values))
-
-
-def _policy_value(key: str, text: str) -> object:
-    """Parse one command-line policy value as the JSON it denotes."""
-
-    if key.startswith("retention.") and text == "keep":
-        return "keep"
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"policy {key} must be given as JSON: {text!r} ({exc})") from exc
-
-
-def _print_policy(policy: Any, *, as_json: bool) -> int:
-    """Print one workspace policy, as JSON or as tab-separated members."""
-
-    if as_json:
-        print(json.dumps(policy.as_mapping(), indent=2, sort_keys=True))
-        return 0
-    for key, value in sorted(policy.as_mapping().items()):
-        print(f"{key}\t{json.dumps(value, sort_keys=True)}")
-    return 0
-
-
-def _remote_policy(
-    arguments: argparse.Namespace, context: CLIContext, verb: str, tail: Sequence[str] = ()
-) -> tuple[Path | None, int]:
-    """Forward one ``workspace policy`` verb to a remote binding, or return the local root.
-
-    :param arguments: Parsed policy command arguments.
-    :param context: Current CLI invocation context.
-    :param verb: The policy verb, ``show``, ``set`` or ``unset``.
-    :param tail: Verb arguments forwarded verbatim; the far side validates them.
-    :return: The local workspace root and ``0``, or ``None`` and the far side's exit status.
-    """
-
-    binding, root = _resolve_binding(arguments, context)
-    if root is not None:
-        return root, 0
-    assert binding is not None
-    command = (*REMOTE_WORKSPACE_POLICY_COMMAND, verb)
-    return None, _remote_workspace_read(binding, context, command, arguments, flags=("--json",), tail=tail)
-
-
-def handle_workspace_policy_show(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Show the tunables one workspace shares with every process attaching it."""
-
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_policy_show)
-    root, code = _remote_policy(arguments, context, "show")
-    if root is None:
-        return code
-    return _print_policy(Workspace(root).policy, as_json=arguments.json)
-
-
-def handle_workspace_policy_set(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Store policy members of a workspace in one validated write and print the result."""
-
-    pairs = _key_value_pairs(arguments)
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_policy_set)
-    root, code = _remote_policy(
-        arguments, context, "set", [part for key, text in pairs for part in ("--key", key, "--value", text)]
-    )
-    if root is None:
-        return code
-    # A retention member is addressed directly so that setting one limit does
-    # not require restating the whole object as JSON; every such pair merges
-    # into one retention mapping seeded from the stored one.
-    workspace = Workspace(root)
-    require_cli_modifiable(workspace)
-    changes: dict[str, object] = {}
-    for key, text in pairs:
-        value = _policy_value(key, text)
-        if not key.startswith("retention."):
-            changes[key] = value
-            continue
-        # Pairs apply in order: a member merges into a pending whole-object
-        # retention pair, and a later whole-object pair replaces earlier merges.
-        pending = changes.get("retention", workspace.policy.retention.as_mapping())
-        if not isinstance(pending, Mapping):
-            raise ValueError(f"policy retention must be a JSON object to merge {key}")
-        changes["retention"] = {**pending, key.split(".", 1)[1]: value}
-    return _print_policy(workspace.set_policy(changes), as_json=arguments.json)
-
-
-def handle_workspace_policy_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Restore one policy member's default without removing the required policy section."""
-
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_policy_unset)
-    root, code = _remote_policy(arguments, context, "unset", ("--key", arguments.key))
-    if root is None:
-        return code
-    defaults = WorkspacePolicy()
-    key = arguments.key
-    if key in POLICY_KEYS:
-        value = defaults.as_mapping()[key]
-    elif key.startswith("retention.") and key.split(".", 1)[1] in RETENTION_KEYS:
-        value = getattr(defaults.retention, key.split(".", 1)[1])
-    else:
-        raise ValueError(f"unknown policy key: {key}")
-    item = copy(arguments)
-    item.key, item.value = [key], [json.dumps(value)]
-    return handle_workspace_policy_set(item, context)
-
-
 def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Check a workspace's job tree, which no other actor may use meanwhile; ``--repair`` asks first."""
 
@@ -881,173 +772,15 @@ def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) ->
     return 0
 
 
-def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Show one workspace's application settings, or one named member."""
+def _policy_value(key: str, text: str) -> object:
+    """Parse one command-line policy value as the JSON it denotes."""
 
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_settings_show)
-    binding, root = _resolve_binding(arguments, context)
-    if root is None:
-        assert binding is not None
-        return _remote_workspace_read(
-            binding,
-            context,
-            (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "show"),
-            arguments,
-            flags=("--json",),
-            tail=() if arguments.key is None else ("--key", arguments.key),
-        )
-    workspace = Workspace(root)
-    settings = workspace.settings
-    if arguments.key is not None:
-        if arguments.key not in settings:
-            raise ValueError(f"application setting is not set: {arguments.key}")
-        print(json.dumps(settings[arguments.key], sort_keys=True))
-        return 0
-    if arguments.json:
-        print(json.dumps(settings, indent=2, sort_keys=True))
-        return 0
-    color = use_color()
-    workflows = installed_workflow_settings(workspace)
-    for key in sorted(settings):
-        shown, annotation = annotate_setting(key, settings[key], workflows=workflows, color=color)
-        print(f"{shown}\t{json.dumps(settings[key], sort_keys=True)}\t{annotation}")
-    return 0
-
-
-def handle_workspace_configure(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Remove and set application settings, validating local changes before writing."""
-
-    if not arguments.settings and not arguments.unset:
-        raise ValueError("workspace configure requires --set KEY=VALUE or --unset KEY")
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_configure)
-    pairs = _pairs(arguments.settings or (), "--set")
-    changes = {key: _json_value(value, f"setting {key}") for key, value in pairs}
-    _validate_settings(changes)
-    for key in changes:
-        Workspace._check_setting_collision(key, changes)
-    for key in arguments.unset or ():
-        _validate_setting_key(key)
-    binding, root = _resolve_binding(arguments, context)
-    if root is None:
-        assert binding is not None
-        # The far side runs this same handler: one validated write, then its settings show.
-        return _remote_workspace_read(
-            binding,
-            context,
-            REMOTE_WORKSPACE_CONFIGURE_COMMAND,
-            arguments,
-            flags=("--json", "--no-durable"),
-            tail=[
-                *(part for text in arguments.settings or () for part in ("--set", text)),
-                *(part for key in arguments.unset or () for part in ("--unset", key)),
-            ],
-        )
-    workspace = Workspace(root, durable=_durable(arguments))
-    require_cli_modifiable(workspace)
-    workspace.configure_settings(changes, unset=arguments.unset or ())
-    report_written_settings(changes, workflows=installed_workflow_settings(workspace))
-    item = copy(arguments)
-    item.key = None
-    return handle_workspace_settings_show(item, context)
-
-
-def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Store application settings on a workspace in one write and print them as one JSON object.
-
-    A remote workspace receives every pair in one forwarded command, and its
-    answer must name every requested key, so an older remote that keeps only the
-    last pair is detected rather than silently trusted.
-    """
-
-    pairs = _key_value_pairs(arguments)
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_settings_set)
-    changes = {key: _json_value(text, f"setting {key}") for key, text in pairs}
-    binding, root = _resolve_binding(arguments, context)
-    if root is None:
-        assert binding is not None
-        returncode, stdout, stderr = remote_workspace_read_output(
-            binding,
-            context,
-            (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "set"),
-            arguments,
-            flags=("--no-durable",),
-            tail=[part for key, text in pairs for part in ("--key", key, "--value", text)],
-        )
-        if stderr:
-            sys.stderr.write(stderr)
-        if returncode:
-            if stdout:
-                sys.stdout.write(stdout if stdout.endswith("\n") else stdout + "\n")
-            return returncode
-        try:
-            applied = json.loads(stdout)
-        except ValueError as exc:
-            raise ValueError(f"the remote did not answer settings set with JSON: {stdout[:200]!r}") from exc
-        complete = isinstance(applied, dict) and changes.keys() <= applied.keys()
-        if len(pairs) == 1 and not complete:
-            # An older remote prints the one stored value bare.
-            applied = {pairs[0][0]: applied}
-        elif not complete:
-            raise ValueError("the remote httk-workflow predates repeatable --key; set one pair per call or upgrade it")
-        print(json.dumps(applied, sort_keys=True))
-        return 0
-    workspace = Workspace(root, durable=_durable(arguments))
-    require_cli_modifiable(workspace)
-    settings = workspace.configure_settings(changes)
-    print(json.dumps({key: settings[key] for key in changes}, sort_keys=True))
-    report_written_settings(changes, workflows=installed_workflow_settings(workspace))
-    return 0
-
-
-def handle_workspace_settings_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Remove application settings from a workspace in one write and print the removed keys as a JSON list.
-
-    A remote workspace receives every key in one forwarded command, and its
-    answer must name every key when several are given, so an older remote that
-    removes only the last one is detected rather than silently trusted.
-    """
-
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_settings_unset)
-    keys: list[str] = arguments.key
-    binding, root = _resolve_binding(arguments, context)
-    if root is None:
-        assert binding is not None
-        returncode, stdout, stderr = remote_workspace_read_output(
-            binding,
-            context,
-            (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "unset"),
-            arguments,
-            flags=("--no-durable",),
-            tail=[part for key in keys for part in ("--key", key)],
-        )
-        if stderr:
-            sys.stderr.write(stderr)
-        if returncode:
-            if stdout:
-                sys.stdout.write(stdout if stdout.endswith("\n") else stdout + "\n")
-            return returncode
-        try:
-            removed = json.loads(stdout) if stdout.strip() else None
-        except ValueError:
-            removed = None
-        if not isinstance(removed, list) or not set(keys) <= set(removed):
-            if len(keys) > 1:
-                raise ValueError(
-                    "the remote httk-workflow predates repeatable --key and removed at most the last key; "
-                    "unset one key per call or upgrade it"
-                )
-            removed = keys  # An older remote prints nothing for its one key.
-        print(json.dumps(removed))
-        return 0
-    workspace = Workspace(root, durable=_durable(arguments))
-    require_cli_modifiable(workspace)
-    workspace.configure_settings({}, unset=keys)
-    print(json.dumps(keys))
-    return 0
+    if key.startswith("retention.") and text == "keep":
+        return "keep"
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"policy {key} must be given as JSON: {text!r} ({exc})") from exc
 
 
 def _prelude_value(text: str) -> str:
@@ -1067,97 +800,181 @@ def _prelude_value(text: str) -> str:
     return text
 
 
-def handle_workspace_workflow_prelude_show(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Show one workspace's per-workflow preludes, or one workflow's prelude.
+def _workspace_key(key: str) -> tuple[str, str]:
+    """Route one workspace key to its store: ``("setting" | "policy" | "prelude", name within that store)``.
 
-    :param arguments: The parsed ``workflow-prelude show`` arguments.
-    :param context: The invocation context.
-    :return: The process exit status.
+    ``policy.*`` names a policy member (``retention.X`` a retention member) and
+    ``prelude.<workflow-id>`` a per-workflow prelude; every other key is an
+    application setting.
+
+    :param key: The workspace key as written on the command line.
+    :return: The store and the name within it.
+    :raises ValueError: If the key is not a valid name in its namespace.
     """
 
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_workflow_prelude_show)
-    binding, root = _resolve_binding(arguments, context)
-    if root is None:
-        assert binding is not None
-        return _remote_workspace_read(
-            binding,
-            context,
-            (*REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND, "show"),
-            arguments,
-            flags=("--json",),
-            tail=() if arguments.workflow is None else ("--workflow", arguments.workflow),
+    space, _, name = key.partition(".")
+    if space == "policy":
+        member = name.removeprefix("retention.")
+        if name in POLICY_KEYS or (name != member and member in RETENTION_KEYS):
+            return "policy", name
+        raise ValueError(
+            f"unknown workspace key: {key}; the policy keys are policy.visibility_deadline_seconds, "
+            f"policy.retention and policy.retention.{{{','.join(sorted(RETENTION_KEYS))}}}"
         )
+    if space == "prelude":
+        return "prelude", _validate_workflow_prelude_id(name)
+    return "setting", _validate_setting_key(key)
+
+
+def _workspace_values(workspace: Workspace, keys: Sequence[str] = ()) -> dict[str, object]:
+    """Return the one flat key view over the settings, policy and preludes, or only *keys* of it.
+
+    :param workspace: The workspace to read.
+    :param keys: The keys to select, which may include the whole ``policy.retention`` object.
+    :return: Settings, then policy members, then preludes, each in key order; *keys* in their given order.
+    :raises ValueError: If a selected key is not set.
+    """
+
+    policy = workspace.policy
+    values: dict[str, object] = dict(sorted(workspace.settings.items()))
+    values["policy.visibility_deadline_seconds"] = policy.visibility_deadline_seconds
+    values.update({f"policy.retention.{key}": getattr(policy.retention, key) for key in sorted(RETENTION_KEYS)})
+    values.update({f"prelude.{key}": text for key, text in sorted(workspace.read_workflow_preludes().items())})
+    if not keys:
+        return values
+    values["policy.retention"] = policy.retention.as_mapping()
+    missing = [key for key in keys if key not in values]
+    if missing:
+        raise ValueError(f"workspace key is not set: {missing[0]}")
+    return {key: values[key] for key in keys}
+
+
+def _forward(
+    arguments: argparse.Namespace, context: CLIContext, command: Sequence[str], tail: Sequence[str]
+) -> tuple[Path | None, int]:
+    """Run a settings verb on a remote workspace in one far-side call, or return the local root.
+
+    :param arguments: Parsed arguments of ``workspace show``, ``set`` or ``unset``.
+    :param context: Current CLI invocation context.
+    :param command: The pinned far-side vector.
+    :param tail: The keys or pairs, forwarded verbatim; the far side validates and applies them.
+    :return: The local workspace root and ``0``, or ``None`` and the far side's exit status.
+    """
+
+    binding, root = _resolve_binding(arguments, context)
+    if root is not None:
+        return root, 0
+    assert binding is not None
+    return None, _remote_workspace_read(
+        binding,
+        context,
+        command,
+        arguments,
+        flags=("--json", "--no-durable"),
+        tail=tail,
+        unwrap_json_array=False,
+        workspace_option=True,
+    )
+
+
+def handle_workspace_show(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Print the workspace's settings, policy and preludes as one key view, or the selected keys.
+
+    One KEY prints its bare value: JSON for a setting or policy member, the
+    shell text for a prelude. Text rows are ``key<TAB>value`` with the value as
+    JSON (a prelude's newlines escaped), plus the annotation for a setting.
+    """
+
+    keys: list[str] = arguments.key
+    for key in keys:
+        _workspace_key(key)
+    root, code = _forward(arguments, context, REMOTE_WORKSPACE_SHOW_COMMAND, keys)
+    if root is None:
+        return code
     workspace = Workspace(root)
-    preludes = workspace.read_workflow_preludes()
-    if arguments.workflow is not None:
-        if arguments.workflow not in preludes:
-            raise ValueError(f"no per-workflow prelude is set for workflow: {arguments.workflow}")
-        print(preludes[arguments.workflow])
-        return 0
+    values = _workspace_values(workspace, keys)
     if arguments.json:
-        print(json.dumps(preludes, indent=2, sort_keys=True))
+        print(json.dumps(values, indent=2, sort_keys=True))
         return 0
-    for workflow_id in sorted(preludes):
-        print(f"{workflow_id}\t{preludes[workflow_id]}")
+    if len(keys) == 1:
+        value = values[keys[0]]
+        print(value if keys[0].startswith("prelude.") else json.dumps(value, sort_keys=True))
+        return 0
+    color = use_color()
+    workflows = installed_workflow_settings(workspace)
+    for key, value in values.items():
+        if key.startswith(("policy.", "prelude.")):
+            print(f"{key}\t{json.dumps(value, sort_keys=True)}")
+            continue
+        shown, annotation = annotate_setting(key, value, workflows=workflows, color=color)
+        print(f"{shown}\t{json.dumps(value, sort_keys=True)}\t{annotation}")
     return 0
 
 
-def handle_workspace_workflow_prelude_set(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Store one per-workflow prelude on a workspace.
+def handle_workspace_set(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Store settings, policy members and preludes in one validated write and print the changed keys as JSON.
 
-    :param arguments: The parsed ``workflow-prelude set`` arguments.
-    :param context: The invocation context.
-    :return: The process exit status.
+    A remote workspace receives the pairs verbatim in one forwarded command,
+    so an ``@FILE`` value is read on the far side.
     """
 
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_workflow_prelude_set)
-    binding, root = _resolve_binding(arguments, context)
+    pairs = [(key, _workspace_key(key), text) for key, text in _pairs(arguments.pairs, "a workspace setting")]
+    root, code = _forward(arguments, context, REMOTE_WORKSPACE_SET_COMMAND, arguments.pairs)
     if root is None:
-        assert binding is not None
-        return _remote_workspace_read(
-            binding,
-            context,
-            (*REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND, "set"),
-            arguments,
-            flags=("--no-durable",),
-            tail=("--workflow", arguments.workflow, "--value", arguments.value),
-        )
-    # Resolve ``@file`` only for a local store: a remote store forwards the raw
-    # argument so the file is read on the far side, as `settings set` forwards.
-    value = _prelude_value(arguments.value)
+        return code
     workspace = Workspace(root, durable=_durable(arguments))
     require_cli_modifiable(workspace)
-    preludes = workspace.set_workflow_prelude(arguments.workflow, value)
-    print(preludes[arguments.workflow])
+    settings: dict[str, object] = {}
+    policy: dict[str, object] = {}
+    preludes: dict[str, str] = {}
+    for key, (space, name), text in pairs:
+        if space == "setting":
+            settings[name] = _json_value(text, f"setting {name}")
+        elif space == "prelude":
+            preludes[name] = _prelude_value(text)
+        elif name.startswith("retention."):
+            # Pairs apply in order: a member merges into a pending whole-object
+            # retention pair, and a later whole-object pair replaces earlier merges.
+            pending = policy.get("retention", workspace.policy.retention.as_mapping())
+            if not isinstance(pending, Mapping):
+                raise ValueError(f"policy.retention must be a JSON object to merge {key}")
+            policy["retention"] = {**pending, name.split(".", 1)[1]: _policy_value(name, text)}
+        else:
+            policy[name] = _policy_value(name, text)
+    workspace.update_configuration(settings, policy, preludes)
+    print(json.dumps(_workspace_values(workspace, list(dict.fromkeys(key for key, _, _ in pairs))), sort_keys=True))
+    report_written_settings(settings, workflows=installed_workflow_settings(workspace))
     return 0
 
 
-def handle_workspace_workflow_prelude_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Remove one per-workflow prelude from a workspace.
+def handle_workspace_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove settings and preludes and restore policy defaults in one write, then print the keys as a JSON list."""
 
-    :param arguments: The parsed ``workflow-prelude unset`` arguments.
-    :param context: The invocation context.
-    :return: The process exit status.
-    """
-
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_workflow_prelude_unset)
-    binding, root = _resolve_binding(arguments, context)
+    keys: list[str] = arguments.key
+    routed = [_workspace_key(key) for key in keys]
+    root, code = _forward(arguments, context, REMOTE_WORKSPACE_UNSET_COMMAND, keys)
     if root is None:
-        assert binding is not None
-        return _remote_workspace_read(
-            binding,
-            context,
-            (*REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND, "unset"),
-            arguments,
-            flags=("--no-durable",),
-            tail=("--workflow", arguments.workflow),
-        )
+        return code
     workspace = Workspace(root, durable=_durable(arguments))
     require_cli_modifiable(workspace)
-    workspace.unset_workflow_prelude(arguments.workflow)
+    defaults = WorkspacePolicy()
+    policy: dict[str, object] = {}
+    for space, name in routed:
+        if space == "policy" and name in POLICY_KEYS:
+            policy[name] = defaults.as_mapping()[name]
+        elif space == "policy":
+            member = name.split(".", 1)[1]
+            pending = policy.get("retention", workspace.policy.retention.as_mapping())
+            assert isinstance(pending, Mapping)
+            policy["retention"] = {**pending, member: getattr(defaults.retention, member)}
+    workspace.update_configuration(
+        {},
+        policy,
+        {},
+        unset_settings=[name for space, name in routed if space == "setting"],
+        unset_preludes=[name for space, name in routed if space == "prelude"],
+    )
+    print(json.dumps(keys))
     return 0
 
 
@@ -1306,58 +1123,6 @@ def build_workspace_parser(
     _add_workspace_targets(workflows, help_text="the workspace whose workflows to list")
     workflows.add_argument("--json", action="store_true", help="print the workflows as one JSON array")
 
-    _, policy_actions = _group(
-        group,
-        "policy",
-        summary="show or set the workspace policy",
-        description="Show or set the tunables one workspace publishes to every attacher",
-    )
-    show = _leaf(
-        policy_actions,
-        "show",
-        summary="print the current policy",
-        description="Print the policy of one execution workspace",
-        handler=handle_workspace_policy_show,
-    )
-    _add_workspace_targets(show, help_text="the workspace whose policy to print")
-    show.add_argument("--json", action="store_true", help="print the policy as one JSON object")
-    _add_by_path_argument(show)
-    store = _leaf(
-        policy_actions,
-        "set",
-        summary="store policy members",
-        description="Store members of the policy of an execution workspace in one validated write",
-        handler=handle_workspace_policy_set,
-    )
-    _add_workspace_targets(store, help_text="the workspace whose policy to change")
-    store.add_argument(
-        "--key",
-        action="append",
-        required=True,
-        metavar="KEY",
-        help="one of " + ", ".join(sorted(POLICY_KEYS)) + " (repeatable; the i-th --key pairs with the i-th --value)",
-    )
-    store.add_argument(
-        "--value", action="append", required=True, metavar="VALUE", help="the JSON value to store (repeatable)"
-    )
-    store.add_argument(
-        "--json",
-        action="store_true",
-        help="print the resulting policy as one JSON object",
-    )
-    _add_by_path_argument(store)
-    reset = _leaf(
-        policy_actions,
-        "unset",
-        summary="restore one policy member's default",
-        description="Restore a policy member or retention.KEY to its default, keeping the policy section",
-        handler=handle_workspace_policy_unset,
-    )
-    _add_workspace_targets(reset, help_text="the workspace whose policy to change")
-    reset.add_argument("--key", required=True, metavar="KEY", help="the policy member or retention.KEY to reset")
-    reset.add_argument("--json", action="store_true", help="print the resulting policy as one JSON object")
-    _add_by_path_argument(reset)
-
     listing = _leaf(
         group,
         "list",
@@ -1427,148 +1192,56 @@ def build_workspace_parser(
     move.add_argument("destination", metavar="DEST_DIR", help="the new workspace path")
     add_durability_arguments(move)
 
-    configuration_show = _leaf(
+    workspace_help = (
+        "the workspace (default: the enclosing workspace, this project's workspace, or the per-user default)"
+    )
+    show = _leaf(
         group,
         "show",
-        summary="show a workspace's application configuration",
-        description="Print application settings; use workspace policy show for execution policy",
-        handler=handle_workspace_settings_show,
-    )
-    _add_workspace_targets(configuration_show, help_text="the workspace whose settings to read")
-    configuration_show.add_argument("--key", metavar="KEY", help="print only this application setting")
-    configuration_show.add_argument("--json", action="store_true", help="print the settings as JSON")
-    _add_by_path_argument(configuration_show)
-    configure = _leaf(
-        group,
-        "configure",
-        summary="set or remove application configuration",
+        summary="show settings, policy and preludes as one key view",
         description=(
-            "Remove settings, then store values, validated together in one write; a remote workspace "
-            "receives the whole change in one forwarded command"
+            "Print every key of a workspace: application settings (e.g. vasp.command), policy.* members and "
+            "prelude.<workflow-id> shell preludes; one KEY prints its bare value"
         ),
-        handler=handle_workspace_configure,
+        handler=handle_workspace_show,
     )
-    _add_workspace_targets(configure, help_text="the workspace to configure")
-    configure.add_argument(
-        "--set", dest="settings", action="append", metavar="KEY=VALUE", help="store a setting (repeatable)"
-    )
-    configure.add_argument(
-        "--unset", action="append", metavar="KEY", help="remove a setting before storing values (repeatable)"
-    )
-    configure.add_argument("--json", action="store_true", help="print the resulting settings as JSON")
-    _add_by_path_argument(configure)
-    add_durability_arguments(configure)
-
-    _, settings_actions = _group(
+    show.add_argument("key", metavar="KEY", nargs="*", help="print only these keys (default: every key)")
+    show.add_argument("--json", action="store_true", help="print the keys as one flat JSON object")
+    store = _leaf(
         group,
-        "settings",
-        summary="show or set a workspace's application settings",
-        description="Show or set the application settings a workspace's runners resolve at run time",
-    )
-    settings_show = _leaf(
-        settings_actions,
-        "show",
-        summary="print the application settings",
-        description="Print the application settings of one workspace, or one named setting",
-        handler=handle_workspace_settings_show,
-    )
-    _add_workspace_targets(settings_show, help_text="the workspace whose settings to read")
-    settings_show.add_argument("--key", metavar="KEY", help="print only this setting (default: all of them)")
-    settings_show.add_argument("--json", action="store_true", help="print the settings as one JSON object")
-    _add_by_path_argument(settings_show)
-    settings_set = _leaf(
-        settings_actions,
         "set",
-        summary="store application settings",
-        description="Store application settings on a workspace in one write, e.g. vasp.command",
-        handler=handle_workspace_settings_set,
+        summary="store settings, policy members and preludes",
+        description=(
+            "Validate every pair, then store application settings, policy.visibility_deadline_seconds, "
+            "policy.retention[.MEMBER] and prelude.<workflow-id> values; a remote workspace receives the whole "
+            "change in one forwarded command"
+        ),
+        handler=handle_workspace_set,
     )
-    _add_workspace_targets(settings_set, help_text="the workspace to change")
-    settings_set.add_argument(
-        "--key",
-        action="append",
-        required=True,
-        metavar="KEY",
-        help="the dotted setting name, e.g. vasp.command (repeatable; the i-th --key pairs with the i-th --value)",
+    store.add_argument(
+        "pairs",
+        metavar="KEY=VALUE",
+        nargs="+",
+        type=_setting_pair,
+        help=(
+            "a setting's JSON value or bare string, a policy member's JSON value (retention members also keep), "
+            "or a prelude's shell text or @FILE"
+        ),
     )
-    settings_set.add_argument(
-        "--value",
-        action="append",
-        required=True,
-        metavar="VALUE",
-        help="the JSON value, or a bare string, to store (repeatable)",
-    )
-    _add_by_path_argument(settings_set)
-    add_durability_arguments(settings_set)
-    settings_unset = _leaf(
-        settings_actions,
-        "unset",
-        summary="remove application settings",
-        description="Remove application settings from a workspace in one write",
-        handler=handle_workspace_settings_unset,
-    )
-    _add_workspace_targets(settings_unset, help_text="the workspace to change")
-    settings_unset.add_argument(
-        "--key",
-        action="append",
-        required=True,
-        metavar="KEY",
-        help="remove these application settings (repeatable)",
-    )
-    _add_by_path_argument(settings_unset)
-    add_durability_arguments(settings_unset)
-
-    _, prelude_actions = _group(
+    store.set_defaults(pairs_parser=store)
+    add_durability_arguments(store)
+    remove = _leaf(
         group,
-        "workflow-prelude",
-        summary="show or set a workspace's per-workflow shell preludes",
-        description="Show or set the per-workflow shell prelude a job's runner sources before it runs",
-    )
-    prelude_show = _leaf(
-        prelude_actions,
-        "show",
-        summary="print the per-workflow preludes",
-        description="Print the per-workflow preludes of one workspace, or one workflow's prelude",
-        handler=handle_workspace_workflow_prelude_show,
-    )
-    _add_workspace_targets(prelude_show, help_text="the workspace whose preludes to read")
-    prelude_show.add_argument(
-        "--workflow", metavar="WORKFLOW", help="print only this workflow's prelude (default: all)"
-    )
-    prelude_show.add_argument("--json", action="store_true", help="print the preludes as one JSON object")
-    _add_by_path_argument(prelude_show)
-    prelude_set = _leaf(
-        prelude_actions,
-        "set",
-        summary="store one per-workflow prelude",
-        description="Store one per-workflow shell prelude on a workspace, keyed by workflow id",
-        handler=handle_workspace_workflow_prelude_set,
-    )
-    _add_workspace_targets(prelude_set, help_text="the workspace to change")
-    prelude_set.add_argument(
-        "--workflow", required=True, metavar="WORKFLOW", help="the workflow id the prelude applies to"
-    )
-    prelude_set.add_argument(
-        "--value",
-        required=True,
-        metavar="VALUE",
-        help="the shell text to store, or @FILE to read it from a file",
-    )
-    _add_by_path_argument(prelude_set)
-    add_durability_arguments(prelude_set)
-    prelude_unset = _leaf(
-        prelude_actions,
         "unset",
-        summary="remove one per-workflow prelude",
-        description="Remove one per-workflow prelude from a workspace",
-        handler=handle_workspace_workflow_prelude_unset,
+        summary="remove settings and preludes, restore policy defaults",
+        description="Remove application settings and preludes and restore policy members to their defaults",
+        handler=handle_workspace_unset,
     )
-    _add_workspace_targets(prelude_unset, help_text="the workspace to change")
-    prelude_unset.add_argument(
-        "--workflow", required=True, metavar="WORKFLOW", help="the workflow id whose prelude to remove"
-    )
-    _add_by_path_argument(prelude_unset)
-    add_durability_arguments(prelude_unset)
+    remove.add_argument("key", metavar="KEY", nargs="+", help="the keys to remove or reset")
+    add_durability_arguments(remove)
+    for leaf in (show, store, remove):
+        leaf.add_argument("-w", "--workspace", metavar="WORKSPACE", help=workspace_help)
+        _add_adapter_timeout(leaf)
 
     fsck = _leaf(
         group,

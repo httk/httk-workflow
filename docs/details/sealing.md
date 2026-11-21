@@ -79,8 +79,8 @@ application settings do:
   `project,identity`.
 
 ```console
-httk workspace settings set --key seal.succeeded --value false default
-httk workspace settings set --key seal.keys --value project,identity default
+httk workspace set -w default seal.succeeded=false
+httk workspace set -w default seal.keys=project,identity
 ```
 
 ## Key refs

@@ -6,16 +6,16 @@ command answers `--help`:
 ```text
 httk setup | identity     operator identities (core-owned)
 httk project             init | show | check | repair | manifest | verify | seal | unseal | import-v1
-httk workspace           init | list | default | show | configure | status | owners | attest-dead | settings | policy | workflow-prelude | fsck | gc | seal | unseal | verify | exchange | daemon | ...
+httk workspace           init | list | default | show | set | unset | status | owners | attest-dead | fsck | gc | seal | unseal | verify | exchange | daemon | ...
 httk job                 new | submit | request | delete | detach | seal | unseal | unlock | list | show | log | why | debug | push | pull | transfer | eject | adopt
 httk collect             workspaces and calculation trees
 httk workflow            run | list | describe | install | uninstall | precheck | postprocess | build | monitor
 httk seal       verify
 httk manager    run
-httk campaign   init | show | configure | remove | submit | collect | start-managers
-httk launcher   list | add | configure | check | show | remove
-httk remote     list | add | configure | check | show | remove | import-v1 | daemon
-httk config              show | configure | set | unset | import-v1
+httk campaign   init | show | set | unset | remove | submit | collect | start-managers
+httk launcher   list | add | set | unset | check | show | remove
+httk remote     list | add | set | unset | check | show | remove | import-v1 | daemon
+httk config              show | set | unset | import-v1
 httk v1                  collect
 httk transfer            status
 ```

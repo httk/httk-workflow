@@ -153,10 +153,8 @@ def test_configure_persists_only_successful_shareable_daemon_settings(
         "daemon_public_key": _public_key(project),
     }
     monkeypatch.setattr(_transfer, "run_adapter", lambda *_args, **_kwargs: {"returncode": 0, "ok": True})
-    args = ["configure", "cluster"]
-    for key, value in settings.items():
-        args.extend(("--set", f"{key}={value}"))
-    code, _stdout, _stderr = _command(project, ["remote", *args])
+    pairs = [f"{key}={value}" for key, value in settings.items()]
+    code, _stdout, _stderr = _command(project, ["remote", "set", "cluster", *pairs])
     assert code == 0
     assert _remote_settings(project) == settings
 

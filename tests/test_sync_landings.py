@@ -541,7 +541,7 @@ def test_io_sync_takes_its_three_values_and_is_a_recognized_engine_setting(
     workspace.unset_setting("io.sync")
     assert reader.io_sync() == "auto"
     assert classify_setting("io.sync", "auto").state == "recognized"
-    argv = ["workspace", "settings", "set", "--key", "io.sync", "--value", "never", name]
+    argv = ["workspace", "set", "-w", name, "io.sync=never"]
     assert command(argv, CLIContext("httk", tmp_path)) != 0
     assert "io.sync must be auto, syncfs or fsync" in capsys.readouterr().err
     assert reader.io_sync() == "auto"
