@@ -248,7 +248,7 @@ def test_cli_lists_pip_workflows_and_points_uninstall_to_pip(
 ) -> None:
     tag, _, head = _bundled(tmp_path, monkeypatch)
     context = CLIContext("httk", tmp_path)
-    assert command(["list", "--json"], context) == 0
+    assert command(["list", "--available", "--json"], context) == 0
     (row,) = [row for row in json.loads(capsys.readouterr().out) if row["workflow"] == _NAME]
     assert row["source"] == {
         "kind": "pip",
@@ -256,13 +256,13 @@ def test_cli_lists_pip_workflows_and_points_uninstall_to_pip(
         "uri": _uri(head),
         "tags": {"wf-v1.0.0": _uri(tag)},
     }
-    assert command(["list"], context) == 0
+    assert command(["list", "--available"], context) == 0
     assert f"pip example-repo {_uri(head)}" in capsys.readouterr().out
-    assert command(["describe", "--json", _NAME], context) == 0
+    assert command(["show", "--json", _NAME], context) == 0
     source = json.loads(capsys.readouterr().out)[0]["source"]
     assert (source["kind"], source["distribution"], source["uri"]) == ("pip", "example-repo", _uri(head))
-    assert command(["describe", f"{_REPOSITORY}@wf-v1.0.0#pkg"], context) == 0
+    assert command(["show", f"{_REPOSITORY}@wf-v1.0.0#pkg"], context) == 0
     assert f"source: pip example-repo {_uri(tag)}" in capsys.readouterr().out
     for selector in (_NAME, _uri(tag)):
-        assert command(["uninstall", selector], context) == 1
+        assert command(["forget", selector], context) == 1
         assert "pip uninstall example-repo" in capsys.readouterr().err

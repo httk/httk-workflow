@@ -262,8 +262,6 @@ def test_campaign_start_managers_forwards_launcher_to_remote_partition(
     ]
     assert seen[0] == [
         "httk",
-        "workflow",
-        "manager",
         "run",
         "--workspace",
         "runs",

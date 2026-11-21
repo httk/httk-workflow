@@ -422,7 +422,7 @@ def test_one_process_manager_takes_its_capacity_from_the_host_probe(
         return Child()
 
     monkeypatch.setattr(launchers.subprocess, "Popen", fake_popen)
-    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"]
+    argv = [sys.executable, "-m", "httk.core.cli", "run"]
     launchers.launch_processes(workspace_root=tmp_path, argv=argv, count=1, settings={}, capacity={"procs": 4})
     assert "--worker-resource" not in calls[0] and calls[0][-2:] == ["--allocation", "host"]
     calls.clear()

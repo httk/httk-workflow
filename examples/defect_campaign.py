@@ -29,7 +29,7 @@ characterization — the point is the campaign, not the physics):
     httk job new \\
         --from-runner examples/defect_campaign.py --start-step characterize \\
         --parameter sites=3 --parameter diverging=1 --tag campaign
-    httk workflow run
+    httk run
     httk job list
 
 The campaign then fails by design, with ``defects.child_failed``, because

@@ -164,7 +164,7 @@ connection only when they resolve the same socket directory: a cron job without
 `XDG_RUNTIME_DIR` looks under `/tmp/httk-ssh-UID` and does not find a
 connection opened from a desktop session.
 
-`httk workflow monitor` prompts at most once per remote workspace, when it
+`httk monitor` prompts at most once per remote workspace, when it
 starts and before its display opens, if `interactive_auth` is `yes` and a
 terminal is attached; it then keeps that one connection, a far-side
 `httk workflow session`, for its whole run, whatever `connection_reuse` says.
@@ -193,7 +193,7 @@ job's workflow there, push the jobs waiting to start and run its manager there:
 ```console
 $ httk workflow install --workspace kappa:runs 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 $ httk push kappa:runs
-$ httk workflow run --workspace kappa:runs --count 4
+$ httk run --workspace kappa:runs --count 4
 ```
 
 `httk push [SRC] DST` moves every `ready` job of SRC; the SRC left out is
@@ -226,7 +226,7 @@ in DST's `.httk-workspace/tmp/push.<hex>/` is named in a warning and removed by
 `httk workspace gc` after a day. The workspace daemon's exchange never installs a workflow a
 client sends. The
 remote invocation asks the owning machine to run
-`httk workflow manager run --workspace runs --detach …`. The target workspace
+`httk run --workspace runs --detach …`. The target workspace
 then applies its own `manager.launch`, `manager.workers`, scheduler settings and
 `environment.prelude`, as if the command had been run on the login node. Fetch
 finished jobs back with a pull, which moves every `succeeded` job of SRC into
@@ -548,7 +548,7 @@ mount point looks the same as a mounted but empty one, so run
 filesystem is mounted and `httk` answers on the far side.
 
 The mount is for transfers only. Do not run `httk workspace init` on the mount
-as a local workspace, and do not run `status`, `collect`, `fsck` or any analysis
+as a local workspace, and do not run `status`, `collect`, `check` or any analysis
 against the mounted tree. The remote machine owns the workspace, so every
 `httk` command about it goes through the executor (`sigma:runs`), as with an
 `ssh` remote:
@@ -557,7 +557,7 @@ against the mounted tree. The remote machine owns the workspace, so every
 $ httk workspace init --name runs sigma:/proj/x/users/me/httk/runs
 $ httk workflow install --workspace sigma:runs ./my-workflow
 $ httk job move --job JOB default sigma:runs
-$ httk workflow run --workspace sigma:runs --count 4
+$ httk run --workspace sigma:runs --count 4
 $ httk workspace status sigma:runs
 ```
 
@@ -743,7 +743,7 @@ every rank of a parallel launch, in a sandbox that can write only that job's
 directory. The `status.json`, `managers.json` and manager log files are informational and
 never acted on. Parallel launches need the site configuration and acceptance
 described in {doc}`workspace_daemon`. Postprocess scripts are never run by the
-destination: run `httk workflow postprocess` on the adopted job locally.
+destination: run `httk postprocess` on the adopted job locally.
 
 ## From Python
 

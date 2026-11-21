@@ -83,7 +83,7 @@ members following the envelope:
   "operation": "start",
   "launcher_dir": "/home/me/.config/httk/launchers/cluster",
   "workspace": "/scratch/me/runs/workspace",
-  "argv": ["httk", "workflow", "manager", "run", "--workspace", "/scratch/me/runs/workspace"],
+  "argv": ["httk", "run", "--workspace", "/scratch/me/runs/workspace"],
   "count": 2,
   "settings": {
     "slurm.partition": "batch",

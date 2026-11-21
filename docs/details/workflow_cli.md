@@ -2,43 +2,46 @@
 
 This is the complete command reference, from workspaces and jobs to projects,
 signed manifests, and remotes. Installing *httk-workflow* registers lazy
-`workflow`, `workspace`, `job`, `launcher`, `remote`, `manager`, `campaign`,
-`config`, `push`, `pull`, `v1`, and `collect` commands with *httk-core*:
+`workflow`, `workspace`, `job`, `launcher`, `remote`, `campaign`, `config`,
+`push`, `pull`, `run`, `monitor`, `postprocess`, `v1`, and `collect` commands
+with *httk-core*:
 
 ```console
 httk workflow --help
 ```
 
-`httk workflow …` covers workflow installation and execution; workspace and job
-management are the top-level trees `httk workspace …` and `httk job …`, and
-collecting results is `httk collect`. Every group and command answers `--help`,
+`httk workflow …` covers workflow installation, inspection and building;
+workspace and job management are the top-level trees `httk workspace …` and
+`httk job …`, running managers is `httk run`, and collecting results is
+`httk collect`. Every group and command answers `--help`,
 and a mistyped action is reported by its group. {doc}`taskmanager` explains
 what the commands do to a workspace.
 
 Short forms: `-w` is `--workspace`, `-s` is `--state`, `-n` is `--dry-run`,
 `-p` is `--parameter` and `-i` is `--input`, wherever the long option exists.
 `--yes` pre-confirms a command that would otherwise ask on the terminal (a
-`delete`, `remove` or `unseal`, `workspace fsck --repair`); `--force` always
+`delete`, `remove` or `unseal`, `workspace repair`); `--force` always
 overrides a safety check instead.
 
 ## The command tree
 
 ```text
-httk workspace          show | set | unset | init | adopt | list | default | move | forget | delete | status | owners (managers) | attest-dead | workflows | fsck | gc | seal | unseal | verify | exchange enable | daemon init|configure|show|check|run
+httk workspace          show | set | unset | init | register | list | default | move | forget | delete | status | owners (managers) | attest-dead | check | repair | gc | seal | unseal | verify | exchange enable | daemon init|configure|show|check|run
 httk job                new | submit | cancel | pause | resume | restart | set | delete | seal | unseal | detach | unlock | eject | adopt | list | show | log | why | precheck | debug | verify | move
 httk push               [SRC] DST [--job JOB] [--state STATE] [--step STEP] [--placement P] [--no-keep] [--no-workflows] [--json]
 httk pull               SRC [DST] [--job JOB] [--state STATE] [--step STEP] [--placement P] [--no-workflows] [--json]
 httk collect            [PATH] [--workspace WORKSPACE] [--into PATH] [--dry-run] …
-httk workflow list      [--workspace WORKSPACE] [--json]
-httk workflow describe  TARGET… [--workspace WORKSPACE] [--json]
+httk workflow list      [--workspace WORKSPACE] [--available] [--json]
+httk workflow show      TARGET… [--workspace WORKSPACE] [--json]
 httk workflow install   SOURCE… [--workspace WORKSPACE] [--no-calls] [--no-build] [--json]
 httk workflow uninstall SELECTOR… [--workspace WORKSPACE] [--check] [--json]
 httk workflow build     [--workspace WORKSPACE] [--list] WORKFLOW…
-httk workflow run       [--workspace WORKSPACE]  (the recommended spelling of `manager run`)
-httk manager            run
+httk workflow fetch     URI… [--json]
+httk workflow forget    SELECTOR… [--json]
+httk run                [--workspace WORKSPACE] [manager options]
 httk launcher           list | add | set | unset | show | check | remove
-httk workflow monitor   [--workspace WORKSPACE …] [--refresh SECONDS]
-httk workflow postprocess
+httk monitor            [--workspace WORKSPACE …] [--refresh SECONDS]
+httk postprocess        SCRIPT [JOB…] [--workspace WORKSPACE]
 httk v1                 collect
 httk remote             list | add | set | unset | check | import-v1 | show | remove | daemon
 httk config             show | set | unset | import-v1
@@ -50,8 +53,10 @@ httk project            init | show | import-v1 | export | check | repair | mani
 ### Configuration conventions
 
 Concept groups live directly below `httk`: `httk launcher`, `httk remote`,
-`httk manager`, `httk campaign` and `httk config`. `workflow`
-retains workflow installation, inspection, building and execution.
+`httk campaign` and `httk config`. `workflow` retains workflow installation,
+inspection and building, and follows the workspace default like every other
+command (`list` and `show` never create it); only `list --available`, `fetch`
+and `forget` address this machine.
 
 Use `show [--json]` to inspect configuration. Workspaces, launchers, remotes,
 the per-user configuration and campaigns change it with `set KEY=VALUE...`, which
@@ -70,7 +75,7 @@ configuration still uses `configure` with repeatable `--set KEY=VALUE` and
 | Workspace application settings | `workspace show [KEY...]` | `workspace set KEY=VALUE...`, `workspace unset KEY...` | `workspace forget NAME` keeps files; `workspace delete NAME` deletes them after confirmation |
 | Workspace policy | `workspace show policy.KEY` | `workspace set policy.KEY=JSON...`; `workspace unset policy.KEY` restores the default | Required format members cannot be deleted |
 | Workflow preludes | `workspace show prelude.WORKFLOW_ID` | `workspace set prelude.WORKFLOW_ID=TEXT\|@FILE`, `workspace unset prelude.WORKFLOW_ID` | Unset a workflow's prelude |
-| Installed workflows | `workspace workflows`, `workflow list --workspace` | `workflow install --workspace` | `workflow uninstall --workspace` |
+| Installed workflows | `workflow list`, `workflow show` | `workflow install` | `workflow uninstall` |
 | Launcher | `launcher show NAME` | `launcher set NAME KEY=VALUE...`, `launcher unset NAME KEY...`; `set --add` / `--remove` for confinement path lists | `launcher remove NAME` |
 | Remote | `remote show NAME` | `remote set NAME KEY=VALUE...`, `remote unset NAME KEY...`, including private credentials | `remote remove NAME` |
 | User configuration | `config show` | `config set KEY=VALUE...`, `config unset KEY...`; `set --add` / `--remove` for `machine_names` | Unset its configurable keys |
@@ -100,9 +105,9 @@ The registry is machine-owned and stores only absolute local paths, in
 `$XDG_CONFIG_HOME/httk/workspaces.json`. When a command reaches a remote
 workspace, the far side resolves the plain name in its own registry.
 
-Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
-`show`, `log`, `why`, `request` and `delete`, `workflow install`, `build` and
-`run`) go through the adapter. Jobs are created locally, moved with
+Remote-capable commands (workspace status, settings, `gc`, `check`, `repair`,
+`job list`, `show`, `log`, `why`, `request` and `delete`, `workflow list`,
+`show`, `install`, `uninstall` and `build`, and `run`) go through the adapter. Jobs are created locally, moved with
 `push` and brought back with `pull` (or `job move` in general).
 
 ## Workspaces
@@ -121,18 +126,18 @@ Remote-capable commands (workspace status, settings, `gc`, `fsck`, `job list`,
 | `workspace daemon reload WORKSPACE` | activate the changed configuration and launcher bundles; a running daemon restarts on it | |
 | `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
-| `workspace adopt [PATH...]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only), `--json` |
+| `workspace register [PATH...]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only), `--json` |
 | `workspace move NAME DEST_DIR` | move a local workspace and update its registry path | `--no-durable` |
 | `workspace forget NAME...` | deregister names, leaving workspaces on disk | |
 | `workspace delete NAME...` | destroy workspaces and deregister them, after confirmation | `--yes` skips the confirmation |
 | `workspace status [NAME...]` | job counts by state, the seal, the owners with their liveness, and the held transfers (transfer id, root job, members, destination, age; `transfers` in `--json`; a hold whose manifest cannot be read is named, `transfers_unreadable` in `--json`, without changing the exit status) (remote: over the adapter) | `--json` |
 | `workspace owners [NAME...]` | list the owners (managers, CLI processes, daemons) with their liveness; `managers` is an alias | `--kind manager\|cli\|daemon`, `--json` |
 | `workspace attest-dead OWNER [NAME] --reason TEXT` | declare an owner and its launches ended, so the next manager tick or `workspace gc` recovers its jobs | `--operator NAME`, `--force` |
-| `workspace workflows [NAME...]` | list the workflows installed in a workspace | `--json` |
 | `workspace show [KEY...]` | print every key (application settings with a column marking each recognized, unrecognized or undeclared, then `policy.*`, then `prelude.*`), or the selected keys; one KEY prints its bare value | `-w`, `--json`, `--adapter-timeout` |
 | `workspace set KEY=VALUE...` | store application settings, policy members and preludes in one validated write, printing the changed keys as one JSON object; warns about unrecognized settings and notes undeclared ones (remote: one forwarded command) | `-w`, `--no-durable`, `--adapter-timeout` |
 | `workspace unset KEY...` | remove application settings and preludes and restore policy defaults in one write, printing the keys as a JSON list (remote: one forwarded command) | `-w`, `--no-durable`, `--adapter-timeout` |
-| `workspace fsck [NAME...]` | check the job tree for what the kernel cannot resolve; only while nothing else uses the workspace | `--repair` (quiescent workspace only, asks first), `--yes`, `--json` |
+| `workspace check [NAME...]` | check the job tree, read-only, for what the kernel cannot resolve; only while nothing else uses the workspace | `--json` |
+| `workspace repair NAME...` | check like `workspace check`, then quarantine unparsable entries and fix the exchange index, after confirmation; quiescent workspace only | `--yes`, `--json` |
 | `workspace gc [NAME...]` | collect what the retention policy allows and recover dead owners (remote: over the adapter) | `--dry-run`, `--category CATEGORY` (repeatable), `--json` |
 | `workspace seal [NAME...]` | record every job's seal digest under one signed workspace seal, listing the unsealed jobs | `--keys REFS` |
 | `workspace unseal [NAME...]` | remove a workspace's seal, refused while its project is sealed | `--yes` skips the confirmation |
@@ -210,11 +215,11 @@ decide needs `--force`. Attesting an owner that is still running can apply a
 request twice and run work twice, so attest only after confirming that the owner
 process and every launch it started are gone; see
 [owners, death and recovery](taskmanager.md#owners-death-and-recovery).
-`workspace fsck` must run only while no manager, CLI operation, daemon or
-transfer uses the workspace; its findings from a busy workspace may be
-transient, and `--repair` is refused until every owner is proven dead and
-recovered by `workspace gc`. `--repair` asks for confirmation first; `--yes`
-answers it, and is required without a terminal. `workspace fsck` and
+`workspace check` and `workspace repair` must run only while no manager, CLI
+operation, daemon or transfer uses the workspace; findings from a busy
+workspace may be transient, and `repair` is refused until every owner is proven
+dead and recovered by `workspace gc`. `repair` asks for confirmation first;
+`--yes` answers it, and is required without a terminal. Checking and
 `workspace gc` are described in
 [checking a workspace](taskmanager.md#checking-a-workspace) and
 [freeing disk](taskmanager.md#freeing-disk).
@@ -226,12 +231,14 @@ in `workflows/<slug>--<h16>/` and are selected by id, short name (the most
 recently installed one of that name) or `NAME@REF` (see
 [Short names](workflow_uris.md#short-names)).
 
-### `install` and `uninstall`
+### `install`, `uninstall`, `fetch` and `forget`
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `workflow install SOURCE...` | install into a workspace: a package directory, a git URI, a runner file or workflow document (installed ad hoc), or a workflow name known here; a git URI without `#SUBDIR` whose repository root carries `httk_plugin.toml` installs every workflow that plugin lists; declared calls are installed too (call slot defaults never are: a `notice:` names each one not installed) and a `[workflow.build]` package is built | `--workspace`, `--no-calls`, `--no-build`, `--language`, `--json`, `--adapter-timeout` |
 | `workflow uninstall SELECTOR...` | remove installed workflows by id, short name or `NAME@REF`; a selector several installations share is refused | `--workspace`, `--check` (warn about unfinished jobs using it), `--json` |
+| `workflow fetch URI...` | fetch git workflows into this machine's cache, without a workspace | `--json` |
+| `workflow forget SELECTOR...` | forget fetched git workflows on this machine (a pinned URI removes that commit, an unpinned URI or a short name its whole lineage) | `--json` |
 
 ```console
 httk workflow install --workspace WORKSPACE 'git+https://github.com/httk/workflows-vasp#vasp-relax'
@@ -242,19 +249,28 @@ httk workflow install --workspace kappa:runs ./my-workflow
 The command prints `ID<TAB>NAME` per installed workflow. A git source is
 installed under its canonical URI pinned to the full commit. A `REMOTE:WS`
 workspace gets the source pushed through the remote's adapter (a git source is
-fetched there by its pinned URI). Without `--workspace`, `install` only fetches
-a git URI into this machine's cache and `uninstall` forgets fetched git
-workflows (a pinned URI removes that commit, an unpinned URI or a short name its
-whole lineage). See {doc}`/details/workflow_uris`.
+fetched there by its pinned URI). Without `--workspace`, `install`,
+`uninstall` and `build` use the default workspace like every other command,
+creating the per-user default when it is missing (as `job new` does); when the
+project's recorded default does not resolve, `install` names `workflow fetch`
+and `workspace init`. See {doc}`/details/workflow_uris`.
 
-### `list` and `describe`
+### `list` and `show`
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workflow list` | without `--workspace`, the workflows a name selects on this machine (registered, plugin, pip-installed workflow repositories, fetched git workflows); with it, the workflows installed in that workspace | `--workspace`, `--json` |
-| `workflow describe TARGET...` | describe a registered id or alias, git URI, runner file or package directory; with `--workspace`, an installation there | `--workspace`, `--language`, `--json` |
+| `workflow list` | the workflows installed in the workspace; with `--available`, the workflows a name selects on this machine (registered, plugin, pip-installed workflow repositories, fetched git workflows) | `--workspace`, `--available`, `--json` |
+| `workflow show TARGET...` | describe a target's installation in the workspace; a target the workspace does not hold (or every target, when there is no workspace) as resolved on this machine: a registered id or alias, git URI, runner file or package directory | `--workspace`, `--language`, `--json` |
 
-As a report, `describe` runs a directory package's runner entry with
+`list` and `show` are inspections and never create a workspace: without
+`--workspace` they use the enclosing workspace, the project's default, or the
+per-user default only when it already exists. With none of them, `list` fails
+with a hint naming `workflow list --available` and `workspace init`, and `show`
+describes every target as this machine resolves it.
+
+Each description starts with `described from: workspace WS` or
+`described from: this machine` (`described_from` and `workspace` in `--json`).
+As a report, `show` runs a directory package's runner entry with
 `--describe`. When the manifest's declared `steps` disagree with what the
 runner reports, it prints a prominent `WARNING: step drift` line
 (`manifest_step_drift` in `--json`), but still exits `0`. Package authoring is
@@ -389,7 +405,7 @@ Other options:
   Jobs without a tag are never checked, `job submit` and spawned children are
   unaffected, and deleting a job frees its tag. The check precedes the
   creation, so two creators racing on one tag can both succeed;
-  `workspace fsck` notes jobs sharing a tag in one placement (a `noted`
+  `workspace check` notes jobs sharing a tag in one placement (a `noted`
   finding `duplicate_tag`, not a failure). Re-running a creation script with
   `skip` thus creates only the jobs that do not exist yet, wherever the
   existing ones are, as *httk* v1's fixed task directories did.
@@ -1393,16 +1409,15 @@ through the workspace daemon's exchange.
 
 ## Running managers
 
-### `manager` and `run`
+### `run`
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `run` | run managers through the workspace launcher until the workspace is idle, or keep serving with `--keep-running` | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement`, `--keep-running`, `--idle-timeout`, `--idle-grace`, `--time-limit`, `--deadline-margin`, `--drain-timeout`, `--join-grace-seconds`, `--gc-interval`, `--inline`, `--launcher`, `--detach`, `--log-level`, `--log-file`, `--json-logs`, `--adapter-timeout` |
-| `manager run` | the same, the advanced spelling | as `run` |
 
-Both follow the binding: a local workspace uses its `manager.launch` setting
+It follows the binding: a local workspace uses its `manager.launch` setting
 (the built-in `process` launcher by default), and a remote workspace invokes the
-same command on its owner. Both also take `--setting KEY=VALUE` (repeatable, not
+same command on its owner. It also takes `--setting KEY=VALUE` (repeatable, not
 shown in `--help`), which pins `manager.confine`, `manager.launch_template`,
 `manager.launch_mpi`, `manager.confine.block_mpi_spawn`, `manager.bind_cpus` or
 a `confine.*` key on the managers for their lifetime; any other key is refused.
@@ -1462,7 +1477,7 @@ See {doc}`launchers` and {doc}`launcher_authoring`.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workflow monitor` | open the curses workspace monitor | `--workspace WORKSPACE` (repeatable), `--refresh SECONDS`, `--adapter-timeout SECONDS`, `--non-interactive` |
+| `monitor` | open the curses workspace monitor | `--workspace WORKSPACE` (repeatable), `--refresh SECONDS`, `--adapter-timeout SECONDS`, `--non-interactive` |
 
 See {doc}`monitor` for the panes, keys, and read budget.
 
@@ -1519,11 +1534,11 @@ already be collected into the store. It is refused together with `--raw`,
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `postprocess [OPTIONS] [JOB...]` | run one declared script for each selected job | `--workspace WS`, `--script NAME` (required), `--workflow-dir PKG`, `--state`, `--step`, `--placement`, `--output-dir DIR`, `--timeout`, `--json` |
+| `postprocess SCRIPT [JOB...]` | run the declared script SCRIPT for each selected job | `--workspace WS`, `--workflow-dir PKG`, `--state`, `--step`, `--placement`, `--output-dir DIR`, `--timeout`, `--json` |
 
 ```console
-httk workflow postprocess --workspace WS --script relaxation-report
-httk workflow postprocess --script relaxation-plot <job-id>
+httk postprocess relaxation-report --workspace WS
+httk postprocess relaxation-plot <job-id>
 ```
 
 Output is written outside the job payload, so a sealed job can be
@@ -1664,7 +1679,7 @@ its seal digest, how to verify it, and its health checks.
 A workspace inside a project is recorded in `httk_project/members.json`:
 registered on `httk workspace init`, unregistered on `workspace delete` or
 `workspace forget`, and its path followed on `workspace move`. On another
-machine, `httk workspace adopt` (per workspace) or `httk project repair` (every
+machine, `httk workspace register` (per workspace) or `httk project repair` (every
 member) registers copied workspaces under their recorded names.
 
 `httk project repair` handles conditions that quietly break a project later:
@@ -1790,7 +1805,7 @@ httk workspace status --json WS
 httk job request-envelopes ACTION --workspace WS --operator LABEL --reason TEXT [--priority N] [--override-step S] [--workflow W] [--destination D] [--max-attempts-per-activation N|unlimited] [--max-total-attempts N|unlimited] [--max-activations N|unlimited] [--force] [--keep-budget] [--tree] JOB_ID …
 httk job publish-requests --workspace WS --document JSON [--document JSON …] [--wait] [--timeout S] [--sequential]
 httk workspace status --by-path --json PATH
-httk workflow manager run --by-path --workspace PATH
+httk run --by-path --workspace PATH
 ```
 
 The hidden `--by-path` switch makes the workspace argument a literal path with
@@ -1814,7 +1829,7 @@ some commands and options. These spellings no longer parse:
 | `httk workflow transfer offer\|receive\|retire\|reclaim` | `job move` (whose first leg is the hidden protocol option `job eject --hold`), `job adopt`, `job move --release` |
 | `workspace unlock` | removed with the maintenance lock; there is nothing to release (`job unlock` is unrelated: it puts one job in debug mode) |
 | `workspace forget --force` | `workspace forget` |
-| `workspace fsck --quarantine-unrepairable` | `workspace fsck --repair` |
+| `workspace fsck --quarantine-unrepairable` | `workspace repair` |
 | `workspace seal --force` | `job seal` the remaining jobs first, or seal the workspace with them listed as unsealed |
 | `manager run --lease-seconds`, `--takeover-grace-factor`, `--unsafe-persistent-takeover`, `--unsafe-isolated-takeover` | recovery only after the death proof or `workspace attest-dead` |
 | `transfer send`, `transfer fetch`, `workspace status REMOTE` (by remote) | `job move --job JOB … SRC DST`; `workspace status WS` lists one workspace's holds (`REMOTE:WS` for a remote one) |
@@ -1861,6 +1876,17 @@ some commands and options. These spellings no longer parse:
 | `job push`, `job pull` | `httk push`, `httk pull` |
 | `httk transfer status [WS]` | `httk workspace status [WS]` (the held transfers; `transfers` in `--json`) |
 | `httk seal verify [PATH]` | `httk job verify JOB...` (a payload directory too), `httk workspace verify [--deep] [--content]`, `httk project verify` |
+| `httk workflow run`, `httk manager run` (and the remote vector `httk workflow manager run`) | `httk run` |
+| `httk workflow monitor` | `httk monitor` |
+| `httk workflow postprocess --script SCRIPT [JOB...]` | `httk postprocess SCRIPT [JOB...]` |
+| `httk workflow describe TARGET...` | `httk workflow show TARGET...` (the installation in the workspace, else this machine's resolution) |
+| `httk workflow list` without `--workspace` (this machine's workflows) | `httk workflow list --available`; `workflow list` lists the default workspace |
+| `httk workflow install URI...` without `--workspace` (fetch only) | `httk workflow fetch URI...`; `workflow install` installs into the default workspace |
+| `httk workflow uninstall SELECTOR...` without `--workspace` (forget fetched) | `httk workflow forget SELECTOR...`; `workflow uninstall` removes from the default workspace |
+| `httk workspace workflows [NAME...]` | `httk workflow list [-w NAME]` |
+| `httk workspace adopt [PATH...]` | `httk workspace register [PATH...]` |
+| `httk workspace fsck [NAME...]` | `httk workspace check [NAME...]` |
+| `httk workspace fsck --repair [--yes] NAME...` | `httk workspace repair [--yes] NAME...` |
 
 Workspaces and bundles of the earlier layout are refused with a message that
 there is no migration: re-create the workspace with `httk workspace init` and

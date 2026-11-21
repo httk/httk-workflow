@@ -77,7 +77,7 @@ def test_a_workflow_prelude_wraps_the_runner_in_a_login_shell(tmp_path: Path) ->
 
 
 def test_batch_script_runs_prelude_before_exec_under_set_e() -> None:
-    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run", "--by-path"]
+    argv = [sys.executable, "-m", "httk.core.cli", "run", "--by-path"]
     script = _batch_script(
         argv,
         settings={"environment.prelude": "module load VASP/6.2.1"},
@@ -90,12 +90,12 @@ def test_batch_script_runs_prelude_before_exec_under_set_e() -> None:
     prelude_at = script.index("module load VASP/6.2.1")
     exec_at = script.index("exec ")
     assert prelude_at < exec_at
-    assert "exec httk workflow manager run --by-path" in script
+    assert "exec httk run --by-path" in script
     assert sys.executable not in script
 
 
 def test_batch_script_uses_configured_manager_command_after_prelude() -> None:
-    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"]
+    argv = [sys.executable, "-m", "httk.core.cli", "run"]
     script = _batch_script(
         argv,
         settings={"environment.prelude": "module load python", "manager.command": "/opt/httk with space"},
@@ -103,20 +103,20 @@ def test_batch_script_uses_configured_manager_command_after_prelude() -> None:
         directory="/ws/.batch",
         launch_id=_LAUNCH_ID,
     )
-    assert "exec '/opt/httk with space' workflow manager run" in script
+    assert "exec '/opt/httk with space' run" in script
 
 
 def test_batch_script_without_prelude_omits_it() -> None:
-    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"]
+    argv = [sys.executable, "-m", "httk.core.cli", "run"]
     script = _batch_script(argv, settings={}, workspace="/ws", directory="/ws/.batch", launch_id=_LAUNCH_ID)
     assert "module load" not in script
     assert "set -e\n" in script and "set -eu" not in script
-    assert f"exec {sys.executable} -m httk.core.cli workflow manager run" in script
+    assert f"exec {sys.executable} -m httk.core.cli run" in script
 
 
 def test_batch_script_quotes_slurm_values_and_paths_with_spaces() -> None:
     script = _batch_script(
-        [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"],
+        [sys.executable, "-m", "httk.core.cli", "run"],
         settings={"slurm.partition": "main cluster"},
         workspace="/ws with space",
         directory="/ws with space/logs/launchers",
@@ -129,7 +129,7 @@ def test_batch_script_quotes_slurm_values_and_paths_with_spaces() -> None:
 
 
 def test_batch_script_exports_the_launch_id_before_the_prelude() -> None:
-    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"]
+    argv = [sys.executable, "-m", "httk.core.cli", "run"]
     script = _batch_script(
         argv,
         settings={"environment.prelude": "module load python"},

@@ -256,7 +256,7 @@ did.
 | --- | --- | --- |
 | `argv` | array of nonempty strings, required | the command |
 | `cwd` | string, optional | the directory to run it in |
-| `share_connection` | boolean, optional | the caller polls (`workflow monitor`): keep one connection open across calls instead of logging in for each |
+| `share_connection` | boolean, optional | the caller polls (`monitor`): keep one connection open across calls instead of logging in for each |
 
 An adapter that has no connection to share ignores `share_connection`. The
 `ssh` template honors it only while `connection_reuse` is absent from
@@ -384,7 +384,7 @@ does not install software or validate compute-node confinement.
 
 ## The `session` operation
 
-A caller that polls, such as `workflow monitor`, would otherwise pay one login
+A caller that polls, such as `monitor`, would otherwise pay one login
 and one remote `httk` start per read. `session` instead starts one long-lived
 far-side process and talks to it over the adapter's own pipes, as rsync does.
 The monitor starts `httk workflow session` (text lines); every job transfer to

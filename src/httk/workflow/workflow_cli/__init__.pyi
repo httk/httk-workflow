@@ -14,12 +14,13 @@ from httk.core.cli import CLIContext
 from ..adapters import (
     REMOTE_MANAGER_COMMAND,
     REMOTE_STATUS_COMMAND,
+    REMOTE_WORKSPACE_CHECK_COMMAND,
     REMOTE_WORKSPACE_DELETE_COMMAND,
-    REMOTE_WORKSPACE_FSCK_COMMAND,
     REMOTE_WORKSPACE_GC_COMMAND,
     REMOTE_WORKSPACE_INIT_COMMAND,
     REMOTE_WORKSPACE_LIST_COMMAND,
     REMOTE_WORKSPACE_MOVE_COMMAND,
+    REMOTE_WORKSPACE_REPAIR_COMMAND,
     REMOTE_WORKSPACE_SET_COMMAND,
     REMOTE_WORKSPACE_SHOW_COMMAND,
     REMOTE_WORKSPACE_UNSET_COMMAND,
@@ -36,12 +37,14 @@ from ._campaign import (
 from ._common import remote_workspace_output
 from ._compat import add_v1_collect_arguments, build_v1_parser, handle_v1_collect
 from ._describe import (
-    build_describe_parser,
     build_install_parser,
     build_list_parser,
-    handle_workflow_describe,
+    build_show_parser,
+    handle_workflow_fetch,
+    handle_workflow_forget,
     handle_workflow_install,
     handle_workflow_list,
+    handle_workflow_show,
     handle_workflow_uninstall,
 )
 from ._job import (
@@ -73,9 +76,7 @@ from ._launcher import (
     handle_launcher_unset,
 )
 from ._manager import (
-    add_manager_run_arguments,
     add_run_arguments,
-    build_manager_parser,
     build_run_parser,
     handle_manager_run,
     launch_workspace_managers,
@@ -109,9 +110,9 @@ from ._workspace import (
     add_workspace_init_arguments,
     add_workspace_status_arguments,
     build_workspace_parser,
+    handle_workspace_check,
     handle_workspace_delete,
     handle_workspace_forget,
-    handle_workspace_fsck,
     handle_workspace_gc,
     handle_workspace_init,
     handle_workspace_list,
@@ -121,22 +122,21 @@ from ._workspace import (
     handle_workspace_status,
     handle_workspace_unseal,
     handle_workspace_unset,
-    handle_workspace_workflows,
 )
 
 __all__ = [
     "REMOTE_MANAGER_COMMAND",
     "REMOTE_STATUS_COMMAND",
+    "REMOTE_WORKSPACE_CHECK_COMMAND",
     "REMOTE_WORKSPACE_DELETE_COMMAND",
-    "REMOTE_WORKSPACE_FSCK_COMMAND",
     "REMOTE_WORKSPACE_GC_COMMAND",
     "REMOTE_WORKSPACE_INIT_COMMAND",
     "REMOTE_WORKSPACE_LIST_COMMAND",
     "REMOTE_WORKSPACE_MOVE_COMMAND",
+    "REMOTE_WORKSPACE_REPAIR_COMMAND",
     "REMOTE_WORKSPACE_SET_COMMAND",
     "REMOTE_WORKSPACE_SHOW_COMMAND",
     "REMOTE_WORKSPACE_UNSET_COMMAND",
-    "add_manager_run_arguments",
     "add_run_arguments",
     "add_v1_collect_arguments",
     "add_workspace_init_arguments",
@@ -144,18 +144,17 @@ __all__ = [
     "build_build_parser",
     "build_campaign_parser",
     "build_config_parser",
-    "build_describe_parser",
     "build_install_parser",
     "build_job_parser",
     "build_launcher_parser",
     "build_list_parser",
-    "build_manager_parser",
     "build_monitor_parser",
     "build_parser",
     "build_postprocess_parser",
     "build_push_pull_parser",
     "build_remote_parser",
     "build_run_parser",
+    "build_show_parser",
     "build_transfer_parser",
     "build_v1_parser",
     "build_workspace_parser",
@@ -208,13 +207,15 @@ __all__ = [
     "handle_remote_unset",
     "handle_transfer",
     "handle_v1_collect",
-    "handle_workflow_describe",
+    "handle_workflow_fetch",
+    "handle_workflow_forget",
     "handle_workflow_install",
     "handle_workflow_list",
+    "handle_workflow_show",
     "handle_workflow_uninstall",
+    "handle_workspace_check",
     "handle_workspace_delete",
     "handle_workspace_forget",
-    "handle_workspace_fsck",
     "handle_workspace_gc",
     "handle_workspace_init",
     "handle_workspace_list",
@@ -224,17 +225,18 @@ __all__ = [
     "handle_workspace_status",
     "handle_workspace_unseal",
     "handle_workspace_unset",
-    "handle_workspace_workflows",
     "job_command",
     "launch_workspace_managers",
     "launcher_command",
-    "manager_command",
+    "monitor_command",
+    "postprocess_command",
     "publish_job_requests",
     "pull_command",
     "push_command",
     "remote_command",
     "remote_workspace_output",
     "request_remote_job_result",
+    "run_command",
     "submit_remote_manager_result",
     "v1_command",
     "workflow_command",
@@ -278,8 +280,14 @@ def job_command(argv: Sequence[str], context: CLIContext) -> int:
 def collect_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``collect`` command."""
 
-def manager_command(argv: Sequence[str], context: CLIContext) -> int:
-    """Handle the registered top-level ``manager`` command."""
+def run_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``run`` command."""
+
+def monitor_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``monitor`` command."""
+
+def postprocess_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``postprocess`` command."""
 
 def remote_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``remote`` command."""

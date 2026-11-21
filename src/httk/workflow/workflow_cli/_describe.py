@@ -1,9 +1,12 @@
-"""The workflow describe, list, install and uninstall commands: this machine's workflows and a workspace's store.
+"""The workflow list, show, install, uninstall, fetch and forget commands: a workspace's store and this machine.
 
-Without ``--workspace`` these commands read (and, for git URIs, fetch into)
-this machine's *httk* setup. With ``--workspace WS`` they act on the store of
-installed workflows of that workspace (``workflows/<slug>--<h16>/``); a
-``REMOTE:WS`` workspace is reached through the remote's adapter.
+``list``, ``show``, ``install`` and ``uninstall`` act on the store of installed
+workflows (``workflows/<slug>--<h16>/``) of the workspace every command
+defaults to (the enclosing workspace, this project's workspace, or the per-user
+default); a ``REMOTE:WS`` workspace is reached through the remote's adapter.
+``list --available`` and ``show`` of a workflow the workspace does not hold read
+this machine's *httk* setup, and ``fetch``/``forget`` manage this machine's
+cache of git workflows.
 """
 
 from __future__ import annotations
@@ -24,10 +27,11 @@ from .. import _fs, _kernel, _landing, _store
 from .._durations import TIME_RESOURCES, format_duration
 from .._manager_scheduling import bound_workflows, effective_workflow
 from ..adapters import probe_remote_workspace, resolve_remote, run_adapter
+from ..errors import ResolutionMiss
 from ..introspection import iter_jobs, read_job, read_state
 from ..models import BUDGET_LIMITS, WORKSPACE_DIRECTORY
 from ..packages import installed_plugin_workflow_owners, installed_plugin_workflows
-from ..registry import WorkspaceBinding
+from ..registry import LOCAL_REMOTE, WorkspaceBinding, _existing_default_workspace
 from ..scaffold import (
     ResolvedWorkflow,
     WorkflowProvider,
@@ -44,6 +48,7 @@ from ._common import (
     _ERRORS,
     _add_adapter_timeout,
     _add_by_path_argument,
+    _by_path,
     _leaf,
     _modifiable,
     _remote_workspace_read,
@@ -195,12 +200,9 @@ def _workflow_description(target: str, format: str | None = None) -> dict[str, o
     return _description(workflow, source_document)
 
 
-def _installed_description(workspace: Workspace, target: str) -> dict[str, object]:
-    """Describe the installation of *target* in a workspace's store."""
+def _installed_description(installed: _store.Installed) -> dict[str, object]:
+    """Describe one installation of a workspace's store."""
 
-    installed = _store.lookup(workspace, target)
-    if installed is None:
-        raise ValueError(f"workflow {target!r} is not installed in the workspace {workspace.root}")
     source = {"kind": "workspace", "path": str(installed.package), **_installed_row(installed)}
     return _description(_provider_resolution(installed.provider()), source)
 
@@ -338,6 +340,11 @@ def _render_text(description: Mapping[str, object]) -> str:
     step_resources = description["step_resources"]
     assert isinstance(step_resources, Mapping)
     lines = [
+        (
+            f"described from: workspace {description['workspace']}"
+            if description.get("described_from") == "workspace"
+            else "described from: this machine"
+        ),
         f"workflow: {description['workflow']}",
         f"alias: {description['alias'] or '-'}",
     ]
@@ -493,6 +500,33 @@ def _remote_relay(binding: WorkspaceBinding, context: Any, arguments: argparse.N
     )
 
 
+def _existing_binding(
+    arguments: argparse.Namespace, context: Any
+) -> tuple[WorkspaceBinding | None, Path | None] | None:
+    """Resolve the workspace like every command, but never create the per-user default: ``None`` when none exists.
+
+    The inspection commands (``list``, ``show``) use this, so that a fresh machine is left untouched.
+
+    :param arguments: The parsed arguments, with ``workspace``.
+    :param context: The invocation context.
+    :return: ``(binding, path)`` as :func:`_resolve_binding` returns it, or ``None``.
+    :raises httk.workflow.errors.ResolutionMiss: If a named or recorded default workspace does not resolve.
+    """
+
+    if arguments.workspace is not None or _by_path(arguments):
+        return _resolve_binding(arguments, context)
+    discovered = Workspace.discover(context.cwd)
+    if discovered is not None:
+        return None, discovered
+    binding = _existing_default_workspace(context.cwd)
+    if binding is None:
+        return None
+    if binding.remote == LOCAL_REMOTE:
+        assert binding.path is not None
+        return binding, Path(binding.path)
+    return binding, None
+
+
 def _print_rows(rows: Sequence[Mapping[str, object]], arguments: argparse.Namespace, text: Any) -> None:
     if arguments.json:
         print(json.dumps(list(rows), indent=2, sort_keys=True))
@@ -501,28 +535,47 @@ def _print_rows(rows: Sequence[Mapping[str, object]], arguments: argparse.Namesp
             print(text(row))
 
 
-def handle_workflow_describe(arguments: argparse.Namespace, context: Any) -> int:
-    """Describe workflows of this machine, or the installations in a workspace, without changing anything."""
+def handle_workflow_show(arguments: argparse.Namespace, context: Any) -> int:
+    """Describe each target's installation in the workspace, else the target as resolved on this machine.
 
-    workspace: Workspace | None = None
-    if arguments.workspace is not None:
-        binding, root = _resolve_binding(arguments, context)
-        if root is None:
-            assert binding is not None
-            format_flags = () if arguments.format is None else ("--language", arguments.format)
-            return _remote_relay(binding, context, arguments, "describe", *format_flags, *arguments.targets)
-        if arguments.format is not None:
-            raise ValueError("--language describes a bare document on this machine; an installation names its language")
-        workspace = Workspace(root)
+    Nothing is changed or created. Without ``--workspace``, the workspace is the enclosing one, the project's
+    default, or an existing per-user default; when there is none, every target is left to this machine. Each
+    description names where it came from (``described_from``).
+
+    :param arguments: The parsed ``show`` arguments.
+    :param context: The invocation context.
+    :return: The process exit status.
+    """
+
+    try:
+        resolved = _existing_binding(arguments, context)
+    except ResolutionMiss:
+        if arguments.workspace is not None:
+            raise
+        resolved = None
+    binding, root = resolved or (None, None)
+    if root is None and binding is not None:
+        format_flags = () if arguments.format is None else ("--language", arguments.format)
+        return _remote_relay(binding, context, arguments, "show", *format_flags, *arguments.targets)
+    workspace = None if root is None else Workspace(root)
+    label = None if root is None else binding.name if binding is not None else str(root)
     descriptions: list[dict[str, object]] = []
     failed = False
     for target in arguments.targets:
         try:
-            description = (
-                _workflow_description(target, arguments.format)
-                if workspace is None
-                else _installed_description(workspace, target)
-            )
+            installed = None if workspace is None else _store.lookup(workspace, target)
+            if installed is None:
+                description = {
+                    **_workflow_description(target, arguments.format),
+                    "described_from": "machine",
+                    "workspace": None,
+                }
+            elif arguments.format is not None:
+                raise ValueError(
+                    "--language describes a bare document on this machine; an installation names its language"
+                )
+            else:
+                description = {**_installed_description(installed), "described_from": "workspace", "workspace": label}
         except (OSError, ValueError, RuntimeError) as exc:
             failed = True
             print(f"{target}: {exc}", file=sys.stderr)
@@ -537,22 +590,34 @@ def handle_workflow_describe(arguments: argparse.Namespace, context: Any) -> int
 
 
 def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
-    """List the workflows of this machine, or the workflows installed in a workspace.
+    """List the workflows installed in the workspace, or with ``--available`` the workflows of this machine.
 
-    Without ``--workspace`` the listing is the union ``--workflow`` resolves
-    names against: the workflows ``register_workflow`` added in this process,
-    the workflows installed plugins bundle, the workflows of pip-installed
-    workflow repositories, then fetched git workflows by short name. With
-    ``--workspace`` it is that workspace's store.
+    The ``--available`` listing is the union a workflow name resolves against:
+    the workflows ``register_workflow`` added in this process, the workflows
+    installed plugins bundle, the workflows of pip-installed workflow
+    repositories, then fetched git workflows by short name.
 
     :param arguments: The parsed ``list`` arguments.
     :param context: The invocation context.
     :return: The process exit status.
     """
 
-    if arguments.workspace is None:
+    if arguments.available:
+        if arguments.workspace is not None:
+            raise ValueError("--available lists this machine's workflows and takes no --workspace")
         return _list_this_machine(arguments)
-    binding, root = _resolve_binding(arguments, context)
+    hint = (
+        "list this machine's workflows with httk workflow list --available, or create one with httk workspace init PATH"
+    )
+    try:
+        resolved = _existing_binding(arguments, context)
+    except ResolutionMiss as exc:
+        if arguments.workspace is not None:
+            raise
+        raise ValueError(f"no workspace to list: {exc}; {hint}") from exc
+    if resolved is None:
+        raise ValueError(f"no workspace to list; {hint}")
+    binding, root = resolved
     if root is None:
         assert binding is not None
         return _remote_relay(binding, context, arguments, "list")
@@ -625,8 +690,13 @@ def _list_this_machine(arguments: argparse.Namespace) -> int:
     return 0
 
 
-def _install_on_this_machine(arguments: argparse.Namespace) -> int:
-    """Fetch git workflows into this machine's cache, without a workspace."""
+def handle_workflow_fetch(arguments: argparse.Namespace, context: Any) -> int:
+    """Fetch git workflows into this machine's cache, without a workspace.
+
+    :param arguments: The parsed ``fetch`` arguments.
+    :param context: The invocation context.
+    :return: The process exit status.
+    """
 
     from ..git_workflows import fetch_workflows
 
@@ -636,8 +706,8 @@ def _install_on_this_machine(arguments: argparse.Namespace) -> int:
         try:
             if not target.startswith("git+"):
                 raise ValueError(
-                    "without --workspace, install takes a git+https://HOST/PATH[@REF][#SUBDIR] URI; "
-                    "give --workspace WS to install a package, runner file or document into a workspace"
+                    "fetch takes a git+https://HOST/PATH[@REF][#SUBDIR] URI; install a package, runner file or "
+                    "document into a workspace with httk workflow install"
                 )
             providers = fetch_workflows(target)
         except (OSError, ValueError) as exc:
@@ -800,13 +870,17 @@ def _build_reason(workspace: Workspace, owner: _kernel.Owner, workflow_id: str) 
 
 
 def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
-    """Install workflows into a workspace's store, or fetch git workflows on this machine without one."""
+    """Install workflows into the workspace's store."""
 
-    if not arguments.sources:
-        raise ValueError("give at least one SOURCE to install")
-    if arguments.workspace is None:
-        return _install_on_this_machine(arguments)
-    binding, root = _resolve_binding(arguments, context)
+    try:
+        binding, root = _resolve_binding(arguments, context)
+    except ResolutionMiss as exc:
+        if arguments.workspace is not None:
+            raise
+        raise ValueError(
+            f"no workspace to install into: {exc}; fetch git workflows into this machine's cache with "
+            "httk workflow fetch URI, or create a workspace with httk workspace init PATH"
+        ) from exc
     if root is None:
         assert binding is not None
         return _install_remote(binding, context, arguments)
@@ -968,10 +1042,8 @@ def _warn_reinstalled(workspace: Workspace, workflow_id: str) -> None:
 
 
 def handle_workflow_uninstall(arguments: argparse.Namespace, context: Any) -> int:
-    """Remove workflows from a workspace's store, or forget fetched git workflows on this machine."""
+    """Remove workflows from the workspace's store."""
 
-    if arguments.workspace is None:
-        return _uninstall_on_this_machine(arguments)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
@@ -998,8 +1070,13 @@ def handle_workflow_uninstall(arguments: argparse.Namespace, context: Any) -> in
     return 1 if failed else 0
 
 
-def _uninstall_on_this_machine(arguments: argparse.Namespace) -> int:
-    """Forget fetched git workflows on this machine by short name or URI."""
+def handle_workflow_forget(arguments: argparse.Namespace, context: Any) -> int:
+    """Forget fetched git workflows on this machine by short name or URI.
+
+    :param arguments: The parsed ``forget`` arguments.
+    :param context: The invocation context.
+    :return: The process exit status.
+    """
 
     from ..git_workflows import _uninstall_workflows
 
@@ -1021,66 +1098,75 @@ def _uninstall_on_this_machine(arguments: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def _add_store_options(parser: argparse.ArgumentParser, help_text: str) -> None:
-    parser.add_argument("-w", "--workspace", metavar="WORKSPACE", help=help_text)
+def _add_store_options(parser: argparse.ArgumentParser, help_text: str, *, inspect: bool = False) -> None:
+    default = (
+        "the enclosing workspace, this project's workspace, or an existing per-user default; never created"
+        if inspect
+        else "the enclosing workspace, this project's workspace, or the per-user default"
+    )
+    parser.add_argument("-w", "--workspace", metavar="WORKSPACE", help=f"{help_text} (default: {default})")
     parser.add_argument("--json", action="store_true", help="print the result as one JSON array")
     _add_adapter_timeout(parser)
 
 
 def build_list_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Declare the top-level ``list`` workflow command."""
+    """Declare the ``list`` workflow command."""
 
     listing = _leaf(
         subparsers,
         "list",
-        summary="list this machine's workflows, or a workspace's installed workflows",
+        summary="list the workspace's installed workflows, or this machine's",
         description=(
-            "Without --workspace, list the workflows a name selects on this machine: those registered in this "
-            "process, those installed plugins bundle, those of pip-installed workflow repositories, then fetched "
-            "git workflows by short name. With --workspace, "
-            "list the workflows installed in that workspace (REMOTE:WS through the remote's adapter)"
+            "List the workflows installed in the workspace (REMOTE:WS through the remote's adapter). Without "
+            "--workspace it is the enclosing workspace, this project's workspace, or an existing per-user default; "
+            "nothing is created, and with none of them the command fails with a hint. With --available, list the "
+            "workflows a name selects on this machine instead: those registered in this process, those installed "
+            "plugins bundle, those of pip-installed workflow repositories, then fetched git workflows by short name"
         ),
         handler=handle_workflow_list,
     )
-    _add_store_options(listing, "list the workflows installed in this workspace")
+    _add_store_options(listing, "list the workflows installed in this workspace", inspect=True)
+    listing.add_argument("--available", action="store_true", help="list the workflow names known on this machine")
     _add_by_path_argument(listing)
 
 
-def build_describe_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Declare the top-level ``describe`` workflow command."""
+def build_show_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Declare the ``show`` workflow command."""
 
-    describe = _leaf(
+    show = _leaf(
         subparsers,
-        "describe",
-        summary="describe a workflow, or an installed one",
+        "show",
+        summary="describe a workflow, as installed in the workspace or as known on this machine",
         description=(
-            "Describe a registered workflow, git workflow URI, runner file, or workflow package directory; with "
-            "--workspace, describe the installation of an id or short name in that workspace"
+            "Describe the installation of each TARGET (id or short name) in the workspace: the enclosing workspace, "
+            "this project's workspace, or an existing per-user default, never created. A TARGET the workspace does "
+            "not hold, or every TARGET when there is no workspace, is described as resolved on this machine: a "
+            "registered workflow, git workflow URI, runner file, or workflow package directory"
         ),
-        handler=handle_workflow_describe,
+        handler=handle_workflow_show,
     )
-    describe.add_argument(
+    show.add_argument(
         "targets",
         metavar="TARGET",
         nargs="+",
         help="workflow id, alias, git+https://…@ref#subdir URI, runner file, or package directory",
     )
-    describe.add_argument(
+    show.add_argument(
         "--language",
         dest="format",
         metavar="LANGUAGE",
         help="force LANGUAGE (cwl, pwd, jobflow, httk-v1) for a bare workflow document or directory",
     )
-    _add_store_options(describe, "describe workflows installed in this workspace")
+    _add_store_options(show, "describe workflows installed in this workspace", inspect=True)
 
 
 def build_install_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """Declare the top-level ``install`` and ``uninstall`` workflow commands."""
+    """Declare the ``install``, ``uninstall``, ``fetch`` and ``forget`` workflow commands."""
 
     install = _leaf(
         subparsers,
         "install",
-        summary="install workflows into a workspace (or fetch git workflows on this machine)",
+        summary="install workflows into the workspace",
         description=(
             "Install each SOURCE into the workspace's store: a package directory, a git+https://HOST/PATH[@REF]"
             "[#SUBDIR] URI, a runner file or workflow document (installed ad hoc), or a workflow name known on "
@@ -1088,13 +1174,14 @@ def build_install_parser(subparsers: argparse._SubParsersAction[argparse.Argumen
             "not installed), and a [workflow.build] package is built for "
             "this platform. A REMOTE:WS workspace gets the source pushed through the remote's adapter (a git "
             "source is fetched there by its pinned URI). A git URI without #SUBDIR whose repository root carries "
-            "httk_plugin.toml installs every workflow that plugin lists. Without --workspace, a git URI is only "
-            "fetched into this machine's cache"
+            "httk_plugin.toml installs every workflow that plugin lists. Without --workspace the workspace is the "
+            "enclosing one, this project's, or the per-user default (created when missing); when this project's "
+            "recorded default does not resolve, the error names workflow fetch and workspace init"
         ),
         handler=handle_workflow_install,
     )
-    install.add_argument("sources", metavar="SOURCE", nargs="*", help="what to install")
-    _add_store_options(install, "the workspace to install into (without it: fetch git URIs on this machine)")
+    install.add_argument("sources", metavar="SOURCE", nargs="+", help="what to install")
+    _add_store_options(install, "the workspace to install into")
     _add_by_path_argument(install)
     install.add_argument("--no-calls", action="store_true", help="do not install the declared calls")
     install.add_argument("--no-build", action="store_true", help="do not build a [workflow.build] package")
@@ -1105,14 +1192,37 @@ def build_install_parser(subparsers: argparse._SubParsersAction[argparse.Argumen
     uninstall = _leaf(
         subparsers,
         "uninstall",
-        summary="remove workflows from a workspace (or forget fetched git workflows)",
+        summary="remove workflows from the workspace",
         description=(
             "Remove installed workflows, by id or short name, from the workspace's store; jobs are not checked "
-            "unless --check is given. Without --workspace, forget fetched git workflows on this machine: a "
-            "pinned URI removes that commit, an unpinned URI or a short name its whole lineage"
+            "unless --check is given"
         ),
         handler=handle_workflow_uninstall,
     )
-    uninstall.add_argument("selectors", metavar="SELECTOR", nargs="+", help="an id, short name or git workflow URI")
-    _add_store_options(uninstall, "the workspace to uninstall from (without it: this machine's git workflows)")
+    uninstall.add_argument("selectors", metavar="SELECTOR", nargs="+", help="an installed id or short name")
+    _add_store_options(uninstall, "the workspace to uninstall from")
     uninstall.add_argument("--check", action="store_true", help="warn about unfinished jobs of the workflow")
+    fetch = _leaf(
+        subparsers,
+        "fetch",
+        summary="fetch git workflows into this machine's cache",
+        description=(
+            "Fetch each git+https://HOST/PATH[@REF][#SUBDIR] URI into this machine's cache of git workflows, "
+            "where a workflow name resolves without installing it into a workspace"
+        ),
+        handler=handle_workflow_fetch,
+    )
+    fetch.add_argument("sources", metavar="URI", nargs="+", help="a git workflow URI")
+    fetch.add_argument("--json", action="store_true", help="print the result as one JSON array")
+    forget = _leaf(
+        subparsers,
+        "forget",
+        summary="forget fetched git workflows on this machine",
+        description=(
+            "Forget fetched git workflows on this machine: a pinned URI removes that commit, an unpinned URI or "
+            "a short name its whole lineage"
+        ),
+        handler=handle_workflow_forget,
+    )
+    forget.add_argument("selectors", metavar="SELECTOR", nargs="+", help="a short name or git workflow URI")
+    forget.add_argument("--json", action="store_true", help="print the result as one JSON array")

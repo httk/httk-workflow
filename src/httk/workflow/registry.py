@@ -163,8 +163,8 @@ def _write_global(workspaces: Mapping[str, Mapping[str, str]], *, durable: bool 
 def _unknown(name: str, *, project: str | os.PathLike[str] | None = None) -> ValueError:
     if discover_project(project) is not None:
         return ResolutionMiss(
-            f"unknown workspace: {name}; if this project was copied here, adopt it with "
-            "`httk workspace adopt`, or register a new one with `httk workspace init`"
+            f"unknown workspace: {name}; if this project was copied here, register it with "
+            "`httk workspace register`, or create a new one with `httk workspace init`"
         )
     return ResolutionMiss(
         f"unknown workspace: {name}; register it with `httk workspace init` "
@@ -302,7 +302,7 @@ def resolve_workspace(name: str, *, project: str | os.PathLike[str] | None = Non
         except ResolutionMiss:
             # A copied project carries its workspace names in members.json; resolve
             # from there for this invocation without silently writing the registry
-            # (adoption is explicit — `httk workspace adopt`).
+            # (registration is explicit — `httk workspace register`).
             fallback = _member_binding(name, project)
             if fallback is not None:
                 return fallback
@@ -314,12 +314,12 @@ def resolve_workspace(name: str, *, project: str | os.PathLike[str] | None = Non
     return WorkspaceBinding(name, remote, None)
 
 
-def default_workspace(*, project: str | os.PathLike[str] | None = None, durable: bool = True) -> WorkspaceBinding:
-    """Resolve or initialize the project's default local workspace.
+def _existing_default_workspace(project: str | os.PathLike[str] | None) -> WorkspaceBinding | None:
+    """Resolve the project's recorded default, else a registered per-user default, without creating anything.
 
     :param project: Locate project configuration for its default binding.
-    :param durable: Flush any initialized registry state durably when true.
-    :return: The default workspace binding.
+    :return: The default workspace binding, or ``None`` when no per-user default is registered yet.
+    :raises httk.workflow.errors.ResolutionMiss: If the project's recorded default does not resolve.
     """
     project_root = discover_project(project)
     if project_root is not None:
@@ -332,7 +332,19 @@ def default_workspace(*, project: str | os.PathLike[str] | None = None, durable:
     try:
         return _local_binding(DEFAULT_WORKSPACE_NAME)
     except ResolutionMiss:
-        pass
+        return None
+
+
+def default_workspace(*, project: str | os.PathLike[str] | None = None, durable: bool = True) -> WorkspaceBinding:
+    """Resolve or initialize the project's default local workspace.
+
+    :param project: Locate project configuration for its default binding.
+    :param durable: Flush any initialized registry state durably when true.
+    :return: The default workspace binding.
+    """
+    existing = _existing_default_workspace(project)
+    if existing is not None:
+        return existing
 
     root = data_home() / "workspace"
     format_path = root / WORKSPACE_DIRECTORY / "format.json"

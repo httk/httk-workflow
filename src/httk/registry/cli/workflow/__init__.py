@@ -5,13 +5,25 @@ from httk.core.register import register_cli_command
 register_cli_command(
     "workflow",
     "httk.workflow.workflow_cli:workflow_command",
-    "install, inspect, build and run workflows",
+    "install, inspect and build workflows",
 )
 
 register_cli_command(
-    "manager",
-    "httk.workflow.workflow_cli:manager_command",
-    "run workflow managers",
+    "run",
+    "httk.workflow.workflow_cli:run_command",
+    "run task managers against a workspace",
+)
+
+register_cli_command(
+    "monitor",
+    "httk.workflow.workflow_cli:monitor_command",
+    "inspect and control workspace jobs interactively",
+)
+
+register_cli_command(
+    "postprocess",
+    "httk.workflow.workflow_cli:postprocess_command",
+    "run a curated workflow postprocess script",
 )
 
 register_cli_command(

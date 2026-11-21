@@ -18,25 +18,25 @@ from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import _campaign, _transfer, command
 
 #: Every group of the canonical tree, with the subcommands its help must name.
-#: ``run`` is deliberately absent: it is a single verb rather than a group, so
-#: it is checked on its own below. ``move`` is a leaf of the ``job`` group; ``push`` and ``pull`` are top-level verbs.
+#: ``run``, ``monitor`` and ``postprocess`` are deliberately absent: they are single verbs rather than groups,
+#: so they are checked on their own below. ``move`` is a leaf of the ``job`` group; ``push`` and ``pull`` are top-level verbs.
 GROUPS: dict[str, tuple[str, ...]] = {
     "workspace": (
         "init",
         "status",
         "owners",
         "attest-dead",
-        "workflows",
         "list",
         "default",
-        "adopt",
+        "register",
         "move",
         "forget",
         "delete",
         "show",
         "set",
         "unset",
-        "fsck",
+        "check",
+        "repair",
         "gc",
         "seal",
         "unseal",
@@ -65,7 +65,6 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "verify",
         "move",
     ),
-    "manager": ("run",),
     "v1": ("collect",),
     "config": ("show", "set", "unset", "import-v1"),
     "remote": ("list", "add", "set", "unset", "check", "import-v1", "show", "remove"),
@@ -183,10 +182,18 @@ def test_the_removed_spellings_are_absent_from_the_help(tmp_path: Path, capsys) 
 
 def test_postprocess_is_a_single_verb(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    parsed = parser.parse_args(["postprocess", "--workspace", "WS", "--script", "report"])
+    parsed = parser.parse_args(["postprocess", "report", "J1", "J2", "--workspace", "WS"])
     assert parsed.handler is workflow_cli.handle_postprocess
-    assert parsed.workspace == "WS"
-    assert parsed.script == "report"
+    assert (parsed.workspace, parsed.script, parsed.jobs) == ("WS", "report", ["J1", "J2"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["postprocess", "--script", "report"])
+    assert parser.parse_args(["postprocess", "report"]).jobs == []
+
+
+def test_postprocess_requires_only_its_script(tmp_path: Path, capsys) -> None:
+    assert workflow_cli.postprocess_command([], _context(tmp_path)) == 2
+    error = capsys.readouterr().err
+    assert "the following arguments are required: SCRIPT" in error and "JOB" not in error.splitlines()[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +210,7 @@ def test_an_unknown_action_under_a_known_group_names_that_group(tmp_path: Path, 
     assert "invalid choice: 'frobnicate'" in captured
     # The group's own actions are what it offers instead, not the tree's groups.
     # (argparse dropped the quotes around each choice in 3.13+, so match the bare name.)
-    assert "fsck" in captured and "remote" not in captured
+    assert "repair" in captured and "remote" not in captured
 
 
 def test_an_unknown_action_under_a_nested_group_names_that_nested_group(capsys) -> None:
@@ -307,28 +314,87 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         parser.parse_args(["remote", "check", "--timeout", "5", "c"])
     # The manager's idle wait is bounded by --idle-timeout.
-    assert parser.parse_args(["manager", "run", "--workspace", "WS", "--idle-timeout", "5"]).idle_timeout == 5.0
-    assert parser.parse_args(["manager", "run", "--workspace", "WS"]).idle_timeout == 3600.0
+    assert parser.parse_args(["run", "--workspace", "WS", "--idle-timeout", "5"]).idle_timeout == 5.0
+    assert parser.parse_args(["run", "--workspace", "WS"]).idle_timeout == 3600.0
     with pytest.raises(SystemExit):
-        parser.parse_args(["manager", "run", "--workspace", "WS", "--until-" + "idle"])
+        parser.parse_args(["run", "--workspace", "WS", "--until-" + "idle"])
     with pytest.raises(SystemExit):
-        parser.parse_args(["manager", "run", "--workspace", "WS", "--fore" + "ground"])
+        parser.parse_args(["run", "--workspace", "WS", "--fore" + "ground"])
     assert parser.parse_args(["run"]).workspace is None
     assert parser.parse_args(["run", "--workspace", "WS", "--keep-running"]).idle is True
     assert parser.parse_args(["run", "--launcher", "gpu"]).launcher == "gpu"
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--inline", "--launcher", "gpu"])
     with pytest.raises(SystemExit):
-        parser.parse_args(["manager", "run", "--workspace", "WS", "--timeout", "5"])
+        parser.parse_args(["run", "--workspace", "WS", "--timeout", "5"])
     with pytest.raises(SystemExit):
-        parser.parse_args(["manager", "run", "WS"])
+        parser.parse_args(["run", "WS"])
 
 
-def test_top_level_run_is_manager_run_with_pinned_defaults(tmp_path: Path) -> None:
-    parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    top_level = _namespace(parser.parse_args(["run", "--workspace", "WS", "--workers", "4", "--keep-running"]))
-    manager = _namespace(parser.parse_args(["manager", "run", "--workspace", "WS", "--workers", "4", "--keep-running"]))
-    assert top_level == manager
+def test_run_monitor_and_postprocess_dispatch_at_the_top_level(tmp_path: Path, monkeypatch, capsys) -> None:
+    from httk.workflow.workflow_cli import _manager, _monitor, _postprocess
+
+    seen: list[tuple[str, argparse.Namespace]] = []
+
+    def recorder(name: str):
+        def handle(arguments: argparse.Namespace, _context: CLIContext) -> int:
+            seen.append((name, arguments))
+            return 0
+
+        return handle
+
+    for module, name in (
+        (_manager, "handle_manager_run"),
+        (_monitor, "handle_monitor"),
+        (_postprocess, "handle_postprocess"),
+    ):
+        monkeypatch.setattr(module, name, recorder(name))
+    assert workflow_cli.run_command(["-w", "WS", "--keep-running"], _context(tmp_path)) == 0
+    assert workflow_cli.monitor_command(["--refresh", "2"], _context(tmp_path)) == 0
+    # A job after an option is collected too (argparse before 3.13 strands it).
+    assert workflow_cli.postprocess_command(["report", "J", "-w", "WS", "K"], _context(tmp_path)) == 0
+    (_, ran), (_, monitored), (_, postprocessed) = seen
+    assert [name for name, _ in seen] == ["handle_manager_run", "handle_monitor", "handle_postprocess"]
+    assert (ran.workspace, ran.idle, monitored.refresh) == ("WS", True, 2.0)
+    assert (postprocessed.script, postprocessed.jobs, postprocessed.workspace) == ("report", ["J", "K"], "WS")
+    # The old spellings are gone, with no alias left behind.
+    for removed in (["run"], ["monitor"], ["postprocess", "--script", "report"], ["manager", "run"]):
+        assert workflow_cli.workflow_command(removed, _context(tmp_path)) == 2
+        assert "invalid choice" in capsys.readouterr().err
+
+
+def test_spawned_and_remote_managers_run_httk_run(tmp_path: Path, monkeypatch) -> None:
+    """Every manager another process starts parses as ``httk run`` on the far side."""
+
+    from httk.workflow import _daemon_slurm
+    from httk.workflow.workflow_cli import _manager
+
+    assert adapters.REMOTE_MANAGER_COMMAND == ("httk", "run")
+    parser = workflow_cli.build_parser("httk", _context(tmp_path))
+    remote = _manager._remote_manager_argv(parser.parse_args(["run", "--workers", "2"]), "station")
+    assert remote == ["httk", "run", "--workspace", "station", "--detach", "--workers", "2"]
+    assert parser.parse_args(remote[1:]).handler is workflow_cli.handle_manager_run
+
+    # Local children re-invoke this interpreter as `-m httk.core.cli run --by-path`.
+    launched: list[list[str]] = []
+
+    class _Child:
+        def __init__(self, argv: list[str], **_options: object) -> None:
+            launched.append(argv)
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(_manager.subprocess, "Popen", _Child)
+    arguments = parser.parse_args(["run", "--count", "2"])
+    assert _manager._run_local_manager_children(arguments, tmp_path, _context(tmp_path)) == 0
+    assert [argv[1:5] for argv in launched] == [["-m", "httk.core.cli", "run", "--by-path"]] * 2
+    assert parser.parse_args(launched[0][3:]).by_path is True
+
+    # A daemon-started Slurm manager runs the same verb.
+    policy = argparse.Namespace(python=Path("/usr/bin/python3"), workspace=Path("/data"))
+    argv = _daemon_slurm.manager_argv(policy, "a" * 64)  # type: ignore[arg-type]
+    assert argv[4:6] == ["run", "--by-path"] and parser.parse_args(argv[4:]).pool
 
 
 def test_top_level_run_defaults_to_until_idle_for_the_project_workspace(tmp_path: Path) -> None:
@@ -444,7 +510,7 @@ def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
         parser.parse_args(["internal", "receive", "--workspace", "/w", "--bundle", "/b"])
 
 
-@pytest.mark.parametrize("group", ["manager", "launcher", "remote", "config", "campaign", "v1"])
+@pytest.mark.parametrize("group", ["launcher", "remote", "config", "campaign", "v1"])
 def test_promoted_groups_are_discoverable_at_root(group, tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert main([group, "--help"]) == 0
@@ -460,15 +526,18 @@ def test_promoted_groups_are_discoverable_at_root(group, tmp_path, monkeypatch, 
 def test_public_workflow_help_only_names_workflow_operations(capsys):
     assert main(["workflow", "--help"]) == 0
     help_text = capsys.readouterr().out
-    for name in ("launcher", "remote", "config", "campaign", "seal", "manager"):
+    for name in ("launcher", "remote", "config", "campaign", "seal", "manager", "run", "monitor", "postprocess"):
         assert f"    {name} " not in help_text
-    for name in ("list", "describe", "install", "uninstall", "build", "run"):
+    for name in ("list", "show", "install", "uninstall", "build", "fetch", "forget"):
         assert f"    {name} " in help_text
 
 
-def test_frozen_remote_manager_command_still_parses(capsys):
-    assert main(["workflow", "manager", "run", "--help"]) == 0
+def test_run_is_top_level_and_hides_its_protocol_switch(capsys):
+    assert main(["run", "--help"]) == 0
     assert "--by-path" not in capsys.readouterr().out
+    for removed in (["workflow", "manager", "run", "--help"], ["workflow", "run", "--help"], ["manager", "run"]):
+        assert main(removed) == 2
+        capsys.readouterr()
 
 
 @pytest.mark.parametrize(("verb", "keep"), [("push", True), ("pull", False)])
@@ -498,14 +567,14 @@ def test_renamed_options_and_short_flags_parse_to_their_destinations(tmp_path: P
     parsed = parser.parse_args(["job", "new", "--workflow", "W", "--start-step", "s", "-p", "a=1", "-i", "b=2"])
     assert (parsed.step, parsed.parameters, parsed.inputs) == ("s", ["a=1"], ["b=2"])
     assert parser.parse_args(["job", "debug", "J", "--start-step", "s"]).step == "s"
-    assert parser.parse_args(["describe", "T", "--language", "cwl"]).format == "cwl"
+    assert parser.parse_args(["show", "T", "--language", "cwl"]).format == "cwl"
     assert parser.parse_args(["install", "S", "--language", "cwl"]).format == "cwl"
     assert parser.parse_args(["launcher", "check", "N", "--adapter-timeout", "5"]).launcher_timeout == 5.0
     listed = parser.parse_args(["job", "list", "-w", "WS", "-s", "ready"])
     assert (listed.workspace, listed.state) == ("WS", ["ready"])
     assert parser.parse_args(["workspace", "gc", "-n"]).dry_run is True
 
-    # The far side of a remote describe and install receives --language.
+    # The far side of a remote show and install receives --language.
     binding = WorkspaceBinding("cluster:far", "cluster", None)
     relayed: list[tuple[str, ...]] = []
     monkeypatch.setattr(_describe, "_resolve_binding", lambda *_args: (binding, None))
@@ -515,9 +584,9 @@ def test_renamed_options_and_short_flags_parse_to_their_destinations(tmp_path: P
         return 0
 
     monkeypatch.setattr(_describe, "_remote_relay", relay)
-    described = parser.parse_args(["describe", "T", "--language", "cwl", "--workspace", "cluster:far"])
-    assert _describe.handle_workflow_describe(described, _context(tmp_path)) == 0
-    assert relayed == [("describe", "--language", "cwl", "T")]
+    described = parser.parse_args(["show", "T", "--language", "cwl", "--workspace", "cluster:far"])
+    assert _describe.handle_workflow_show(described, _context(tmp_path)) == 0
+    assert relayed == [("show", "--language", "cwl", "T")]
 
     invoked: list[list[str]] = []
 

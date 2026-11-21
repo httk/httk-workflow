@@ -666,7 +666,7 @@ def _manager_checks(
             else "no manager is registered in this workspace"
         )
         report.check("registered manager", False, detail)
-        report.hint("start one with 'httk manager run --workspace WORKSPACE'")
+        report.hint("start one with 'httk run --workspace WORKSPACE'")
         return
     accepting: list[ManagerRecord] = []
     for record in live:
@@ -688,7 +688,7 @@ def _manager_checks(
     )
     if not accepting:
         report.hint(
-            f"run a manager that matches, for example 'httk manager run --pool {requirements.pool} --workspace WORKSPACE"
+            f"run a manager that matches, for example 'httk run --pool {requirements.pool} --workspace WORKSPACE"
             + "".join(f" --capability {name}" for name in sorted(requirements.capabilities))
             + "'"
         )

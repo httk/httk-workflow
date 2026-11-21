@@ -1,4 +1,4 @@
-"""The workspace maintenance verbs on the filesystem kernel: status, owners, attest-dead, gc and fsck."""
+"""The workspace maintenance verbs on the filesystem kernel: status, owners, attest-dead, gc, check and repair."""
 
 import json
 import os
@@ -12,7 +12,7 @@ from httk.core.cli import CLIContext
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.workflow_cli import command
-from v3_helpers import cli_owner, install, only, submit, workspace
+from v3_helpers import cli_owner, only, submit, workspace
 
 _WORKFLOW = ("demo--0123456789abcdef", "demo")
 
@@ -64,19 +64,6 @@ def test_owners_lists_a_serving_manager_and_managers_is_an_alias(tmp_path: Path,
     ]
     assert command(["workspace", "owners", name], context) == 0
     assert "no owner is registered" in capsys.readouterr().out
-
-
-def test_workflows_lists_the_installed_workflows(tmp_path: Path, capsys) -> None:
-    ws, context, name = _named(tmp_path)
-    assert command(["workspace", "workflows", name], context) == 0
-    assert "no workflows are installed" in capsys.readouterr().out
-    installed = install(ws, tmp_path / "package")
-    assert command(["workspace", "workflows", name], context) == 0
-    assert capsys.readouterr().out.startswith(f"{installed.id}\t{installed.name}\t")
-    assert command(["workspace", "workflows", "--json", name], context) == 0
-    ((row,),) = json.loads(capsys.readouterr().out)
-    assert row["workflow"] == installed.id and row["error"] is None
-    assert row["tree_sha256"] == installed.record["tree_sha256"]
 
 
 # -- attest-dead and recovery ---------------------------------------------------------------------------------
@@ -163,7 +150,7 @@ def test_attest_dead_refuses_a_live_owner_and_an_unknown_one(tmp_path: Path, cap
     assert "--reason" in capsys.readouterr().err
 
 
-# -- gc and fsck ----------------------------------------------------------------------------------------------
+# -- gc, check and repair------------------------------------------------------------------------------------------
 
 
 def test_gc_reports_the_selected_categories_and_rejects_an_unknown_one(tmp_path: Path, capsys) -> None:
@@ -182,28 +169,35 @@ def test_gc_reports_the_selected_categories_and_rejects_an_unknown_one(tmp_path:
     assert "invalid choice: 'journal'" in capsys.readouterr().err
 
 
-def test_fsck_exits_one_while_findings_remain_and_repair_quarantines_unparsable_names(tmp_path: Path, capsys) -> None:
+def test_check_exits_one_while_findings_remain_and_repair_quarantines_unparsable_names(tmp_path: Path, capsys) -> None:
     ws, context, name = _named(tmp_path)
     junk = ws.jobs / "ready" / "not-a-job"
     junk.write_text("junk", encoding="utf-8")
-    assert command(["workspace", "fsck", name], context) == 1
+    assert command(["workspace", "check", name], context) == 1
     out = capsys.readouterr().out
     assert f"reported\tunparsable_name\t-\t{junk}\t" in out and "checked 0 jobs, 1 findings" in out
-    assert command(["workspace", "fsck", "--repair", "--yes", name], context) == 0
+    assert junk.exists()  # check is read-only
+    assert command(["workspace", "repair", "--yes", name], context) == 0
     assert "quarantined\tunparsable_name" in capsys.readouterr().out
     assert not junk.exists()
-    assert command(["workspace", "fsck", name], context) == 0
+    assert command(["workspace", "check", name], context) == 0
     capsys.readouterr()
+    # The old spellings are gone; check repairs nothing and repair needs a named workspace.
+    for removed in (["workspace", "fsck", name], ["workspace", "check", "--repair", name]):
+        assert command(removed, context) == 2
+        capsys.readouterr()
+    assert command(["workspace", "repair", "--yes"], context) == 2
+    assert "the following arguments are required: WORKSPACE" in capsys.readouterr().err
 
 
-def test_fsck_repair_asks_first_and_refuses_without_a_terminal(
+def test_repair_asks_first_and_refuses_without_a_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     ws, context, name = _named(tmp_path)
     junk = ws.jobs / "ready" / "not-a-job"
     junk.write_text("junk", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-    assert command(["workspace", "fsck", "--repair", name], context) == 1
+    assert command(["workspace", "repair", name], context) == 1
     assert "without a terminal requires --yes" in capsys.readouterr().err and junk.exists()
     prompts: list[str] = []
 
@@ -213,18 +207,18 @@ def test_fsck_repair_asks_first_and_refuses_without_a_terminal(
 
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", decline)
-    assert command(["workspace", "fsck", "--repair", name], context) == 1
+    assert command(["workspace", "repair", name], context) == 1
     assert "not repaired" in capsys.readouterr().out and junk.exists()
     assert prompts == ["Make sure no other operations are ongoing in this workspace. Continue? [y/N] "]
     monkeypatch.setattr("builtins.input", lambda _prompt: "y")
-    assert command(["workspace", "fsck", "--repair", name], context) == 0
+    assert command(["workspace", "repair", name], context) == 0
     assert "quarantined\tunparsable_name" in capsys.readouterr().out and not junk.exists()
 
 
-def test_fsck_repair_is_refused_until_gc_recovers_the_owners(tmp_path: Path, capsys) -> None:
+def test_repair_is_refused_until_gc_recovers_the_owners(tmp_path: Path, capsys) -> None:
     ws, context, name = _named(tmp_path)
     ref = submit(ws, _WORKFLOW, {"start": "succeed"})
-    repair = ["workspace", "fsck", "--repair", "--yes", name]
+    repair = ["workspace", "repair", "--yes", name]
     owner_id, process = _foreign_owner(ws, "live")
     try:
         assert command(repair, context) == 1

@@ -1,4 +1,4 @@
-"""Bounded readers used by the workflow monitor."""
+"""Bounded readers used by the monitor."""
 
 import json
 import logging

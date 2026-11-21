@@ -15,7 +15,7 @@ httk workspace init WORKSPACE
 httk workflow install --workspace WORKSPACE ./legacy-package
 httk job new --workspace WORKSPACE --workflow-dir ./legacy-package \
   --placement project-a/00/17
-httk workflow run --workspace WORKSPACE --pool vasp
+httk run --workspace WORKSPACE --pool vasp
 ```
 
 ## Converted packages

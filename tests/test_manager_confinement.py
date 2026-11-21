@@ -427,7 +427,7 @@ def test_a_manager_stopped_by_unavailable_confinement_exits_non_zero_naming_it(
     workspace = Workspace.initialize(tmp_path / "workspace")
     blocked = WorkCensus(0, 0, 0, {"confinement": {"manager.confine": 2}}, 0, 0, 0)
     monkeypatch.setattr(TaskManager, "run_until_idle", lambda _self, **_options: blocked)
-    run = ["manager", "run", "--by-path", "--workspace", str(workspace.root), "--inline", "--allocation", "none"]
+    run = ["run", "--by-path", "--workspace", str(workspace.root), "--inline", "--allocation", "none"]
     assert command(run, CLIContext("httk", tmp_path)) == 2
     error = capsys.readouterr().err
     assert "confinement is unavailable, so 2 ready job(s)" in error and "idle:" not in error

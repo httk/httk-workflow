@@ -60,10 +60,10 @@ $ httk workspace set -w default manager.workers=4
 $ httk workspace set -w default slurm.account=project-123
 $ httk workspace set -w default slurm.time_limit=02:00:00
 $ httk workspace set -w default environment.prelude='module load httk'
-$ httk workflow run --count 4 --workspace default
+$ httk run --count 4 --workspace default
 ```
 
-`httk workflow run --count 4` returns the submitted scheduler job IDs.
+`httk run --count 4` returns the submitted scheduler job IDs.
 
 ### Workspace settings
 
@@ -131,7 +131,7 @@ setting above (`--time` is `slurm.time_limit`, `--mem` is `slurm.mem`, and so
 on), including any abbreviation of them, since `sbatch` accepts unambiguous
 prefixes. A launcher
 value replaces a workspace value entirely; the two are not combined. An
-`SBATCH_*` variable in the environment of the user who runs `httk workflow run`
+`SBATCH_*` variable in the environment of the user who runs `httk run`
 outranks the script's directives.
 
 For MPI programs, `slurm.ntasks` requests the total number of processes and
@@ -145,13 +145,13 @@ ranks, and use `cpus_per_task` when each rank needs several cores.
 `--launcher process`:
 
 ```console
-$ httk workflow run --workspace default --count 4 --launcher cluster
+$ httk run --workspace default --count 4 --launcher cluster
 ```
 
 For a debugging pass, run exactly one manager in the current process:
 
 ```console
-$ httk workflow run --count 1 --inline --workspace default
+$ httk run --count 1 --inline --workspace default
 ```
 
 `--inline` shows manager output directly and ignores the workspace launcher.
@@ -169,7 +169,7 @@ Slurm launcher whose `slurm.time_limit` is unset, `0` or `UNLIMITED` without a
 
 ```console
 $ httk launcher set cluster slurm.time_limit_max=1-00:00:00
-$ httk workflow run --workspace default --launcher cluster --time-limit 12:00:00
+$ httk run --workspace default --launcher cluster --time-limit 12:00:00
 ```
 
 The printed result's `time_limit` is the effective `--time`.
@@ -209,8 +209,8 @@ queues or reservations:
 $ httk launcher add cpu --kind slurm --global slurm.partition=cpu
 $ httk launcher add gpu --kind slurm --global slurm.partition=gpu
 $ httk launcher set gpu slurm.reservation=gpu-a100
-$ httk workflow run --workspace default --launcher cpu --count 4
-$ httk workflow run --workspace default --launcher gpu --count 2
+$ httk run --workspace default --launcher cpu --count 4
+$ httk run --workspace default --launcher gpu --count 2
 ```
 
 Settings in a launcher's `launcher.json` `settings` object take precedence over
@@ -257,13 +257,13 @@ Pinned values override the workspace setting of the same key and stay fixed
 for the manager's lifetime. Every other workspace setting, and any of these
 keys the launcher does not set, is read live at each claim. The process
 launcher has no bundle and pins nothing; set the keys as workspace settings,
-or pass `--setting` to `httk workflow run` or `manager run` yourself (the
+or pass `--setting` to `httk run` yourself (the
 option is not shown in `--help` and accepts only these keys). Job parameters
 and declared job environment never reach these keys.
 
 ```console
 $ httk launcher add confined --kind slurm --global manager.confine=bwrap
-$ httk workflow run --workspace default --launcher confined --count 2
+$ httk run --workspace default --launcher confined --count 2
 ```
 
 ### Extending path lists
@@ -321,7 +321,7 @@ result = start_managers(
     target,
     workspace_root=workspace.root,
     argv=[
-        sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run",
+        sys.executable, "-m", "httk.core.cli", "run",
         "--by-path", "--workspace", str(workspace.root),
     ],
     count=4,

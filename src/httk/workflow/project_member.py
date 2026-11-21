@@ -257,7 +257,7 @@ def _unregistered_workspaces(project_root: Path, adopt: bool) -> dict[str, objec
 
     # Detection only: a workspace missing from members.json, or a member whose
     # recorded name is not registered centrally on this machine (a freshly copied
-    # tree), both need `httk workspace adopt` / `httk project repair`.
+    # tree), both need `httk workspace register` / `httk project repair`.
     central = {str(Path(record["path"]).resolve()) for record in _read_global().values()}
     unregistered = [relpath for relpath in on_disk if relpath not in registered]
     # Only a workspace member with a recorded *name* is adoptable by name; an unnamed

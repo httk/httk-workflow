@@ -1,4 +1,4 @@
-"""The interactive :command:`workflow monitor` command."""
+"""The interactive :command:`monitor` command."""
 
 import argparse
 import math
@@ -28,11 +28,11 @@ def handle_monitor(arguments: argparse.Namespace, context: CLIContext) -> int:
     if not math.isfinite(arguments.refresh) or not 0.5 <= arguments.refresh <= 3600:
         raise ValueError("--refresh must be finite and between 0.5 and 3600 seconds")
     if arguments.non_interactive or not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise ValueError("workflow monitor requires an interactive TTY (use job list for non-interactive output)")
+        raise ValueError("monitor requires an interactive TTY (use job list for non-interactive output)")
     try:
         import curses
     except ImportError as exc:
-        raise ValueError("workflow monitor requires the stdlib curses module on this platform") from exc
+        raise ValueError("monitor requires the stdlib curses module on this platform") from exc
 
     names = arguments.workspace
     bindings: list[WorkspaceBinding | Workspace] = (

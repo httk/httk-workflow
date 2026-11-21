@@ -204,7 +204,7 @@ def test_end_time_is_the_earlier_of_time_limit_and_the_allocation(
 
 def test_time_options_parse_and_forward(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
-    for leaf in (["manager", "run"], ["run"]):
+    for leaf in (["run"],):
         parsed = parser.parse_args([*leaf, "--time-limit", "1:00:00", "--deadline-margin", "300"])
         assert _manager.manager_argv_tail(parsed) == ["--time-limit", "1:00:00", "--deadline-margin", "300.0"]
     with pytest.raises(ValueError, match="--time-limit 00:01:00 does not exceed the 120 s deadline margin"):

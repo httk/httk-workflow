@@ -28,7 +28,7 @@ def _parser(tmp_path: Path) -> argparse.ArgumentParser:
     return build_parser("httk workflow", CLIContext("httk", tmp_path))
 
 
-@pytest.mark.parametrize("leaf", [["manager", "run"], ["run"]])
+@pytest.mark.parametrize("leaf", [["run"]])
 def test_allowed_keys_parse_and_the_last_occurrence_wins(tmp_path: Path, leaf: list[str]) -> None:
     arguments = _parser(tmp_path).parse_args(
         [
@@ -83,7 +83,7 @@ def test_allowed_keys_parse_and_the_last_occurrence_wins(tmp_path: Path, leaf: l
 def test_other_keys_and_bad_values_are_usage_errors(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], item: str, message: str
 ) -> None:
-    for leaf in (["manager", "run"], ["run"]):
+    for leaf in (["run"],):
         with pytest.raises(SystemExit) as raised:
             _parser(tmp_path).parse_args([*leaf, "--setting", item])
         assert raised.value.code == 2
@@ -94,18 +94,12 @@ def test_other_keys_and_bad_values_are_usage_errors(
 def test_setting_is_hidden_from_the_help(tmp_path: Path) -> None:
     parser = _parser(tmp_path)
     subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
-    manager_group = subparsers.choices["manager"]
-    manager_subparsers = next(
-        action for action in manager_group._actions if isinstance(action, argparse._SubParsersAction)
-    )
-    for leaf in (manager_subparsers.choices["run"], subparsers.choices["run"]):
-        assert "--setting" not in leaf.format_help()
+    assert "--setting" not in subparsers.choices["run"].format_help()
 
 
 def test_argv_tail_forwards_the_effective_pins_to_children_and_remotes(tmp_path: Path) -> None:
     arguments = _parser(tmp_path).parse_args(
         [
-            "manager",
             "run",
             "--setting",
             "manager.confine=bwrap",
@@ -125,12 +119,12 @@ def test_argv_tail_forwards_the_effective_pins_to_children_and_remotes(tmp_path:
     remote = _manager._remote_manager_argv(arguments, "cluster-ws")
     assert remote[-4:] == tail
     # A child parses the forwarded tail back to the same pins.
-    child = _parser(tmp_path).parse_args(["manager", "run", *tail])
+    child = _parser(tmp_path).parse_args(["run", *tail])
     assert _manager._pinned_settings(child) == _manager._pinned_settings(arguments)
 
 
 def test_launcher_pins_follow_the_forwarded_cli_pins() -> None:
-    argv = ["httk", "workflow", "manager", "run", "--setting", "manager.confine=none"]
+    argv = ["httk", "run", "--setting", "manager.confine=none"]
     workspace = {"confine.devices": "/dev/nvidia0", "manager.bind_cpus": "true", "manager.confine": "none"}
     launcher = {
         "manager.confine": "bwrap",
@@ -160,8 +154,8 @@ def test_launcher_pins_follow_the_forwarded_cli_pins() -> None:
 @pytest.mark.parametrize("value", [0, 1, "0", "1", "true", "FALSE"])
 def test_launcher_boolean_pins_round_trip_through_the_manager_cli(tmp_path: Path, value: object) -> None:
     bundle = {"confine.isolate_network": value, "manager.confine": "bwrap"}
-    argv = launch_runtime._manager_argv(["httk", "workflow", "manager", "run"], bundle, bundle)
-    pinned = _manager._pinned_settings(_parser(tmp_path).parse_args(argv[2:]))
+    argv = launch_runtime._manager_argv(["httk", "run"], bundle, bundle)
+    pinned = _manager._pinned_settings(_parser(tmp_path).parse_args(argv[1:]))
     assert pinned["confine.isolate_network"] == str(value)
     expected = str(value).lower() in ("1", "true")
     assert confine_settings(pinned).isolate_network is expected
@@ -189,8 +183,6 @@ def test_batch_script_carries_launcher_pins_after_cli_ones(
         sys.executable,
         "-m",
         "httk.core.cli",
-        "workflow",
-        "manager",
         "run",
         "--setting",
         "manager.confine=none",
@@ -227,7 +219,7 @@ def test_batch_script_carries_launcher_pins_after_cli_ones(
     assert "confine.devices" not in exec_line and "manager.bind_cpus" not in exec_line
     words = shlex.split(exec_line)[1:]
     assert words[: len(cli_argv)] == cli_argv
-    parsed = _parser(tmp_path).parse_args(words[4:])
+    parsed = _parser(tmp_path).parse_args(words[3:])
     assert _manager._pinned_settings(parsed) == {
         "manager.confine": "bwrap",
         "confine.readonly_paths": "/usr:/opt/my tools",
@@ -304,7 +296,7 @@ def test_in_process_manager_uses_and_validates_effective_settings(
     monkeypatch.setattr(_manager, "TaskManager", FakeManager)
     monkeypatch.setattr(_manager, "probe_allocation", probe)
     context = CLIContext("httk", tmp_path)
-    run = ["manager", "run", "--inline", "--workspace", "pins", "--allocation", "none"]
+    run = ["run", "--inline", "--workspace", "pins", "--allocation", "none"]
     assert command([*run, "--setting", "manager.bind_cpus=true"], context) == 0
     assert slots == [True] and len(constructed) == 1
 

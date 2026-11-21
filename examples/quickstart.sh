@@ -16,14 +16,6 @@ here=$(cd "$(dirname "$0")" && pwd)
 
 # These helpers use the installed command when available and the identical
 # module form otherwise.
-httk_workflow() {
-    if command -v httk >/dev/null 2>&1; then
-        httk workflow "$@"
-    else
-        python3 -m httk.core.cli workflow "$@"
-    fi
-}
-
 httk_cmd() {
     if command -v httk >/dev/null 2>&1; then
         httk "$@"
@@ -74,7 +66,7 @@ httk_cmd job new \
 httk_cmd workspace set -w default vasp.command="$here/mock_vasp.py"
 
 # 4. Run every ready job until nothing is left to do.
-httk_workflow run
+httk_cmd run
 
 # 5. What happened, and store entries, runs, and products when httk-store is installed.
 if python3 -c 'import httk.store.backend.sql' >/dev/null 2>&1; then
@@ -85,6 +77,6 @@ else
 fi
 
 # 6. Make a plot from the workdir OUTCAR.
-httk_workflow postprocess --script relaxation-plot
+httk_cmd postprocess relaxation-plot
 
 printf '\nthe result is in workspace/jobs/*/run/ (no data/ copy)\n'

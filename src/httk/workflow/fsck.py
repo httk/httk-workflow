@@ -190,11 +190,9 @@ def _require_quiescent(workspace: "Workspace") -> None:
     try:
         require_quiescent_workspace(workspace)
     except ValueError as exc:
-        raise WorkflowError(f"workspace fsck --repair refused: {exc}; {advice}") from exc
+        raise WorkflowError(f"workspace repair refused: {exc}; {advice}") from exc
     if unrecovered := _kernel.recoverable_owners(workspace):
-        raise WorkflowError(
-            f"workspace fsck --repair refused: dead owners not recovered: {', '.join(unrecovered)}; {advice}"
-        )
+        raise WorkflowError(f"workspace repair refused: dead owners not recovered: {', '.join(unrecovered)}; {advice}")
 
 
 def check_workspace(
@@ -218,7 +216,7 @@ def check_workspace(
         owner = None
         if repairing:
             owner = stack.enter_context(
-                _kernel.register_owner(workspace, kind="cli", label="workspace fsck", allocation=None, advertised={})
+                _kernel.register_owner(workspace, kind="cli", label="workspace repair", allocation=None, advertised={})
             )
         return _check(workspace, owner)
 

@@ -164,7 +164,7 @@ def test_postprocess_cli_streams_results_errors_and_workflow_dir(tmp_path: Path,
 
     assert (
         command(
-            ["postprocess", "--workspace", workspace_name, "--script", "report", "--workflow-dir", str(package)],
+            ["postprocess", "report", "--workspace", workspace_name, "--workflow-dir", str(package)],
             context,
         )
         == 0
@@ -173,7 +173,7 @@ def test_postprocess_cli_streams_results_errors_and_workflow_dir(tmp_path: Path,
     assert line[:3] == [record.job_key, "report", "0"]
     assert Path(line[3]).is_dir()
 
-    assert command(["postprocess", "--workspace", workspace_name, "--script", "report", "--json"], context) == 1
+    assert command(["postprocess", "report", "--workspace", workspace_name, "--json"], context) == 1
     error = json.loads(capsys.readouterr().out)
     assert error["job_key"] == record.job_key
     assert "not registered" in error["error"]
@@ -185,10 +185,9 @@ def test_postprocess_cli_streams_results_errors_and_workflow_dir(tmp_path: Path,
         command(
             [
                 "postprocess",
+                "report",
                 "--workspace",
                 workspace_name,
-                "--script",
-                "report",
                 "--workflow-dir",
                 str(package),
                 "--json",
@@ -214,10 +213,9 @@ def test_postprocess_cli_surfaces_failing_script_stderr(tmp_path: Path, capsys) 
         command(
             [
                 "postprocess",
+                "report",
                 "--workspace",
                 workspace_name,
-                "--script",
-                "report",
                 "--workflow-dir",
                 str(package),
                 "--json",
@@ -233,7 +231,7 @@ def test_postprocess_cli_surfaces_failing_script_stderr(tmp_path: Path, capsys) 
     # The human form appends the last stderr line to the row.
     assert (
         command(
-            ["postprocess", "--workspace", workspace_name, "--script", "report", "--workflow-dir", str(package)],
+            ["postprocess", "report", "--workspace", workspace_name, "--workflow-dir", str(package)],
             context,
         )
         == 1
@@ -289,10 +287,9 @@ def test_postprocess_cli_output_dir_flag_places_output(tmp_path: Path, capsys) -
         command(
             [
                 "postprocess",
+                "report",
                 "--workspace",
                 workspace_name,
-                "--script",
-                "report",
                 "--workflow-dir",
                 str(package),
                 "--output-dir",
@@ -349,10 +346,9 @@ def test_postprocess_cli_unknown_job_id_exits_one(tmp_path: Path, capsys) -> Non
         command(
             [
                 "postprocess",
+                "report",
                 "--workspace",
                 workspace_name,
-                "--script",
-                "report",
                 "--workflow-dir",
                 str(package),
                 "nope",
@@ -372,10 +368,9 @@ def test_postprocess_cli_selector_with_state_is_a_usage_error(tmp_path: Path, ca
         command(
             [
                 "postprocess",
+                "report",
                 "--workspace",
                 workspace_name,
-                "--script",
-                "report",
                 "--workflow-dir",
                 str(package),
                 "--state",
@@ -387,7 +382,7 @@ def test_postprocess_cli_selector_with_state_is_a_usage_error(tmp_path: Path, ca
         == 2
     )
     assert "state" in capsys.readouterr().err
-    base = ["postprocess", "--workspace", workspace_name, "--script", "report", "--workflow-dir", str(package)]
+    base = ["postprocess", "report", "--workspace", workspace_name, "--workflow-dir", str(package)]
     assert command([*base, "--step", "start", record.job_id], context) == 2
     assert "--step" in capsys.readouterr().err
     # Without job selectors --step selects: a job at another step is left out.
@@ -470,9 +465,9 @@ def test_postprocess_tables_still_reject_unknown_keys(tmp_path: Path) -> None:
 def test_describe_shows_declared_outputs(tmp_path: Path, capsys) -> None:
     context = CLIContext("httk", tmp_path)
     package = _declaring(tmp_path, '["summary.json", "*.png"]')
-    assert command(["describe", str(package)], context) == 0
+    assert command(["show", str(package)], context) == 0
     assert "report: scripts/report.sh — write a report (outputs: summary.json, *.png)" in capsys.readouterr().out
-    assert command(["describe", "--json", str(package)], context) == 0
+    assert command(["show", "--json", str(package)], context) == 0
     assert json.loads(capsys.readouterr().out)[0]["postprocess"]["report"]["outputs"] == ["summary.json", "*.png"]
 
 

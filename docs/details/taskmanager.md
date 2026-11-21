@@ -47,12 +47,12 @@ httk workspace init --name runs /scratch/rar/httk/runs
 httk workspace set -w runs manager.launch=cluster
 httk workspace set -w runs slurm.partition=batch
 httk workspace set -w runs vasp.command=vasp_std
-httk workflow run --workspace runs --count 4
+httk run --workspace runs --count 4
 ```
 
 From a desk, the same operations reach that workspace through a remote as
 `kappa:runs`; `run --workspace kappa:runs` invokes
-`httk workflow manager run --workspace runs --count 4 --detach` on kappa, which
+`httk run --workspace runs --count 4 --detach` on kappa, which
 uses the owning workspace's launcher. Move jobs there and back with
 `job move` ({doc}`remotes`).
 
@@ -164,7 +164,7 @@ workflow it calls. Install once, then create jobs by id or short name:
 ```console
 httk workflow install --workspace WORKSPACE 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 httk workflow install --workspace WORKSPACE ./my-workflow
-httk workspace workflows WORKSPACE
+httk workflow list -w WORKSPACE
 httk job new --workspace WORKSPACE --workflow vasp.relax --input structure=POSCAR
 ```
 
@@ -250,8 +250,8 @@ answers what serves the workspace without a `job why` on an arbitrary job.
 ### Starting a manager
 
 ```console
-httk manager run --workspace WORKSPACE --workers 8
-httk manager run --workspace WORKSPACE --pool vasp --capability gpu --workers 4
+httk run --workspace WORKSPACE --workers 8
+httk run --workspace WORKSPACE --pool vasp --capability gpu --workers 4
 ```
 
 Without pool configuration, a manager advertises the reserved `default` pool;
@@ -286,7 +286,7 @@ every launch it made have been reaped, and never follows a symlink there.
 
 ### Launching managers
 
-`run` and `manager run` launch managers through the launcher bundle that the
+`run` launches managers through the launcher bundle that the
 workspace's `manager.launch` setting selects: the built-in `process` launcher
 starts detached local processes, and a named bundle, such as the Slurm launcher
 `cluster` above, starts them as it defines. `manager.count`, `manager.workers`,
@@ -346,7 +346,7 @@ available again. A workspace with the exchange extension requires
 
 ### Startup banner and idle summary
 
-`run` and `manager run` print one startup line (manager id, workspace, log
+`run` prints one startup line (manager id, workspace, log
 file, pools, capabilities, resources) and, on exiting idle, one summary line:
 
 ```text
@@ -480,7 +480,7 @@ Managers may advertise integer resource capacities, such as
 CPUs and 128000 MB:
 
 ```console
-httk manager run --workspace WORKSPACE --workers 4 \
+httk run --workspace WORKSPACE --workers 4 \
   --worker-resource procs 32 --worker-resource mem 128000
 ```
 
@@ -527,7 +527,7 @@ resources = { procs = 1, mem = 2000, matlab_license_slots = 1 }
 and is served by:
 
 ```console
-httk workflow run --workers 4 \
+httk run --workers 4 \
   --worker-resource procs 32 --worker-resource mem 128000 \
   --worker-resource matlab_license_slots 2
 ```
@@ -774,7 +774,7 @@ Of two managers that try, exactly one wins; the other moves on.
 Placement prefixes restrict what a manager scans:
 
 ```console
-httk manager run --workspace WORKSPACE \
+httk run --workspace WORKSPACE \
   --placement project-a \
   --placement project-b/2026
 ```
@@ -796,7 +796,7 @@ httk workspace status --json WORKSPACE
 
 `status` prints the job counts per state, whether the workspace is sealed, and
 the owners with their liveness; an owner it proves dead gets its tombstone, for
-the next manager tick or `workspace gc` to recover. `httk workflow monitor`
+the next manager tick or `workspace gc` to recover. `httk monitor`
 gives an interactive view of the same counts, with pages, details and controls;
 see {doc}`monitor`.
 
@@ -983,7 +983,7 @@ httk workspace set -w WORKSPACE policy.retention.attempt_control_days=14
 httk workspace gc --dry-run WORKSPACE
 httk workspace gc WORKSPACE
 httk workspace gc --category requests --category tmp_entries WORKSPACE
-httk manager run --workspace WORKSPACE --gc-interval 3600
+httk run --workspace WORKSPACE --gc-interval 3600
 ```
 
 | Category | What goes |
@@ -1007,36 +1007,36 @@ by hand. A manager with `--gc-interval` collects every category but
 
 ## Checking a workspace
 
-`workspace fsck` walks `jobs/` and reports what the kernel cannot read or
+`workspace check` walks `jobs/` and reports what the kernel cannot read or
 resolve on its own:
 
 ```console
-httk workspace fsck WORKSPACE
-httk workspace fsck --json WORKSPACE
-httk workspace fsck --repair WORKSPACE
+httk workspace check WORKSPACE
+httk workspace check --json WORKSPACE
+httk workspace repair WORKSPACE
 ```
 
 Like `fsck` for a filesystem, run it only while no other actor uses the
 workspace: no managers, CLI operations, daemon or transfers. Findings from a
-busy workspace may be transient. `--repair` is refused unless the workspace is
+busy workspace may be transient. `workspace repair` is refused unless the workspace is
 quiescent: every owner must be proven dead, and every dead owner recovered, so
 no owned jobs or dead-owner scratch remain. Stop the managers, run
-`httk workspace gc` (which recovers dead owners), then rerun. `--repair` also
+`httk workspace gc` (which recovers dead owners), then rerun. `repair` also
 asks "Make sure no other operations are ongoing in this workspace. Continue?";
-`--yes` answers it, and without a terminal `--repair` needs `--yes`.
+`--yes` answers it, and without a terminal `repair` needs `--yes`.
 
 | Finding | Meaning and remedy |
 | --- | --- |
-| `unparsable_name` | an entry that is neither a placement directory nor a job name of its position; `--repair` moves it to quarantine |
+| `unparsable_name` | an entry that is neither a placement directory nor a job name of its position; `repair` moves it to quarantine |
 | `duplicate_job` | one job UUID in two places, after a cross-filesystem crash, a duplicate delivery or two concurrent adoptions; inspect both and delete one |
 | `orphan_owned` | `jobs/owned/<id>/` without its owner's directory; resolve it with `workspace attest-dead` |
 | `tombstoned_owner_with_jobs` | a recovered owner holds jobs, launches or scratch again; `workspace gc` recovers it |
 | `unreadable_state` | a `state.json` that exists but does not decode; the next claimant fails the job with `protocol_error` |
 | `foreign_owner` | a job directory another account owns, which managers skip |
-| `stale_exchange_index` | an exchange index entry whose job is not in the workspace (a job removed by hand), which blocks the client's resubmission of that name; `--repair` removes it |
-| `unindexed_exchange_job` | an exchange root without its exchange index entry; `--repair` recreates the entry |
+| `stale_exchange_index` | an exchange index entry whose job is not in the workspace (a job removed by hand), which blocks the client's resubmission of that name; `repair` removes it |
+| `unindexed_exchange_job` | an exchange root without its exchange index entry; `repair` recreates the entry |
 
-Without `--repair` nothing is written. The command exits `0` when nothing is
+`workspace check` writes nothing. The command exits `0` when nothing is
 left for an operator and `1` otherwise. `httk project repair` adds the
 workspace health checks: dead owners not yet recovered, scratch of unknown
 owners, old temporaries, and holds or incoming copies older than seven days.

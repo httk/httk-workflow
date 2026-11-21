@@ -81,22 +81,24 @@ httk workflow install --workspace WS 'git+https://github.com/httk/workflows-vasp
 
 A root `httk_workflow.toml` is still a single package. A `REMOTE:WS` workspace
 gets the pinned repository URI and expands it there. `httk job new
---workflow` and `httk workflow describe` still need `#subdir`.
+--workflow` and `httk workflow show` still need `#subdir`.
 
-`httk workflow describe URI` fetches and describes without installing.
+`httk workflow show URI` fetches and describes without installing: it
+describes a workflow installed in the workspace, and anything else as this
+machine resolves it.
 `httk workflow uninstall --workspace WS SELECTOR` removes an installation by
 id, short name or `NAME@REF` (a selector several installations share is
 refused); jobs are not checked unless `--check` is given.
 
 ## The machine cache
 
-Without `--workspace`, `httk workflow install URI` only fetches into this
-machine's cache and prints each canonical URI and short name, and
-`httk workflow uninstall SELECTOR` forgets fetched workflows:
+`httk workflow fetch URI` only fetches into this machine's cache and prints
+each canonical URI and short name, and `httk workflow forget SELECTOR` forgets
+fetched workflows:
 
 ```console
-httk workflow install 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-httk workflow uninstall vasp.relax
+httk workflow fetch 'git+https://github.com/httk/workflows-vasp#vasp-relax'
+httk workflow forget vasp.relax
 ```
 
 A pinned URI forgets that commit; an unpinned URI or a short name forgets
@@ -130,8 +132,7 @@ repositories or subdirectories claim the same name, it is refused and the URI
 must be used. In-process registrations, installed plugins and
 [pip-installed workflow repositories](#install-a-workflow-repository-with-pip)
 take precedence, in that order; a fetched workflow they shadow logs a warning
-and stays reachable by its URI. `httk workflow list` without `--workspace`
-lists them.
+and stays reachable by its URI. `httk workflow list --available` lists them.
 
 ## Install a workflow repository with pip
 
@@ -188,8 +189,8 @@ state of its first lookup; restart it after `pip install`, `git checkout` or
 
 Nothing is written to this machine's installed entries
 (`data_home()/workflows/installed`), so `pip uninstall` removes the workflows
-entirely; only checkout trees stay in the cache. `httk workflow uninstall`
-without `--workspace` points to `pip uninstall` for them. Plugin names take
+entirely; only checkout trees stay in the cache. `httk workflow forget`
+points to `pip uninstall` for them. Plugin names take
 precedence over pip names, and pip names over fetched short names.
 
 ## Definition and declaration

@@ -19,7 +19,7 @@ from v3_helpers import workspace as v3_workspace
 
 def test_all_command_groups_have_help(tmp_path: Path, capsys) -> None:
     context = CLIContext("httk", tmp_path)
-    for group in ("workspace", "job", "manager", "config", "remote"):
+    for group in ("workspace", "job", "config", "remote", "launcher", "campaign", "run", "monitor", "postprocess"):
         assert command([group, "--help"], context) == 0
     assert command(["v1", "collect", "--help"], context) == 0
     assert "usage:" in capsys.readouterr().out

@@ -127,8 +127,8 @@ the setting. A ref that cannot be resolved is skipped with a warning.
 These still work unchanged:
 
 - every read-only command (`status`, `show`, `log`, `why`, `verify`);
-- `gc` and `fsck`;
-- `workflow postprocess`, which writes outside the payload. A sealed job can be
+- `gc`, `workspace check` and `workspace repair`;
+- `postprocess`, which writes outside the payload. A sealed job can be
   postprocessed; the output is excluded from the job seal and, when it lives in
   the project tree, from the project seal too;
 - moving a job out of an unsealed workspace. The seal travels inside the

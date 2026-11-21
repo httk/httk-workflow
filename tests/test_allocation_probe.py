@@ -413,7 +413,7 @@ def test_allocation_option_parses_and_forwards(tmp_path: Path) -> None:
     from httk.workflow import workflow_cli
 
     parser = workflow_cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
-    for leaf in (["manager", "run"], ["run"]):
+    for leaf in (["run"],):
         assert parser.parse_args(leaf).allocation == "auto"
         parsed = parser.parse_args([*leaf, "--allocation", "exec:/site/allocation"])
         assert _manager.manager_argv_tail(parsed) == ["--allocation", "exec:/site/allocation"]
@@ -468,7 +468,6 @@ def test_a_manager_without_a_probed_end_keeps_the_slurm_end(tmp_path: Path, monk
     monkeypatch.setenv("SLURM_JOB_END_TIME", str(end))
     for spec in ("none", "host"):
         arguments = [
-            "manager",
             "run",
             "--by-path",
             "--workspace",
@@ -492,7 +491,7 @@ def test_run_uses_the_probed_allocation(tmp_path: Path, monkeypatch: pytest.Monk
     seen: dict[str, object] = {}
     monkeypatch.setattr(_manager, "TaskManager", _fake_manager(seen))
     arguments = [
-        *("manager", "run", "--by-path", "--workspace", str(workspace.root), "--inline"),
+        *("run", "--by-path", "--workspace", str(workspace.root), "--inline"),
         *("--allocation", f"exec:{probe}", "--worker-resource", "procs", "3", "--time-limit", "1:00:00"),
     ]
     assert command(arguments, CLIContext("httk", tmp_path)) == 0
@@ -516,7 +515,7 @@ def test_owner_json_records_the_allocation(tmp_path: Path) -> None:
 
 
 def test_slurm_dispatcher_appends_the_configured_probe() -> None:
-    argv = ["httk", "workflow", "manager", "run"]
+    argv = ["httk", "run"]
     assert launch_runtime._manager_argv(argv, {})[-2:] == ["--allocation", "slurm"]
     configured = launch_runtime._manager_argv(argv, {"manager.allocation": "exec:/site/allocation"})
     assert configured[-2:] == ["--allocation", "exec:/site/allocation"]
@@ -541,7 +540,7 @@ def test_process_launcher_probes_the_host_for_one_manager_only(
         return Child()
 
     monkeypatch.setattr(launchers.subprocess, "Popen", fake_popen)
-    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"]
+    argv = [sys.executable, "-m", "httk.core.cli", "run"]
     for count, spec in ((1, "host"), (2, "none")):
         calls.clear()
         launchers.launch_processes(workspace_root=tmp_path, argv=argv, count=count, settings={}, capacity={})

@@ -6,12 +6,13 @@ command answers `--help`:
 ```text
 httk setup | identity     operator identities (core-owned)
 httk project             init | show | check | repair | manifest | verify | seal | unseal | import-v1
-httk workspace           init | list | default | show | set | unset | status | owners | attest-dead | fsck | gc | seal | unseal | verify | exchange | daemon | ...
+httk workspace           init | register | list | default | show | set | unset | status | owners | attest-dead | check | repair | gc | seal | unseal | verify | exchange | daemon | ...
 httk job                 new | submit | cancel | pause | resume | restart | set | delete | detach | seal | unseal | unlock | list | show | log | why | precheck | debug | verify | move | eject | adopt
 httk push | pull          move ready jobs to a workspace, succeeded jobs back
 httk collect             workspaces and calculation trees
-httk workflow            run | list | describe | install | uninstall | postprocess | build | monitor
-httk manager    run
+httk workflow            list | show | install | uninstall | build | fetch | forget
+httk run | monitor        run managers; watch workspaces interactively
+httk postprocess         run a declared postprocess script on collected jobs
 httk campaign   init | show | set | unset | remove | submit | collect | start-managers
 httk launcher   list | add | set | unset | check | show | remove
 httk remote     list | add | set | unset | check | show | remove | import-v1 | daemon

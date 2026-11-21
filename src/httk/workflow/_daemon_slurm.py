@@ -185,8 +185,6 @@ def manager_argv(policy: Policy, operator_key: str) -> list[str]:
         "-I",
         "-m",
         "httk.core.cli",
-        "workflow",
-        "manager",
         "run",
         "--by-path",
         "--workspace",

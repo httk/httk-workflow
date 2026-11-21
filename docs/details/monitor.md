@@ -1,11 +1,11 @@
 # Workflow monitor
 
-`httk workflow monitor` opens a stdlib `curses` view over one or more
+`httk monitor` opens a stdlib `curses` view over one or more
 registered workspaces:
 
 ```console
-httk workflow monitor --workspace default --refresh 3
-httk workflow monitor --workspace cluster:runs
+httk monitor --workspace default --refresh 3
+httk monitor --workspace cluster:runs
 ```
 
 `--refresh` accepts finite values from 0.5 through 3600 seconds. The command

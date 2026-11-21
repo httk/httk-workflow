@@ -7,7 +7,7 @@ they are done, look at what happened, and collect the results.
 ```console
 httk workflow install --workspace default 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon
-httk workflow run
+httk run
 httk job list
 httk collect --into results.sqlite --id-base httk.campaign
 ```
@@ -21,11 +21,11 @@ come along:
 ```console
 httk workflow install --workspace default 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 httk workflow install --workspace default ./my-workflow
-httk workspace workflows default
+httk workflow list -w default
 ```
 
-Without `--workspace`, `httk workflow install URI` only fetches the repository
-into this machine's cache. `httk job new` then instantiates jobs:
+`httk workflow fetch URI` only fetches the repository into this machine's
+cache, without installing it in a workspace. `httk job new` then instantiates jobs:
 
 | `--workflow` / option | Selects |
 | --- | --- |
@@ -43,7 +43,7 @@ managers and collects can address on its own; job directories never nest, so
 no placement component may look like a job key (`name--uuid`). Workflows decide
 their own data handling through parameters; the VASP workflows, for example,
 copy a curated set of results into `data/` only with
-`--parameter publish_data=true`. `httk workflow describe NAME` shows what a
+`--parameter publish_data=true`. `httk workflow show NAME` shows what a
 workflow declares before anything is created, and `httk job precheck`
 reports whether the workspace can run its jobs.
 
@@ -89,10 +89,10 @@ its `job.json`.
 ## Running managers
 
 ```console
-httk workflow run                      # serve ready jobs until nothing is left
-httk workflow run --keep-running               # keep serving; this is how a campaign runs
-httk workflow run --count 4 --workers 8
-httk workflow run --workspace kappa:runs --count 4
+httk run                      # serve ready jobs until nothing is left
+httk run --keep-running               # keep serving; this is how a campaign runs
+httk run --count 4 --workers 8
+httk run --workspace kappa:runs --count 4
 ```
 
 A manager claims jobs, runs their steps and records every transition. `--count`
@@ -162,7 +162,7 @@ the owners and their liveness, and when no probe can decide (a host that is
 gone), `workspace attest-dead OWNER --reason TEXT` declares the death; it
 refuses a provably live owner and needs `--force` for an undecidable one, and
 attesting a still-running owner can run work twice. `workspace status`
-summarizes the workspace, `workspace fsck` checks the job tree (only while
+summarizes the workspace, `workspace check` checks the job tree (only while
 nothing else uses the workspace, like `fsck` for a filesystem), and
 `workspace gc` frees what the retention policy allows.
 {doc}`details/taskmanager` explains each of them.
@@ -176,7 +176,7 @@ succeeded job home:
 ```console
 httk workflow install --workspace kappa:runs 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 httk push kappa:runs
-httk workflow run --workspace kappa:runs --count 4
+httk run --workspace kappa:runs --count 4
 httk pull kappa:runs
 ```
 
@@ -241,8 +241,8 @@ Workflow packages may ship curated scripts that run against a finished job's
 files, such as the relaxation plot of the VASP workflows:
 
 ```console
-httk workflow postprocess --script relaxation-plot
-httk workflow postprocess --script relaxation-plot silicon
+httk postprocess relaxation-plot
+httk postprocess relaxation-plot silicon
 ```
 
 Output lands under `<workspace>/postprocess/`, never in the payload, so a
@@ -256,7 +256,7 @@ output into the same store:
 
 ```console
 httk collect WS --into results.sqlite --id-base mydb
-httk workflow postprocess --workspace WS --script relaxation-plot
+httk postprocess relaxation-plot --workspace WS
 httk collect WS --postprocess relaxation-plot --into results.sqlite --id-base mydb
 ```
 
@@ -280,7 +280,7 @@ httk project unseal
 
 A succeeded job is never changed until `job unseal` releases it (or, for debugging,
 `job unlock` puts it in debug mode, see {doc}`restarting_jobs`), and a sealed
-workspace refuses modifying commands; reading, `fsck`, `gc` and postprocessing
+workspace refuses modifying commands; reading, `workspace check`, `gc` and postprocessing
 still work, and a seal travels with its job. {doc}`details/sealing` covers key refs, verdicts and what each level
 records.
 

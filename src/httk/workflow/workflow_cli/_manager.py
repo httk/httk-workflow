@@ -46,7 +46,6 @@ from ._common import (
     _add_adapter_timeout,
     _add_by_path_argument,
     _durable,
-    _group,
     _leaf,
     _resolve_binding,
     add_durability_arguments,
@@ -289,8 +288,8 @@ def manager_option_defaults() -> dict[str, object]:
     }
 
 
-def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare :command:`manager run`."""
+def add_run_arguments(parser: argparse.ArgumentParser) -> None:
+    """Declare the options of :command:`run`."""
 
     parser.add_argument(
         "-w",
@@ -422,119 +421,6 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     _add_launcher_argument(parser)
     add_durability_arguments(parser)
     parser.set_defaults(**manager_option_defaults())
-
-
-def add_run_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare the streamlined top-level :command:`run` leaf."""
-
-    parser.add_argument(
-        "-w",
-        "--workspace",
-        metavar="WORKSPACE",
-        help="the workspace this manager serves (default: the enclosing workspace, this project's workspace, or the per-user default)",
-    )
-    parser.add_argument(
-        "--pool",
-        action="append",
-        metavar="POOL",
-        help="claim only jobs of this pool (repeatable, default: default)",
-    )
-    parser.add_argument(
-        "--capability",
-        action="append",
-        metavar="CAPABILITY",
-        help="advertise this capability to the scheduler, so capability-gated jobs become claimable (repeatable)",
-    )
-    parser.add_argument(
-        "--placement",
-        action="append",
-        dest="placement_prefix",
-        metavar="PREFIX",
-        help="restrict every scheduling scan to jobs at or below this placement subtree (repeatable)",
-    )
-    parser.add_argument(
-        "--keep-running", action="store_true", dest="idle", help="keep serving the workspace when nothing is left to do"
-    )
-    parser.add_argument(
-        "--idle-timeout",
-        type=float,
-        metavar="SECONDS",
-        help="without --keep-running, give up after this long if the workspace never becomes idle (default: 3600)",
-    )
-    parser.add_argument(
-        "--idle-grace",
-        type=float,
-        metavar="SECONDS",
-        help=(
-            "without --keep-running, a manager serving the workspace's exchange, or whose ready jobs wait for "
-            "confinement, does not exit as idle this soon after it starts; still blocked by confinement "
-            "after it, it exits 2 (default: 120)"
-        ),
-    )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        metavar="COUNT",
-        help="attempts to run at once, locally, or workers per submitted remote manager (default: 1)",
-    )
-    _add_worker_resource_argument(parser)
-    _add_setting_argument(parser)
-    parser.add_argument("--log-level", choices=LOG_LEVELS, help="log level for the manager log and console")
-    parser.add_argument(
-        "--count",
-        type=int,
-        metavar="COUNT",
-        help="managers to start (default: the workspace's manager.count, or 1)",
-    )
-    _add_adapter_timeout(parser)
-    inline_detach = parser.add_mutually_exclusive_group()
-    inline_detach.add_argument(
-        "--inline",
-        action=_LauncherOption,
-        nargs=0,
-        help="run one manager in this process regardless of the workspace's launcher",
-    )
-    inline_detach.add_argument(
-        "--detach", action="store_true", help="start the managers and return; the default when invoked from a remote"
-    )
-    _add_launcher_argument(parser)
-    parser.add_argument(
-        "--heartbeat-interval",
-        type=float,
-        metavar="SECONDS",
-        help="how often this manager writes its informational heartbeat (default: 30)",
-    )
-    parser.add_argument(
-        "--poll-interval",
-        type=float,
-        metavar="SECONDS",
-        help="how often this manager looks for work (default: 1)",
-    )
-    parser.add_argument(
-        "--join-grace-seconds",
-        type=float,
-        metavar="SECONDS",
-        help="how long a waiting job tolerates an unresolvable join child (default: 3600)",
-    )
-    parser.add_argument(
-        "--drain-timeout",
-        type=float,
-        metavar="SECONDS",
-        help=(
-            "seconds to keep committing outcomes after a drain starts "
-            "(stop signal or the allocation's drain point) (default: 30)"
-        ),
-    )
-    _add_time_limit_arguments(parser)
-    parser.add_argument("--gc-interval", type=float, metavar="SECONDS", help="background garbage collection interval")
-    parser.add_argument(
-        "--log-file",
-        metavar="PATH",
-        help="fixed log file for one in-process manager (default: WORKSPACE/logs/managers/<manager-id>.log)",
-    )
-    parser.add_argument("--json-logs", action="store_true", help="log one JSON object per line")
-    add_durability_arguments(parser)
-    parser.set_defaults(handler=handle_manager_run, **manager_option_defaults())
 
 
 _LOG_FILE_REFUSAL = (
@@ -670,8 +556,6 @@ def _run_local_manager_children(
                 sys.executable,
                 "-m",
                 "httk.core.cli",
-                "workflow",
-                "manager",
                 "run",
                 "--by-path",
                 "--workspace",
@@ -887,8 +771,6 @@ def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context
         sys.executable,
         "-m",
         "httk.core.cli",
-        "workflow",
-        "manager",
         "run",
         "--by-path",
         "--workspace",
@@ -986,34 +868,12 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
     try:
         _mode, result = launch_workspace_managers(root, arguments, context)
     except RuntimeError as exc:
-        print(f"{context.program} workflow: {exc}", file=sys.stderr)
+        print(f"{context.program} run: {exc}", file=sys.stderr)
         return 1
     if isinstance(result, Mapping):
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result.get("ok", True) else 1
     return cast(int, result)
-
-
-def build_manager_parser(
-    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
-) -> None:
-    """Declare the ``manager`` group: the process that runs the jobs."""
-
-    _, group = _group(
-        subparsers,
-        "manager",
-        summary="run a task manager against a workspace",
-        description="Run the task manager that claims and executes the jobs of a workspace",
-    )
-    add_manager_run_arguments(
-        _leaf(
-            group,
-            "run",
-            summary="run the task manager",
-            description="Run one task manager against one execution workspace",
-            handler=handle_manager_run,
-        )
-    )
 
 
 def build_run_parser(

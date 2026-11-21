@@ -34,6 +34,6 @@ def test_a_cli_manager_records_its_launch_id_in_owner_json(
         return owner
 
     monkeypatch.setattr(_kernel, "register_owner", spy)
-    assert workflow_cli.command(["manager", "run", "--workspace", ws], CLIContext("httk", tmp_path)) == 0
+    assert workflow_cli.command(["run", "--workspace", ws], CLIContext("httk", tmp_path)) == 0
     [record] = [record for record in records if record["kind"] == "manager"]
     assert "launch_id" in record and record["launch_id"] == recorded

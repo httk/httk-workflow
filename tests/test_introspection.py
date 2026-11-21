@@ -340,7 +340,7 @@ def test_why_reports_a_ready_job_no_manager_serves(ws: Workspace, installed: Any
     detail = {check.name: check.detail for check in diagnosis.checks}
     assert detail["registered manager"] == "no manager is registered in this workspace"
     assert detail["installed workflow"] == f"{installed.id} and its calls are installed and built here"
-    assert any("httk manager run" in hint for hint in diagnosis.hints)
+    assert any("httk run --workspace WORKSPACE" in hint for hint in diagnosis.hints)
     assert any("httk job debug" in hint for hint in diagnosis.hints)
 
 
@@ -391,7 +391,7 @@ def test_why_names_the_claim_pool_no_live_manager_serves(ws: Workspace, installe
             for check in diagnosis.checks
             if check.name == "live manager"
         )
-        assert any("manager run --pool gpu --workspace WORKSPACE --capability cuda" in hint for hint in diagnosis.hints)
+        assert any("httk run --pool gpu --workspace WORKSPACE --capability cuda" in hint for hint in diagnosis.hints)
         rendered = diagnosis.render()
         assert f"job example--{submitted.job_id} is ready" in rendered and "no  eligible manager" in rendered
         assert diagnosis.as_mapping()["format"] == "httk-workflow-job-diagnosis"

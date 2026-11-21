@@ -52,7 +52,7 @@ adapter and an unconfined Slurm launcher lack these guarantees.
 | Component | Runs | Can write |
 | --- | --- | --- |
 | broker (`httk workspace daemon`) | in its own Bubblewrap sandbox on the login or service node, with the host filesystem read-only | `jobs/`, `exchange/`, `.httk-workspace/{owners,requests,tmp,quarantine,exchange-jobs}` and `.httk-workspace/daemon/broker/` |
-| manager | unconfined, as you, in the Slurm batch job: `httk workflow manager run --pool exchange-<key>`, until it is idle | the workspace |
+| manager | unconfined, as you, in the Slurm batch job: `httk run --pool exchange-<key>`, until it is idle | the workspace |
 | job attempt | in a Bubblewrap sandbox the manager builds, on the manager's node | its own job directory |
 | rank of a confined launch | in the launch's Bubblewrap keeper sandbox on its node, which the trusted rank helpers build | its own job directory, the launch's shared-memory directory |
 
@@ -61,7 +61,7 @@ The manager is trusted and runs unconfined, so it may read
 installation, the frozen launcher settings and the workspace settings. What
 it does not do on the trusted side:
 
-- it never runs a job's postprocess scripts; `httk workflow postprocess` and
+- it never runs a job's postprocess scripts; `httk postprocess` and
   `httk collect` are client-side verbs that you run on adopted jobs, unconfined
   wherever you run them;
 - it runs only workflows an operator installed in the workspace
@@ -452,7 +452,7 @@ effective `time_limit` as `[D-]HH:MM:SS` (omitted when no limit applies), and
 recovery answers `uncertain` after its daemon crashed carries only a requested
 `time_limit`; without a request it stays null.
 
-The manager is `httk workflow manager run --by-path --workspace WORKSPACE
+The manager is `httk run --by-path --workspace WORKSPACE
 --pool exchange-<key>` with the launcher's `--workers` (from `manager.workers`),
 `--allocation` (from `manager.allocation`, default `slurm`) and its pinned
 `--setting` values. `exchange-<key>` is the exchange pool of the key that
@@ -599,7 +599,7 @@ The daemon executes a `job_request` only for an indexed exchange root adopted
 from the inbox whose recorded `owner_key` matches the command-signing key,
 which must also remain in `authorized_keys`. Local jobs, keyless submissions,
 children, transferred or adopted jobs, and roots with an index entry recreated
-by `fsck --repair` are refused with `not_owner`. A mounted-daemon job command
+by `workspace repair` are refused with `not_owner`. A mounted-daemon job command
 with `--operator` must use the identity that ejected the job. `detach` never
 applies through the daemon because only roots are controllable and roots have
 no parent; children move and stop with their root, daemon ejects include the

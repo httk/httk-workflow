@@ -18,10 +18,9 @@ def test_postprocess_cli_targets_a_single_job_by_id(tmp_path: Path, capsys) -> N
         command(
             [
                 "postprocess",
+                "report",
                 "--workspace",
                 workspace_name,
-                "--script",
-                "report",
                 "--workflow-dir",
                 str(package),
                 "--json",

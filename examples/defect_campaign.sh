@@ -10,7 +10,7 @@
 #     httk job new \
 #         --from-runner examples/defect_campaign.sh --start-step characterize \
 #         --parameter sites=3 --parameter diverging=1 --tag campaign
-#     httk workflow run
+#     httk run
 #
 # Job parameters:
 #   sites      -- how many sites to relax, one child job each

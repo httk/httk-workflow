@@ -359,7 +359,7 @@ def _ssh_transport(settings: Mapping[str, object], *, share_connection: bool = F
     already names a ``ControlPath`` for the destination: ssh then reuses that
     master and httk adds no control options. *share_connection* asks for the
     same sharing while ``connection_reuse`` is unset, for a caller that polls
-    (``workflow monitor``) and would otherwise log in once per read;
+    (``monitor``) and would otherwise log in once per read;
     ``connection_reuse=no`` never shares, for sites that forbid it.
 
     :param settings: The persisted remote settings and their credentials.

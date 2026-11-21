@@ -67,11 +67,11 @@ def test_workflow_describe_reports_manifest_step_drift(tmp_path: Path, capsys) -
     )
     (package / "run").chmod(0o755)
     context = _context(tmp_path)
-    assert command(["describe", str(package)], context) == 0
+    assert command(["show", str(package)], context) == 0
     out = capsys.readouterr().out
     assert "WARNING: step drift" in out and "gone" in out
 
-    assert command(["describe", "--json", str(package)], context) == 0
+    assert command(["show", "--json", str(package)], context) == 0
     described = json.loads(capsys.readouterr().out)[0]
     assert "gone" in described["manifest_step_drift"]
 
@@ -340,7 +340,7 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
     context = _context(tmp_path)
     package = _cli_package(tmp_path / "package")
     before = tmp_path / "describe-workspace"
-    assert command(["describe", str(package)], context) == 0
+    assert command(["show", str(package)], context) == 0
     text = capsys.readouterr().out
     assert "workflow: tests.cli.package" in text
     assert "source: directory" in text
@@ -354,7 +354,7 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
     assert "collect hook: yes (collect.py), kind=python" in text
     assert not before.exists()
 
-    assert command(["describe", "--json", str(package)], context) == 0
+    assert command(["show", "--json", str(package)], context) == 0
     directory = json.loads(capsys.readouterr().out)[0]
     assert directory["build"] == {"present": False}
     assert directory["hooks"] == {
@@ -367,14 +367,14 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
 
     provider = load_workflow_package(package)
     try:
-        assert command(["describe", "--json", "tests.cli.package"], context) == 0
+        assert command(["show", "--json", "tests.cli.package"], context) == 0
         by_id = json.loads(capsys.readouterr().out)[0]
         assert by_id["format"] == "httk-workflow-workflow-description"
         assert by_id["format_version"] == 2
         assert by_id["source"]["kind"] == "registered-directory"
         assert by_id["workflow"] == provider.workflow_id
 
-        assert command(["describe", "--json", "cli-package"], context) == 0
+        assert command(["show", "--json", "cli-package"], context) == 0
         by_alias = json.loads(capsys.readouterr().out)[0]
         assert by_alias["workflow"] == "tests.cli.package"
     finally:
@@ -388,7 +388,7 @@ def test_workflow_describe_reports_build_registration(tmp_path: Path, capsys) ->
         + '\n[workflow.build]\ncommand = "python build.py"\nplatform = "linux x86_64"\nartifacts = ["build"]\n',
     )
     context = _context(tmp_path)
-    assert command(["describe", "--json", str(package)], context) == 0
+    assert command(["show", "--json", str(package)], context) == 0
     described = json.loads(capsys.readouterr().out)[0]
     assert described["build"] == {
         "present": True,
@@ -396,7 +396,7 @@ def test_workflow_describe_reports_build_registration(tmp_path: Path, capsys) ->
         "platform": "linux x86_64",
         "artifacts": ["build"],
     }
-    assert command(["describe", str(package)], context) == 0
+    assert command(["show", str(package)], context) == 0
     assert "build: yes" in capsys.readouterr().out
 
 
@@ -408,11 +408,11 @@ def test_workflow_describe_renders_time_resources_as_durations(tmp_path: Path, c
         + '\n[workflow.steps.start.resources]\nmaxtime = "90"\n',
     )
     context = _context(tmp_path)
-    assert command(["describe", "--json", str(package)], context) == 0
+    assert command(["show", "--json", str(package)], context) == 0
     described = json.loads(capsys.readouterr().out)[0]
     assert described["resources"] == {"maxtime": 86400, "procs": 4}
     assert described["step_resources"] == {"start": {"maxtime": 5400}}
-    assert command(["describe", str(package)], context) == 0
+    assert command(["show", str(package)], context) == 0
     text = capsys.readouterr().out
     assert 'resources: {"maxtime": "1-00:00:00", "procs": 4}' in text
     assert 'step_resources: {"start": {"maxtime": "01:30:00"}}' in text
@@ -421,7 +421,7 @@ def test_workflow_describe_renders_time_resources_as_durations(tmp_path: Path, c
 @pytest.mark.usefixtures("relax_workflow")
 def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path: Path, capsys) -> None:
     context = _context(tmp_path)
-    assert command(["describe", "--json", "test-relax"], context) == 0
+    assert command(["show", "--json", "test-relax"], context) == 0
     packaged = json.loads(capsys.readouterr().out)[0]
     assert packaged["hooks"]["collect"] == {"present": True, "file": None, "kind": None, "packaged": True}
     assert packaged["hooks"]["instantiate"] == {"present": False, "file": None, "kind": None, "packaged": True}
@@ -430,7 +430,7 @@ def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path:
     assert packaged["postprocess"] == {
         "report": {"file": "scripts/report", "description": "write a report", "outputs": None}
     }
-    assert command(["describe", "test-relax"], context) == 0
+    assert command(["show", "test-relax"], context) == 0
     described = capsys.readouterr().out
     assert "report: scripts/report" in described
 
@@ -440,14 +440,14 @@ def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path:
             '[workflow.collect]\nfile = "collect.py"\n\n', ""
         ),
     )
-    assert command(["describe", "--json", str(no_hooks)], context) == 0
+    assert command(["show", "--json", str(no_hooks)], context) == 0
     directory = json.loads(capsys.readouterr().out)[0]
     assert directory["hooks"] == {
         "instantiate": {"present": False, "file": None, "kind": None, "packaged": False},
         "collect": {"present": False, "file": None, "kind": None, "packaged": False},
     }
     assert directory["postprocess"] == {}
-    assert command(["describe", str(no_hooks)], context) == 0
+    assert command(["show", str(no_hooks)], context) == 0
     assert "postprocess scripts:\n  -" in capsys.readouterr().out
 
 
@@ -459,12 +459,12 @@ def test_workflow_describe_renders_environment(tmp_path: Path, capsys) -> None:
     )
     context = _context(tmp_path)
     assert load_workflow_package(package, register=False).environment
-    assert command(["describe", str(package)], context) == 0
+    assert command(["show", str(package)], context) == 0
     output = capsys.readouterr().out
     assert "environment:" in output
     assert "command: type=string, setting=tool.command, default=echo, description=The command." in output
     assert "\nsettings: tool.command\noutputs:" in output
-    assert command(["describe", "--json", str(package)], context) == 0
+    assert command(["show", "--json", str(package)], context) == 0
     (description,) = json.loads(capsys.readouterr().out)
     assert description["settings"] == ["tool.command"]
 
@@ -581,7 +581,7 @@ def test_workflow_build_json_is_one_report(tmp_path: Path, capfd) -> None:
     assert "compiler-output" in captured.err
 
 
-def test_workflow_install_list_describe_and_uninstall_a_workspace_store(tmp_path: Path, capfd) -> None:
+def test_workflow_install_list_show_and_uninstall_a_workspace_store(tmp_path: Path, capfd) -> None:
     context = _context(tmp_path)
     workspace = Workspace.initialize(tmp_path / "workspace")
     name = register_ws(context, workspace.root, "store")
@@ -596,14 +596,18 @@ def test_workflow_install_list_describe_and_uninstall_a_workspace_store(tmp_path
 
     assert command(["list", "--workspace", name], context) == 0
     assert capfd.readouterr().out == f"local:tests.package\ttests.package\t{package.resolve()}\n"
-    assert command(["describe", "--workspace", name, "--json", "tests.package"], context) == 0
+    assert command(["show", "--workspace", name, "--json", "tests.package"], context) == 0
     (described,) = json.loads(capfd.readouterr().out)
     assert described["workflow"] == "local:tests.package" and described["source"]["kind"] == "workspace"
     assert described["source"]["id"] == "local:tests.package" and described["build"]["present"] is True
-    assert command(["describe", "--workspace", name, "tests.package"], context) == 0
-    assert "source: workspace installation local:tests.package" in capfd.readouterr().out
-    assert command(["describe", "--workspace", name, "tests.missing"], context) == 1
-    assert "is not installed in the workspace" in capfd.readouterr().err
+    assert (described["described_from"], described["workspace"]) == ("workspace", name)
+    assert command(["show", "--workspace", name, "tests.package"], context) == 0
+    shown = capfd.readouterr().out
+    assert shown.startswith(f"tests.package:\ndescribed from: workspace {name}\n")
+    assert "source: workspace installation local:tests.package" in shown
+    # What the workspace does not hold is described as this machine resolves it.
+    assert command(["show", "--workspace", name, "tests.missing"], context) == 1
+    assert "tests.missing" in capfd.readouterr().err
 
     job = new_job(workspace, "tests.package", inputs={"structure": tmp_path / "package" / "run"})
     assert command(["uninstall", "--workspace", name, "--check", "tests.package"], context) == 0

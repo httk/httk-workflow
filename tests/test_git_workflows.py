@@ -407,20 +407,20 @@ def test_cli_list_and_describe_report_fetched_workflows(tmp_path: Path, capsys: 
     root, commit = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
     uri = f"git+file://{root}@{commit}#relax"
     context = CLIContext("httk", tmp_path)
-    assert command(["describe", "--json", f"git+file://{root}#relax"], context) == 0
+    assert command(["show", "--json", f"git+file://{root}#relax"], context) == 0
     described = json.loads(capsys.readouterr().out)[0]
     assert described["workflow"] == uri
     assert described["source"]["kind"] == "installed"
     assert described["source"]["uri"] == uri and described["source"]["commit"] == commit
     assert described["declaration"]["id"] is None
 
-    assert command(["describe", "tests.git.relax"], context) == 0
+    assert command(["show", "tests.git.relax"], context) == 0
     assert f"source: installed {uri}" in capsys.readouterr().out
 
-    assert command(["list", "--json"], context) == 0
+    assert command(["list", "--available", "--json"], context) == 0
     rows = [row for row in json.loads(capsys.readouterr().out) if row["workflow"] == "tests.git.relax"]
     assert rows[0]["source"] == {"kind": "installed", "plugin": None, "uri": uri}
-    assert command(["list"], context) == 0
+    assert command(["list", "--available"], context) == 0
     assert f"installed {uri}" in capsys.readouterr().out
 
 
@@ -543,7 +543,7 @@ def test_describe_ignores_step_order(tmp_path: Path, capsys: pytest.CaptureFixtu
         "@run.step\ndef finish(a):\n    a.succeed()\nraise SystemExit(run.main())\n",
         encoding="utf-8",
     )
-    assert command(["describe", "--json", str(package)], CLIContext("httk", tmp_path)) == 0
+    assert command(["show", "--json", str(package)], CLIContext("httk", tmp_path)) == 0
     assert json.loads(capsys.readouterr().out)[0]["manifest_step_drift"] is None
 
 
@@ -557,7 +557,7 @@ def test_cli_install_and_uninstall(tmp_path: Path, capsys: pytest.CaptureFixture
     root, commit = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
     uri = f"git+file://{root}@{commit}#relax"
     context = CLIContext("httk", tmp_path)
-    assert command(["install", "--json", f"git+file://{root}#relax", "not-a-uri"], context) == 1
+    assert command(["fetch", "--json", f"git+file://{root}#relax", "not-a-uri"], context) == 1
     captured = capsys.readouterr()
     assert json.loads(captured.out) == [{"uri": uri, "name": "tests.git.relax", "alias": None}]
     assert "not-a-uri" in captured.err
@@ -568,15 +568,15 @@ def test_cli_install_and_uninstall(tmp_path: Path, capsys: pytest.CaptureFixture
     _write_package(local, "tests.git.local")
     register_workflow(WorkflowProvider(workflow_id="tests.git.local", directory=local, steps=("start",)))
     try:
-        assert command(["uninstall", "tests.git.local"], context) == 1
+        assert command(["forget", "tests.git.local"], context) == 1
         assert "registered in-process" in capsys.readouterr().err
     finally:
         scaffold._WORKFLOW_PROVIDERS.pop("tests.git.local", None)
-    assert command(["uninstall", "--json", "tests.git.relax"], context) == 0
+    assert command(["forget", "--json", "tests.git.relax"], context) == 0
     assert json.loads(capsys.readouterr().out) == [{"uri": uri, "names": ["tests.git.relax"]}]
     assert workflow_provider("tests.git.relax") is None
     assert workflow_provider(uri) is None
-    assert command(["uninstall", "tests.git.relax"], context) == 1
+    assert command(["forget", "tests.git.relax"], context) == 1
 
 
 def test_uninstall_by_pinned_uri_falls_back_and_unpinned_uri_removes_the_lineage(tmp_path: Path) -> None:
@@ -586,11 +586,11 @@ def test_uninstall_by_pinned_uri_falls_back_and_unpinned_uri_removes_the_lineage
     fetch_workflow(f"{base}@{first}#relax")
     fetch_workflow(f"{base}@{second}#relax")
     context = CLIContext("httk", tmp_path)
-    assert command(["uninstall", f"{base}@{second}#relax"], context) == 0
+    assert command(["forget", f"{base}@{second}#relax"], context) == 0
     provider = workflow_provider("tests.git.relax")
     assert provider is not None and provider.workflow_id == f"{base}@{first}#relax"
     fetch_workflow(f"{base}@{second}#relax")
-    assert command(["uninstall", "--json", f"{base}#relax"], context) == 0
+    assert command(["forget", "--json", f"{base}#relax"], context) == 0
     assert workflow_provider("tests.git.relax") is None and not fetched_workflows()
 
 
@@ -603,7 +603,7 @@ def test_uninstall_of_a_plugin_workflow_points_to_plugin_uninstall(
     install_plugin(plugin)
     _reset_plugin_workflow_cache()
     try:
-        assert command(["uninstall", "tests.git.plugin"], CLIContext("httk", tmp_path)) == 1
+        assert command(["forget", "tests.git.plugin"], CLIContext("httk", tmp_path)) == 1
         assert "httk plugin uninstall" in capsys.readouterr().err
     finally:
         _reset_plugin_workflow_cache()
@@ -730,7 +730,7 @@ def test_plugin_root_uri_without_workspace_fetches_every_member(
 ) -> None:
     base, commit = _parent_and_child(tmp_path / "plugin")
     context = CLIContext("httk", tmp_path)
-    assert command(["install", "--json", base], context) == 0
+    assert command(["fetch", "--json", base], context) == 0
     rows = [
         {"uri": f"{base}@{commit}#child", "name": "tests.git.child", "alias": None},
         {"uri": f"{base}@{commit}#parent", "name": "tests.git.parent", "alias": None},

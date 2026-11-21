@@ -204,7 +204,7 @@ def confirm(prompt: str, *, yes: bool, declined: str = "not removed") -> bool:
     """Ask for confirmation on a terminal, or refuse without one.
 
     This is the one destructive-action gate every ``delete``/``remove``/``unseal`` leaf and
-    ``workspace fsck --repair`` share. ``--yes`` answers yes without asking; without a terminal and
+    ``workspace repair`` share. ``--yes`` answers yes without asking; without a terminal and
     without ``--yes`` the action is refused with a hint rather than blocking on
     an unanswerable prompt. It calls the builtin :func:`input` so a test that
     patches it still drives the prompt.
@@ -601,7 +601,7 @@ def _remote_workspace_read(
     *workspace_option*, follow ``--workspace NAME`` for a command whose
     positionals are its own (``workspace show/set/unset``). This is the single
     path the remote-capable workspace commands run through, so the reads
-    (``status``, ``gc``, ``fsck``, ``job_records``, the ``job`` reads) and the
+    (``status``, ``gc``, ``check``, ``repair``, ``job_records``, the ``job`` reads) and the
     ``workspace set``/``unset`` writes all reach a remote the same way.
     """
 

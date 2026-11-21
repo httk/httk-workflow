@@ -119,9 +119,7 @@ def test_a_job_round_trips_through_the_exchange(
     # the signing key's exchange pool, serves the exchange because the workspace has the extension, and exits
     # when it has nothing left to do.
     argv = _submitted_manager(policy)
-    assert argv[:9] == [
-        "workflow",
-        "manager",
+    assert argv[:7] == [
         "run",
         "--by-path",
         "--workspace",

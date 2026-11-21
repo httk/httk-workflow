@@ -582,10 +582,7 @@ def test_workspace_launcher_profile_dispatches_run_to_slurm(tmp_path: Path, remo
     ):
         assert f"#SBATCH {directive}" in script
     assert f"#SBATCH --chdir={workspace.root}" in script
-    assert (
-        f"exec {sys.executable} -m httk.core.cli workflow manager run --by-path --workspace {workspace.root} --workers 4"
-        in script
-    )
+    assert f"exec {sys.executable} -m httk.core.cli run --by-path --workspace {workspace.root} --workers 4" in script
 
 
 def test_invocation_launcher_overrides_workspace_launcher(tmp_path: Path, remote: Remote, capsys) -> None:
@@ -622,8 +619,6 @@ def test_process_launcher_option_uses_exact_local_child_and_detached_argv(
         sys.executable,
         "-m",
         "httk.core.cli",
-        "workflow",
-        "manager",
         "run",
         "--by-path",
         "--workspace",
@@ -743,15 +738,15 @@ def test_remote_manager_from_the_command_line_invokes_once(
     fake_remote(project, workspace=str(workspace.root))
     workspace.set_setting("manager.workers", "4")
     context = CLIContext("httk", project)
-    # `manager run` on a remote-bound workspace submits through the remote's
+    # `run` on a remote-bound workspace submits through the remote's
     # The remote command is invoked directly on the owning machine.
     register_ws(context, workspace.root, "station", remote="cluster")
 
-    assert command(["manager", "run", "--workspace", "cluster:station", "--count", "2"], context) == 0
+    assert command(["run", "--workspace", "cluster:station", "--count", "2"], context) == 0
     capsys.readouterr()
-    manager_commands = [item for item in remote.commands() if "workflow manager run" in item]
+    manager_commands = [item for item in remote.commands() if "httk run" in item]
     assert len(manager_commands) == 1
-    assert "httk workflow manager run --workspace station --detach --count 2" in manager_commands[0]
+    assert "httk run --workspace station --detach --count 2" in manager_commands[0]
 
 
 def test_remote_manager_forwards_execution_options(
@@ -767,7 +762,6 @@ def test_remote_manager_forwards_execution_options(
     assert (
         command(
             [
-                "manager",
                 "run",
                 "--workspace",
                 "cluster:options",
@@ -802,8 +796,6 @@ def test_remote_manager_forwards_execution_options(
     command_line = remote.commands()[-1]
     assert shlex.split(command_line) == [
         "httk",
-        "workflow",
-        "manager",
         "run",
         "--workspace",
         "options",

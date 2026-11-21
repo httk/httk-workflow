@@ -149,13 +149,13 @@ def build_postprocess_parser(subparsers: argparse._SubParsersAction[argparse.Arg
         description="Run a manifest-declared postprocess script against collected jobs",
         handler=handle_postprocess,
     )
+    parser.add_argument("script", metavar="SCRIPT", help="declared postprocess script name")
     parser.add_argument(
         "-w",
         "--workspace",
         metavar="WORKSPACE",
         help="the workspace to postprocess (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
-    parser.add_argument("--script", required=True, metavar="NAME", help="declared postprocess script name")
     parser.add_argument("--workflow-dir", metavar="PKG", help="use this workflow package for every job")
     parser.add_argument(
         "-s",
@@ -187,10 +187,12 @@ def build_postprocess_parser(subparsers: argparse._SubParsersAction[argparse.Arg
     parser.add_argument(
         "jobs",
         nargs="*",
+        default=[],
         metavar="JOB",
         help="postprocess only these jobs (UUID, key, unique prefix, or a path inside the "
         "workspace); mutually exclusive with --state/--step/--placement",
     )
+    parser.set_defaults(jobs_parser=parser)
 
 
 __all__ = ["build_postprocess_parser", "handle_postprocess"]

@@ -74,9 +74,9 @@ def _handle(request: Mapping[str, Any]) -> dict[str, Any]:
         return _refused(request_id, f"session refuses {shlex.join(argv)}: not a pinned remote command")
 
     # The real ``httk`` entry point routes these registered names to these handlers (``httk.registry.cli``).
-    from . import job_command, workflow_command, workspace_command
+    from . import job_command, run_command, workspace_command
 
-    route = {"job": job_command, "workspace": workspace_command, "workflow": workflow_command}[argv[1]]
+    route = {"job": job_command, "workspace": workspace_command, "run": run_command}[argv[1]]
     context = CLIContext("httk", Path(cwd) if cwd is not None else Path.cwd())
     stdout, stderr = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):

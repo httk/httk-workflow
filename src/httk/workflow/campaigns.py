@@ -359,7 +359,7 @@ def campaign_managers(
     """Start a manager per selected partition and report what each did.
 
     A local partition follows its workspace launcher; a remote partition invokes
-    ``httk workflow manager run`` on the owning machine over its adapter.
+    ``httk run`` on the owning machine over its adapter.
     The report has one row per partition, so a caller sees where work ran.
 
     :param partitions: Select partitions, or use all partitions.

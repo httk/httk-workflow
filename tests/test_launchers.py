@@ -124,7 +124,7 @@ def test_launcher_add_persists_settings_and_slurm_prefers_them(tmp_path: Path, r
     result = start_managers(
         resolve_launcher("gpu", project=project),
         workspace_root=workspace.root,
-        argv=[sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"],
+        argv=[sys.executable, "-m", "httk.core.cli", "run"],
         count=1,
         settings=workspace_settings,
         timeout=None,
@@ -136,7 +136,7 @@ def test_launcher_add_persists_settings_and_slurm_prefers_them(tmp_path: Path, r
     assert "--workers 8" in script
     assert "module load gpu" in script
     assert "module load batch" not in script
-    assert "exec /opt/gpu-httk workflow manager run" in script
+    assert "exec /opt/gpu-httk run" in script
     assert bundle.exists()
 
 
@@ -238,7 +238,7 @@ def test_slurm_launcher_start_spools_scripts(tmp_path: Path, remote: Remote) -> 
     result = start_managers(
         target,
         workspace_root=workspace.root,
-        argv=["httk", "workflow", "manager", "run", "--workspace", str(workspace.root)],
+        argv=["httk", "run", "--workspace", str(workspace.root)],
         count=2,
         settings=settings,
         timeout=None,
@@ -271,7 +271,7 @@ def test_slurm_launcher_start_spools_scripts(tmp_path: Path, remote: Remote) -> 
         assert f"#SBATCH {directive}" in script
     assert f"#SBATCH --chdir={workspace.root}" in script
     assert "module load python" in script
-    assert f"exec httk workflow manager run --workspace {workspace.root} --allocation slurm" in script
+    assert f"exec httk run --workspace {workspace.root} --allocation slurm" in script
     assert bundle.exists()
 
 
@@ -289,7 +289,7 @@ def test_sbatch_options_are_emitted_last_one_line_per_word(tmp_path: Path, remot
     result = start_managers(
         resolve_launcher("cluster", project=project),
         workspace_root=workspace.root,
-        argv=["httk", "workflow", "manager", "run"],
+        argv=["httk", "run"],
         count=1,
         settings={"slurm.partition": "main"},
         timeout=None,
@@ -317,7 +317,7 @@ def test_launcher_sbatch_options_replace_the_workspace_value(tmp_path: Path, rem
         result = start_managers(
             resolve_launcher(name, project=project),
             workspace_root=workspace.root,
-            argv=["httk", "workflow", "manager", "run"],
+            argv=["httk", "run"],
             count=1,
             settings={"slurm.sbatch_options": "--qos=low --exclusive"},
             timeout=None,
@@ -374,7 +374,7 @@ def test_workspace_sbatch_options_are_validated_before_any_submission(tmp_path: 
         start_managers(
             resolve_launcher("cluster", project=project),
             workspace_root=workspace.root,
-            argv=["httk", "workflow", "manager", "run"],
+            argv=["httk", "run"],
             count=2,
             settings={"slurm.sbatch_options": "--qos=high --time=1"},
             timeout=None,
@@ -427,7 +427,7 @@ def test_slurm_launcher_start_applies_a_bounded_time_limit(tmp_path: Path, remot
         project=project,
     )
     target = resolve_launcher("cluster", project=project)
-    argv = ["httk", "workflow", "manager", "run", "--workspace", str(workspace.root)]
+    argv = ["httk", "run", "--workspace", str(workspace.root)]
 
     def start(time_limit: str | None) -> dict[str, object]:
         return start_managers(
@@ -555,8 +555,6 @@ def test_launch_processes_detaches_and_filters_slurm(monkeypatch: pytest.MonkeyP
             sys.executable,
             "-m",
             "httk.core.cli",
-            "workflow",
-            "manager",
             "run",
             "--worker-resource",
             "license",
@@ -590,13 +588,13 @@ def test_launch_processes_detaches_and_filters_slurm(monkeypatch: pytest.MonkeyP
     assert "--worker-resource procs 3" in " ".join(launched_argvs[0])
     assert "--worker-resource procs 2" in " ".join(launched_argvs[1])
     assert all(sys.executable not in argv for argv in launched_argvs)
-    assert all("httk workflow manager run" in " ".join(argv) for argv in launched_argvs)
+    assert all("httk run" in " ".join(argv) for argv in launched_argvs)
     # Two managers split the host, so neither may bind to its devices.
     assert all("--allocation none" in " ".join(argv) for argv in launched_argvs)
 
 
 def test_manager_command_must_be_a_nonempty_string(tmp_path: Path) -> None:
-    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"]
+    argv = [sys.executable, "-m", "httk.core.cli", "run"]
     with pytest.raises(ValueError, match="manager.command must be a nonempty string"):
         launch_processes(
             workspace_root=tmp_path,
@@ -624,7 +622,7 @@ def test_slurm_launcher_reports_partial_submission(tmp_path: Path, monkeypatch: 
                 "operation": "start",
                 "launcher_dir": str(bundle),
                 "workspace": str(workspace),
-                "argv": [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"],
+                "argv": [sys.executable, "-m", "httk.core.cli", "run"],
                 "count": 2,
                 "settings": {},
             }

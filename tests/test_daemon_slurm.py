@@ -135,8 +135,6 @@ def test_submission_pipes_the_slurm_launcher_script_with_the_trusted_identity(
         "-I",
         "-m",
         "httk.core.cli",
-        "workflow",
-        "manager",
         "run",
         "--by-path",
         "--workspace",
@@ -240,8 +238,8 @@ def test_submission_uses_only_the_frozen_launcher_settings(policy: Policy, tmp_p
     command = shlex.split(script.splitlines()[-1])
     # After a prelude, the launcher's manager command replaces the isolated interpreter.
     assert command[:2] == ["exec", "site-httk"]
-    assert command[2:10] == manager_argv(policy, _KEY)[4:]
-    assert command[10:] == [
+    assert command[2:8] == manager_argv(policy, _KEY)[4:]
+    assert command[8:] == [
         "--workers",
         "4",
         "--allocation",

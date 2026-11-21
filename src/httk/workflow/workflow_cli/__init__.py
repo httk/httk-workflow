@@ -34,16 +34,16 @@ from ._common import (
 __all__ = [
     "REMOTE_MANAGER_COMMAND",
     "REMOTE_STATUS_COMMAND",
+    "REMOTE_WORKSPACE_CHECK_COMMAND",
     "REMOTE_WORKSPACE_DELETE_COMMAND",
-    "REMOTE_WORKSPACE_FSCK_COMMAND",
     "REMOTE_WORKSPACE_GC_COMMAND",
     "REMOTE_WORKSPACE_INIT_COMMAND",
     "REMOTE_WORKSPACE_LIST_COMMAND",
     "REMOTE_WORKSPACE_MOVE_COMMAND",
+    "REMOTE_WORKSPACE_REPAIR_COMMAND",
     "REMOTE_WORKSPACE_SET_COMMAND",
     "REMOTE_WORKSPACE_SHOW_COMMAND",
     "REMOTE_WORKSPACE_UNSET_COMMAND",
-    "add_manager_run_arguments",
     "add_run_arguments",
     "add_v1_collect_arguments",
     "add_workspace_init_arguments",
@@ -51,18 +51,17 @@ __all__ = [
     "build_build_parser",
     "build_campaign_parser",
     "build_config_parser",
-    "build_describe_parser",
     "build_install_parser",
     "build_job_parser",
     "build_launcher_parser",
     "build_list_parser",
-    "build_manager_parser",
     "build_monitor_parser",
     "build_parser",
     "build_postprocess_parser",
     "build_push_pull_parser",
     "build_remote_parser",
     "build_run_parser",
+    "build_show_parser",
     "build_transfer_parser",
     "build_v1_parser",
     "build_workspace_parser",
@@ -115,13 +114,15 @@ __all__ = [
     "handle_remote_unset",
     "handle_transfer",
     "handle_v1_collect",
-    "handle_workflow_describe",
+    "handle_workflow_fetch",
+    "handle_workflow_forget",
     "handle_workflow_install",
     "handle_workflow_list",
+    "handle_workflow_show",
     "handle_workflow_uninstall",
+    "handle_workspace_check",
     "handle_workspace_delete",
     "handle_workspace_forget",
-    "handle_workspace_fsck",
     "handle_workspace_gc",
     "handle_workspace_init",
     "handle_workspace_list",
@@ -131,17 +132,18 @@ __all__ = [
     "handle_workspace_status",
     "handle_workspace_unseal",
     "handle_workspace_unset",
-    "handle_workspace_workflows",
     "job_command",
     "launch_workspace_managers",
     "launcher_command",
-    "manager_command",
+    "monitor_command",
+    "postprocess_command",
     "publish_job_requests",
     "pull_command",
     "push_command",
     "remote_command",
     "remote_workspace_output",
     "request_remote_job_result",
+    "run_command",
     "submit_remote_manager_result",
     "v1_command",
     "workflow_command",
@@ -152,12 +154,13 @@ __all__ = [
 _LAZY_EXPORTS = {
     "REMOTE_MANAGER_COMMAND": "..adapters",
     "REMOTE_STATUS_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_CHECK_COMMAND": "..adapters",
     "REMOTE_WORKSPACE_DELETE_COMMAND": "..adapters",
-    "REMOTE_WORKSPACE_FSCK_COMMAND": "..adapters",
     "REMOTE_WORKSPACE_GC_COMMAND": "..adapters",
     "REMOTE_WORKSPACE_INIT_COMMAND": "..adapters",
     "REMOTE_WORKSPACE_LIST_COMMAND": "..adapters",
     "REMOTE_WORKSPACE_MOVE_COMMAND": "..adapters",
+    "REMOTE_WORKSPACE_REPAIR_COMMAND": "..adapters",
     "REMOTE_WORKSPACE_SET_COMMAND": "..adapters",
     "REMOTE_WORKSPACE_SHOW_COMMAND": "..adapters",
     "REMOTE_WORKSPACE_UNSET_COMMAND": "..adapters",
@@ -172,12 +175,14 @@ _LAZY_EXPORTS = {
     "add_v1_collect_arguments": "._compat",
     "build_v1_parser": "._compat",
     "handle_v1_collect": "._compat",
-    "build_describe_parser": "._describe",
     "build_install_parser": "._describe",
     "build_list_parser": "._describe",
-    "handle_workflow_describe": "._describe",
+    "build_show_parser": "._describe",
+    "handle_workflow_fetch": "._describe",
+    "handle_workflow_forget": "._describe",
     "handle_workflow_install": "._describe",
     "handle_workflow_list": "._describe",
+    "handle_workflow_show": "._describe",
     "handle_workflow_uninstall": "._describe",
     "build_job_parser": "._job",
     "ensure_identity_key": "._job",
@@ -203,9 +208,7 @@ _LAZY_EXPORTS = {
     "handle_launcher_set": "._launcher",
     "handle_launcher_show": "._launcher",
     "handle_launcher_unset": "._launcher",
-    "add_manager_run_arguments": "._manager",
     "add_run_arguments": "._manager",
-    "build_manager_parser": "._manager",
     "build_run_parser": "._manager",
     "handle_manager_run": "._manager",
     "launch_workspace_managers": "._manager",
@@ -235,9 +238,9 @@ _LAZY_EXPORTS = {
     "add_workspace_init_arguments": "._workspace",
     "add_workspace_status_arguments": "._workspace",
     "build_workspace_parser": "._workspace",
+    "handle_workspace_check": "._workspace",
     "handle_workspace_delete": "._workspace",
     "handle_workspace_forget": "._workspace",
-    "handle_workspace_fsck": "._workspace",
     "handle_workspace_gc": "._workspace",
     "handle_workspace_init": "._workspace",
     "handle_workspace_list": "._workspace",
@@ -247,7 +250,6 @@ _LAZY_EXPORTS = {
     "handle_workspace_status": "._workspace",
     "handle_workspace_unseal": "._workspace",
     "handle_workspace_unset": "._workspace",
-    "handle_workspace_workflows": "._workspace",
 }
 
 # Each command group: the names it registers, its module, its parser builder, whether the builder takes
@@ -255,21 +257,20 @@ _LAZY_EXPORTS = {
 _GROUPS = (
     (("workspace",), "._workspace", "build_workspace_parser", True, True),
     (("job",), "._job", "build_job_parser", True, True),
-    (("describe",), "._describe", "build_describe_parser", False, False),
+    (("show",), "._describe", "build_show_parser", False, False),
     (("list",), "._describe", "build_list_parser", False, False),
-    (("install", "uninstall"), "._describe", "build_install_parser", False, False),
+    (("install", "uninstall", "fetch", "forget"), "._describe", "build_install_parser", False, False),
     (("collect",), "._collect", "build_collect_parser", True, True),
     (("build",), "._build", "build_build_parser", False, False),
-    (("postprocess",), "._postprocess", "build_postprocess_parser", False, False),
-    (("run",), "._manager", "build_run_parser", False, False),
-    (("manager",), "._manager", "build_manager_parser", False, True),
+    (("postprocess",), "._postprocess", "build_postprocess_parser", False, True),
+    (("run",), "._manager", "build_run_parser", False, True),
     (("v1",), "._compat", "build_v1_parser", False, True),
     (("config",), "._project", "build_config_parser", False, True),
     (("remote",), "._transfer", "build_remote_parser", False, True),
     (("push", "pull"), "._transfer", "build_push_pull_parser", False, True),
     (("launcher",), "._launcher", "build_launcher_parser", False, True),
     (("campaign",), "._campaign", "build_campaign_parser", False, True),
-    (("monitor",), "._monitor", "build_monitor_parser", False, False),
+    (("monitor",), "._monitor", "build_monitor_parser", False, True),
     (("session",), "._session", "build_session_parser", False, False),
     (("transfer-session",), "._transfer_session", "build_transfer_session_parser", False, False),
 )
@@ -345,16 +346,20 @@ def dispatch(
         if extras:
             # Before Python 3.13 an optional KEY=VALUE positional after NAME takes only the words before the
             # first option (``remote add NAME --kind ssh host=x`` strands ``host=x``); leaves whose pairs are
-            # optional mark themselves with ``pairs_parser`` and collect the stranded pairs here.
-            leaf = getattr(arguments, "pairs_parser", None)
+            # optional mark themselves with ``pairs_parser`` and collect the stranded pairs here, and
+            # ``postprocess SCRIPT -w WS JOB`` marks itself with ``jobs_parser`` for its stranded jobs.
+            jobs = getattr(arguments, "jobs_parser", None)
+            leaf = getattr(arguments, "pairs_parser", None) or jobs
             options = [word for word in extras if word.startswith("-")]
             if leaf is None or options:
                 parser.error(f"unrecognized arguments: {' '.join(options if leaf else extras)}")
-            for word in extras:
+            for word in extras if jobs is None else ():
                 try:
                     arguments.pairs.append(_setting_pair(word))
                 except argparse.ArgumentTypeError as exc:
                     leaf.error(f"argument KEY=VALUE: {exc}")
+            if jobs is not None:
+                arguments.jobs = [*arguments.jobs, *extras]
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 1
     handler: _Handler | None = getattr(arguments, "handler", None)
@@ -382,10 +387,6 @@ def command(argv: Sequence[str], context: CLIContext, *, prog: str | None = None
 def workflow_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered ``workflow`` command, excluding standalone groups."""
 
-    # Frozen peer vector: remote launchers still invoke workflow manager run.
-    # Keep it accepted but absent from public workflow help.
-    if list(argv[:2]) == ["manager", "run"]:
-        return manager_command(argv[1:], context)
     parser = build_parser(
         f"{context.program} workflow", context, include_workspace_job=False, only=argv[0] if argv else None
     )
@@ -414,10 +415,22 @@ def collect_command(argv: Sequence[str], context: CLIContext) -> int:
     return command(["collect", *argv], context, prog=f"{context.program} collect")
 
 
-def manager_command(argv: Sequence[str], context: CLIContext) -> int:
-    """Handle the registered top-level ``manager`` command."""
+def run_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``run`` command."""
 
-    return command(["manager", *argv], context, prog=f"{context.program} manager")
+    return command(["run", *argv], context, prog=f"{context.program} run")
+
+
+def monitor_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``monitor`` command."""
+
+    return command(["monitor", *argv], context, prog=f"{context.program} monitor")
+
+
+def postprocess_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``postprocess`` command."""
+
+    return command(["postprocess", *argv], context, prog=f"{context.program} postprocess")
 
 
 def remote_command(argv: Sequence[str], context: CLIContext) -> int:

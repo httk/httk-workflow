@@ -12,7 +12,7 @@ from httk.workflow.workflow_cli import _manager
 
 def _arguments(tmp_path: Path, *extra: str):
     parser = workflow_cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
-    return parser.parse_args(["manager", "run", "--workspace", str(tmp_path / "ws"), "--log-file", "x.log", *extra])
+    return parser.parse_args(["run", "--workspace", str(tmp_path / "ws"), "--log-file", "x.log", *extra])
 
 
 @pytest.mark.parametrize("extra", [("--count", "2"), ("--detach",)])
@@ -36,8 +36,6 @@ def test_single_in_process_manager_honours_log_file(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "ws")
     ws = register_ws(None, workspace.root)
     log = tmp_path / "fixed.log"
-    code = workflow_cli.command(
-        ["manager", "run", "--workspace", ws, "--log-file", str(log)], CLIContext("httk", tmp_path)
-    )
+    code = workflow_cli.command(["run", "--workspace", ws, "--log-file", str(log)], CLIContext("httk", tmp_path))
     assert code == 0 and log.is_file()
     assert not (workspace.root / "logs" / "managers").exists()

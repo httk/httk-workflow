@@ -10,6 +10,7 @@ from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote
 from httk.workflow import Workspace, _kernel
+from httk.workflow.adapters import REMOTE_WORKSPACE_CHECK_COMMAND, REMOTE_WORKSPACE_REPAIR_COMMAND
 from httk.workflow.projects import initialize_project
 from httk.workflow.registry import resolve_workspace, workspaces_path
 from httk.workflow.workflow_cli import _common as workflow_common
@@ -132,12 +133,14 @@ def test_remote_workspace_adapter_requests_are_exact_argv(tmp_path: Path, monkey
     commands = (
         ["workspace", "init", "--name", "runs", "cluster:runs"],
         ["workspace", "status", "--json", "cluster:runs"],
-        ["workspace", "fsck", "--json", "cluster:runs"],
+        ["workspace", "check", "--json", "cluster:runs"],
+        ["workspace", "repair", "--yes", "--json", "cluster:runs"],
         ["workspace", "gc", "--dry-run", "--json", "cluster:runs"],
         ["workspace", "show", "--json", "-w", "cluster:runs"],
         ["workspace", "list", "--json", "cluster:"],
         ["workspace", "move", "cluster:runs", "moved"],
         ["workspace", "delete", "--yes", "cluster:runs"],
+        ["show", "--json", "--language", "cwl", "-w", "cluster:runs", "demo", "./doc.cwl"],
     )
     for argv in commands:
         assert command(argv, context) == 0
@@ -146,13 +149,16 @@ def test_remote_workspace_adapter_requests_are_exact_argv(tmp_path: Path, monkey
     assert captured == [
         ("httk", "workspace", "init", "--name", "runs", "runs"),
         ("httk", "workspace", "status", "--json", "runs"),
-        ("httk", "workspace", "fsck", "--json", "runs"),
+        ("httk", "workspace", "check", "--json", "runs"),
+        ("httk", "workspace", "repair", "--yes", "--json", "runs"),
         ("httk", "workspace", "gc", "--dry-run", "--json", "runs"),
         ("httk", "workspace", "show", "--json", "--workspace", "runs"),
         ("httk", "workspace", "list", "--json"),
         ("httk", "workspace", "move", "runs", "moved"),
         ("httk", "workspace", "delete", "--yes", "runs"),
+        ("httk", "workflow", "show", "--json", "--language", "cwl", "demo", "./doc.cwl", "--workspace", "runs"),
     ]
+    assert captured[2][:3] == REMOTE_WORKSPACE_CHECK_COMMAND and captured[3][:3] == REMOTE_WORKSPACE_REPAIR_COMMAND
 
 
 def test_protocol_path_fallback_does_not_hide_a_corrupt_registry(tmp_path: Path) -> None:
@@ -289,7 +295,7 @@ def test_move_updates_the_registry_and_refuses_while_an_owner_is_not_proven_dead
     assert command(["workspace", "move", "old", "new"], context) == 0
     capsys.readouterr()
     assert _local_rows(context, capsys)[0]["path"] == str(tmp_path / "new")
-    assert command(["workspace", "fsck", "old"], context) == 0
+    assert command(["workspace", "check", "old"], context) == 0
     capsys.readouterr()
     assert command(["workspace", "gc", "--dry-run", "old"], context) == 0
     capsys.readouterr()

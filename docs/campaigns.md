@@ -108,7 +108,7 @@ $ httk campaign collect --state succeeded
 ```
 
 `campaign start-managers` starts managers at each selected partition through
-that workspace's own launcher, exactly as `httk workflow run` does for one
+that workspace's own launcher, exactly as `httk run` does for one
 workspace; for a remote partition the manager command runs on the owning
 machine. `campaign collect` collects the partitions one after another in
 stable order and accepts the same `--into`, `--batch-size` and `--fail-fast`

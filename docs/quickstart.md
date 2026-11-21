@@ -53,9 +53,9 @@ $ httk project init --name quickstart .
 $ httk workspace init --name default workspace
 $ httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --install --input structure=POSCAR --tag silicon
 $ httk workspace set -w default vasp.command="$PWD/examples/mock_vasp.py"
-$ httk workflow run
+$ httk run
 $ httk collect --into results.sqlite --id-base httk.quickstart
-$ httk workflow postprocess --script relaxation-plot
+$ httk postprocess relaxation-plot
 ```
 
 On a VASP machine, set `vasp.command` to the bare program, such as
@@ -124,7 +124,7 @@ under the workspace root. Postprocess output never lands in the payload, so a
 finished job can be sealed and still be postprocessed; change the root with the
 `postprocess.directory` setting or `--output-dir`. To postprocess one job
 instead of every succeeded job, pass its id:
-`httk workflow postprocess --script relaxation-plot <job-id>`.
+`httk postprocess relaxation-plot <job-id>`.
 
 ## Looking at a job
 

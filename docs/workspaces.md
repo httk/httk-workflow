@@ -308,7 +308,7 @@ once per workspace, locally or on a remote:
 
 ```console
 httk workflow install --workspace default 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-httk workspace workflows default
+httk workflow list -w default
 ```
 
 `job new --install` installs a missing workflow on the fly. A transfer
@@ -345,12 +345,12 @@ httk launcher add --kind slurm --global cluster
 httk launcher check cluster
 httk workspace set -w default manager.launch=cluster \
   slurm.partition=batch slurm.time_limit=02:00:00
-httk workflow run --count 4 --workspace default
+httk run --count 4 --workspace default
 ```
 
 Every pair is validated and all of them are stored in one write, or none is.
 
-`httk workflow run --count 4` now submits four managers through Slurm and
+`httk run --count 4` now submits four managers through Slurm and
 prints their scheduler job ids. `--inline` runs one manager in the current
 process regardless of the launcher, which is the way to see manager output
 while debugging; `--launcher NAME` picks another launcher for one invocation.
@@ -384,7 +384,7 @@ remote is created and addressed by writing the remote name before it:
 httk workspace init --name runs kappa:/scratch/me/httk/runs
 httk workspace set -w kappa:runs manager.launch=cluster
 httk workspace status kappa:runs
-httk workflow run --workspace kappa:runs --count 4
+httk run --workspace kappa:runs --count 4
 ```
 
 `NAME:WORKSPACE` is a binding, not a path. Jobs are created locally, pushed
@@ -412,7 +412,7 @@ the adapter bundle, and {doc}`details/workspace_daemon` the confined broker.
 A project directory is self-describing. Copy the whole tree, including its
 workspaces, and run `httk project repair` inside it: every member workspace is
 registered under the name recorded in `httk_project/members.json`, and
-`httk workflow run`, `--workspace NAME` and the rest work without a new
+`httk run`, `--workspace NAME` and the rest work without a new
 `init`. It is idempotent and refuses to overwrite a name that already points
 elsewhere.
 
@@ -420,7 +420,7 @@ elsewhere.
 
 - {doc}`details/taskmanager` covers workspace policy, durability and
   filesystem requirements, resources and scheduling, owners and recovery, and
-  maintenance with `fsck` and `gc`.
+  maintenance with `workspace check`, `workspace repair` and `gc`.
 - {doc}`details/workflow_cli` is the complete command reference, including
   the `workspace`, `launcher`, `remote`, `config` and `project` groups.
 - {doc}`campaigns` spreads one very large run across several workspaces.

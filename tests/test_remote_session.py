@@ -70,6 +70,20 @@ def test_session_refuses_unpinned_and_malformed_requests_and_continues() -> None
     assert responses[-1]["returncode"] == 0 and "status" in responses[-1]["stdout"]
 
 
+def test_session_routes_httk_run_and_refuses_the_old_manager_spellings() -> None:
+    """The pinned manager vector is ``httk run``; the removed ``workflow manager run``/``workflow run`` are refused."""
+
+    ran, old, older = _session(
+        {"id": 1, "argv": ["httk", "run", "--help"]},
+        {"id": 2, "argv": ["httk", "workflow", "manager", "run", "--help"]},
+        {"id": 3, "argv": ["httk", "workflow", "run", "--help"]},
+    )[1:]
+
+    assert ran["returncode"] == 0 and ran["stdout"].startswith("usage: httk run"), ran
+    for response in (old, older):
+        assert response["returncode"] == 2 and "not a pinned remote command" in response["stderr"], response
+
+
 def test_session_reports_handler_errors_and_continues(tmp_path: Path) -> None:
     """A handler failure or an argparse exit is one nonzero response, not the end of the session."""
 

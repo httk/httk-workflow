@@ -225,5 +225,5 @@ def test_fsck_exits_zero_when_its_only_finding_is_a_duplicate_tag(
     new_job(ws, _RAW, tag="si", duplicate_tag="allow")
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, ws.root, "fsck")
-    assert command(["workspace", "fsck", name], context) == 0
+    assert command(["workspace", "check", name], context) == 0
     assert "noted\tduplicate_tag\t" in capsys.readouterr().out

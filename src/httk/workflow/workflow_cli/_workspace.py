@@ -17,17 +17,18 @@ from typing import Any, cast
 from httk.core.cli import CLIContext
 from httk.core.identity import configured_operator_identity
 
-from .. import _death, _kernel, _moving, _store
+from .. import _death, _kernel, _moving
 from .._bundles import BundleError
 from .._setting_catalog import annotate_setting, installed_workflow_settings, report_written_settings, use_color
 from ..adapters import (
     REMOTE_STATUS_COMMAND,
+    REMOTE_WORKSPACE_CHECK_COMMAND,
     REMOTE_WORKSPACE_DELETE_COMMAND,
-    REMOTE_WORKSPACE_FSCK_COMMAND,
     REMOTE_WORKSPACE_GC_COMMAND,
     REMOTE_WORKSPACE_INIT_COMMAND,
     REMOTE_WORKSPACE_LIST_COMMAND,
     REMOTE_WORKSPACE_MOVE_COMMAND,
+    REMOTE_WORKSPACE_REPAIR_COMMAND,
     REMOTE_WORKSPACE_SET_COMMAND,
     REMOTE_WORKSPACE_SHOW_COMMAND,
     REMOTE_WORKSPACE_UNSET_COMMAND,
@@ -139,7 +140,9 @@ def _add_workspace_targets(parser: argparse.ArgumentParser, *, help_text: str, r
         "workspace",
         metavar="WORKSPACE",
         nargs="+" if required else "*",
-        help=f"{help_text} (default: the enclosing workspace, this project's workspace, or the per-user default)",
+        help=help_text
+        if required
+        else f"{help_text} (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
 
 
@@ -463,42 +466,6 @@ def handle_workspace_attest_dead(arguments: argparse.Namespace, context: CLICont
     return 0
 
 
-def handle_workspace_workflows(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """List the workflows installed in a workspace, with each one's id, short name, tree digest and summary.
-
-    The summary comes from parsing the installed manifest; the runner is never
-    executed. A manifest that fails to parse leaves the listing intact: its error
-    text takes the summary column.
-    """
-
-    if isinstance(arguments.workspace, list):
-        return _workspace_batch(arguments, context, handle_workspace_workflows)
-    workspace = Workspace(_local_root(arguments, context, action="list its workflows"))
-    rows: list[dict[str, object]] = []
-    for installed in _store.list_installed(workspace):
-        row: dict[str, object] = {
-            "workflow": installed.id,
-            "name": installed.name,
-            "tree_sha256": installed.record.get("tree_sha256"),
-            "summary": None,
-            "error": None,
-        }
-        try:
-            row["summary"] = installed.provider().summary or None
-        except _ERRORS as exc:
-            row["error"] = str(exc)
-        rows.append(row)
-    if arguments.json:
-        print(json.dumps(rows, indent=2, sort_keys=True))
-        return 0
-    if not rows:
-        print("no workflows are installed in this workspace")
-        return 0
-    for row in rows:
-        print(f"{row['workflow']}\t{row['name']}\t{row['error'] or row['summary'] or '-'}")
-    return 0
-
-
 def handle_workspace_seal(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Seal a workspace: a signed snapshot of the seal digest of every job it holds now.
 
@@ -564,13 +531,11 @@ def handle_workspace_unseal(arguments: argparse.Namespace, context: CLIContext) 
     return 0
 
 
-def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Check a workspace's job tree, which no other actor may use meanwhile; ``--repair`` asks first."""
+def handle_workspace_check(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Check a workspace's job tree, which no other actor may use meanwhile; ``workspace repair`` asks first."""
 
     if isinstance(arguments.workspace, list):
-        if arguments.repair and not arguments.workspace:
-            raise ValueError("workspace fsck repair requires at least one WORKSPACE")
-        return _workspace_batch(arguments, context, handle_workspace_fsck)
+        return _workspace_batch(arguments, context, handle_workspace_check)
     if arguments.repair:
         prompt = "Make sure no other operations are ongoing in this workspace. Continue?"
         if not confirm(prompt, yes=arguments.yes, declined="not repaired"):
@@ -582,9 +547,9 @@ def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) ->
         return _remote_workspace_read(
             binding,
             context,
-            REMOTE_WORKSPACE_FSCK_COMMAND,
+            REMOTE_WORKSPACE_REPAIR_COMMAND if arguments.repair else REMOTE_WORKSPACE_CHECK_COMMAND,
             arguments,
-            flags=("--repair", "--yes", "--json"),
+            flags=("--yes", "--json"),
         )
     report = check_workspace(Workspace(root), repair=arguments.repair)
     if arguments.json:
@@ -1021,12 +986,12 @@ def handle_workspace_unset(arguments: argparse.Namespace, context: CLIContext) -
     return 0
 
 
-def handle_workspace_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
+def handle_workspace_register(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Register copied workspaces on this machine under their recorded names."""
 
     paths = arguments.paths or [str(context.cwd)]
     if arguments.name is not None and len(paths) > 1:
-        raise ValueError("workspace adopt --name accepts exactly one PATH")
+        raise ValueError("workspace register --name accepts exactly one PATH")
     failed = False
     reports: list[dict[str, object]] = []
     for raw in paths:
@@ -1157,16 +1122,6 @@ def build_workspace_parser(
         help="attest an owner whose death the proof cannot decide (an owner proven alive is always refused)",
     )
 
-    workflows = _leaf(
-        group,
-        "workflows",
-        summary="list the workflows installed in this workspace",
-        description="List the workflows installed in a workspace, with each one's id, short name and summary",
-        handler=handle_workspace_workflows,
-    )
-    _add_workspace_targets(workflows, help_text="the workspace whose workflows to list")
-    workflows.add_argument("--json", action="store_true", help="print the workflows as one JSON array")
-
     listing = _leaf(
         group,
         "list",
@@ -1187,24 +1142,24 @@ def build_workspace_parser(
     default.add_argument("workspace", metavar="NAME", nargs="?", help="the workspace name to record")
     default.add_argument("--unset", action="store_true", help="clear the recorded project default")
 
-    adopt = _leaf(
+    register = _leaf(
         group,
-        "adopt",
+        "register",
         summary="register copied workspaces on this machine",
         description=(
             "Register one or more workspaces from a copied project tree under their recorded "
             "names, join them to the enclosing project, and record any missing name"
         ),
-        handler=handle_workspace_adopt,
+        handler=handle_workspace_register,
     )
-    adopt.add_argument(
+    register.add_argument(
         "paths",
         nargs="*",
         metavar="PATH",
         help="a workspace or a directory inside one (default: the enclosing workspace)",
     )
-    adopt.add_argument("--name", metavar="NAME", help="adopt the single PATH under this name")
-    adopt.add_argument("--json", action="store_true", help="print the adoption findings as JSON")
+    register.add_argument("--name", metavar="NAME", help="register the single PATH under this name")
+    register.add_argument("--json", action="store_true", help="print the registration findings as JSON")
     forget = _leaf(
         group,
         "forget",
@@ -1287,31 +1242,37 @@ def build_workspace_parser(
         leaf.add_argument("-w", "--workspace", metavar="WORKSPACE", help=workspace_help)
         _add_adapter_timeout(leaf)
 
-    fsck = _leaf(
+    check = _leaf(
         group,
-        "fsck",
+        "check",
         summary="check the job tree for what the kernel cannot read",
         description=(
-            "Check a workspace's job tree: unparsable names, a job in two places, owned jobs without their owner, "
-            "unreadable state.json, jobs another user owns, and stale or missing exchange index entries. Run it "
-            "only while no other actor (manager, CLI operation, daemon or transfer) uses the workspace: findings "
-            "from a busy workspace may be transient, and --repair is refused unless every owner is proven dead "
-            "and recovered"
+            "Check a workspace's job tree, read-only: unparsable names, a job in two places, owned jobs without "
+            "their owner, unreadable state.json, jobs another user owns, and stale or missing exchange index "
+            "entries. Run it only while no other actor (manager, CLI operation, daemon or transfer) uses the "
+            "workspace: findings from a busy workspace may be transient"
         ),
-        handler=handle_workspace_fsck,
+        handler=handle_workspace_check,
     )
-    _add_workspace_targets(fsck, help_text="the workspace to check")
-    fsck.add_argument(
-        "--repair",
-        action="store_true",
-        help=(
-            "quarantine unparsable entries, remove stale exchange index entries and recreate missing ones, after "
-            "confirmation; every other finding is left to the operator"
+    _add_workspace_targets(check, help_text="the workspace to check")
+    check.set_defaults(repair=False)
+    repair = _leaf(
+        group,
+        "repair",
+        summary="check the job tree and repair what can be repaired",
+        description=(
+            "Check a workspace's job tree like workspace check, then quarantine unparsable entries, remove stale "
+            "exchange index entries and recreate missing ones, after confirmation; every other finding is left to "
+            "the operator. Refused unless every owner of the workspace is proven dead and recovered"
         ),
+        handler=handle_workspace_check,
     )
-    fsck.add_argument("--yes", action="store_true", help="repair without asking for confirmation")
-    fsck.add_argument("--json", action="store_true", help="print the findings as one JSON report")
-    _add_by_path_argument(fsck)
+    _add_workspace_targets(repair, help_text="the workspace to repair", required=True)
+    repair.set_defaults(repair=True)
+    repair.add_argument("--yes", action="store_true", help="repair without asking for confirmation")
+    for leaf in (check, repair):
+        leaf.add_argument("--json", action="store_true", help="print the findings as one JSON report")
+        _add_by_path_argument(leaf)
 
     collect = _leaf(
         group,

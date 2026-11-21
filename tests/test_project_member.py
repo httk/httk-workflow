@@ -155,10 +155,12 @@ def test_copied_workspace_resolves_by_name_without_writing_the_registry(tmp_path
     assert _read_global() == {}  # resolution never wrote the central registry
 
 
-def test_adopt_registers_the_copied_workspace_under_its_recorded_name(tmp_path: Path, monkeypatch) -> None:
+def test_register_registers_the_copied_workspace_under_its_recorded_name(tmp_path: Path, monkeypatch, capsys) -> None:
     copied = _copied_named_project(tmp_path, monkeypatch)
     context = CLIContext("httk", copied / "work")
-    assert command(["workspace", "adopt"], context) == 0
+    assert command(["workspace", "adopt"], context) == 2
+    assert "invalid choice: 'adopt'" in capsys.readouterr().err
+    assert command(["workspace", "register"], context) == 0
     binding = resolve_workspace("myws")
     assert binding.path is not None
     assert Path(binding.path).resolve() == (copied / "work").resolve()

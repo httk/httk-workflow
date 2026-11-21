@@ -50,9 +50,9 @@ def test_references_parse_onto_the_provider_and_describe(tmp_path: Path, capsys:
     assert provider.references == {"paw": _PAW_TABLE}
     assert parse_workflow_manifest(_package(tmp_path / "plain")).references == {}
 
-    assert command(["describe", "--json", str(package)], CLIContext("httk", tmp_path)) == 0
+    assert command(["show", "--json", str(package)], CLIContext("httk", tmp_path)) == 0
     assert json.loads(capsys.readouterr().out)[0]["references"] == {"paw": _PAW_TABLE}
-    assert command(["describe", str(package)], CLIContext("httk", tmp_path)) == 0
+    assert command(["show", str(package)], CLIContext("httk", tmp_path)) == 0
     text = capsys.readouterr().out
     assert f"references:\n  paw: {_PAW_TABLE['doi']} — {_PAW_TABLE['title']}\n" in text
 

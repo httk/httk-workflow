@@ -42,7 +42,7 @@ A package runs only once it is installed in a workspace, which copies it to
 [Installation and lifecycle](#installation-and-lifecycle)):
 
 ```console
-httk workflow describe ./my-workflow
+httk workflow show ./my-workflow
 httk workflow install --workspace WS ./my-workflow
 httk job new --workspace WS --workflow example.relax --input structure=POSCAR
 ```
@@ -132,7 +132,7 @@ checked against the interpreter doing the work:
   a missing capability; `httk job why` and `httk job precheck` name the
   unmet requirement. Install the required versions in its environment and
   restart it.
-- **When describing.** `httk workflow describe` refuses a workflow whose
+- **When describing.** `httk workflow show` refuses a workflow whose
   requirements this interpreter does not meet, listing every unmet
   requirement and its installed version.
 
@@ -345,7 +345,7 @@ The command is validated when the package loads:
 
 A job of a package using `{artifacts}` is not claimed until its build is
 registered for the manager's platform, like a `run` bridge into the
-artifacts. `httk workflow describe`
+artifacts. `httk workflow show`
 runs a command without `{artifacts}` with `HTTK_WORKFLOW_DESCRIBE=1` to check
 the manifest steps. Describe has no build registration, so for a compiled
 package it reports the manifest alone.
@@ -484,7 +484,7 @@ add no observed data or log lines.
 The CLI supplies per-job overrides with repeatable `--environment NAME=VALUE`,
 decoding JSON values when possible. In Python, `new_job(environment={...})`
 supplies shared overrides, and each `JobItem` in `new_jobs` may carry its own
-`environment` mapping. `workflow describe` shows each entry's type, setting,
+`environment` mapping. `workflow show` shows each entry's type, setting,
 default, and description.
 
 ### `settings`
@@ -497,7 +497,7 @@ prints no notice. Each item is a dotted setting name, listed once. A name in a
 namespace *httk-workflow* owns (`manager`, `slurm`, `confine`, `environment`,
 `seal`, `postprocess`, `children`, `httk_v1`) is refused: the workflow's own
 keys belong outside them. The setting each environment entry resolves counts
-as declared without being listed, and `workflow describe` shows the combined
+as declared without being listed, and `workflow show` shows the combined
 list. An environment entry whose setting lies in one of those namespaces keeps
 working as before, but never changes how the key is classified.
 
@@ -537,7 +537,7 @@ for runner and `[workflow.recognize]` packages alike. The keys are the OPTIMADE
 is a nonempty string, so quote numbers (`year = "1999"`), and `authors` and
 `editors` are nonempty lists of `{name, firstname?, lastname?}` tables. At least
 one of `doi`, `url` and `title` is required. `LABEL` is a local handle that
-`httk workflow describe` and the collect report show; it is not stored.
+`httk workflow show` and the collect report show; it is not stored.
 
 ```toml
 [workflow.references.paw]
@@ -558,7 +558,7 @@ the job's stored entries and run; see {doc}`/details/collecting`.
 The presence of either table declares that hook. Each has exactly one key,
 `file`, naming a relative regular member: a `.py` file selects the in-process
 Python path, and any other must be executable and selects the subprocess
-contract. `workflow describe` reports `kind=python` or `kind=executable` for
+contract. `workflow show` reports `kind=python` or `kind=executable` for
 each. The contracts are in [Hooks and trust](#hooks-and-trust).
 
 ```toml
@@ -586,9 +586,9 @@ description = "copy selected results to an archive"
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `<NAME>` | required | The name selected by `httk workflow postprocess --script`. |
+| `<NAME>` | required | The name selected by `httk postprocess SCRIPT`. |
 | `file` | required | A relative executable regular file inside the registered package. |
-| `description` | optional | Human-readable text shown by `workflow describe`. |
+| `description` | optional | Human-readable text shown by `workflow show`. |
 | `outputs` | optional | List of file patterns the script writes, relative to its output directory, making its results collectable ({doc}`collecting`). |
 
 `outputs` entries are unique relative POSIX paths (no `..`, no empty
@@ -734,7 +734,7 @@ the foreground:
 httk workflow install --workspace WORKSPACE ./my-workflow
 httk workflow build --workspace WORKSPACE examples.chain-rust
 httk job new --workspace WORKSPACE --workflow examples.chain-rust --start-step prepare
-httk workflow run --workspace WORKSPACE
+httk run --workspace WORKSPACE
 ```
 
 A workflow without `[workflow.build]` is refused by `workflow build`.
@@ -783,7 +783,7 @@ share the installed/registered trust tier. `httk workflow install --workspace
 WS NAME` installs one into a workspace like any package directory; resolving
 a name never executes a hook or build command. Listings and unknown-workflow hints
 label plugin entries `[plugin PLUGIN_NAME]`, with any alias, and
-`workflow describe` reports `source: installed-package`.
+`workflow show` reports `source: installed-package`.
 
 ## Hooks and trust
 
@@ -1003,10 +1003,9 @@ environment, or terminal prompts, so private repositories are not supported.
 A package whose tree cannot be installed (for example one containing a
 symlink) is refused at fetch time. Its runner and instantiate hook run from
 the workspace's installed copy; its collect hook and postprocess scripts run
-from the cache tree, like a plugin package. Without `--workspace`,
-`httk workflow install URI...` only fetches, and
-`httk workflow uninstall SELECTOR...` removes fetched entries, never the
-cached checkouts.
+from the cache tree, like a plugin package. `httk workflow fetch URI...` only
+fetches, and `httk workflow forget SELECTOR...` removes fetched entries, never
+the cached checkouts.
 
 ### Resolution precedence
 
@@ -1020,14 +1019,14 @@ then fetched git workflows by `name` or `alias`; a name with no package
 directory (registered in-process only) cannot be installed. Among fetched
 entries claiming the name, one lineage (`repository`, `subdir`) selects its
 most recently referenced commit, and several lineages are an error naming
-the competing URIs. `workflow list` and the unknown-workflow hint include
+the competing URIs. `workflow list --available` and the unknown-workflow hint include
 fetched short names that are neither shadowed nor conflicted.
 
 Without installing, `new_job` and `job new --workflow` look the workflow up
 in the workspace store by id or short name, and map a package directory,
 alias or fetched git URI to the id it would be installed under; a runner
 file, `--from-command` or bare document is always installed ad hoc.
-`workflow describe` resolves through
+`workflow show` resolves through
 {py:func}`~httk.workflow.scaffold.resolve_workflow`, fetching a git URI but
 installing nothing.
 
@@ -1068,7 +1067,7 @@ edited package directory is picked up by the next job. To iterate on a runner
 for one job only, without reinstalling, unlock the job: it gets its own copy of
 the installed `package/` at `workflow/` in the job directory to edit and rerun (see
 {doc}`/restarting_jobs`). `httk workflow list --workspace WS` and
-`httk workflow describe --workspace WS ID` show installations; the manager
+`httk workflow show --workspace WS ID` show installations; the manager
 records the id and tree digest it launched in `state.json` `workflow_pin`.
 The store layout is specified in
 {doc}`/details/workflow_filesystem_api`.
@@ -1089,12 +1088,12 @@ httk job new --workspace WS --workflow example.relax \
     --input-from structure structures/ \
     --parameter kpoint_density=30.0 \
     --placement project/screening
-httk workflow run --workspace WS
+httk run --workspace WS
 httk collect --workspace WS
 httk collect --workspace WS --into results.sqlite --id-base httk.workflow
 ```
 
-`httk workflow describe TARGET [--json]` reports a registered id or alias,
+`httk workflow show TARGET [--json]` reports a registered id or alias,
 git URI, runner file, or package directory without installing it. `collect`
 emits one `CollectedJob` summary per line by default, `--raw` emits
 `JobRecord` records, and `--allow-job-collector` enables the third trust
@@ -1133,7 +1132,7 @@ the short version is in {doc}`/workflow_packages`.
 `--from-runner FILE` and `--from-command CMD` (and the API's
 `new_job(..., embed_workflow=True)` / `new_jobs(..., embed_workflow=True)`), and is refused with
 `--install`. Nothing is installed; fetching a git URI into the fetch cache is
-allowed, as for `workflow describe`. The creator resolves the package, builds one
+allowed, as for `workflow show`. The creator resolves the package, builds one
 scratch snapshot of it (no symlinks, special files, hard-linked files, `.git` or
 `__pycache__`), computes the embedded digest, runs the instantiate hooks from that
 snapshot pinned to the digest, and copies the snapshot into each job's

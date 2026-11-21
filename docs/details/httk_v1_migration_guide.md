@@ -16,10 +16,10 @@ You do not need to migrate every workflow at once.
 
 | Route | Workflow changes | Manager | Best use |
 | --- | --- | --- | --- |
-| Converted package | None, normally | normal `httk workflow run --pool POOL` | Establish an *httk₂* operational baseline quickly |
+| Converted package | None, normally | normal `httk run --pool POOL` | Establish an *httk₂* operational baseline quickly |
 | Mixed | Per job type | the normal manager on one workspace | Incremental migration with a direct fallback |
-| Native Bash | Replace `HT_TASK_*` and `VASP_*` calls | `httk workflow run` | Preserve a shell-oriented workflow |
-| Native Python | Replace the runner with Python calls | `httk workflow run` | New development and more structured logic |
+| Native Bash | Replace `HT_TASK_*` and `VASP_*` calls | `httk run` | Preserve a shell-oriented workflow |
+| Native Python | Replace the runner with Python calls | `httk run` | New development and more structured logic |
 
 Start with a converted package unless tests already describe the workflow's
 inputs, outputs, restart behavior and child tasks. A package run gives a
@@ -63,7 +63,7 @@ normal path:
 httk workflow install --workspace workflow-workspace ./legacy-package
 httk job new --workspace workflow-workspace --workflow-dir ./legacy-package \
   --placement migration/reference/silicon-relax
-httk workflow run --workspace workflow-workspace --pool vasp --workers 4
+httk run --workspace workflow-workspace --pool vasp --workers 4
 ```
 
 The old source paths remain available below the compatibility `HTTK_DIR`, so
@@ -131,7 +131,7 @@ Install it, then submit a one-shot job or a structure campaign:
 httk workflow install --workspace WS ./silicon-relax
 httk job new --workspace WS --workflow-dir ./silicon-relax \
   --input-from structure structures/*.cif --parameter encut=520
-httk workflow run --workspace WS --pool vasp
+httk run --workspace WS --pool vasp
 httk collect --workspace WS
 ```
 
@@ -214,8 +214,8 @@ normal manager can serve both from the same *httk₂* workspace. Select the
 converted package's `taskset` with the manager pool:
 
 ```console
-httk workflow run --workspace workflow-workspace --pool vasp --workers 2
-httk workflow run --workspace workflow-workspace --workers 2
+httk run --workspace workflow-workspace --pool vasp --workers 2
+httk run --workspace workflow-workspace --workers 2
 ```
 
 The second manager serves the `default` pool, where native jobs land.
@@ -363,7 +363,7 @@ httk workflow install --workspace native-workspace ./native-relax
 httk job new --workspace native-workspace --workflow-dir ./native-relax \
   --file POSCAR=POSCAR --file INCAR=INCAR --file vasp-options.json=vasp-options.json \
   --placement migration/native/silicon-relax --tag silicon-relax --priority 700
-httk workflow run --workspace native-workspace
+httk run --workspace native-workspace
 ```
 
 Staged files are below `HTTK_WORKFLOW_JOB_DIR` (a bare `--file` name lands in

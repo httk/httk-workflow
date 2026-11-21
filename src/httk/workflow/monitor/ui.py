@@ -583,7 +583,7 @@ class MonitorApp:
                         Actions(self.state.view).request,
                         {"c": "cancel", "P": "pause", "C": "continue"}[normalized],
                         self._selected_ids(),
-                        "requested from workflow monitor",
+                        "requested from monitor",
                     )
                 elif normalized in {"w", "l"}:
                     row = self.state.selected_row

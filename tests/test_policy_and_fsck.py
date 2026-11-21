@@ -363,8 +363,8 @@ def test_fsck_reports_a_job_another_user_owns(tmp_path: Path, monkeypatch) -> No
     assert [(finding.entry, finding.problem) for finding in report.findings] == [(ref.path, "foreign_owner")]
 
 
-def test_the_fsck_command_prints_the_findings(tmp_path: Path, capsys) -> None:
+def test_the_check_command_prints_the_findings(tmp_path: Path, capsys) -> None:
     ws = workspace(tmp_path / "workspace")
     context = CLIContext("httk", tmp_path)
-    assert command(["workspace", "fsck", "--json", register_ws(context, ws.root)], context) == 0
+    assert command(["workspace", "check", "--json", register_ws(context, ws.root)], context) == 0
     assert json.loads(capsys.readouterr().out)[0]["findings"] == []

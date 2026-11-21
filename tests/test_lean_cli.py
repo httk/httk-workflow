@@ -98,6 +98,7 @@ def probe(*argvs: Sequence[str], stdin: bytes = b"") -> dict[str, Any]:
             [["workflow", "install", "--json", "--workspace", "WS", "--help"]],
             id="workflow",
         ),
+        pytest.param([["run", "-w", "WS", "--help"]], id="run"),
     ],
 )
 def test_help_of_a_transfer_verb_stays_lean(argvs: list[list[str]]) -> None:

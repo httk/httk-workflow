@@ -1641,7 +1641,7 @@ def new_job(
         carries the job's final tag (explicit or derived from an input or the instantiate hook): ``"refuse"`` raises
         :class:`~httk.workflow.errors.DuplicateTagError`, ``"skip"`` logs a warning and submits nothing,
         ``"allow"`` does not check. A tagless job is never checked. The check precedes the submission, so two
-        concurrent creators of one tag can both pass; ``httk workspace fsck`` reports the result.
+        concurrent creators of one tag can both pass; ``httk workspace check`` reports the result.
     :return: The submitted job description, or ``None`` when it was skipped.
     :raises httk.workflow.errors.DuplicateTagError: If the tag is taken and *duplicate_tag* is ``"refuse"``.
     :raises ValueError: If the workflow is not installed (and *install* and *embed_workflow* are false), or workflow,

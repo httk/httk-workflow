@@ -69,12 +69,13 @@ __all__ = [
     "REMOTE_SESSION_COMMAND",
     "REMOTE_STATUS_COMMAND",
     "REMOTE_TRANSFER_SESSION_COMMAND",
+    "REMOTE_WORKSPACE_CHECK_COMMAND",
     "REMOTE_WORKSPACE_DELETE_COMMAND",
-    "REMOTE_WORKSPACE_FSCK_COMMAND",
     "REMOTE_WORKSPACE_GC_COMMAND",
     "REMOTE_WORKSPACE_INIT_COMMAND",
     "REMOTE_WORKSPACE_LIST_COMMAND",
     "REMOTE_WORKSPACE_MOVE_COMMAND",
+    "REMOTE_WORKSPACE_REPAIR_COMMAND",
     "REMOTE_WORKSPACE_SET_COMMAND",
     "REMOTE_WORKSPACE_SHOW_COMMAND",
     "REMOTE_WORKSPACE_UNSET_COMMAND",
@@ -190,7 +191,8 @@ _RENAMED_REMOTE_SETTINGS = {"prelude": _PRELUDE_RENAMED}
 
 REMOTE_WORKSPACE_INIT_COMMAND = ("httk", "workspace", "init")
 REMOTE_WORKSPACE_DELETE_COMMAND = ("httk", "workspace", "delete")
-REMOTE_WORKSPACE_FSCK_COMMAND = ("httk", "workspace", "fsck")
+REMOTE_WORKSPACE_CHECK_COMMAND = ("httk", "workspace", "check")
+REMOTE_WORKSPACE_REPAIR_COMMAND = ("httk", "workspace", "repair")
 REMOTE_WORKSPACE_GC_COMMAND = ("httk", "workspace", "gc")
 REMOTE_WORKSPACE_LIST_COMMAND = ("httk", "workspace", "list")
 REMOTE_WORKSPACE_MOVE_COMMAND = ("httk", "workspace", "move")
@@ -201,7 +203,7 @@ REMOTE_STATUS_COMMAND = ("httk", "workspace", "status")
 REMOTE_WORKSPACE_SHOW_COMMAND = ("httk", "workspace", "show")
 REMOTE_WORKSPACE_SET_COMMAND = ("httk", "workspace", "set")
 REMOTE_WORKSPACE_UNSET_COMMAND = ("httk", "workspace", "unset")
-REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
+REMOTE_MANAGER_COMMAND = ("httk", "run")
 REMOTE_JOB_REQUEST_ENVELOPES_COMMAND = ("httk", "job", "request-envelopes")
 REMOTE_JOB_PUBLISH_REQUESTS_COMMAND = ("httk", "job", "publish-requests")
 REMOTE_JOB_LIST_COMMAND = ("httk", "job", "list")

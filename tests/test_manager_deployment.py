@@ -129,7 +129,6 @@ def test_remote_run_forwards_worker_resources(tmp_path: Path, monkeypatch: pytes
     parser = workflow_cli.build_parser("httk workflow", context)
     arguments = parser.parse_args(
         [
-            "manager",
             "run",
             "--workspace",
             "cluster:station",
@@ -152,8 +151,6 @@ def test_remote_run_forwards_worker_resources(tmp_path: Path, monkeypatch: pytes
     )
     assert seen["argv"] == [
         "httk",
-        "workflow",
-        "manager",
         "run",
         "--workspace",
         "station",
@@ -178,7 +175,6 @@ def test_local_count_starts_multiple_manager_processes(tmp_path: Path) -> None:
     assert (
         command(
             [
-                "manager",
                 "run",
                 "--workspace",
                 "many",
@@ -209,7 +205,6 @@ def test_local_count_splits_capacity_in_each_child_argv(tmp_path: Path, monkeypa
     parser = workflow_cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
     arguments = parser.parse_args(
         [
-            "manager",
             "run",
             "--workspace",
             str(tmp_path / "workspace"),
@@ -285,13 +280,13 @@ def test_manager_option_defaults_match_the_parsers_and_cover_the_argv_tail(tmp_p
 
     parser = workflow_cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
     defaults = _manager.manager_option_defaults()
-    for argv in (["manager", "run"], ["run"]):
+    for argv in (["run"],):
         parsed = vars(parser.parse_args(argv))
         assert {name: parsed[name] for name in defaults} == defaults
     tail = _manager.manager_argv_tail(argparse.Namespace(**defaults))
-    assert tail == [] == _manager.manager_argv_tail(parser.parse_args(["manager", "run"]))
+    assert tail == [] == _manager.manager_argv_tail(parser.parse_args(["run"]))
     # The startup grace travels to launched managers, and --keep-running makes it moot.
-    assert _manager.manager_argv_tail(parser.parse_args(["manager", "run", "--idle-grace", "5"])) == [
+    assert _manager.manager_argv_tail(parser.parse_args(["run", "--idle-grace", "5"])) == [
         "--idle-grace",
         "5.0",
     ]
@@ -303,4 +298,4 @@ def test_manager_option_defaults_match_the_parsers_and_cover_the_argv_tail(tmp_p
     # The durability switch defaults to argparse.SUPPRESS; absent reads as false.
     assert read - {"no_durable"} <= set(defaults)
     # A spawned manager is durable by default, so only the opt-out travels.
-    assert _manager.manager_argv_tail(parser.parse_args(["manager", "run", "--no-durable"])) == ["--no-durable"]
+    assert _manager.manager_argv_tail(parser.parse_args(["run", "--no-durable"])) == ["--no-durable"]
