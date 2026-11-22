@@ -203,6 +203,7 @@ of the same name, given with `--collector DIR`, replaces the shipped one.
 - *httk-workflow-orca* — ORCA (`httk.codes.orca`)
 - *httk-workflow-phonopy* — phonopy (`httk.codes.phonopy`), builds on *httk-workflow-vasp*
 
-Install a code package with `python -m pip install httk-workflow-<code>`, or
-through the metapackage with `python -m pip install "httk2[<code>]"`; all eight
-are installed by `python -m pip install "httk2[codes]"`.
+*httk-workflow-vasp* is on PyPI: install it with
+`python -m pip install httk-workflow-vasp` or `python -m pip install "httk2[vasp]"`.
+The other code packages are not yet on PyPI; install them from GitHub with
+`python -m pip install "httk-workflow-<code> @ git+https://github.com/httk/httk-workflow-<code>"`.
