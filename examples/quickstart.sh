@@ -56,8 +56,7 @@ httk_cmd workspace init --name default workspace
 # 2. One job of the vasp.relax workflow, referenced by its git URI, starting from
 #    that structure; --install installs the workflow in the workspace first. The
 #    command prints one tab-separated line with its key and payload.
-httk_cmd job new \
-    --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --install \
+httk_cmd job new 'git+https://github.com/httk/workflows-vasp#vasp-relax' --install \
     --input structure=POSCAR \
     --tag silicon
 

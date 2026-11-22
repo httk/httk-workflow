@@ -149,7 +149,7 @@ def test_the_measured_command_lines() -> None:
     root, structures = Path("/w/ws"), Path("/w/structures")
     new = bench.command_arguments("new", root, "git+file:///r#vasp-static", structures, [])
     assert new == [
-        "job", "new", "--workspace", "/w/ws", "--workflow", "git+file:///r#vasp-static", "--install",
+        "job", "new", "--workspace", "/w/ws", "git+file:///r#vasp-static", "--install",
         "--input-from", "structure", "/w/structures", "--duplicate-tag", "skip",
     ]  # fmt: skip
     assert bench.command_arguments("delete", root, "", structures, ["x--"]) == [

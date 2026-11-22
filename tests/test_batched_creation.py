@@ -807,7 +807,7 @@ def test_the_cli_prints_an_error_s_notes(
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, ws.root, "notes")
     failing_submission(monkeypatch, at=1)
-    assert command(["job", "new", "--workspace", name, "--workflow", "tests.raw", "--tag", "x"], context) == 2
+    assert command(["job", "new", "--workspace", name, "tests.raw", "--tag", "x"], context) == 2
     lines = capsys.readouterr().err.splitlines()
     assert lines[0] == "httk: refused"
     assert lines[1].startswith("httk: 0 job(s) of this command were reported as submitted; x--")
@@ -1074,7 +1074,7 @@ def cli_structures(tmp_path: Path, ws: Workspace, count: int) -> tuple[CLIContex
         (structures / f"s{index}.vasp").write_text(_POSCAR, encoding="utf-8")
     package = _cli_package(tmp_path / "cli-package")
     install(ws, package)
-    argv = ["job", "new", "--workspace", name, "--workflow", "tests.cli.package"]
+    argv = ["job", "new", "--workspace", name, "tests.cli.package"]
     return context, [*argv, "--input-from", "structure", str(structures)]
 
 

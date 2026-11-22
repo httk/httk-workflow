@@ -61,7 +61,7 @@ normal path:
 
 ```console
 httk workflow install --workspace workflow-workspace ./legacy-package
-httk job new --workspace workflow-workspace --workflow-dir ./legacy-package \
+httk job new --workspace workflow-workspace ./legacy-package \
   --placement migration/reference/silicon-relax
 httk run --workspace workflow-workspace --pool vasp --workers 4
 ```
@@ -129,7 +129,7 @@ Install it, then submit a one-shot job or a structure campaign:
 
 ```console
 httk workflow install --workspace WS ./silicon-relax
-httk job new --workspace WS --workflow-dir ./silicon-relax \
+httk job new --workspace WS ./silicon-relax \
   --input-from structure structures/*.cif --parameter encut=520
 httk run --workspace WS --pool vasp
 httk collect --workspace WS
@@ -360,7 +360,7 @@ Install it, stage the static inputs into a job, and run it:
 ```console
 httk workspace init native-workspace
 httk workflow install --workspace native-workspace ./native-relax
-httk job new --workspace native-workspace --workflow-dir ./native-relax \
+httk job new --workspace native-workspace ./native-relax \
   --file POSCAR=POSCAR --file INCAR=INCAR --file vasp-options.json=vasp-options.json \
   --placement migration/native/silicon-relax --tag silicon-relax --priority 700
 httk run --workspace native-workspace

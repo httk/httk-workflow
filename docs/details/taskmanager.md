@@ -165,7 +165,7 @@ workflow it calls. Install once, then create jobs by id or short name:
 httk workflow install --workspace WORKSPACE 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 httk workflow install --workspace WORKSPACE ./my-workflow
 httk workflow list -w WORKSPACE
-httk job new --workspace WORKSPACE --workflow vasp.relax --input structure=POSCAR
+httk job new --workspace WORKSPACE vasp.relax --input structure=POSCAR
 ```
 
 `job new --install` installs a missing workflow first, and a runner file,

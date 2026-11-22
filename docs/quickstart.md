@@ -51,7 +51,7 @@ END
 $ httk setup --name "Your Name" --email you@example.org
 $ httk project init --name quickstart .
 $ httk workspace init --name default workspace
-$ httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --install --input structure=POSCAR --tag silicon
+$ httk job new 'git+https://github.com/httk/workflows-vasp#vasp-relax' --install --input structure=POSCAR --tag silicon
 $ httk workspace set -w default vasp.command="$PWD/examples/mock_vasp.py"
 $ httk run
 $ httk collect --into results.sqlite --id-base httk.quickstart
@@ -157,7 +157,7 @@ Point `--input-from structure` at a *directory* and every readable structure
 file in it becomes one job, each tagged after its file:
 
 ```console
-$ httk job new --workspace default --workflow vasp.relax --input-from structure structures/ \
+$ httk job new --workspace default vasp.relax --input-from structure structures/ \
       --parameter kpoint_density=30.0 --placement project/screening
 ```
 
@@ -195,7 +195,7 @@ cycle in full.
   remotes, and creating, running, inspecting, transferring and sealing jobs.
 - {doc}`vasp_runners`: the VASP workflows of the workflows-vasp repository.
 - {doc}`runtime_helpers`: writing a runner of your own, which
-  `job new --from-runner ./my_runner.py` installs into the workspace ad hoc;
+  `job new ./my_runner.py` installs into the workspace ad hoc;
   {doc}`sdks/bash_api` is the same protocol from Bash.
 - {doc}`workflow_packages`: packaging a workflow with its manifest and hooks.
 - {doc}`workflow_compat`: running CWL, PWD, jobflow and httk v1 workflows as jobs.

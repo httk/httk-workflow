@@ -114,7 +114,6 @@ def test_job_new_accepts_workflow_dir_and_batches_parameter_sources(tmp_path: Pa
                 "--workspace",
                 workspace,
                 "--install",
-                "--workflow-dir",
                 str(package),
                 "--input-from",
                 "structure",
@@ -162,7 +161,6 @@ def test_job_new_batch_reconciles_structure_names_and_reports_skips_and_count(tm
                 "--workspace",
                 workspace,
                 "--install",
-                "--workflow-dir",
                 str(package),
                 "--input-from",
                 "structure",
@@ -200,7 +198,6 @@ def test_job_new_batch_tag_prefixes_each_derived_tag(tmp_path: Path, capsys) -> 
                 "--workspace",
                 workspace,
                 "--install",
-                "--workflow-dir",
                 str(package),
                 "--tag",
                 "run7",
@@ -238,7 +235,6 @@ def test_job_new_batch_tag_prefix_stays_within_the_tag_syntax(tmp_path: Path, ca
                 "--workspace",
                 workspace,
                 "--install",
-                "--workflow-dir",
                 str(package),
                 "--tag",
                 "run-",
@@ -276,7 +272,6 @@ def test_job_new_batch_reports_partial_progress_before_failing(tmp_path: Path, c
                 "--workspace",
                 workspace,
                 "--install",
-                "--workflow-dir",
                 str(package),
                 "--input",
                 "bad=1",
@@ -307,7 +302,6 @@ def test_job_new_accepts_a_package_directory_and_rejects_workflow_selection_erro
                 "--workspace",
                 workspace,
                 "--install",
-                "--workflow-dir",
                 str(package),
                 "--input",
                 f"structure={structure}",
@@ -318,22 +312,20 @@ def test_job_new_accepts_a_package_directory_and_rejects_workflow_selection_erro
     )
     assert (
         command(
-            ["job", "new", "--workspace", workspace, "--workflow", "test-relax", "--workflow-dir", str(package)],
+            ["job", "new", "--workspace", workspace, "test-relax", str(package)],
             context,
         )
         == 2
     )
-    assert "not allowed with argument" in capsys.readouterr().err
+    assert "unrecognized arguments" in capsys.readouterr().err
     assert command(["job", "new", "--workspace", workspace], context) == 2
-    assert (
-        "one of the arguments --workflow --workflow-dir --from-runner --from-command is required"
-        in capsys.readouterr().err
-    )
+    assert "give the workflow as SOURCE" in capsys.readouterr().err
 
+    # A directory without httk_workflow.toml is read as a workflow name, as workflow install reads it.
     empty = tmp_path / "not-a-package"
     empty.mkdir()
-    assert command(["job", "new", "--workspace", workspace, "--workflow-dir", str(empty)], context) == 2
-    assert "containing httk_workflow.toml" in capsys.readouterr().err
+    assert command(["job", "new", "--workspace", workspace, str(empty)], context) == 2
+    assert "is not installed in the workspace" in capsys.readouterr().err
 
 
 def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_path: Path, capsys) -> None:

@@ -37,12 +37,12 @@ A workflow is installed in a workspace before jobs of it are created.
 Installing a URI fetches it and records its canonical URI, pinned to the full
 commit (append `@<ref>` before `#` to choose a branch, tag or commit); every
 job of it records that id. Once installed, the short name selects it, and
-`job new --workflow URI --install` installs on first use:
+`job new URI --install` installs on first use:
 
 ```console
 httk workflow install --workspace default 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 httk workspace set -w default vasp.command=vasp_std
-httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon
+httk job new vasp.relax --input structure=POSCAR --tag silicon
 httk run
 httk collect
 httk workflow uninstall --workspace default vasp.relax

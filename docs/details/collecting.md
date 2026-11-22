@@ -102,7 +102,7 @@ workflow received. Two kinds of staged file are recorded:
   payload-relative path. An input without a `destination` (a port, such as
   a jobflow input handed over from a parent job) is a value, not a staged
   file, and only a hook can record it.
-- Every file `job new --file`/`--files` staged (also with `--from-command`,
+- Every file `job new --file`/`--files` staged (also with `--command`,
   the `files` argument of `httk.workflow.new_job`, and the `files` of a
   child that `Attempt.call` creates), listed in the `staged_files` member of
   `job.json` and labelled by its payload-relative path, such as
@@ -628,6 +628,12 @@ rebuilds; see {doc}`/details/stable_ids`. It lives beside the store at
 `<into>.ids.sqlite` (relocate it with `--id-ledger PATH`), is created and
 signed on first use, and is announced prominently because it should be kept
 and committed with the store.
+
+`collect --campaign --into` keeps one ledger for all its partitions, at the
+same `<into>.ids.sqlite`, signed like a tree sweep's with the project or
+operator identity key (`tree_ledger_keys`). A store built by the former
+ledger-less `campaign collect --into X` gets a fresh `X.ids.sqlite` on its
+next sweep, unless `--no-id-ledger` is passed or the store is rebuilt.
 
 `--no-id-ledger` opts out, and a sweep without a resolvable workspace signing
 key has no ledger. Either way the store mints ids that are not stable across

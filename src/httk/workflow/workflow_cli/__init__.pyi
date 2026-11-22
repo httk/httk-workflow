@@ -28,11 +28,8 @@ from ..adapters import (
 from ._build import build_build_parser, handle_build
 from ._campaign import (
     build_campaign_parser,
-    handle_campaign_collect,
     handle_campaign_init,
     handle_campaign_show,
-    handle_campaign_start_managers,
-    handle_campaign_submit,
 )
 from ._common import remote_workspace_output
 from ._compat import add_v1_collect_arguments, build_v1_parser, handle_v1_collect
@@ -166,11 +163,8 @@ __all__ = [
     "dispatch",
     "ensure_identity_key",
     "handle_build",
-    "handle_campaign_collect",
     "handle_campaign_init",
     "handle_campaign_show",
-    "handle_campaign_start_managers",
-    "handle_campaign_submit",
     "handle_config_import_v1",
     "handle_config_set",
     "handle_config_show",

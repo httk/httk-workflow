@@ -250,7 +250,7 @@ def test_job_new_binds_slots_from_the_command_line(
     (tmp_path / "tags.json").write_text('{"ENCUT": 520}', encoding="utf-8")
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, workspace.root, "w")
-    argv = ["job", "new", "--workspace", name, "--workflow", caller.id, "--call", f"forces.dft={pair.id}"]
+    argv = ["job", "new", "--workspace", name, caller.id, "--call", f"forces.dft={pair.id}"]
     argv += ["--call-parameter", "forces.dft", "incar_tags=@" + str(tmp_path / "tags.json")]
     argv += ["--call-parameter", "forces.dft", "cutoff=400"]
     with caplog.at_level(logging.WARNING):

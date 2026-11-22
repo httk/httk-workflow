@@ -152,7 +152,7 @@ def test_the_cli_refuses_skips_or_allows_a_duplicate_tag(
 ) -> None:
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, ws.root, "tags")
-    argv = ["job", "new", "--workspace", name, "--workflow", _RAW, "--tag", "x"]
+    argv = ["job", "new", "--workspace", name, _RAW, "--tag", "x"]
     assert command(argv, context) == 0
     first = capsys.readouterr().out.split("\t")[0]
     assert command(argv, context) == 2
@@ -186,7 +186,7 @@ def test_a_cli_batch_counts_skips_and_reports_a_refusal(tmp_path: Path, capsys: 
     for file in ("one.vasp", "two.vasp"):
         (structures / file).write_text(_POSCAR, encoding="utf-8")
     package = _cli_package(tmp_path / "package")
-    argv = ["job", "new", "--workspace", name, "--install", "--workflow-dir", str(package)]
+    argv = ["job", "new", "--workspace", name, "--install", str(package)]
     argv += ["--input-from", "structure", str(structures)]
     assert command(argv, context) == 0
     capsys.readouterr()

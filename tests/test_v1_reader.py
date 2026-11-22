@@ -160,11 +160,10 @@ def test_collection_batching_options(tmp_path: Path, capsys: pytest.CaptureFixtu
     context = CLIContext("httk", tmp_path)
     assert command(["v1", "collect", "--workflow-dir", "package", "root", "--batch-size", "64"], context) == 2
     assert "unrecognized arguments: --batch-size 64" in capsys.readouterr().err
-    for prefix in ([], ["campaign"]):
-        assert command([*prefix, "collect", "--help"], context) == 0
-        help_text = " ".join(capsys.readouterr().out.split())
-        assert "disables executable batching (one collector process per job)" in help_text
-        assert "ignored with --fail-fast" in help_text
+    assert command(["collect", "--help"], context) == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "disables executable batching (one collector process per job)" in help_text
+    assert "ignored with --fail-fast" in help_text
 
 
 @pytest.mark.parametrize("error", [ImportError, _CollectEnvironmentError])

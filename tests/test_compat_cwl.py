@@ -375,7 +375,7 @@ def test_cli_job_new_accepts_a_bare_cwl_document(package: Path, workspace: Works
     name = register_ws(CLIContext("httk", tmp_path), workspace.root, "bare-cwl")
     assert (
         command(
-            ["job", "new", "--workspace", name, "--from-runner", str(package / "echo.cwl"), "--input", "message=hello"],
+            ["job", "new", "--workspace", name, str(package / "echo.cwl"), "--input", "message=hello"],
             CLIContext("httk", tmp_path),
         )
         == 0
@@ -922,7 +922,6 @@ def test_cli_job_new_surfaces_preparation_warnings_on_stderr(tmp_path: Path, wor
                 "--workspace",
                 name,
                 "--install",
-                "--workflow-dir",
                 str(package),
                 "--input",
                 "message=contained",

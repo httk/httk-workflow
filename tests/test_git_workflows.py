@@ -430,9 +430,9 @@ def test_cli_job_new_accepts_a_git_uri(tmp_path: Path, capsys: pytest.CaptureFix
     Workspace.initialize(tmp_path / "workspace")
     workspace = register_ws(context, tmp_path / "workspace", "git")
     uri = f"git+file://{root}#relax"
-    assert command(["job", "new", "--workspace", workspace, "--workflow", uri], context) == 2
+    assert command(["job", "new", "--workspace", workspace, uri], context) == 2
     assert "httk workflow install" in capsys.readouterr().err
-    assert command(["job", "new", "--workspace", workspace, "--install", "--workflow", uri], context) == 0
+    assert command(["job", "new", "--workspace", workspace, "--install", uri], context) == 0
     documents = [
         json.loads(path.read_text(encoding="utf-8")) for path in (tmp_path / "workspace").glob("jobs/**/job.json")
     ]
@@ -449,12 +449,13 @@ def test_uri_parse_keeps_the_manifest_name_as_short_name_and_an_explicit_declara
     assert provider.declarations["workflow"]["$id"] == "https://example.test/workflows/package"
 
 
-def test_campaign_submit_surfaces_the_git_error_of_an_uri(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_job_new_campaign_surfaces_the_git_error_of_an_uri(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root, _ = _campaign_project(tmp_path, "hash")
     missing = f"git+file://{tmp_path}/no-such-repo#relax"
-    assert command(["campaign", "submit", "--workflow", missing, "--key", "k"], CLIContext("httk", root)) == 2
+    argv = ["job", "new", missing, "--campaign", "--tag", "k", "--install"]
+    assert command(argv, CLIContext("httk", root)) == 2
     error = capsys.readouterr().err
-    assert "git clone" in error and "workflow names only" not in error
+    assert "git clone" in error and "--campaign takes" not in error
 
 
 def test_fetch_refuses_an_unpublishable_tree_before_installing(tmp_path: Path) -> None:

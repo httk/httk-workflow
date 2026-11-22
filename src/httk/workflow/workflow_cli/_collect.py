@@ -3,6 +3,7 @@
 import argparse
 import json
 from collections.abc import Callable, Iterable, Sequence
+from itertools import chain
 from pathlib import Path
 
 from httk.core.cli import CLIContext
@@ -296,9 +297,20 @@ def _claim_mapping(claim: DirectoryClaim) -> dict[str, object]:
 
 
 def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Stream collected summaries of a workspace or a calculation tree, or raw job records."""
+    """Stream collected summaries of a workspace, a campaign's partitions or a calculation tree, or raw job records."""
 
-    tree, root = _collect_target(arguments, context)
+    workspaces: list[Workspace] = []
+    if arguments.campaign:
+        given = (("path", "PATH"), ("workspace", "--workspace"), ("job", "--job"), ("postprocess", "--postprocess"))
+        for name, flag in given:
+            if getattr(arguments, name) is not None:
+                raise ValueError(f"{flag} does not apply with --campaign, which collects the partitions' workspaces")
+        tree, root = False, Path(context.cwd)
+    else:
+        if arguments.partition:
+            raise ValueError("--partition applies only with --campaign")
+        tree, root = _collect_target(arguments, context)
+        workspaces = [] if tree else [Workspace(root)]
     if arguments.postprocess is not None:
         if tree:
             raise ValueError("--postprocess only applies to a workspace, not a calculation tree")
@@ -333,6 +345,10 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
     if arguments.degraded and arguments.raw:
         raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
     selection = records_option(arguments)
+    if arguments.campaign:
+        from ._campaign import campaign_workspaces
+
+        workspaces = campaign_workspaces(arguments, context)
     skipped = 0
     unclaimed = 0
 
@@ -362,7 +378,6 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             return tree_ledger_keys(root)
 
     else:
-        workspace = Workspace(root)
         cwd = Path(context.cwd)
         # The API resolves path selectors against the process directory; the CLI's is context.cwd.
         jobs = (
@@ -371,15 +386,18 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             else [str(cwd / selector) if selector_is_path(cwd, selector) else selector for selector in arguments.job]
         )
         if arguments.postprocess is not None:
-            return _collect_postprocess(arguments, workspace, jobs)
+            return _collect_postprocess(arguments, workspaces[0], jobs)
         if arguments.raw:
-            records = job_records(
-                workspace,
-                states=arguments.state or DEFAULT_COLLECT_STATES,
-                placement=arguments.placement,
-                on_skipped=_skip,
-                jobs=jobs,
-                steps=arguments.step,
+            records = chain.from_iterable(
+                job_records(
+                    workspace,
+                    states=arguments.state or DEFAULT_COLLECT_STATES,
+                    placement=arguments.placement,
+                    on_skipped=_skip,
+                    jobs=jobs,
+                    steps=arguments.step,
+                )
+                for workspace in workspaces
             )
             collected = 0
             for record in records:
@@ -388,21 +406,26 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             return _emit_collect_summary(
                 collected=collected, degraded=0, unfulfilled_roles=0, storage_errors=0, skipped_unreadable=skipped
             )
-        collected_items = collect(
-            workspace,
-            states=arguments.state or DEFAULT_COLLECT_STATES,
-            placement=arguments.placement,
-            allow_job_collector=arguments.allow_job_collector,
-            on_skipped=_skip,
-            fail_fast=arguments.fail_fast,
-            batch_size=64 if arguments.batch_size is None else arguments.batch_size,
-            jobs=jobs,
-            steps=arguments.step,
-            force=arguments.force,
+        # A campaign's partitions are collected one workspace after another, as one sweep.
+        collected_items = chain.from_iterable(
+            collect(
+                workspace,
+                states=arguments.state or DEFAULT_COLLECT_STATES,
+                placement=arguments.placement,
+                allow_job_collector=arguments.allow_job_collector,
+                on_skipped=_skip,
+                fail_fast=arguments.fail_fast,
+                batch_size=64 if arguments.batch_size is None else arguments.batch_size,
+                jobs=jobs,
+                steps=arguments.step,
+                force=arguments.force,
+            )
+            for workspace in workspaces
         )
 
         def resolve_keys() -> Sequence[tuple[str, bytes]]:
-            return default_workspace_keys(workspace).keys
+            # A campaign's ledger is the project's: signed as a tree's, with the project's keys.
+            return tree_ledger_keys(root) if arguments.campaign else default_workspace_keys(workspaces[0]).keys
 
     collected = degraded = unfulfilled_roles = storage_errors = revised = 0
     if arguments.into is not None:
@@ -461,8 +484,9 @@ def build_collect_parser(
         "collect",
         summary="collect workspaces and recognized calculations into records",
         description=(
-            "Collect finished jobs from an execution workspace, or walk a directory tree and collect the "
-            "finished calculations that registered or given collectors recognize"
+            "Collect finished jobs from an execution workspace (or, with --campaign, from every partition of this "
+            "project's campaign), or walk a directory tree and collect the finished calculations that registered "
+            "or given collectors recognize"
         ),
         handler=handle_collect,
     )
@@ -482,6 +506,18 @@ def build_collect_parser(
         "--workspace",
         metavar="WORKSPACE",
         help="the workspace to collect from (default: the enclosing workspace, this project's workspace, or the per-user default)",
+    )
+    parser.add_argument(
+        "--campaign",
+        action="store_true",
+        help="collect the partitions of this project's campaign, one workspace after another, as one sweep",
+    )
+    parser.add_argument(
+        "--partition",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="with --campaign: collect only this partition (repeatable, default: all of them)",
     )
     parser.add_argument(
         "-s",

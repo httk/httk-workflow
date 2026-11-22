@@ -66,7 +66,7 @@ gfortran -std=f2008    .../httk/workflow/languages/fortran/httk_workflow.f90 \
          runner.f90 httk_workflow_c.o -o runner
 ```
 
-The compiled binary is an executable runner file: `httk job new --from-runner`
+The compiled binary is an executable runner file: `httk job new FILE`
 describes it by running it and installs it as an `adhoc:` workflow whatever
 language wrote it, and the manager runs the installed copy directly.
 

@@ -176,7 +176,13 @@ def campaign_partitions(project: str | os.PathLike[str] | None = None) -> dict[s
     return dict(read_campaign(project).partitions)
 
 
-def assign_partition(key: str, *, index: int = 0, project: str | os.PathLike[str] | None = None) -> str:
+def assign_partition(
+    key: str,
+    *,
+    index: int = 0,
+    project: str | os.PathLike[str] | None = None,
+    config: CampaignConfig | None = None,
+) -> str:
     """Return the partition one root job is assigned, per the project policy.
 
     ``explicit`` reads *key* as the partition name outright. ``hash`` maps *key*
@@ -188,12 +194,14 @@ def assign_partition(key: str, *, index: int = 0, project: str | os.PathLike[str
     :param key: Supply the tag, job key, or explicit partition name.
     :param index: Supply the batch position for round-robin assignment.
     :param project: Locate the project whose campaign to read.
+    :param config: Use this campaign configuration instead of reading *project*'s.
     :return: The selected partition name.
     :raises ValueError: If no partitions exist or an explicit partition is
         unknown.
     """
 
-    config = read_campaign(project)
+    if config is None:
+        config = read_campaign(project)
     names = config.ordered_partitions()
     if not names:
         raise ValueError("this project defines no campaign partitions")
@@ -222,15 +230,20 @@ def partition_workspace(partition: str, *, project: str | os.PathLike[str] | Non
     return partitions[partition]
 
 
-def _local_partition_workspace(partition: str, project: str | os.PathLike[str] | None) -> Workspace:
-    """Return the local workspace of one partition, refusing a remote one."""
+_SUBMIT_HINT = "submit locally and move it with `httk push`, or run this on the remote"
+_COLLECT_HINT = "fetch it home with `httk pull` before collecting the campaign"
+
+
+def _local_partition_workspace(
+    partition: str, project: str | os.PathLike[str] | None, hint: str = _SUBMIT_HINT
+) -> Workspace:
+    """Return the local workspace of one partition, refusing an unknown partition or a remote one with *hint*."""
 
     name = partition_workspace(partition, project=project)
     binding = resolve_workspace(name, project=project)
     if binding.remote != LOCAL_REMOTE:
         raise ValueError(
-            f"campaign partition {partition!r} is the remote workspace {name!r} on {binding.remote!r}; "
-            "submit locally and move it with `httk push`, or run this on the remote"
+            f"campaign partition {partition!r} is the remote workspace {name!r} on {binding.remote!r}; {hint}"
         )
     assert binding.path is not None
     return Workspace(binding.path)
@@ -331,17 +344,9 @@ def campaign_collect(
     :raises ValueError: If a selected partition is remote or unknown.
     """
 
-    config = read_campaign(project)
-    for partition in _selected(config, partitions):
-        name = config.partitions[partition]
-        binding = resolve_workspace(name, project=project)
-        if binding.remote != LOCAL_REMOTE:
-            raise ValueError(
-                f"campaign partition {partition!r} is the remote workspace {name!r} on {binding.remote!r}; "
-                "fetch it home with `httk pull` before collecting the campaign"
-            )
-        assert binding.path is not None
-        yield from job_records(Workspace(binding.path), states=states, placement=placement, steps=steps)
+    for partition in _selected(read_campaign(project), partitions):
+        workspace = _local_partition_workspace(partition, project, _COLLECT_HINT)
+        yield from job_records(workspace, states=states, placement=placement, steps=steps)
 
 
 def campaign_managers(

@@ -181,7 +181,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     assert sum(1 for line in commands if line.startswith("httk")) == 8
     assert 'httk setup --name "Your Name" --email you@example.org' in commands
     assert "httk project init --name quickstart ." in commands
-    assert any(line.startswith(f"httk job new --workflow '{_RELAX_URI}'") for line in commands)
+    assert any(line.startswith(f"httk job new '{_RELAX_URI}'") for line in commands)
     commands = [line.replace(_WORKFLOWS_VASP, prefix) for line in commands]
 
     completed = _run(

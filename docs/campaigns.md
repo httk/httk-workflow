@@ -52,9 +52,9 @@ are refused while the project is sealed.
 
 | Policy | How a root is placed |
 | --- | --- |
-| `hash` | The submission key is hashed to a partition deterministically, so the same key always lands in the same partition. This is the default: it spreads a stream of distinct keys evenly and reproducibly without any shared counter. |
-| `round-robin` | The batch position (`--index`) selects the partition, so a batch fans out evenly across the partitions in order. |
-| `explicit` | The key *is* the partition name: the caller places each root outright. |
+| `hash` | The job's tag is hashed to a partition deterministically, so the same tag always lands in the same partition. This is the default: it spreads a stream of distinct keys evenly and reproducibly without any shared counter. |
+| `round-robin` | The job's position in its `job new` batch, counted from `--campaign-index` (default 0), selects the partition, so a batch fans out evenly across the partitions in order. |
+| `explicit` | `--partition NAME` names the partition: the caller places each root outright. |
 
 The partitions are always visited in a stable (sorted) order, so both a hash and
 an index map to a partition reproducibly, run after run.
@@ -62,15 +62,35 @@ an index map to a partition reproducibly, run after run.
 ## Submitting into a campaign
 
 ```console
-$ httk campaign submit --workflow vasp.relax --key silicon \
+$ httk job new vasp.relax --campaign \
       --input structure=structures/Si.vasp --tag silicon
 silicon--0c4f…	/…/screening-a/workspace/jobs/silicon--0c4f…
+$ httk job new vasp.relax --campaign --input-from structure structures/
 ```
 
-`campaign submit` assigns `--key` to a partition and submits one root job into
-that partition's workspace. The workflow must be installed in that workspace;
-`--install` installs it there first. Everything the root later spawns follows
-it there. In Python:
+`job new --campaign` assigns each new job to a partition and submits it into
+that partition's workspace: under `hash` by its tag (`--tag`, or the tag an
+input supplies; a job without one is refused), under `round-robin` by its
+position in the batch, and under `explicit` to `--partition NAME`, which
+also pins the partition under the other policies. The workflow must be
+installed in that workspace; `--install` installs it there first. Every other
+`job new` option applies, and everything the root later spawns follows it
+there. `hash` sees only the tag known before the job is scaffolded: a tag an
+instantiate hook derives does not count, so a workflow that derives its tag
+needs `--tag` or `--partition` under `hash`. `--campaign-index` applies only to
+`round-robin` without `--partition`.
+
+Before submitting anything, `job new --campaign` checks every partition the
+batch reaches: without `--install` or `--embed-workflow` the workflow must be
+installed there, and with the default `--duplicate-tag refuse` no job tag may
+be taken in that placement or given to two jobs of one partition. Such a
+refusal submits nothing anywhere. A failure found only while a partition's
+jobs are being created can still leave the partitions before it submitted:
+an input that cannot be staged, an instantiate hook that fails or derives a
+taken tag, a failed `--install`, a step or setting the partition's
+installation rejects, or a failed sync. Rerun the same command with
+`--duplicate-tag skip`; it creates only the jobs that do not exist yet. In
+Python:
 
 ```python
 from httk.workflow.campaigns import assign_partition, campaign_submit
@@ -102,17 +122,25 @@ existing one is in (an away copy counts): re-running the creation script with
 ## Running and collecting across partitions
 
 ```console
-$ httk campaign start-managers            # every partition
-$ httk campaign start-managers --partition north
-$ httk campaign collect --state succeeded
+$ httk run --campaign                     # every partition
+$ httk run --campaign --partition north
+$ httk collect --campaign --state succeeded
 ```
 
-`campaign start-managers` starts managers at each selected partition through
-that workspace's own launcher, exactly as `httk run` does for one
-workspace; for a remote partition the manager command runs on the owning
-machine. `campaign collect` collects the partitions one after another in
-stable order and accepts the same `--into`, `--batch-size` and `--fail-fast`
-options as `httk collect`. Both take `--partition` to act on a subset.
+`run --campaign` starts managers at each selected partition through that
+workspace's own launcher, exactly as `httk run` does for one workspace; for a
+remote partition the manager command runs on the owning machine. It passes
+`--workers`, `--worker-resource`, `--count`, `--launcher`, `--idle-timeout`
+and `--adapter-timeout` on and refuses the other `run` options.
+`collect --campaign` collects the partitions one after another in stable
+order as one sweep and takes the workspace options of `httk collect`
+(`--into`, `--batch-size`, `--fail-fast`, `--state`, …) except `--job` and
+`--postprocess`. Both take `--partition` (repeatable) to act on a subset.
+With `--into`, `collect --campaign` keeps the default id ledger beside the
+store (`<into>.ids.sqlite`, signed with the project or operator identity key)
+as every `collect --into` does; a store built by the former ledger-less
+`campaign collect --into X` gets a fresh `X.ids.sqlite` on its next sweep,
+unless `--no-id-ledger` is passed or the store is rebuilt.
 
 ## Bounded fan-out: placement recipes
 
@@ -134,5 +162,5 @@ for tools that need short absolute paths to other jobs' files; an explicit
 ## Where to go next
 
 - {doc}`details/workflow_cli` for the `campaign` group in full.
-- {doc}`collecting` for the records `campaign collect` yields.
+- {doc}`collecting` for the records `collect --campaign` yields.
 - {doc}`running` for managers, transfers and sealing.

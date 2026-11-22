@@ -30,7 +30,7 @@ def relax(a):
 raise SystemExit(run.main())
 ```
 
-`httk job new --from-runner ./relax.py --start-step prepare` installs the file in
+`httk job new ./relax.py --start-step prepare` installs the file in
 the workspace as an `adhoc:` workflow and creates a job of it. Inside a
 step, the `Attempt` object `a` gives the job's parameters, settings and
 declared environment, a private `state` that survives retries, the workdir and

@@ -61,7 +61,7 @@ store:
   missing callee shows up in `httk job why` and `httk job precheck`
   before any step runs.
 
-An ad hoc workflow (a runner file given to `job new --from-runner`) has no
+An ad hoc workflow (a runner file given to `job new FILE`) has no
 `[workflow.calls]`, so it cannot call anything; give it a package manifest to
 compose it. See the `[workflow.calls]` section of
 {doc}`/details/workflow_packages`.
@@ -232,7 +232,7 @@ name resolves to its newest installation), a slot passes its
 to another installation, they are ignored.
 
 ```bash
-httk job new --workflow phonopy.phonons --input structure=POSCAR \
+httk job new phonopy.phonons --input structure=POSCAR \
     --call forces=ase.static --call-parameter forces calculator=ase.calculators.emt:EMT
 ```
 

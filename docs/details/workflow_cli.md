@@ -2,9 +2,10 @@
 
 This is the complete command reference, from workspaces and jobs to projects,
 signed manifests, and remotes. Installing *httk-workflow* registers lazy
-`workflow`, `workspace`, `job`, `launcher`, `remote`, `campaign`, `config`,
-`push`, `pull`, `run`, `monitor`, `postprocess`, `v1`, and `collect` commands
-with *httk-core*:
+`config` (Setup); `workspace`, `remote`, `launcher`, `daemon` and `campaign`
+(Organize); `workflow`, `job`, `run`, `monitor`, `push`, `pull` and `manager`
+(Run); `collect` and `postprocess` (Results); and `v1` (Legacy) commands with
+*httk-core*, which lists them under those headings in `httk --help`:
 
 ```console
 httk workflow --help
@@ -27,10 +28,11 @@ overrides a safety check instead.
 
 ```text
 httk workspace          show | set | unset | init | register | list | default | move | forget | delete | status | owners (managers) | attest-dead | check | repair | gc | seal | unseal | verify
+httk job new            SOURCE | --command TEMPLATE [--campaign [--partition NAME] [--campaign-index N]] [job options]
 httk job                new | submit | cancel | pause | resume | restart | set | delete | seal | unseal | detach | unlock | eject | adopt | list | show | log | why | precheck | debug | verify | move
 httk push               [SRC] DST [--job JOB] [--state STATE] [--step STEP] [--placement P] [--no-keep] [--no-workflows] [--json]
 httk pull               SRC [DST] [--job JOB] [--state STATE] [--step STEP] [--placement P] [--no-workflows] [--json]
-httk collect            [PATH] [--workspace WORKSPACE] [--into PATH] [--dry-run] …
+httk collect            [PATH] [--workspace WORKSPACE] [--into PATH] [--dry-run] …   (--campaign [--partition NAME]…: the campaign's partitions)
 httk workflow list      [--workspace WORKSPACE] [--available] [--json]
 httk workflow show      TARGET… [--workspace WORKSPACE] [--json]
 httk workflow install   SOURCE… [--workspace WORKSPACE] [--no-calls] [--no-build] [--json]
@@ -38,7 +40,7 @@ httk workflow uninstall SELECTOR… [--workspace WORKSPACE] [--check] [--json]
 httk workflow build     [--workspace WORKSPACE] [--list] WORKFLOW…
 httk workflow fetch     URI… [--json]
 httk workflow forget    SELECTOR… [--json]
-httk run                [--workspace WORKSPACE] [manager options]   (a mount-daemon workspace: --configuration NAME [--time-limit D] [--request-id ID] [--wait-seconds S])
+httk run                [--workspace WORKSPACE] [manager options]   (--campaign [--partition NAME]…: a manager per partition; a mount-daemon workspace: --configuration NAME [--time-limit D] [--request-id ID] [--wait-seconds S])
 httk manager            status | log | cancel   (the managers a mount-daemon remote's daemon started)
 httk daemon             init | set | unset | show | check | run | reload   (the confined workspace daemon, on its host)
 httk launcher           list | add | set | unset | show | check | remove
@@ -47,7 +49,7 @@ httk postprocess        SCRIPT [JOB…] [--workspace WORKSPACE]
 httk v1                 collect
 httk remote             list | add | set | unset | check | import-v1 | show | remove | take-back
 httk config             show | set | unset | import-v1
-httk campaign           init | show | set | unset | remove | submit | collect | start-managers
+httk campaign           init | show | set | unset | remove   (job new, collect and run take --campaign)
 httk setup | identity    (core-owned: per-user configuration and named operator identities)
 httk project            init | show | import-v1 | export | check | repair | manifest | verify | seal | unseal   (core-owned)
 ```
@@ -298,7 +300,7 @@ manager's platform stays `ready` and unclaimed there.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `job new [OPTIONS]` | scaffold and submit jobs of an installed workflow | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, `--from-command`; `--install`, `--embed-workflow`, `--call`, `--call-parameter`, `--parameter`, `--environment`, `--language`, `--input`, `--input-move-from-job`, `--input-from`, `--file`, `--files`, `--tag`, `--name`, `--placement`, `--priority`, `--start-step`, `--json` |
+| `job new SOURCE\|--command TEMPLATE` | scaffold and submit jobs of a workflow | `--workspace`, `--campaign` (with `--partition`, `--campaign-index`), `--install`, `--embed-workflow`, `--call`, `--call-parameter`, `--parameter`, `--environment`, `--language`, `--input`, `--input-move-from-job`, `--input-from`, `--file`, `--files`, `--tag`, `--placement`, `--priority`, `--start-step`, `--duplicate-tag`, `--json` |
 | `job submit SOURCE...` | submit prepared payload directories | `--workspace`, `--move`, `--json` |
 | `job cancel\|pause\|resume\|restart JOB...` | post one `cancel`, `pause`, `continue` or `restart` request per job (remote: signed envelope or typed daemon command) | `--workspace`, `--state`, `--step`, `--placement`, `--operator`, `--reason` (default: the command), `--adapter-timeout`, daemon-only `--request-id`; `pause`: `--wait`, `--timeout`; `resume`: `--tree`; `resume`, `restart`: `--force`, `--keep-budget` |
 | `job set JOB... KEY=VALUE...` | change jobs through requests: `workflow=`, `budget.max_attempts_per_activation=`, `budget.max_total_attempts=`, `budget.max_activations=`, `priority=`, `step=` | as the request verbs; `--force`, `--keep-budget` with `step=` |
@@ -336,40 +338,52 @@ lowercase job UUIDs only; resolve keys and prefixes locally first.
 
 ### Creating jobs
 
-`job new` scaffolds and submits jobs of a workflow installed in the workspace.
-See {doc}`/quickstart`.
+`job new SOURCE` scaffolds and submits jobs of a workflow installed in the
+workspace; `job new --command TEMPLATE` generates the workflow instead of
+SOURCE. See {doc}`/quickstart`.
 
 ```console
 httk workflow install --workspace WORKSPACE 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-httk job new --workspace WORKSPACE --workflow vasp.relax --input structure=POSCAR --tag silicon
-httk job new --workspace WORKSPACE --workflow vasp.relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening
-httk job new --workflow vasp.relax --input structure=POSCAR --parameter publish_data=true
-httk job new --from-runner ./my_runner.py --start-step characterize --parameter sites=8
-httk job new --from-command 'my_executable {input}' --file input=input_files/a.dat --tag a
+httk job new --workspace WORKSPACE vasp.relax --input structure=POSCAR --tag silicon
+httk job new --workspace WORKSPACE vasp.relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening
+httk job new vasp.relax --input structure=POSCAR --parameter publish_data=true
+httk job new ./my_runner.py --start-step characterize --parameter sites=8
+httk job new --command 'my_executable {input}' --file input=input_files/a.dat --tag a
 ```
 
-`--workflow` names an installed workflow by id or short name (the most
-recently installed one of that name), or as `NAME@REF` by the tag, branch or
-commit prefix it was installed from (see
-[Short names](workflow_uris.md#short-names)). A workflow that
-is not installed is refused, unless `--install` installs it first (with its
-calls): a git URI `git+https://HOST/PATH[@REF][#SUBDIR]`, a package directory
-(`--workflow-dir`, installed again when the directory's sources differ from
-the installed ones, compared by the installed digest's rules), or a workflow name known on this machine. A runner file,
-command template or bare workflow document is always installed ad hoc, as
-`adhoc:<name>@<digest>`. The job records the installed workflow's id, pinned to
-the full commit for a git workflow.
+SOURCE is told apart as `httk workflow install SOURCE` tells its kinds apart,
+in this order: an existing runner file, workflow document or package directory
+(holding `httk_workflow.toml`), then a git URI
+`git+https://HOST/PATH[@REF][#SUBDIR]`, then a name. A directory without
+`httk_workflow.toml` is read as a name (unless `--language` names a directory
+format), so a directory that happens to share a workflow's name where the job
+is created does not hide the workflow; give `./NAME/` a manifest, or another
+name, to mean the directory. A name is an installed workflow's id or short name
+(the most recently installed one of that name), `NAME@REF` by the tag, branch
+or commit prefix it was installed from (see
+[Short names](workflow_uris.md#short-names)), or a registered or packaged
+workflow name. A workflow that is not installed is refused, unless `--install`
+installs it first (with its calls); a package directory is installed again when
+its sources differ from the installed ones, compared by the installed digest's
+rules. A runner file, command template or bare workflow document is always
+installed ad hoc, as `adhoc:<name>@<digest>`. The job records the installed
+workflow's id, pinned to the full commit for a git workflow.
 
-A runner supplied with `--from-runner` is run in describe mode to infer its
-workflow and initial step, so it must call `httk_workflow_runner WORKFLOW
-STEP...` before any work.
+A runner file given as SOURCE is run in describe mode to infer its workflow and
+initial step, so it must call `httk_workflow_runner WORKFLOW STEP...` before
+any work. Give SOURCE before `--input-from` (or after `--`): `--input-from` takes
+every word up to the next option, so a SOURCE after it is read as an input
+file, and `job new` then names that word. A SOURCE that looks like a path (it
+holds `/` or ends in `.py`, `.sh`, `.bash`, `.cwl`, `.json`, `.yaml` or `.yml`)
+but does not exist is refused as `workflow install` refuses it, not looked up
+as a name.
 
 Other options:
 
 - `--embed-workflow` embeds the workflow in the job's `<job>/workflow/` instead
   of naming an installation (see {doc}`workflow_packages`, *Embedded workflows*).
-  It works with `--workflow`, `--workflow-dir`, `--from-runner` and
-  `--from-command`, installs nothing, and is refused together with `--install`.
+  It works with every SOURCE and with `--command`, installs nothing, and is
+  refused together with `--install`.
   The job's workflow id is `embedded:<name>@<sha12>`. Language realizations,
   `[workflow.build]` packages and uninstalled fixed callees are refused, and the
   tree must hold no symlink, special file, hard-linked file or `__pycache__`.
@@ -452,7 +466,7 @@ job, `--tag` is the whole tag.
 
 ### Command templates
 
-With `--from-command TEMPLATE`, `shlex`-style words are turned into a one-step
+With `--command TEMPLATE`, `shlex`-style words are turned into a one-step
 Bash runner, installed ad hoc as `adhoc:command@<digest>`. The template is an
 argv-only word list with no shell syntax. Each `{name}` placeholder must have a
 matching `--parameter NAME=VALUE` or `--file NAME=PATH`. Parameter placeholders
@@ -465,18 +479,18 @@ Each `--file` input is copied into the job workdir under its basename before
 the command runs; two inputs with the same basename are refused at `job new`,
 as is a `--file` staged below the workdir `run/`. Existing workdir entries are
 never replaced, so a retry keeps working on the copy an earlier attempt left.
-The generated runner can be edited and passed back with `--from-runner`.
+The generated runner can be edited and passed back as `job new FILE`.
 
 ### Running workflow documents
 
 Run a PWD, CWL, or jobflow document directly with
-`job new --from-runner DOCUMENT`; the document is installed ad hoc and run by
+`job new DOCUMENT`; the document is installed ad hoc and run by
 the manager's built-in realization:
 
 ```console
-httk job new --workspace WS --from-runner flow.cwl --input message=echo
-httk job new --workspace WS --from-runner workflow.json --parameter pwd_module_path='["."]'
-httk job new --workspace WS --from-runner maker.json
+httk job new --workspace WS flow.cwl --input message=echo
+httk job new --workspace WS workflow.json --parameter pwd_module_path='["."]'
+httk job new --workspace WS maker.json
 ```
 
 `--language` accepts `cwl`, `pwd`, `jobflow`, and `httk-v1` for bare document
@@ -677,7 +691,7 @@ deduplicate by `job_id`. `--counts` adds per-state totals, which need a full
 directory walk and ignore `--step`.
 
 `--state STATE` and `--step STEP` select jobs in the same way across `job
-list`, `job move`, the request verbs, `collect`, `campaign collect` and
+list`, `job move`, the request verbs, `collect` (also with `--campaign`) and
 `postprocess`: each
 repeats (the values of one option are alternatives), and a job must match
 every option given. A job whose step cannot be determined (an unreadable
@@ -1409,7 +1423,7 @@ through the workspace daemon's exchange.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `run` | run managers through the workspace launcher until the workspace is idle, or keep serving with `--keep-running` | `--workspace`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement`, `--keep-running`, `--idle-timeout`, `--idle-grace`, `--time-limit`, `--deadline-margin`, `--drain-timeout`, `--join-grace-seconds`, `--gc-interval`, `--inline`, `--launcher`, `--detach`, `--log-level`, `--log-file`, `--json-logs`, `--adapter-timeout` |
+| `run` | run managers through the workspace launcher until the workspace is idle, or keep serving with `--keep-running`; `--campaign` starts a manager per campaign partition (see [Campaigns](#campaigns)) | `--workspace`, `--campaign`, `--partition`, `--workers`, `--worker-resource`, `--allocation`, `--count`, `--pool`, `--capability`, `--placement`, `--keep-running`, `--idle-timeout`, `--idle-grace`, `--time-limit`, `--deadline-margin`, `--drain-timeout`, `--join-grace-seconds`, `--gc-interval`, `--inline`, `--launcher`, `--detach`, `--log-level`, `--log-file`, `--json-logs`, `--adapter-timeout` |
 
 It follows the binding: a local workspace uses its `manager.launch` setting
 (the built-in `process` launcher by default), and a remote workspace invokes the
@@ -1500,6 +1514,7 @@ See {doc}`monitor` for the panes, keys, and read budget.
 | a workspace root | that workspace |
 | a directory inside a workspace | refused: collect the workspace root, narrowing with `--placement` |
 | any other directory | the calculation tree below it, through the recognized-calculation collectors |
+| `--campaign` (no PATH) | the selected partitions of this project's campaign, one workspace after another (see [Campaigns](#campaigns)) |
 
 | Options | Apply to |
 | --- | --- |
@@ -1799,17 +1814,35 @@ exception: the daemon accepts only commands signed by a key in its own
 | `campaign unset KEY...` | remove partitions or reset the assignment to `hash` | `partitions.NAME`, `assignment` |
 | `campaign remove` | clear campaign configuration, keeping jobs and workspaces | `--yes` skips confirmation |
 | `campaign show` | show the partition map | `--json` |
-| `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--install`, `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
-| `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--step`, `--placement`, `--raw`, `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--records TYPE=NAME[,NAME...]`, … |
-| `campaign start-<wbr>managers` | start a manager per selected partition | `--partition`, `--workers`, `--worker-resource`, `--count`, `--launcher`, `--idle-timeout`, `--adapter-timeout` |
 
 A campaign is a thin convention over registered workspaces: a partition map,
 stored in the project, that spreads a very large body of work across many
 workspaces without a new scheduler. Roots are assigned to partitions by policy,
-and spawned children always inherit their parent's workspace. `campaign submit
---workflow` names a workflow installed in the partition's workspace, or with
-`--install` a package directory, git URI or workflow name to install there
-first. See {doc}`/campaigns`.
+and spawned children always inherit their parent's workspace. `job new`,
+`collect` and `run` act on the campaign with `--campaign` (and `-w/--workspace`
+is refused, since each partition names its workspace):
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `job new SOURCE --campaign` | assign each new job to a partition and submit it into that partition's local workspace (`hash`: by the tag known before scaffolding, not a hook-derived one) | `--partition NAME` (required by `explicit` assignment; a pin otherwise), `--campaign-index N` (round-robin start, default 0), every `job new` option |
+| `collect --campaign` | collect the selected partitions' local workspaces one after another as one sweep (one summary, one `--into` store) | `--partition NAME` (repeatable; default all), every workspace `collect` option except `--job` and `--postprocess` |
+| `run --campaign` | start a manager per selected partition: through its launcher locally, or on the remote owner | `--partition NAME` (repeatable; default all), `--workers`, `--worker-resource`, `--count`, `--launcher`, `--idle-timeout`, `--adapter-timeout` |
+
+The assignment policy picks a new job's partition: `hash` hashes the job's tag
+(`--tag`, or the tag an input supplies; without one the job is refused; a tag
+an instantiate hook derives does not count, so such a workflow needs `--tag`
+or `--partition`), `round-robin` numbers the jobs of one `job new` batch from
+`--campaign-index` (refused under the other policies and with `--partition`),
+and `explicit` takes `--partition`. A batch is checked in every partition it
+reaches before anything is submitted (an uninstalled workflow, a taken or
+repeated tag); see {doc}`/campaigns` for the failures that can still leave a
+partial fan-out. SOURCE is a workflow installed in the
+partition's workspace, or with `--install` a package directory, git URI or
+workflow name to install there first; a runner file, document or `--command`
+is refused. A remote partition is refused by `job new` and `collect` (submit
+locally and `push`; `pull` it home to collect). `collect --campaign --into`
+uses the default id ledger as a calculation tree does, signed with the
+project's keys. See {doc}`/campaigns`.
 
 ## Protocol spellings and removed commands
 
@@ -1871,6 +1904,12 @@ some commands and options. These spellings no longer parse:
 | `launcher add --template KIND --set KEY=VALUE` | `launcher add --kind KIND NAME [KEY=VALUE...]` (one launcher per call) |
 | several NAMEs in one `remote add`/`configure` or `launcher add`/`configure` call; exit status 1 for their validation errors | one NAME per `remote add/set/unset` and `launcher add/set/unset` call; a validation error of these commands exits 2 |
 | `job new --step`, `job debug --step` | `--start-step` |
+| `job new --workflow NAME`, `--workflow-dir DIR`, `--from-runner FILE` | `job new SOURCE` (the kind is detected as by `workflow install SOURCE`) |
+| `job new --from-command TEMPLATE` | `job new --command TEMPLATE` |
+| `job new --name NAME` | nothing: the tag (`--tag`) is the readable job handle; `job.json` keeps its derived `name` |
+| `campaign submit --workflow W --key K [--index N]` | `job new W --campaign` (`--tag` is the hash key, `--partition NAME` the explicit one, `--campaign-index N` the round-robin start) |
+| `campaign collect` | `collect --campaign [--partition NAME]...` (with `--into X` it keeps the default id ledger: a store built by the ledger-less `campaign collect --into X` gets a fresh `X.ids.sqlite` on its next sweep unless `--no-id-ledger` is passed or the store is rebuilt) |
+| `campaign start-managers` | `run --campaign [--partition NAME]...` |
 | `--format` on `job new`, `workflow describe`, `workflow install` | `--language` |
 | `manager run --idle`, `workflow run --idle` | `--keep-running` |
 | `manager run --placement-prefix`, `workflow run --placement-prefix` | `--placement` |

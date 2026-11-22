@@ -1,32 +1,32 @@
-"""Campaign command group."""
+"""Campaign command group, and the ``--campaign`` target of ``job new``, ``collect`` and ``run``."""
 
 import argparse
 import json
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from httk.core.cli import CLIContext
 
+from .. import scaffold
 from ..campaigns import (
+    _COLLECT_HINT,
     ASSIGNMENT_POLICIES,
+    _local_partition_workspace,
+    _selected,
+    assign_partition,
     campaign_managers,
-    campaign_submit,
-    campaign_submit_many,
     read_campaign,
     remove_campaign,
     write_campaign,
 )
-from ..collecting import COLLECTABLE_STATES, DEFAULT_COLLECT_STATES
-from ..registry import LOCAL_REMOTE, resolve_workspace
-from ..scaffold import DEFAULT_PLACEMENT
+from ..scaffold import JobItem
+from ..seals import require_cli_modifiable
 from ..workspace import Workspace
 from ._common import (
-    _add_adapter_timeout,
-    _add_step_option,
+    _durable,
     _group,
-    _json_value,
     _leaf,
-    _load_inputs,
     _pairs,
     _setting_pair,
     confirm,
@@ -114,168 +114,125 @@ def handle_campaign_remove(arguments: argparse.Namespace, context: CLIContext) -
     return 0
 
 
-def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Assign one root job to a partition and submit it into that workspace."""
+def campaign_shares(
+    arguments: argparse.Namespace, context: CLIContext
+) -> Callable[[Sequence[JobItem]], list[tuple[Workspace, list[JobItem]]]]:
+    """Check ``job new --campaign`` and return what splits its jobs over the partitions they are assigned.
 
-    workflow = arguments.workflow
-    path = Path(workflow).expanduser()
-    if path.is_file() or ("/" in workflow and not workflow.startswith("git+") and not path.is_dir()):
+    ``--partition`` names the partition outright (required by ``explicit`` assignment); otherwise ``hash`` hashes
+    each job's tag as given (``--tag`` or an input's, never one an instantiate hook derives later) and
+    ``round-robin`` numbers the jobs from ``--campaign-index``. The split keeps each partition's jobs in order, the
+    partitions in the order their first job came. Before anything is submitted it refuses, in every partition, a
+    workflow that is not installed (without ``--install`` or ``--embed-workflow``) and, with ``--duplicate-tag
+    refuse``, a tag already taken in the placement or given twice to one partition's jobs, so such a refusal leaves
+    no partition partly submitted.
+    """
+
+    if arguments.workspace is not None:
+        raise ValueError("--campaign submits into the partitions' workspaces; it cannot be combined with --workspace")
+    source: str = arguments.source or ""
+    path = Path(source).expanduser()
+    if not source or path.is_file() or ("/" in source and not source.startswith("git+") and not path.is_dir()):
         raise ValueError(
-            "campaign submit accepts workflow names only (or a git URI or package directory); "
-            "use job new --from-runner FILE or --from-command TEMPLATE for a runner"
+            "--campaign takes a workflow name, git URI or package directory, not a runner file, document or "
+            "--command; install it into the partitions' workspaces (httk workflow install -w WS FILE) and give "
+            "its name, or create the job without --campaign"
         )
-    if workflow.startswith("git+"):
-        from ..git_workflows import fetch_workflow
+    project = context.cwd
+    config = read_campaign(project)
+    if arguments.partition is None and config.assignment == "explicit":
+        raise ValueError("this campaign assigns partitions explicitly; name one with --partition NAME")
+    if arguments.campaign_index is not None and (arguments.partition is not None or config.assignment != "round-robin"):
+        raise ValueError("--campaign-index applies only to round-robin assignment, without --partition")
+    durable = _durable(arguments)
+    opened: dict[str, Workspace] = {}
 
-        fetch_workflow(workflow)  # an explicit URI is consent to fetch; its git error is the diagnostic
-    parameters = {
-        name: _json_value(text, f"job parameter {name!r}")
-        for name, text in _pairs(arguments.parameters, "a job parameter")
-    }
-    files: dict[str, str | Path] = {name: Path(text) for name, text in _pairs(arguments.files, "a staged file")}
-    inputs, items, input_tag = _load_inputs(arguments.inputs, arguments.input_from)
-    shared = {
-        "inputs": inputs,
-        "files": files,
-        "parameters": parameters,
-        "tag": arguments.tag or input_tag,
-        "placement": DEFAULT_PLACEMENT if arguments.placement is None else arguments.placement,
-        "priority": arguments.priority,
-        "name": arguments.name,
-        "install": arguments.install,
-    }
-    if items:
-        for item in items:
-            item["tag"] = arguments.tag or item.get("tag")
-        jobs = campaign_submit_many(
-            workflow, items, key=arguments.key, index=arguments.index, project=context.cwd, **shared
-        )
-    else:
-        jobs = [campaign_submit(workflow, key=arguments.key, index=arguments.index, project=context.cwd, **shared)]
-    if arguments.json:
-        print(json.dumps([job.as_mapping() for job in jobs] if len(jobs) > 1 else jobs[0].as_mapping(), indent=2))
-        return 0
-    for job in jobs:
-        print(f"{job.job_key}\t{job.payload}")
-    return 0
+    def workspace(partition: str) -> Workspace:
+        if partition not in opened:
+            found = Workspace(_local_partition_workspace(partition, project).root, durable=durable)
+            require_cli_modifiable(found)
+            opened[partition] = found
+        return opened[partition]
 
-
-def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Collect every partition of this campaign, one workspace after another."""
-
-    from ..collecting import CollectedJob, job_records
-    from ..collecting import collect as collect_jobs
-    from ..storing import _collected_mapping, store_collected
-    from ._collect import _emit_collect_summary, records_option
-
-    if arguments.into is not None and arguments.raw:
-        raise ValueError("--into cannot be combined with --raw")
-    if arguments.into is not None and arguments.id_base is None:
-        raise ValueError("--id-base is required with --into")
-    if arguments.into is None and arguments.no_bare_runs:
-        raise ValueError("--no-bare-runs only applies with --into")
-    if arguments.degraded and arguments.raw:
-        raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
-    selection = records_option(arguments)
-    config = read_campaign(context.cwd)
-    selected = sorted(arguments.partition or config.partitions)
-    states = arguments.state or DEFAULT_COLLECT_STATES
-    skipped = 0
-
-    def _skip(_job_key: str) -> None:
-        nonlocal skipped
-        skipped += 1
-
-    def _workspace(partition: str) -> Workspace:
-        binding = resolve_workspace(config.partitions[partition], project=context.cwd)
-        if binding.remote != LOCAL_REMOTE:
-            raise ValueError(
-                f"campaign partition {partition!r} is the remote workspace {config.partitions[partition]!r} on "
-                f"{binding.remote!r}; fetch it home with `httk pull` before collecting the campaign"
-            )
-        assert binding.path is not None
-        return Workspace(binding.path)
-
-    if arguments.raw:
-        collected = 0
-        for partition in selected:
-            for record in job_records(
-                _workspace(partition),
-                states=states,
-                placement=arguments.placement,
-                on_skipped=_skip,
-                steps=arguments.step,
-            ):
-                print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
-                collected += 1
-        return _emit_collect_summary(
-            collected=collected, degraded=0, unfulfilled_roles=0, storage_errors=0, skipped_unreadable=skipped
-        )
-
-    collected = degraded = unfulfilled_roles = storage_errors = 0
-    if arguments.into is not None:
-        # Store provenance resolves across the whole campaign, so --into keeps
-        # this sweep in memory; normal campaign reports stream.
-        items: list[CollectedJob] = []
-        for partition in selected:
-            items.extend(
-                collect_jobs(
-                    _workspace(partition),
-                    states=states,
-                    placement=arguments.placement,
-                    allow_job_collector=arguments.allow_job_collector,
-                    on_skipped=_skip,
-                    fail_fast=arguments.fail_fast,
-                    batch_size=arguments.batch_size,
-                    steps=arguments.step,
+    def precheck(partition: str, share: Sequence[JobItem]) -> None:
+        into = workspace(partition)
+        if not arguments.install and not arguments.embed_workflow:
+            scaffold._installed(into, source, owner=None, install=False, step=arguments.step, language=arguments.format)
+        if arguments.duplicate_tag == "refuse":
+            tags = [str(tag) for item in share if (tag := item.get("tag"))]
+            for tag in [tag for tag, count in Counter(tags).items() if count > 1][:1]:
+                raise ValueError(
+                    f"two jobs for campaign partition {partition!r} have the tag {tag!r}; nothing was submitted "
+                    "(pass --duplicate-tag allow to create both, or skip to create the first)"
                 )
-            )
-        reports = store_collected(
-            items,
-            arguments.into,
-            id_base=arguments.id_base,
-            id_series=arguments.id_series,
-            bare_runs=not arguments.no_bare_runs,
-            entry_records=selection,
-        )
-        for item, report in zip(items, reports):
-            degraded += item.missing_collector is not None
-            collected += item.missing_collector is None
-            unfulfilled_roles += len(item.unfulfilled)
-            storage_errors += report.get("storage_error") is not None
-            if not arguments.degraded or item.missing_collector is not None:
-                print(json.dumps(report, sort_keys=True, separators=(",", ":")))
-    else:
-        for partition in selected:
-            for item in collect_jobs(
-                _workspace(partition),
-                states=states,
-                placement=arguments.placement,
-                allow_job_collector=arguments.allow_job_collector,
-                on_skipped=_skip,
-                fail_fast=arguments.fail_fast,
-                batch_size=arguments.batch_size,
-                steps=arguments.step,
-            ):
-                degraded += item.missing_collector is not None
-                collected += item.missing_collector is None
-                unfulfilled_roles += len(item.unfulfilled)
-                if not arguments.degraded or item.missing_collector is not None:
-                    print(json.dumps(_collected_mapping(item), sort_keys=True, separators=(",", ":")))
-    return _emit_collect_summary(
-        collected=collected,
-        degraded=degraded,
-        unfulfilled_roles=unfulfilled_roles,
-        storage_errors=storage_errors,
-        skipped_unreadable=skipped,
-    )
+            scaffold._refuse_taken_tags(into, arguments.placement, tags)
+
+    def split(batch: Sequence[JobItem]) -> list[tuple[Workspace, list[JobItem]]]:
+        shares: dict[str, list[JobItem]] = {}
+        for position, item in enumerate(batch):
+            if arguments.partition is not None:
+                partition = arguments.partition
+            elif config.assignment == "hash":
+                tag = item.get("tag")
+                if not tag:
+                    raise ValueError(
+                        "hash campaign assignment hashes the job's tag, and no input supplies one; give --tag TAG"
+                    )
+                partition = assign_partition(str(tag), config=config)
+            else:
+                partition = assign_partition("", index=(arguments.campaign_index or 0) + position, config=config)
+            shares.setdefault(partition, []).append(item)
+        for partition, share in shares.items():
+            precheck(partition, share)
+        return [(workspace(partition), share) for partition, share in shares.items()]
+
+    return split
 
 
-def handle_campaign_start_managers(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Start a manager per selected partition of this campaign."""
+def campaign_workspaces(arguments: argparse.Namespace, context: CLIContext) -> list[Workspace]:
+    """Return the local workspaces of the partitions ``--partition`` selects (default: all), in stable order.
+
+    :param arguments: The parsed ``collect`` arguments.
+    :param context: The invocation context, whose directory locates the project.
+    :return: The selected partitions' workspaces.
+    :raises ValueError: If a partition is unknown or remote, or the campaign has no partitions.
+    """
+
+    config = read_campaign(context.cwd)
+    if not config.partitions:
+        raise ValueError("this project defines no campaign partitions")
+    return [
+        _local_partition_workspace(partition, context.cwd, _COLLECT_HINT)
+        for partition in _selected(config, arguments.partition or None)
+    ]
+
+
+#: ``run`` options a ``--campaign`` run passes to each partition's managers.
+_CAMPAIGN_RUN_OPTIONS = frozenset(
+    {"workers", "launcher", "worker_resource", "count", "idle_timeout", "adapter_timeout"}
+)
+#: ``run`` destinations whose flag is not ``--`` plus the destination with hyphens.
+_RUN_FLAGS = {"placement_prefix": "--placement", "idle": "--keep-running"}
+
+
+def run_campaign(arguments: argparse.Namespace, context: CLIContext, defaults: Mapping[str, object]) -> int:
+    """Start a manager per selected partition of this campaign: ``run --campaign``.
+
+    :param arguments: The parsed ``run`` arguments.
+    :param context: The invocation context.
+    :param defaults: Every ``run`` option's default; one changed outside :data:`_CAMPAIGN_RUN_OPTIONS` is refused.
+    :return: 1 when a partition's launch failed, else 0.
+    """
 
     from ._manager import _worker_resources
 
+    for name, default in defaults.items():
+        if name not in _CAMPAIGN_RUN_OPTIONS and getattr(arguments, name, default) != default:
+            flag = _RUN_FLAGS.get(name, f"--{name.replace('_', '-')}")
+            raise ValueError(
+                f"{flag} does not apply with --campaign, which starts each partition's managers in its own workspace "
+                "with --workers, --launcher, --worker-resource, --count, --idle-timeout and --adapter-timeout only"
+            )
     report = campaign_managers(
         partitions=arguments.partition or None,
         workers=arguments.workers,
@@ -307,13 +264,14 @@ def build_campaign_parser(
 ) -> None:
     """Declare the ``campaign`` group: a partition map over many workspaces."""
 
-    from ._collect import _positive_int, add_records_option
-
     _, group = _group(
         subparsers,
         "campaign",
         summary="partition a large campaign across many workspaces",
-        description="Define and drive a campaign that partitions its jobs across many registered workspaces",
+        description=(
+            "Define a campaign that partitions its jobs across many registered workspaces; job new, collect and "
+            "run take --campaign to act on its partitions"
+        ),
     )
 
     init = _leaf(
@@ -373,196 +331,3 @@ def build_campaign_parser(
         handler=handle_campaign_remove,
     )
     remove.add_argument("--yes", action="store_true", help="skip the confirmation")
-
-    submit = _leaf(
-        group,
-        "submit",
-        summary="submit one root job to its assigned partition",
-        description="Assign one root job to a partition by policy and submit it into that partition's workspace",
-        handler=handle_campaign_submit,
-    )
-    submit.add_argument(
-        "--workflow",
-        metavar="WORKFLOW",
-        required=True,
-        help="the workflow installed in the partition's workspace (id or short name), or with --install a "
-        "package directory, git+https://HOST/PATH[@REF][#SUBDIR] URI or workflow name known here",
-    )
-    submit.add_argument(
-        "--install",
-        action="store_true",
-        help="install the workflow into the partition's workspace first when it is not installed",
-    )
-    submit.add_argument(
-        "--key",
-        metavar="KEY",
-        required=True,
-        help="the tag or key the assignment policy hashes",
-    )
-    submit.add_argument(
-        "--index",
-        type=int,
-        default=0,
-        metavar="N",
-        help="the batch position, for round-robin (default: 0)",
-    )
-    submit.add_argument(
-        "-p",
-        "--parameter",
-        action="append",
-        default=[],
-        dest="parameters",
-        metavar="NAME=VALUE",
-        help="one implementation parameter (repeatable)",
-    )
-    submit.add_argument(
-        "--file",
-        action="append",
-        default=[],
-        dest="files",
-        metavar="NAME=PATH",
-        help="one staged file (repeatable)",
-    )
-    submit.add_argument(
-        "-i",
-        "--input",
-        action="append",
-        default=[],
-        dest="inputs",
-        metavar="NAME=VALUE",
-        help="one declared input value to stage (repeatable)",
-    )
-    submit.add_argument(
-        "--input-from",
-        action="append",
-        nargs="+",
-        default=[],
-        metavar=("NAME", "SOURCE"),
-        help="load a declared input from one or more files, or readable files in a directory (repeatable)",
-    )
-    submit.add_argument("--tag", metavar="TAG", help="the job tag")
-    submit.add_argument("--placement", metavar="PLACEMENT", help="where the job lands in its workspace")
-    submit.add_argument("--priority", type=int, metavar="PRIORITY", help="the job priority")
-    submit.add_argument("--name", metavar="NAME", help="a human name for the job")
-    submit.add_argument(
-        "--json",
-        action="store_true",
-        help="print the scaffolded job as one JSON object",
-    )
-
-    collect_parser = _leaf(
-        group,
-        "collect",
-        summary="collect every partition of the campaign",
-        description="Collect the finished jobs of every campaign partition, one workspace after another",
-        handler=handle_campaign_collect,
-    )
-    collect_parser.add_argument(
-        "--partition",
-        action="append",
-        default=[],
-        metavar="NAME",
-        help="collect only this partition (repeatable, default: all of them)",
-    )
-    collect_parser.add_argument(
-        "-s",
-        "--state",
-        action="append",
-        metavar="STATE",
-        choices=COLLECTABLE_STATES,
-        help=f"job state to collect (repeatable, default: {', '.join(DEFAULT_COLLECT_STATES)})",
-    )
-    _add_step_option(
-        collect_parser,
-        help_text="collect only jobs at this step: the current activation's, else the initial step (repeatable)",
-    )
-    collect_parser.add_argument(
-        "--placement",
-        metavar="PLACEMENT",
-        help="collect only jobs at or below this placement",
-    )
-    collect_parser.add_argument("--raw", action="store_true", help="print raw collect records")
-    collect_parser.add_argument(
-        "--degraded",
-        action="store_true",
-        help="print only degraded per-job lines; the summary still counts the whole sweep",
-    )
-    collect_parser.add_argument(
-        "--allow-job-collector",
-        action="store_true",
-        help="allow collectors loaded and verified from a pinned workspace workflow tree",
-    )
-    collect_parser.add_argument(
-        "--fail-fast",
-        action="store_true",
-        help="stop at the first degraded job; disables executable batching (one collector process per job)",
-    )
-    collect_parser.add_argument(
-        "--batch-size",
-        type=_positive_int,
-        default=64,
-        metavar="N",
-        help="records retained and executable requests grouped at once (default: 64; ignored with --fail-fast)",
-    )
-    collect_parser.add_argument(
-        "--into",
-        metavar="PATH",
-        help="save collected entries, runs, and products into a file-backed SQLite store",
-    )
-    collect_parser.add_argument(
-        "--no-bare-runs",
-        action="store_true",
-        help="with --into, store no run for a job whose workflow has nothing to collect (default: store one)",
-    )
-    collect_parser.add_argument(
-        "--id-base",
-        metavar="BASE",
-        help="entry-id namespace base (required with --into)",
-    )
-    collect_parser.add_argument(
-        "--id-series",
-        metavar="SERIES",
-        default="1",
-        help="entry-id campaign series (default: 1)",
-    )
-    add_records_option(collect_parser)
-
-    managers = _leaf(
-        group,
-        "start-managers",
-        summary="start a manager per selected partition",
-        description="Start a manager for each selected partition: through its launcher locally, or on the remote owner",
-        handler=handle_campaign_start_managers,
-    )
-    managers.add_argument(
-        "--partition",
-        action="append",
-        default=[],
-        metavar="NAME",
-        help="start a manager only for this partition (repeatable, default: all of them)",
-    )
-    managers.add_argument("--workers", type=int, metavar="COUNT", help="workers per manager")
-    managers.add_argument("--launcher", metavar="NAME", help="use launcher NAME for every selected partition")
-    managers.add_argument(
-        "--worker-resource",
-        nargs=2,
-        action="append",
-        default=[],
-        metavar=("NAME", "COUNT"),
-        help="advertise COUNT units of resource NAME to the scheduler (repeatable; procs and mem are shared fairly among --workers)",
-    )
-    managers.add_argument(
-        "--count",
-        type=int,
-        default=None,
-        metavar="COUNT",
-        help="managers to start per partition (default: each workspace's manager.count, or 1)",
-    )
-    managers.add_argument(
-        "--idle-timeout",
-        type=float,
-        default=3600.0,
-        metavar="SECONDS",
-        help="cap how long each local manager waits for the campaign to become idle (default: 3600)",
-    )
-    _add_adapter_timeout(managers)

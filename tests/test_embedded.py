@@ -351,7 +351,7 @@ def test_cli_from_command_embed_workflow(tmp_path: Path) -> None:
     context = CLIContext("httk", tmp_path)
     ws = workspace_at(tmp_path / "ws")
     name = register_ws(context, ws.root, "w")
-    argv = ["job", "new", "--workspace", name, "--from-command", "true", "--embed-workflow", "--tag", "cmd"]
+    argv = ["job", "new", "--workspace", name, "--command", "true", "--embed-workflow", "--tag", "cmd"]
     assert command(argv, context) == 0
     (ref,) = list(_kernel.list_jobs(ws, "ready"))
     definition = JobDefinition.from_path(ref.path / "job.json")
@@ -361,6 +361,5 @@ def test_cli_from_command_embed_workflow(tmp_path: Path) -> None:
     assert embedded_digest(ref.path / "workflow") == definition.embedded["tree_sha256"]
     assert _store.list_installed(ws) == []
     assert (
-        command(["job", "new", "--workspace", name, "--from-command", "true", "--embed-workflow", "--install"], context)
-        != 0
+        command(["job", "new", "--workspace", name, "--command", "true", "--embed-workflow", "--install"], context) != 0
     )

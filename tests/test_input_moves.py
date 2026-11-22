@@ -155,7 +155,7 @@ def test_the_cli_moves_a_file_and_refuses_it_with_input_for_the_same_name(
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, ws.root, "moves")
     source = _origin(ws) / "run" / "traj.dat"
-    argv = ["job", "new", "--workspace", name, "--workflow", _WORKFLOW, "--parameter", 'script={"start":"succeed"}']
+    argv = ["job", "new", "--workspace", name, _WORKFLOW, "--parameter", 'script={"start":"succeed"}']
 
     refused = [*argv, "--input", f"trajectory={tmp_path}", "--input-move-from-job", f"trajectory={source}"]
     assert command(refused, context) != 0

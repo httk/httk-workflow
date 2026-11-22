@@ -319,8 +319,8 @@ def _load_inputs(
     A directory expands to its loadable files; unreadable files are skipped with
     one stderr note, and a structure-named file with no reader of its own is read
     as POSCAR. The batch — a directory or a multi-file occurrence — is returned
-    as a list so both the single-shot ``job new`` submitter and the campaign
-    submitter, which re-reads and re-tags it, see one stable result.
+    as a list so ``job new``, which re-tags it and with ``--campaign`` splits it over the
+    partitions, sees one stable result.
     """
 
     shared: dict[str, object] = {name: text for name, text in _pairs(values, "a staged workflow input")}

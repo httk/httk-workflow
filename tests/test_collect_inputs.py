@@ -734,7 +734,7 @@ def test_identical_staged_bytes_at_other_paths_store_one_alternative_and_one_fil
 
 
 def _staged_jobs(tmp_path: Path, *contents: str) -> tuple[Workspace, str]:
-    """Run one ``job new --from-command true --files DIR`` job per INCAR content, staging INCAR, KPOINTS, POTCAR."""
+    """Run one ``job new --command true --files DIR`` job per INCAR content, staging INCAR, KPOINTS, POTCAR."""
 
     context = CLIContext("httk", tmp_path)
     ws = workspace(tmp_path / "workspace")
@@ -744,7 +744,7 @@ def _staged_jobs(tmp_path: Path, *contents: str) -> tuple[Workspace, str]:
         directory.mkdir()
         for file_name, text in (("INCAR", incar), ("KPOINTS", f"kpoints {index}\n"), ("POTCAR", "potcar\n")):
             (directory / file_name).write_text(text, encoding="utf-8")
-        argv = ["job", "new", "--workspace", name, "--from-command", "true", "--files", str(directory)]
+        argv = ["job", "new", "--workspace", name, "--command", "true", "--files", str(directory)]
         assert command([*argv, "--tag", f"staged{index}"], context) == 0
     run(ws)
     return ws, name
@@ -1003,7 +1003,7 @@ def test_a_lost_input_is_stored_and_a_later_identical_copy_fills_its_location(
     directory.mkdir()
     for file_name, text in (("INCAR", "ENCUT = 520\n"), ("KPOINTS", "kpoints 1\n"), ("POTCAR", "potcar\n")):
         (directory / file_name).write_text(text, encoding="utf-8")
-    job_new = ["job", "new", "--workspace", name, "--from-command", "true", "--files", str(directory)]
+    job_new = ["job", "new", "--workspace", name, "--command", "true", "--files", str(directory)]
     assert command([*job_new, "--tag", "again"], context) == 0
     run(ws)
     capsys.readouterr()
@@ -1050,11 +1050,11 @@ def test_job_new_records_the_digest_of_every_staged_file_and_declared_input(tmp_
     directory.mkdir()
     (directory / "INCAR").write_text("ENCUT = 520\n", encoding="utf-8")
     (tmp_path / "Si.vasp").write_text(_POSCAR, encoding="utf-8")
-    argv = ["job", "new", "--workspace", name, "--workflow", _WORKFLOW, "--files", str(directory)]
+    argv = ["job", "new", "--workspace", name, _WORKFLOW, "--files", str(directory)]
     assert command([*argv, "--input", f"structure={tmp_path / 'Si.vasp'}", "--tag", "copied"], context) == 0
     # A loaded structure is written with httk.core.save; its destination is hashed as written.
     new_job(ws, _WORKFLOW, inputs={"structure": load(str(tmp_path / "Si.vasp"))}, tag="saved")
-    assert command(["job", "new", "--workspace", name, "--from-command", "true", "--tag", "plain"], context) == 0
+    assert command(["job", "new", "--workspace", name, "--command", "true", "--tag", "plain"], context) == 0
 
     copied = JobDefinition.from_path(next((ws.root / "jobs").rglob("copied--*")) / "job.json")
     assert copied.as_mapping()["staged_files"] == [
@@ -1075,9 +1075,9 @@ def test_a_command_file_placeholder_names_the_workdir_copy(tmp_path: Path, capsy
     name = register_ws(context, ws.root, "placeholder")
     source = tmp_path / "INCAR"
     source.write_text("a\n", encoding="utf-8")
-    argv = ["job", "new", "--workspace", name, "--from-command", "sed -i s/a/b/ {INCAR}"]
+    argv = ["job", "new", "--workspace", name, "--command", "sed -i s/a/b/ {INCAR}"]
     # A file staged into the workdir would itself be the copy the command rewrites.
-    refused = ["job", "new", "--workspace", name, "--from-command", "true", "--file", f"run/INCAR={source}"]
+    refused = ["job", "new", "--workspace", name, "--command", "true", "--file", f"run/INCAR={source}"]
     assert command(refused, context) == 2
     assert "stages into the workdir run/" in capsys.readouterr().err
     assert command([*argv, "--file", f"INCAR={source}"], context) == 0

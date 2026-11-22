@@ -95,18 +95,14 @@ def test_the_written_campaign_reads_back(tmp_path: Path) -> None:
     assert config.ordered_partitions() == ("north", "south")
 
 
-def test_campaign_cli_rejects_path_workflows_with_a_job_new_hint(tmp_path: Path, capsys) -> None:
+def test_job_new_campaign_rejects_runner_files_and_commands(tmp_path: Path, capsys) -> None:
     root, _ = _campaign_project(tmp_path, "hash")
-    assert (
-        command(
-            ["campaign", "submit", "--workflow", "./runner.py", "--key", "silicon"],
-            CLIContext("httk", root),
-        )
-        == 2
-    )
-    error = capsys.readouterr().err
-    assert "workflow names only" in error
-    assert "job new" in error
+    (root / "runner.py").write_text("# runner\n", encoding="utf-8")
+    for words in (["./runner.py"], [str(root / "runner.py")], ["--command", "true"]):
+        assert command(["job", "new", *words, "--campaign", "--tag", "silicon"], CLIContext("httk", root)) == 2
+        error = capsys.readouterr().err
+        assert "--campaign takes a workflow name, git URI or package directory" in error, words
+        assert "without --campaign" in error
 
 
 def test_children_stay_in_their_parents_workspace(tmp_path: Path) -> None:
@@ -147,7 +143,7 @@ def test_collect_crosses_the_partitions_lazily_in_stable_order(tmp_path: Path, c
     assert len(list(campaign_collect(steps=["start"], project=root))) == 2
     assert list(campaign_collect(steps=["relax"], project=root)) == []
     for step, collected in (("start", 2), ("relax", 0)):
-        assert command(["campaign", "collect", "--raw", "--step", step], CLIContext("httk", root)) == 0
+        assert command(["collect", "--campaign", "--raw", "--step", step], CLIContext("httk", root)) == 0
         summary = json.loads(capsys.readouterr().out.splitlines()[-1])
         assert (summary["collected"], summary["skipped_unreadable"]) == (collected, 0)
 
@@ -169,8 +165,8 @@ def test_campaign_collect_into_skips_degraded_jobs_and_exits_nonzero(tmp_path: P
     assert (
         command(
             [
-                "campaign",
                 "collect",
+                "--campaign",
                 "--allow-job-collector",
                 "--into",
                 str(store),
@@ -194,12 +190,38 @@ def test_campaign_collect_into_skips_degraded_jobs_and_exits_nonzero(tmp_path: P
 def test_campaign_collect_rejects_into_with_raw(tmp_path: Path, capsys) -> None:
     root, _ = _campaign_project(tmp_path, "explicit")
     context = CLIContext("httk", root)
-    assert command(["campaign", "collect", "--raw", "--into", str(tmp_path / "x.sqlite")], context) == 2
+    assert command(["collect", "--campaign", "--raw", "--into", str(tmp_path / "x.sqlite")], context) == 2
     assert "--into cannot be combined with --raw" in capsys.readouterr().err
 
 
+def test_collect_campaign_selects_partitions_and_refuses_what_does_not_apply(tmp_path: Path, capsys) -> None:
+    root, workspaces = _campaign_project(tmp_path, "explicit")
+    for partition in ("north", "south"):
+        _run_one(tmp_path, workspaces[partition], partition)
+    context = CLIContext("httk", root)
+
+    assert command(["collect", "--campaign", "--raw", "--partition", "south"], context) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [json.loads(line)["workspace_id"] for line in lines[:-1]] == [workspaces["south"].workspace_id]
+    assert command(["collect", "--campaign", "--partition", "east"], context) == 2
+    assert "unknown campaign partition: east" in capsys.readouterr().err
+
+    for extra, message in (
+        ([str(workspaces["north"].root)], "PATH does not apply with --campaign"),
+        (["-w", "north"], "--workspace does not apply with --campaign"),
+        (["--job", "x"], "--job does not apply with --campaign"),
+        (["--postprocess", "report"], "--postprocess does not apply with --campaign"),
+        (["--dry-run"], "--dry-run only applies to a calculation tree"),
+        (["--exclude", "x"], "--exclude only applies to a calculation tree"),
+    ):
+        assert command(["collect", "--campaign", *extra], context) == 2, extra
+        assert message in capsys.readouterr().err, extra
+    assert command(["collect", "--partition", "north"], context) == 2
+    assert "--partition applies only with --campaign" in capsys.readouterr().err
+
+
 def test_collect_refuses_and_names_a_remote_partition(tmp_path: Path) -> None:
-    """A remote workspace is collected where it runs; the campaign collect names any
+    """A remote workspace is collected where it runs; collect --campaign names any
     remote partition rather than silently skipping it."""
 
     root = tmp_path / "project"
@@ -292,7 +314,7 @@ def test_campaign_remote_manager_failure_is_reported_and_returns_nonzero(
         return {"returncode": 7, "stdout": "remote output\n", "stderr": "remote failure\n"}
 
     monkeypatch.setattr(adapters, "run_adapter", refused)
-    assert command(["campaign", "start-managers"], context) == 1
+    assert command(["run", "--campaign"], context) == 1
     report = json.loads(capsys.readouterr().out)[0]
     assert report["returncode"] == 7
     assert report["stdout"] == "remote output\n"

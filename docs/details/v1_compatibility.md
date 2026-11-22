@@ -13,7 +13,7 @@ select its claim pool with `--pool`.
 ```console
 httk workspace init WORKSPACE
 httk workflow install --workspace WORKSPACE ./legacy-package
-httk job new --workspace WORKSPACE --workflow-dir ./legacy-package \
+httk job new --workspace WORKSPACE ./legacy-package \
   --placement project-a/00/17
 httk run --workspace WORKSPACE --pool vasp
 ```
@@ -108,7 +108,7 @@ The v1 realization declares these workflow environment entries:
 Override them per job from the CLI or the Python API:
 
 ```console
-httk job new --workspace WORKSPACE --workflow-dir ./legacy-package \
+httk job new --workspace WORKSPACE ./legacy-package \
   --environment httk_v1.timeout=3600
 ```
 
@@ -135,7 +135,7 @@ language is given: it wraps the directory in a generated package named
 
 ```console
 httk workflow install --workspace WORKSPACE --language httk-v1 ./legacy
-httk job new --workspace WORKSPACE --workflow httk-v1.legacy
+httk job new --workspace WORKSPACE httk-v1.legacy
 ```
 
 `new_job(workspace, "./legacy", format="httk-v1")` does both. Such a package

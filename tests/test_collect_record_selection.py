@@ -365,7 +365,7 @@ def test_collect_records_usage_errors(tmp_path: Path, capsys: pytest.CaptureFixt
 def test_campaign_and_v1_collect_take_records(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     context = CLIContext("httk", tmp_path)
     records = ["--records", "structures=atomistic-numeric-unitcell-structure"]
-    for argv in (["campaign", "collect"], ["v1", "collect", str(tmp_path), "--workflow-dir", str(tmp_path)]):
+    for argv in (["collect", "--campaign"], ["v1", "collect", str(tmp_path), "--workflow-dir", str(tmp_path)]):
         assert command([*argv, *records], context) == 2, argv
         assert "--records only applies with --into" in capsys.readouterr().err, argv
 

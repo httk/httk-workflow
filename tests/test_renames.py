@@ -254,9 +254,7 @@ def test_retired_lifecycle_spellings_are_gone() -> None:
         assert "output_types" not in declaration
     parser = cli.build_parser("httk workflow", CLIContext("httk", Path.cwd()))
     with pytest.raises(SystemExit):
-        parser.parse_args(
-            ["job", "new", "--workspace", "WS", "--workflow", "test-relax", "--parameter-from", "structure", "x"]
-        )
+        parser.parse_args(["job", "new", "--workspace", "WS", "test-relax", "--parameter-from", "structure", "x"])
     root = Path(httk.workflow.__file__).parents[2]
     retired = re.compile(
         r"\b(?:TemplateProvider|register_template|resolve_template|registered_templates|template_provider|"

@@ -2,7 +2,7 @@
 
 This is a script, not a test. One invocation measures, on N jobs in a local workspace, the commands::
 
-    job new --workspace WS --workflow URI --install --input-from structure DIR --duplicate-tag skip
+    job new --workspace WS URI --install --input-from structure DIR --duplicate-tag skip
     job cancel --reason bench SEL...              (on the N fresh ready jobs)
     job delete --yes SEL...                       (on the N cancelled jobs)
     job pause --reason bench SEL...               (on N fresh ready jobs, a second workspace)
@@ -535,7 +535,7 @@ def command_arguments(
 
     if command == "new":
         source = ["--input-from", "structure", str(structures), "--duplicate-tag", "skip"]
-        return ["job", "new", "--workspace", str(workspace), "--workflow", workflow, "--install", *source]
+        return ["job", "new", "--workspace", str(workspace), workflow, "--install", *source]
     if command == "delete":
         return ["job", "delete", "--workspace", str(workspace), "--yes", *selection]
     verb = "resume" if command == "continue" else command

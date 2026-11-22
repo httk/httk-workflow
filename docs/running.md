@@ -6,7 +6,7 @@ they are done, look at what happened, and collect the results.
 
 ```console
 httk workflow install --workspace default 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon
+httk job new vasp.relax --input structure=POSCAR --tag silicon
 httk run
 httk job list
 httk collect --into results.sqlite --id-base httk.campaign
@@ -27,13 +27,14 @@ httk workflow list -w default
 `httk workflow fetch URI` only fetches the repository into this machine's
 cache, without installing it in a workspace. `httk job new` then instantiates jobs:
 
-| `--workflow` / option | Selects |
+| SOURCE / option | Selects |
 | --- | --- |
 | `vasp.relax` | an installed workflow by short name (or id) |
-| `--workflow 'git+…#vasp-relax' --install` | a workflow not installed yet, installed first |
-| `--workflow-dir ./my-workflow --install` | a local workflow package directory |
-| `--from-runner ./relax.py` | a runner file of your own, installed ad hoc |
-| `--from-runner flow.cwl` | a CWL, PWD or jobflow document ({doc}`workflow_compat`) |
+| `'git+…#vasp-relax' --install` | a workflow not installed yet, installed first |
+| `./my-workflow --install` | a local workflow package directory |
+| `./relax.py` | a runner file of your own, installed ad hoc |
+| `flow.cwl` | a CWL, PWD or jobflow document ({doc}`workflow_compat`) |
+| `--command 'my_executable {input}'` | a one-step runner generated from a command line |
 
 Declared **inputs** are files or entries the workflow stages into the payload
 (`--input structure=POSCAR`); **parameters** are plain values
@@ -63,7 +64,7 @@ file back to its job by hand.
 Many jobs at once come from a directory of inputs, one job per file:
 
 ```console
-httk job new --workflow vasp.relax --input-from structure structures/ --parameter kpoint_density=30.0
+httk job new vasp.relax --input-from structure structures/ --parameter kpoint_density=30.0
 ```
 
 The same thing streams from Python, which is how a campaign of any size is

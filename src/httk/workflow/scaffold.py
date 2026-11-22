@@ -401,7 +401,7 @@ def register_workflow(provider: WorkflowProvider) -> None:
     """Register one packaged workflow, replacing any registered under its name.
 
     A domain calls this once per workflow it ships when its package is imported,
-    which is how ``httk job new --workflow NAME`` resolves a packaged
+    which is how ``httk job new NAME`` resolves a packaged
     runner the generic scaffold never names.
 
     :param provider: Supply the workflow provider to register.
@@ -2790,7 +2790,7 @@ def _installed(
             and _store.source_digest(path) != found.record.get("tree_sha256")
         ):
             return _store.install(workspace, owner, path)
-    elif not path.exists():
+    elif not _source_path(path, language):
         found = _lookup_by_name(workspace, text)
     if found is not None:
         return found
@@ -2803,6 +2803,34 @@ def _installed(
         f"install it first with `httk workflow install --workspace {shlex.quote(str(workspace.root))} "
         f"{shlex.quote(text)}`, or create the job with `httk job new --install` (install=True)"
     )
+
+
+def _source_path(path: Path, language: str | None) -> bool:
+    """Whether *path* names a source path, not a workflow name, as an install reads it.
+
+    That is an existing file, a package directory, or with *language* any directory; another directory of a
+    workflow's name where the job is created does not hide that workflow.
+    """
+
+    from .packages import MANIFEST_NAME
+
+    return path.is_file() or (path.is_dir() and (language is not None or (path / MANIFEST_NAME).is_file()))
+
+
+def _refuse_taken_tags(workspace: Workspace, placement: str | PurePosixPath, tags: Iterable[str]) -> None:
+    """Refuse, as :func:`new_jobs` does with ``duplicate_tag="refuse"``, the first of *tags* a job at *placement* has.
+
+    :param workspace: The workspace whose jobs are looked up.
+    :param placement: The exact placement the new jobs go to.
+    :param tags: The new jobs' tags.
+    :raises httk.workflow.errors.DuplicateTagError: For the first tag taken at exactly *placement*.
+    """
+
+    index = _TagIndex(workspace)
+    where = normalize_placement(placement)
+    for tag in tags:
+        if (existing := index.existing(where, tag)) is not None:
+            raise DuplicateTagError(tag, where, existing)
 
 
 def _lookup_by_name(workspace: Workspace, reference: str) -> Installed | None:
@@ -2831,12 +2859,12 @@ def _embedded_snapshot(
     from . import _store
 
     path = Path(os.fspath(workflow)).expanduser()
-    found = None if path.exists() else _lookup_by_name(workspace, os.fspath(workflow))
+    found = None if _source_path(path, language) else _lookup_by_name(workspace, os.fspath(workflow))
     if found is not None:
         workflow_id, name, provider = found.id, found.name, found.provider()
     else:
         workflow_id, name, provider, _ = _store._resolve(
-            workflow, work, step, by_name=not path.exists(), language=language
+            workflow, work, step, by_name=not _source_path(path, language), language=language
         )
     if provider.language is not None:
         raise ValueError(

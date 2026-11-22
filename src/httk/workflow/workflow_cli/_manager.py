@@ -866,9 +866,17 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
     managers through the remote's scheduler over its adapter; on a mount-daemon
     remote, a typed start request asks its daemon for an approved configuration.
     ``--keep-running`` keeps a local manager serving after the workspace becomes
-    idle; otherwise the command exits when it becomes idle.
+    idle; otherwise the command exits when it becomes idle. ``--campaign`` starts a manager per selected
+    partition of this project's campaign instead.
     """
 
+    if arguments.campaign:
+        from ._campaign import run_campaign
+
+        protocol = {"workspace": None, "configuration": None, "request_id": None, "wait_seconds": None}
+        return run_campaign(arguments, context, {**manager_option_defaults(), **protocol, "no_durable": False})
+    if arguments.partition:
+        raise ValueError("--partition applies only with --campaign")
     binding, root = _resolve_binding(arguments, context)
     daemon = False
     if root is None:
@@ -913,6 +921,19 @@ def build_run_parser(
         handler=handle_manager_run,
     )
     add_run_arguments(parser)
+    parser.add_argument(
+        "--campaign",
+        action="store_true",
+        help="start a manager per selected partition of this project's campaign: through its launcher locally, "
+        "or on the remote owner",
+    )
+    parser.add_argument(
+        "--partition",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="with --campaign: start managers only for this partition (repeatable, default: all of them)",
+    )
     parser.add_argument(
         "--configuration",
         metavar="NAME",

@@ -34,15 +34,15 @@ default = 520
 
 ```console
 httk workflow install --workspace WS my-workflow
-httk job new --workspace WS --workflow example.relax --input structure=POSCAR
+httk job new --workspace WS example.relax --input structure=POSCAR
 ```
 
 installs it (id `local:example.relax`) and instantiates a job from it;
-`httk job new --workflow-dir my-workflow --install ...` does both in one
+`httk job new my-workflow --install ...` does both in one
 command, and installs again when `my-workflow` has changed since. To edit the
 runner for a single job instead, unlock that job (`httk job unlock`, see
-{doc}`restarting_jobs`). A single runner file (`--from-runner`) or command
-(`--from-command`) needs no package: `job new` installs it ad hoc. Beyond runner, inputs and parameters, the manifest can declare
+{doc}`restarting_jobs`). A single runner file (`job new FILE`) or command
+(`job new --command TEMPLATE`) needs no package: `job new` installs it ad hoc. Beyond runner, inputs and parameters, the manifest can declare
 typed workspace settings the runner consumes (`[workflow.environment.*]`)
 and the other settings it reads (`settings`),
 hooks that run at instantiation and collection (`[workflow.instantiate]`,
@@ -64,14 +64,14 @@ git+https://github.com/<org>/<repo>[@<ref>][#<subdir>]
 
 ```console
 httk workflow install --workspace WS 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-httk job new --workspace WS --workflow vasp.relax --input structure=POSCAR
+httk job new --workspace WS vasp.relax --input structure=POSCAR
 httk workflow uninstall --workspace WS vasp.relax
 ```
 
 Installing a URI fetches the repository and installs the workflow under the
 canonical URI with the ref expanded to the full commit; every job records that
 id. Once installed, the manifest's `name` is its short name, and
-`job new --workflow URI --install` installs on first use. Only `git+https://`, `git+http://` and `git+file://`
+`job new URI --install` installs on first use. Only `git+https://`, `git+http://` and `git+file://`
 URIs without credentials are accepted. Referencing a URI is consent to run its
 code with the trust of an installed plugin. A repository that also carries an
 `httk_plugin.toml` installs as a plugin with `httk plugin install`.
@@ -105,16 +105,16 @@ or, for large shared files, read from the parent's workdir in place. See
 A job can embed its own workflow instead of naming an installation. With
 `job new --embed-workflow` the workflow's package is copied into the job's own
 `workflow/` directory and nothing is installed in the workspace store, which
-suits one-off jobs (`--from-command`, a runner file, a package directory under
+suits one-off jobs (`--command`, a runner file, a package directory under
 development) and jobs whose code must travel and be sealed with them:
 
 ```console
-httk job new --workspace WS --embed-workflow --workflow-dir ./my_relax --input structure=POSCAR
-httk job new --workspace WS --embed-workflow --from-command 'my_executable {input}' --file input=a.dat
+httk job new --workspace WS --embed-workflow ./my_relax --input structure=POSCAR
+httk job new --workspace WS --embed-workflow --command 'my_executable {input}' --file input=a.dat
 ```
 
-`--embed-workflow` works with `--workflow`, `--workflow-dir`, `--from-runner` and
-`--from-command`, and is refused together with `--install`. The job records the
+`--embed-workflow` works with every SOURCE and with `--command`, and is refused
+together with `--install`. The job records the
 id `embedded:<name>@<first 12 hex digits of the tree digest>` and the tree digest
 in `job.json`, together with the runner entry or command, the steps, the
 fixed calls, the call-slot interfaces and `requires`, all read from the manifest

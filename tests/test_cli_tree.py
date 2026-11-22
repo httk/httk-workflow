@@ -70,7 +70,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "remote": ("list", "add", "set", "unset", "check", "import-v1", "show", "remove", "take-back"),
     "manager": ("status", "log", "cancel"),
     "launcher": ("list", "add", "set", "unset", "show", "check", "remove"),
-    "campaign": ("init", "show", "set", "unset", "submit", "collect", "start-managers"),
+    "campaign": ("init", "show", "set", "unset", "remove"),
 }
 
 #: Superseded group spellings that were removed: ``tasks`` was the transfer
@@ -261,7 +261,7 @@ def test_the_job_options_of_the_runner_store_and_per_job_modes_are_removed(tmp_p
     """Workflows are installed (no runner publication), and a job has no workdir or data mode."""
 
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    new = ["job", "new", "--from-command", "true"]
+    new = ["job", "new", "--command", "true"]
     for removed in (
         [*new, "--publish", "workspace"],
         [*new, "--workdir-mode", "persistent"],
@@ -411,7 +411,7 @@ def test_top_level_run_reports_an_idle_timeout_without_a_traceback(tmp_path: Pat
     assert "Traceback" not in error
 
 
-def test_campaign_start_managers_forwards_idle_timeout(tmp_path: Path, monkeypatch) -> None:
+def test_run_campaign_forwards_the_manager_options(tmp_path: Path, monkeypatch, capsys) -> None:
     seen: dict[str, object] = {}
 
     def fake_campaign_managers(**arguments: object) -> list[dict[str, object]]:
@@ -419,36 +419,63 @@ def test_campaign_start_managers_forwards_idle_timeout(tmp_path: Path, monkeypat
         return []
 
     monkeypatch.setattr(_campaign, "campaign_managers", fake_campaign_managers)
-    assert (
-        command(
-            [
-                "campaign",
-                "start-managers",
-                "--idle-timeout",
-                "10",
-                "--worker-resource",
-                "procs",
-                "4",
-            ],
-            _context(tmp_path),
-        )
-        == 0
+    argv = ["run", "--campaign", "--idle-timeout", "10", "--worker-resource", "procs", "4", "--partition", "north"]
+    assert command(argv, _context(tmp_path)) == 0
+    assert (seen["idle_timeout"], seen["resources"], seen["count"], seen["partitions"]) == (
+        10.0,
+        {"procs": 4},
+        None,
+        ["north"],
     )
-    assert seen["idle_timeout"] == 10.0
-    assert seen["resources"] == {"procs": 4}
-    assert seen["count"] is None
 
-    assert command(["campaign", "start-managers", "--count", "3"], _context(tmp_path)) == 0
-    assert seen["count"] == 3
+    assert command(["run", "--campaign", "--count", "3", "--workers", "2", "--launcher", "L"], _context(tmp_path)) == 0
+    assert (seen["count"], seen["workers"], seen["launcher"], seen["partitions"]) == (3, 2, "L", None)
+    capsys.readouterr()
+
+    # The partitions name their workspaces, and options a campaign run does not pass on are refused.
+    for refused, flag in (
+        (["-w", "WS"], "--workspace"),
+        (["--keep-running"], "--keep-running"),
+        (["--placement", "p"], "--placement"),
+        (["--inline"], "--inline"),
+        (["--configuration", "c"], "--configuration"),
+    ):
+        assert command(["run", "--campaign", *refused], _context(tmp_path)) == 2
+        assert f"{flag} does not apply with --campaign" in capsys.readouterr().err
+    assert command(["run", "--partition", "north"], _context(tmp_path)) == 2
+    assert "--partition applies only with --campaign" in capsys.readouterr().err
 
 
-def test_campaign_start_managers_returns_nonzero_for_a_failed_partition(tmp_path: Path, monkeypatch) -> None:
+def test_run_campaign_returns_nonzero_for_a_failed_partition(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         _campaign,
         "campaign_managers",
         lambda **_arguments: [{"partition": "north", "result": 2}],
     )
-    assert command(["campaign", "start-managers"], _context(tmp_path)) == 1
+    assert command(["run", "--campaign"], _context(tmp_path)) == 1
+
+
+#: The root-help section of every top-level command httk-workflow registers.
+WORKFLOW_SECTIONS = {
+    "Setup": ("config",),
+    "Organize": ("workspace", "remote", "launcher", "daemon", "campaign"),
+    "Run": ("workflow", "job", "run", "monitor", "push", "pull", "manager"),
+    "Results": ("collect", "postprocess"),
+    "Legacy": ("v1",),
+}
+
+
+def test_root_help_lists_every_workflow_command_under_its_section(capsys) -> None:
+    assert main(["--help"]) == 0
+    sections: dict[str, set[str]] = {}
+    current = ""
+    for line in capsys.readouterr().out.splitlines():
+        if line and not line.startswith(" "):
+            current = line.removesuffix(":")
+        elif line.startswith("  ") and line.strip():
+            sections.setdefault(current, set()).add(line.split()[0])
+    for section, names in WORKFLOW_SECTIONS.items():
+        assert set(names) <= sections.get(section, set()), section
 
 
 def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
@@ -561,7 +588,7 @@ def test_renamed_options_and_short_flags_parse_to_their_destinations(tmp_path: P
     from httk.workflow.workflow_cli import _describe
 
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    parsed = parser.parse_args(["job", "new", "--workflow", "W", "--start-step", "s", "-p", "a=1", "-i", "b=2"])
+    parsed = parser.parse_args(["job", "new", "W", "--start-step", "s", "-p", "a=1", "-i", "b=2"])
     assert (parsed.step, parsed.parameters, parsed.inputs) == ("s", ["a=1"], ["b=2"])
     assert parser.parse_args(["job", "debug", "J", "--start-step", "s"]).step == "s"
     assert parser.parse_args(["show", "T", "--language", "cwl"]).format == "cwl"

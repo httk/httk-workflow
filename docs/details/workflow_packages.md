@@ -44,10 +44,10 @@ A package runs only once it is installed in a workspace, which copies it to
 ```console
 httk workflow show ./my-workflow
 httk workflow install --workspace WS ./my-workflow
-httk job new --workspace WS --workflow example.relax --input structure=POSCAR
+httk job new --workspace WS example.relax --input structure=POSCAR
 ```
 
-`httk job new --workflow-dir ./my-workflow --install` installs and creates the
+`httk job new ./my-workflow --install` installs and creates the
 job in one command. In Python, `new_job(workspace, "my-workflow", install=True)`
 does the same, and
 `httk.workflow.packages.load_workflow_package` registers a package
@@ -733,7 +733,7 @@ the foreground:
 ```console
 httk workflow install --workspace WORKSPACE ./my-workflow
 httk workflow build --workspace WORKSPACE examples.chain-rust
-httk job new --workspace WORKSPACE --workflow examples.chain-rust --start-step prepare
+httk job new --workspace WORKSPACE examples.chain-rust --start-step prepare
 httk run --workspace WORKSPACE
 ```
 
@@ -1009,7 +1009,7 @@ the cached checkouts.
 
 ### Resolution precedence
 
-`httk workflow install` (and `--install` on `job new` and `campaign submit`)
+`httk workflow install` (and `--install` on `job new`, with or without `--campaign`)
 resolves its source as a package directory (id `local:<name>`), a git URI
 (fetched with {py:func}`~httk.workflow.git_workflows.fetch_workflow`; id the
 canonical URI), a runner file or bare workflow document (an ad hoc package,
@@ -1022,10 +1022,15 @@ most recently referenced commit, and several lineages are an error naming
 the competing URIs. `workflow list --available` and the unknown-workflow hint include
 fetched short names that are neither shadowed nor conflicted.
 
-Without installing, `new_job` and `job new --workflow` look the workflow up
-in the workspace store by id or short name, and map a package directory,
-alias or fetched git URI to the id it would be installed under; a runner
-file, `--from-command` or bare document is always installed ad hoc.
+`job new SOURCE` tells the same kinds apart in the same order: an existing
+runner file, document or package directory before a git URI before a name.
+A directory without `httk_workflow.toml` is read as a name unless
+`--language` names a directory format, so a directory of a workflow's name
+where the job is created does not hide that workflow. Without installing,
+`new_job` and `job new` look the workflow up in the workspace store by id or
+short name, and map a package directory, alias or fetched git URI to the id
+it would be installed under; a runner file, `--command` or bare document is
+always installed ad hoc.
 `workflow show` resolves through
 {py:func}`~httk.workflow.scaffold.resolve_workflow`, fetching a git URI but
 installing nothing.
@@ -1060,7 +1065,7 @@ the remedies: reinstall the tree it ran with, or rerun it on the installed
 tree (`httk job restart --reason TEXT JOB` for a failed or paused job,
 or `job resume --tree` when it failed waiting on failed children; a succeeded job
 is deleted with `httk job delete` and created again).
-`job new --workflow-dir DIR --install` reinstalls when the sources
+`job new DIR --install` reinstalls when the sources
 of `DIR` have changed since the installation (compared by the installed
 digest's rules, ignoring `.git` and declared build artifacts), so an
 edited package directory is picked up by the next job. To iterate on a runner
@@ -1084,7 +1089,7 @@ The usual lifecycle is install, instantiate, run, then collect:
 
 ```console
 httk workflow install --workspace WS ./my-workflow
-httk job new --workspace WS --workflow example.relax \
+httk job new --workspace WS example.relax \
     --input-from structure structures/ \
     --parameter kpoint_density=30.0 \
     --placement project/screening
@@ -1128,8 +1133,8 @@ the short version is in {doc}`/workflow_packages`.
 
 ### Creating a job with an embedded workflow
 
-`--embed-workflow` combines with `--workflow ID|ALIAS|GIT-URI`, `--workflow-dir DIR`,
-`--from-runner FILE` and `--from-command CMD` (and the API's
+`--embed-workflow` combines with every SOURCE (an installed id or alias, a git URI, a package
+directory, a runner file) and with `--command CMD` (and the API's
 `new_job(..., embed_workflow=True)` / `new_jobs(..., embed_workflow=True)`), and is refused with
 `--install`. Nothing is installed; fetching a git URI into the fetch cache is
 allowed, as for `workflow show`. The creator resolves the package, builds one

@@ -6,4 +6,5 @@ register_cli_command(
     "workspace",
     "httk.workflow.workflow_cli:workspace_command",
     "manage workflow workspaces",
+    section="Organize",
 )

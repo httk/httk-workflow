@@ -9,12 +9,12 @@ collected like any other.
 
 | Format | How a job is made | Needs |
 | --- | --- | --- |
-| CWL | `job new --from-runner flow.cwl --input message=echo` | `httk-workflow[cwl]` where the job is prepared |
-| PWD | `job new --from-runner graph.json` | nothing extra |
-| jobflow | `job new --from-runner maker.json`, or a package with `format = "jobflow"` | `httk-workflow[jobflow]` (and `[atomate2]`) where the job runs |
+| CWL | `job new flow.cwl --input message=echo` | `httk-workflow[cwl]` where the job is prepared |
+| PWD | `job new graph.json` | nothing extra |
+| jobflow | `job new maker.json`, or a package with `format = "jobflow"` | `httk-workflow[jobflow]` (and `[atomate2]`) where the job runs |
 | httk v1 | a package with `format = "httk-v1"` | nothing extra |
 
-`job new --from-runner` installs a bare document ad hoc as a workflow named
+`job new DOCUMENT` installs a bare document ad hoc as a workflow named
 `<format>.<stem>`. A workflow package, installed with
 `httk workflow install --workspace WS DIR` (or `job new --install`), declares the format in `[workflow.runner]` instead, which
 lets it name inputs, outputs and parameters properly:

@@ -109,7 +109,7 @@ an `adhoc:defects@<sha12>` workflow, and every job, parent and child, runs that
 installation:
 
 ```console
-httk job new --workspace workflow-workspace --from-runner defects.sh --start-step characterize \
+httk job new --workspace workflow-workspace defects.sh --start-step characterize \
     --parameter encut=520 --placement project/si-vacancies
 ```
 
@@ -151,7 +151,7 @@ and touches nothing on disk. `httk_workflow_main --describe` does the same. The
 step set is also recorded in the job's `state.json` as `runner_steps`, from the
 first outcome the job publishes.
 
-`job new --from-runner FILE` executes FILE in this describe mode to infer its
+`job new FILE` executes FILE in this describe mode to infer its
 workflow and initial step when it installs FILE as an `adhoc:` workflow. The file must call `httk_workflow_runner WORKFLOW
 STEP...` before any work, including before `httk_workflow_main`; a file that
 never registers fails deterministically with the file name and that missing-call

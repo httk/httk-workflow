@@ -13,13 +13,13 @@ An installed package of a format records it as `runner.builtin` in its
 
 | Format | Bare document or package form | Built-in runner |
 | --- | --- | --- |
-| CWL | `job new --workspace WS --from-runner flow.cwl` | `httk.workflow.compat.cwl/cwl_runner.py` |
-| PWD | `job new --workspace WS --from-runner graph.json` | `httk.workflow.compat.pwd/pwd_runner.py` |
-| jobflow | `job new --workspace WS --from-runner maker.json`, or a package with `format = "jobflow"` | `httk.workflow.compat.jobflow/jobflow_runner.py` |
+| CWL | `job new --workspace WS flow.cwl` | `httk.workflow.compat.cwl/cwl_runner.py` |
+| PWD | `job new --workspace WS graph.json` | `httk.workflow.compat.pwd/pwd_runner.py` |
+| jobflow | `job new --workspace WS maker.json`, or a package with `format = "jobflow"` | `httk.workflow.compat.jobflow/jobflow_runner.py` |
 | httk-v1 | a package with `format = "httk-v1"` | `httk.workflow.compat.v1/v1_runner.py` |
 
 A package directory is installed first, with `httk workflow install
---workspace WS DIR`, `job new --workflow-dir DIR --install` or
+--workspace WS DIR`, `job new DIR --install` or
 `new_job(..., install=True)`; see {doc}`/details/workflow_packages`.
 
 ## Optional extras
@@ -496,10 +496,10 @@ runtime behavior.
 Maker `.json` document, and installs it ad hoc before creating the job:
 
 ```console
-httk job new --workspace WS --from-runner flow.cwl --input message=echo
-httk job new --workspace WS --from-runner workflow.json \
+httk job new --workspace WS flow.cwl --input message=echo
+httk job new --workspace WS workflow.json \
   --parameter pwd_module_path='["."]'
-httk job new --workspace WS --from-runner maker.json
+httk job new --workspace WS maker.json
 ```
 
 When path matching is not appropriate, `--language LANGUAGE` selects the reader:

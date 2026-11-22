@@ -109,7 +109,7 @@ def test_help_of_a_transfer_verb_stays_lean(argvs: list[list[str]]) -> None:
 
 
 def test_adopting_a_bundle_stays_lean(tmp_path: Path) -> None:
-    # A fetched git workflow in another format on this machine: listing it in ``job new --workflow`` help would
+    # A fetched git workflow in another format on this machine: listing it in ``job new SOURCE`` help would
     # parse it, importing every compat language and with them collecting.
     root = tmp_path / "repo"
     root.mkdir()

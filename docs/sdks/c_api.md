@@ -48,7 +48,7 @@ cc -std=c99 -Wall -Wextra runner.c \
    -I.../httk/workflow/languages/c -o runner
 ```
 
-The compiled binary is an executable runner file: `httk job new --from-runner`
+The compiled binary is an executable runner file: `httk job new FILE`
 describes it by running it and installs it as an `adhoc:` workflow whatever
 language wrote it, and the manager runs the installed copy directly.
 

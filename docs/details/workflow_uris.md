@@ -38,14 +38,14 @@ installed first, or with `--install` on first use:
 
 ```console
 httk workflow install --workspace WS 'git+https://github.com/httk/workflows-vasp#vasp-relax'
-httk job new --workspace WS --workflow vasp.relax --input structure=POSCAR
+httk job new --workspace WS vasp.relax --input structure=POSCAR
 
 httk job new --workspace WS --install \
-    --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' \
+    'git+https://github.com/httk/workflows-vasp#vasp-relax' \
     --input structure=POSCAR
 ```
 
-`httk campaign submit --install`, {py:func}`~httk.workflow.scaffold.new_job`
+`httk job new --campaign --install`, {py:func}`~httk.workflow.scaffold.new_job`
 with `install=True`, and `[workflow.calls]` of an installed package (which
 must pin the full commit) install the same way. With `--install` a URI is
 fetched each time, but an installation that installing it again would only
@@ -179,8 +179,8 @@ workspaces move freely between a machine that installed it with pip and one
 that fetched it from GitHub.
 
 Only committed content is installed; the tree is always taken from git
-objects, never from the working tree, so install a package path (or use
-`--workflow-dir`) to run a working copy. An editable install follows the
+objects, never from the working tree, so install a package path (or give
+it to `job new` as SOURCE) to run a working copy. An editable install follows the
 clone's current HEAD and tags; a wheel offers the HEAD and tags of the time it
 was built, so after adding a tag at an unchanged HEAD reinstall with
 `pip install --force-reinstall --no-deps .`. A running process keeps the pip

@@ -57,7 +57,7 @@ httk_workflow = { path = ".../httk/workflow/languages/rust" }
 cargo build --release --offline
 ```
 
-The compiled binary is an executable runner file: `httk job new --from-runner`
+The compiled binary is an executable runner file: `httk job new FILE`
 describes it by running it and installs it as an `adhoc:` workflow whatever
 language wrote it, and the manager runs the installed copy directly.
 
