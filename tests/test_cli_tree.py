@@ -67,7 +67,8 @@ GROUPS: dict[str, tuple[str, ...]] = {
     ),
     "v1": ("collect",),
     "config": ("show", "set", "unset", "import-v1"),
-    "remote": ("list", "add", "set", "unset", "check", "import-v1", "show", "remove"),
+    "remote": ("list", "add", "set", "unset", "check", "import-v1", "show", "remove", "take-back"),
+    "manager": ("status", "log", "cancel"),
     "launcher": ("list", "add", "set", "unset", "show", "check", "remove"),
     "campaign": ("init", "show", "set", "unset", "submit", "collect", "start-managers"),
 }
@@ -175,6 +176,10 @@ def test_the_removed_spellings_are_absent_from_the_help(tmp_path: Path, capsys) 
         ["precheck"],
         ["seal", "verify"],
         ["transfer", "status"],
+        ["workspace", "daemon", "show", "/data"],
+        ["workspace", "exchange", "enable"],
+        ["remote", "daemon", "show", "cluster"],
+        ["manager", "run"],
     ):
         assert command(removed, _context(tmp_path)) == 2
         assert "invalid choice" in capsys.readouterr().err
@@ -211,14 +216,6 @@ def test_an_unknown_action_under_a_known_group_names_that_group(tmp_path: Path, 
     # The group's own actions are what it offers instead, not the tree's groups.
     # (argparse dropped the quotes around each choice in 3.13+, so match the bare name.)
     assert "repair" in captured and "remote" not in captured
-
-
-def test_an_unknown_action_under_a_nested_group_names_that_nested_group(capsys) -> None:
-    # `workspace exchange` is a nested group of a tree httk-workflow mounts on the core
-    # `httk` command; a mistyped action still names the nested group it is under.
-    assert main(["workspace", "exchange", "frobnicate"]) == 2
-    captured = capsys.readouterr().err
-    assert "httk workspace exchange" in captured and "invalid choice: 'frobnicate'" in captured
 
 
 def test_an_unknown_group_names_the_tree(tmp_path: Path, capsys) -> None:
@@ -510,7 +507,7 @@ def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
         parser.parse_args(["internal", "receive", "--workspace", "/w", "--bundle", "/b"])
 
 
-@pytest.mark.parametrize("group", ["launcher", "remote", "config", "campaign", "v1"])
+@pytest.mark.parametrize("group", ["launcher", "remote", "config", "campaign", "v1", "manager"])
 def test_promoted_groups_are_discoverable_at_root(group, tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert main([group, "--help"]) == 0

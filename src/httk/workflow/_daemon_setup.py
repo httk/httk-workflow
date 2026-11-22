@@ -1,5 +1,6 @@
 """Trusted local enrollment and publication for the workspace daemon."""
 
+import contextlib
 import hashlib
 import json
 import os
@@ -400,7 +401,7 @@ def _cluster(cluster: str | None, slurm_conf: Path | None, scontrol: Path | None
 
 
 def _setting(key: str, value: str) -> object:
-    """Return the stored form of one ``--set`` value; executables resolve and relative paths anchor to the cwd."""
+    """Return the stored form of one set value; executables resolve and relative paths anchor to the cwd."""
 
     if key in _LIST_KEYS:
         return value.split(",") if value else []
@@ -426,9 +427,9 @@ def _apply(document: dict[str, object], changes: Sequence[tuple[str, str]], keys
     for operation, item in changes:
         key, separator, value = item.partition("=")
         if operation == "unset" and separator:
-            raise ValueError(f"--unset expects KEY, not KEY=VALUE: {item!r}")
+            raise ValueError(f"unset expects KEY, not KEY=VALUE: {item!r}")
         if operation != "unset" and not separator:
-            raise ValueError(f"--{operation} expects KEY=VALUE: {item!r}")
+            raise ValueError(f"{operation} expects KEY=VALUE: {item!r}")
         if key not in keys:
             if key in INITIALIZE_KEYS:
                 raise ValueError(f"{key} is fixed by the enrollment; changing it requires a new enrollment")
@@ -436,7 +437,7 @@ def _apply(document: dict[str, object], changes: Sequence[tuple[str, str]], keys
         if operation == "unset":
             defaults = {"sacct": None, "slurm_conf": None, "max_submissions": _DEFAULT_MAX_SUBMISSIONS, "force": False}
             if key not in defaults:
-                raise ValueError(f"daemon configuration {key} is required; use --set to replace it")
+                raise ValueError(f"daemon configuration {key} is required; set it to replace it")
             document[key] = defaults[key]
             continue
         if operation == "set":
@@ -709,7 +710,7 @@ def _write_daemon_document(policy: Policy) -> None:
     except (OSError, ExchangeUnavailableError) as exc:
         raise ValueError(
             f"cannot publish {policy.exchange / _DAEMON_DOCUMENT}: {exc}; the workspace's exchange must be "
-            "a real directory ('httk workspace exchange enable' creates it)"
+            "a real directory ('httk daemon init' creates it)"
         ) from exc
 
 
@@ -724,7 +725,7 @@ def _load_configuration(policy: Policy) -> _Configuration:
         raise ValueError(
             f"the daemon directory {policy.daemon} has no {_CONFIGURATION_FILE}; this enrollment predates the saved "
             "configuration and is not migrated. Remove its daemon directory and run "
-            "'httk workspace daemon init' again"
+            "'httk daemon init' again"
         ) from None
     return _configuration(_decode_object(data, description="daemon configuration"))
 
@@ -752,8 +753,10 @@ def initialize(
     """Compile and publish a fresh enrollment from approved global ``slurm`` launchers.
 
     The exchange is the workspace's own ``exchange`` directory. The workspace's exchange extension is enabled
-    when it is absent (and *report* told so) before ``exchange/daemon.json`` is written: from then on every
-    manager of the workspace must confine its attempts.
+    when it is absent (and *report* told so), last, after the enrollment is published and before
+    ``exchange/daemon.json`` is written: from then on every manager of the workspace must confine its attempts.
+    An earlier failure leaves the extension untouched; a failed enable removes the daemon directory this call
+    created, so init can run again.
 
     Configuration values that *changes* does not set are discovered: executables on ``PATH``, the running
     interpreter, the effective Slurm configuration and its cluster, 128 submissions, and ``force=false``.
@@ -801,9 +804,16 @@ def initialize(
         max_submissions=policy.max_submissions,
     ):
         snapshot = _publish(policy)
-        # From here on every manager of the workspace must be confined. The exchange must exist before the
-        # daemon document can be installed in it.
-        if enable_exchange(Workspace(workspace)) and report is not None:
+        # From here on every manager of the workspace must be confined, so the irreversible extension is enabled
+        # last; the exchange must exist before the daemon document can be installed in it. A failed enable removes
+        # the daemon directory this call created, so init can run again once the cause is fixed.
+        try:
+            enabled = enable_exchange(Workspace(workspace))
+        except BaseException:
+            with contextlib.suppress(OSError):  # the enable's own error is the one to report
+                _fs.discard(_fs.loc(policy.daemon), trash_dir=policy.daemon.parent, durable=True)
+            raise
+        if enabled and report is not None:
             report(f"enabled the exchange extension of {workspace}: {workspace / EXCHANGE_DIRECTORY}")
         _write_daemon_document(policy)
         return snapshot

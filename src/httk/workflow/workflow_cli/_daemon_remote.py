@@ -1,4 +1,4 @@
-"""Typed CLI controls for a mounted workspace daemon."""
+"""Typed CLI controls for a mounted workspace daemon: ``manager``, ``remote take-back`` and their helpers."""
 
 import argparse
 import json
@@ -25,13 +25,12 @@ from .._daemon_client import (
 )
 from .._daemon_protocol import Request, encode_request, encode_response
 from .._durations import format_duration, parse_slurm_duration
-from .._util import write_json_atomic
-from ..adapters import metadata_path, read_metadata, remote_settings, resolve_remote, run_adapter
+from ..adapters import read_metadata, remote_settings, resolve_remote, run_adapter
+from ..registry import WorkspaceBinding
 from ._common import _group, _leaf
 from ._daemon_jobs import job_request_status
 
 _OPERATION_NAMES = {
-    "health": "health",
     "start": "start_manager",
     "status": "manager_status",
     "cancel": "cancel_manager",
@@ -41,18 +40,18 @@ _POSITIVE_OUTCOMES = frozenset({"ready", "submitted", "status", "cancel_requeste
 _MIN_TIME_LIMIT_SECONDS = 120
 
 
-def handle_remote_daemon_configure(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Pin the workspace (and, when daemon.json exists, daemon) identities of a mounted exchange directory."""
+def exchange_pins(value: str) -> tuple[dict[str, str], list[str]]:
+    """Read the identities a mount-daemon remote pins from a mounted exchange directory (``remote set R exchange=P``).
 
-    target = resolve_remote(arguments.remote, project=context.cwd)
-    metadata = read_metadata(target.bundle)
-    if metadata.get("kind") != "mount-daemon":
-        raise ValueError(f"remote {arguments.remote!r} is not a mount-daemon remote")
-    exchange = _anchored(Path(arguments.exchange), "exchange")
-    settings: dict[str, object] = {
-        "exchange": str(exchange),
-        "daemon_workspace_id": read_exchange(exchange)["workspace_id"],
-    }
+    :param value: The mounted ``WORKSPACE/exchange`` directory; a relative path anchors to the working directory.
+    :return: The settings to store (the anchored ``exchange``, the workspace published in ``exchange.json`` and,
+        when ``daemon.json`` exists, the daemon identities), and the daemon pins to remove when it does not.
+    :raises ValueError: If a document is invalid or the path is ambiguous.
+    :raises OSError: If the exchange cannot be opened safely.
+    """
+
+    exchange = _anchored(Path(value), "exchange")
+    settings = {"exchange": str(exchange), "daemon_workspace_id": cast(str, read_exchange(exchange)["workspace_id"])}
     try:
         exported = read_daemon(exchange)
     except FileNotFoundError:
@@ -60,23 +59,12 @@ def handle_remote_daemon_configure(arguments: argparse.Namespace, context: CLICo
             "no daemon.json in the exchange: pinned the workspace only; signed requests stay unavailable",
             file=sys.stderr,
         )
-        settings.update(daemon_enrollment_id=None, daemon_public_key=None)  # None unpins stale daemon pins
-    else:
-        settings["daemon_enrollment_id"] = exported["enrollment_id"]
-        settings["daemon_public_key"] = exported["daemon_public_key"]
+        Endpoint.from_settings(settings).check()
+        return settings, ["daemon_enrollment_id", "daemon_public_key"]  # unpins stale daemon pins
+    settings["daemon_enrollment_id"] = cast(str, exported["enrollment_id"])
+    settings["daemon_public_key"] = cast(str, exported["daemon_public_key"])
     Endpoint.from_settings(settings).check()
-    result = run_adapter(target.bundle, "configure", {"settings": settings})
-    if result.get("configured") is not True:
-        raise ValueError("mount-daemon adapter did not confirm endpoint configuration")
-    configured = metadata.setdefault("settings", {})
-    if not isinstance(configured, dict):
-        raise ValueError("adapter settings are not mutable JSON")
-    configured.update(settings)
-    configured = {name: value for name, value in configured.items() if value is not None}
-    metadata["settings"] = configured
-    write_json_atomic(metadata_path(target.bundle), metadata)
-    print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
+    return settings, []
 
 
 def _request_id(value: str | None) -> str:
@@ -101,7 +89,7 @@ def _mount_endpoint(arguments: argparse.Namespace, context: CLIContext) -> tuple
     return target.bundle, Endpoint.from_settings(settings)
 
 
-def handle_remote_daemon_log(arguments: argparse.Namespace, context: CLIContext) -> int:
+def handle_manager_log(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Write the published log of one manager handle to standard output, byte for byte.
 
     :param arguments: The parsed ``log`` command arguments.
@@ -116,20 +104,23 @@ def handle_remote_daemon_log(arguments: argparse.Namespace, context: CLIContext)
     return 0
 
 
-def handle_remote_daemon_show(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Print the validated ``daemon.json`` of the pinned daemon.
+def daemon_description(bundle: Path) -> dict[str, object]:
+    """Return the validated ``daemon.json`` a mount-daemon remote pins, for ``remote check``.
 
-    :param arguments: The parsed ``show`` command arguments.
-    :param context: The active CLI context.
-    :return: 0 after the document is printed.
+    :param bundle: The remote bundle.
+    :return: The daemon's identities and approved configurations, as plain JSON values.
+    :raises ValueError: If the settings or the document are invalid, the daemon is not pinned (the message says how
+        to pin it), or the enrollment changed.
+    :raises OSError: If the document cannot be opened safely.
     """
 
-    _, endpoint = _mount_endpoint(arguments, context)
-    print(json.dumps(endpoint.live(), indent=2, sort_keys=True, default=dict))
-    return 0
+    settings = remote_settings(bundle)
+    if not isinstance(settings, Mapping):
+        raise ValueError("mount-daemon remote settings must be an object")
+    return json.loads(json.dumps(Endpoint.from_settings(settings).live(), default=dict))
 
 
-def handle_remote_daemon_take_back(arguments: argparse.Namespace, context: CLIContext) -> int:
+def handle_remote_take_back(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Take an ejected bundle back out of the exchange inbox before a manager adopts it.
 
     :param arguments: The parsed ``take-back`` command arguments.
@@ -167,15 +158,65 @@ def _response_returncode(outcome: str) -> int:
     raise ValueError(f"unsupported daemon outcome: {outcome}")
 
 
-def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Send one typed request to the configured mounted workspace daemon.
+def handle_manager(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Send one typed ``manager status`` or ``manager cancel`` request to a mounted workspace daemon.
 
-    :param arguments: The parsed daemon command arguments.
+    :param arguments: The parsed manager command arguments.
     :param context: The active CLI context.
     :return: The status derived from the confirmed daemon outcome, or 2 when no result is acknowledged.
     """
 
-    verb = arguments.daemon_verb
+    return daemon_request(arguments, context, arguments.daemon_verb)
+
+
+def start_manager(binding: WorkspaceBinding, arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Run ``httk run`` against a mount-daemon remote: a typed start of an approved manager configuration.
+
+    :param binding: The remote workspace binding.
+    :param arguments: The parsed ``run`` arguments.
+    :param context: The active CLI context.
+    :return: The status derived from the confirmed daemon outcome, or 2 when no result is acknowledged.
+    :raises ValueError: If a manager option the daemon does not carry is given, or none names a configuration.
+    """
+
+    from ._manager import manager_option_defaults
+
+    defaults = {**manager_option_defaults(), "no_durable": False}
+    defaults.pop("time_limit")
+    if any(getattr(arguments, name, value) != value for name, value in defaults.items()):
+        raise ValueError(
+            "a mount-daemon remote starts an approved manager configuration; run takes only --configuration, "
+            "--time-limit, --request-id and --wait-seconds there"
+        )
+    if arguments.configuration is None:
+        raise ValueError(
+            f"{binding.remote} is a mount-daemon remote: name an approved manager configuration with "
+            f"--configuration NAME (httk remote check {binding.remote} lists them)"
+        )
+    try:
+        time_limit = None if arguments.time_limit is None else _time_limit(arguments.time_limit)
+    except argparse.ArgumentTypeError as exc:
+        raise ValueError(f"--time-limit: {exc}") from exc
+    start = argparse.Namespace(
+        remote=binding.remote,
+        configuration=arguments.configuration,
+        time_limit=time_limit,
+        request_id=arguments.request_id,
+        wait_seconds=10.0 if arguments.wait_seconds is None else arguments.wait_seconds,
+    )
+    return daemon_request(start, context, "start")
+
+
+def daemon_request(arguments: argparse.Namespace, context: CLIContext, verb: str) -> int:
+    """Send one typed request to the configured mounted workspace daemon.
+
+    :param arguments: The request fields: ``remote``, ``wait_seconds``, ``request_id`` and, by verb, ``handle``,
+        ``configuration`` and ``time_limit``.
+    :param context: The active CLI context.
+    :param verb: ``start``, ``status`` or ``cancel``.
+    :return: The status derived from the confirmed daemon outcome, or 2 when no result is acknowledged.
+    """
+
     wait_seconds = arguments.wait_seconds
     if (
         not isinstance(wait_seconds, (int, float))
@@ -272,7 +313,7 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
             f"daemon request {request.request_id} has no acknowledged result: {exc}. "
             "It may still be queued in the exchange and be applied when the daemon picks it up, "
             "until the request expires. Check with "
-            f"`{context.program} remote daemon status {arguments.remote}`. "
+            f"`{context.program} manager status {arguments.remote}`. "
             f"To keep waiting for this request, rerun with identical fields and --request-id {request.request_id}; "
             "rerunning without it sends a new request"
             + (" and may start another manager." if verb == "start" else "."),
@@ -281,33 +322,45 @@ def handle_remote_daemon(arguments: argparse.Namespace, context: CLIContext) -> 
         return 2
 
 
-def build_daemon_remote_parser(
-    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
-) -> None:
-    """Add ``workflow remote daemon`` typed controls to the remote group.
+def add_take_back_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    """Add ``remote take-back`` to the remote group.
 
-    :param subparsers: The command collection for ``workflow remote``.
+    :param subparsers: The command collection for ``remote``.
     """
 
-    _, daemon_subparsers = _group(
+    take = _leaf(
         subparsers,
-        "daemon",
-        summary="control a mounted workspace daemon",
-        description="Send bounded typed health, manager, and cancellation requests to a mount-daemon remote",
+        "take-back",
+        summary="take an ejected bundle back from a mount-daemon inbox",
+        description=(
+            "Rename EXCHANGE/inbox/NAME of a mount-daemon remote to a dot name (managers ignore it), copy it to "
+            "DESTINATION (default: ./NAME) and remove it; fails when a manager already took it, then cancel the job "
+            "instead"
+        ),
+        handler=handle_remote_take_back,
     )
-    configure = _leaf(
-        daemon_subparsers,
-        "configure",
-        summary="pin a mounted daemon exchange",
-        description="Pin the workspace published in EXCHANGE/exchange.json and, when present, the daemon identities in EXCHANGE/daemon.json of a mounted exchange directory",
-        handler=handle_remote_daemon_configure,
-    )
-    configure.add_argument("remote", metavar="REMOTE", help="the existing mount-daemon remote")
-    configure.add_argument(
-        "--exchange", required=True, metavar="PATH", help="locally mounted WORKSPACE/exchange directory"
+    take.add_argument("remote", metavar="REMOTE", help="the configured mount-daemon remote")
+    take.add_argument("name", metavar="NAME", help="bundle name in the exchange inbox")
+    take.add_argument("destination", nargs="?", metavar="DESTINATION", help="local path to copy to (default: ./NAME)")
+
+
+def build_manager_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    """Declare the ``manager`` group: the managers a mount-daemon remote's daemon started.
+
+    :param subparsers: The top-level command collection.
+    """
+
+    _, group = _group(
+        subparsers,
+        "manager",
+        summary="inspect and cancel the managers a workspace daemon started",
+        description=(
+            "Inspect, read the log of, and cancel the managers the daemon behind a mount-daemon remote started "
+            "(httk run -w REMOTE:WS --configuration NAME starts one)"
+        ),
     )
     log = _leaf(
-        daemon_subparsers,
+        group,
         "log",
         summary="print a manager's published launcher log",
         description=(
@@ -315,47 +368,22 @@ def build_daemon_remote_parser(
             "which appears when the manager's Slurm job ends and is removed by the workspace's retention "
             "(retention.trash_days)"
         ),
-        handler=handle_remote_daemon_log,
+        handler=handle_manager_log,
     )
     log.add_argument("remote", metavar="REMOTE", help="the configured mount-daemon remote")
     log.add_argument("--handle", required=True, metavar="HANDLE", help="broker-issued manager handle")
-    show = _leaf(
-        daemon_subparsers,
-        "show",
-        summary="print the daemon's published menu",
-        description=(
-            "Print EXCHANGE/daemon.json of the pinned daemon: its identities and the approved configurations "
-            "with their digests and published resource settings"
+    for verb, summary, description in (
+        (
+            "status",
+            "inspect the daemon's managers",
+            (
+                "Print the published exchange status and managers, or, with --handle or --request-id, send a typed "
+                "status request"
+            ),
         ),
-        handler=handle_remote_daemon_show,
-    )
-    show.add_argument("remote", metavar="REMOTE", help="the configured mount-daemon remote")
-    take = _leaf(
-        daemon_subparsers,
-        "take-back",
-        summary="take an ejected bundle back from the inbox",
-        description=(
-            "Rename EXCHANGE/inbox/NAME to a dot name (managers ignore it), copy it to DESTINATION "
-            "(default: ./NAME) and remove it; fails when a manager already took it, then cancel the job instead"
-        ),
-        handler=handle_remote_daemon_take_back,
-    )
-    take.add_argument("remote", metavar="REMOTE", help="the configured mount-daemon remote")
-    take.add_argument("name", metavar="NAME", help="bundle name in the exchange inbox")
-    take.add_argument("destination", nargs="?", metavar="DESTINATION", help="local path to copy to (default: ./NAME)")
-    for verb, summary in (
-        ("health", "check daemon readiness"),
-        ("start", "start an approved manager configuration"),
-        ("status", "inspect a broker-issued manager handle"),
-        ("cancel", "request cancellation of a manager handle"),
+        ("cancel", "request cancellation of a manager", "Send a typed cancellation request for one manager handle"),
     ):
-        parser = _leaf(
-            daemon_subparsers,
-            verb,
-            summary=summary,
-            description=f"Run the typed daemon {verb} operation",
-            handler=handle_remote_daemon,
-        )
+        parser = _leaf(group, verb, summary=summary, description=description, handler=handle_manager)
         parser.add_argument("remote", metavar="REMOTE", help="the configured mount-daemon remote")
         parser.add_argument(
             "--wait-seconds",
@@ -364,44 +392,23 @@ def build_daemon_remote_parser(
             metavar="SECONDS",
             help="bound the mailbox wait (0.05 to 120 seconds; default: 10)",
         )
-        if verb == "start":
-            parser.add_argument(
-                "--configuration",
-                required=True,
-                metavar="NAME",
-                help="approved manager configuration",
-            )
-            parser.add_argument(
-                "--time-limit",
-                type=_time_limit,
-                metavar="DURATION",
-                help="the manager job's Slurm --time instead of the configuration's slurm.time_limit, "
-                "up to its slurm.time_limit_max (default: slurm.time_limit)",
-            )
-            parser.add_argument(
-                "--request-id",
-                metavar="ID",
-                help="32 lowercase hexadecimal request ID (default: generated); reuse one to keep waiting for a request",
-            )
-        elif verb == "cancel":
+        if verb == "cancel":
             parser.add_argument("--handle", required=True, metavar="HANDLE", help="broker-issued manager handle")
             parser.add_argument(
                 "--request-id",
                 metavar="ID",
                 help="32 lowercase hexadecimal request ID (default: generated); reuse one to keep waiting for a request",
             )
-        elif verb == "status":
-            group = parser.add_mutually_exclusive_group()
-            group.add_argument(
+        else:
+            group_options = parser.add_mutually_exclusive_group()
+            group_options.add_argument(
                 "--handle",
                 metavar="HANDLE",
                 help="broker-issued manager handle (signed manager-status request)",
             )
-            group.add_argument(
+            group_options.add_argument(
                 "--request-id",
                 metavar="ID",
                 help="original 32-digit job command ID (send a fresh signed job-status request)",
             )
-        else:
-            parser.add_argument("--request-id", metavar="ID", help="optional 32 lowercase hexadecimal request ID")
         parser.set_defaults(daemon_verb=verb)

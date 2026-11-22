@@ -576,23 +576,28 @@ mount point must be outside every local workspace. Then pin the identities the
 exchange publishes in `exchange.json` and `daemon.json`:
 
 ```console
-$ httk remote add --kind mount-daemon confined
-$ httk remote daemon configure confined --exchange /mnt/cluster/exchange
+$ httk remote add --kind mount-daemon confined exchange=/mnt/cluster/exchange
 $ httk remote check confined
 ```
 
 The remote's settings are `exchange` and `daemon_workspace_id`, which are
 required, and `daemon_enrollment_id` and `daemon_public_key`, which are needed
-only for signed requests. `configure` pins the workspace from `exchange.json`
+only for signed requests. Setting `exchange=PATH` (at `remote add`, or later
+with `httk remote set confined exchange=PATH`) pins the workspace from `exchange.json`
 and, when a daemon has published `daemon.json`, the daemon identities; without
 `daemon.json` it pins the workspace only, which is enough to send and fetch
 jobs and read status. The active configuration digest and request lifetime are
 read live from protocol 5's `daemon.json`; changed configuration needs no
-reconfiguration, while a changed identity is refused. Configure an *httk*
-identity whose public key the daemon authorizes. `configure` publishes nothing.
-`check` reads `exchange.json` and, when the daemon is pinned, `daemon.json` and
-sends a signed health request; it checks a broker response and does not
-establish compute-node readiness.
+reconfiguration, while a changed identity is refused; set `exchange=PATH`
+again to repin. Configure an *httk* identity whose public key the daemon
+authorizes. Pinning publishes nothing. `check` reads `exchange.json` and, when
+the daemon is pinned, `daemon.json` and sends a signed typed health request,
+whose signed response it reports together with the pinned daemon's
+`daemon.json` (its identities and approved configurations, under `daemon`); it
+checks a broker response and does not establish compute-node readiness.
+`remote show` stays local: it prints the stored pins and never reads the
+mount. The `exchange` and `daemon_*` settings are refused for other kinds of
+remote.
 
 ### Moving jobs and daemon requests
 
@@ -600,12 +605,12 @@ Jobs move through the exchange with the ordinary `job eject` and `job adopt`:
 
 ```console
 $ httk job eject JOB /mnt/cluster/exchange/inbox
-$ httk remote daemon show confined
-$ httk remote daemon start confined --configuration small
-$ httk remote daemon status confined
-$ httk remote daemon status confined --handle MANAGER_HANDLE
+$ httk remote check confined
+$ httk run -w confined:runs --configuration small
+$ httk manager status confined
+$ httk manager status confined --handle MANAGER_HANDLE
 $ httk job pause --workspace confined:runs --reason 'operator pause' JOB_UUID
-$ httk remote daemon cancel confined --handle MANAGER_HANDLE
+$ httk manager cancel confined --handle MANAGER_HANDLE
 $ httk job adopt --move /mnt/cluster/exchange/outbox/CLIENT_JOB_KEY
 ```
 
@@ -626,23 +631,26 @@ returned tree, verifies it and removes the source from the exchange.
 `--configuration` names one of the global `slurm` launchers the operator
 approved for the daemon (each sets `manager.confine=bwrap`); `daemon.json`
 lists them with their digests and published resource settings (task layout,
-CPUs, memory, GRES, partition, workers and time limits), and `show` prints it. Every unrestricted confined manager of the workspace (no `--placement` or pool restriction), and
+CPUs, memory, GRES, partition, workers and time limits), and `remote check`
+reports it. On a `mount-daemon` workspace, `httk run` takes only
+`--configuration`, `--time-limit`, `--request-id` and `--wait-seconds`; those
+three daemon options are refused elsewhere. Every unrestricted confined manager of the workspace (no `--placement` or pool restriction), and
 every manager the daemon starts, adopts bundles from `inbox` and runs every job
 attempt confined to its own job directory; the daemon only starts, queries and
 cancels managers. Adoption puts the jobs you eject in your key's exchange pool,
 and a manager the daemon starts for your key runs only those, then exits once
 it has nothing left to do; a keyless bundle waits for a manager an operator
-starts on the host. Only the key that started a manager may query or cancel it. `status` without `--handle` is passive: it prints the
+starts on the host. Only the key that started a manager may query or cancel it. `manager status` without `--handle` is passive: it prints the
 informational root `status.json` and `managers.json` from the exchange without
 a request. With `--handle` it sends the signed `manager_status` request.
 `managers.json` also reports each manager's outcome (scheduler state, exit
-code, times); once a manager's Slurm job has ended, `httk remote
-daemon log confined --handle MANAGER_HANDLE` prints its published log. The
+code, times); once a manager's Slurm job has ended, `httk manager log
+confined --handle MANAGER_HANDLE` prints its published log. The
 published logs, like `managers.json`, are readable by every client of the
 exchange, not only the key that started the manager.
 
 To give up on a bundle that no manager has adopted, run `httk remote
-daemon take-back confined NAME [DESTINATION]`. It is client-only: it renames
+take-back confined NAME [DESTINATION]`. It is client-only: it renames
 `inbox/NAME` to a dot name (managers ignore it), copies it out and removes it.
 If the name is gone, a manager took it. See {doc}`workspace_daemon` for the job
 lifecycle, rejected bundles, `status.json` and signed job control.
@@ -669,9 +677,9 @@ action, reason and action-specific fields to reuse its exact cached signature,
 even if the active configuration changed. Any semantic change under that id
 is refused. This option is valid only for one selector on a `mount-daemon`
 workspace; local and ordinary remote requests reject it. To inspect the
-original job command, run `httk remote daemon status confined --request-id ID`.
+original job command, run `httk manager status confined --request-id ID`.
 That command sends a fresh signed observation request. Without `--handle` or
-`--request-id`, `remote daemon status` remains passive and informational.
+`--request-id`, `manager status` remains passive and informational.
 
 ### Request ids and retries
 
@@ -684,12 +692,12 @@ request may still be queued in the exchange, and the daemon applies it when it
 picks it up, until the request expires. The error message names the id.
 
 - To keep waiting for that request, rerun with **`--request-id ID` and
-  identical fields**. Rerunning `start` without it sends a new request and may
-  start a second manager; check `httk remote daemon status confined` first.
+  identical fields**. Rerunning `httk run` without it sends a new request and may
+  start a second manager; check `httk manager status confined` first.
 - Never retry an uncertain submission with a new id; reconcile it with the
   operator.
 - Use a fresh id (the default) for each status refresh.
-- `remote daemon status --request-id ID` refers to the original job command ID;
+- `manager status --request-id ID` refers to the original job command ID;
   it sends a separate fresh status request each time.
 - The client stores the exact signed requests in its local httk data directory
   before publication. Retries reuse their original timestamps and signatures;
@@ -704,8 +712,8 @@ acceptance window and replay rules.
 
 ### Waiting and exit codes
 
-`health`, `start`, `status` and `cancel` accept `--wait-seconds` from 0.05 to
-120 (default 10). Exit 0 means a positive protocol outcome; `refused`, `busy`,
+`httk run` against a `mount-daemon` workspace, `manager status` and `manager
+cancel` accept `--wait-seconds` from 0.05 to 120 (default 10). Exit 0 means a positive protocol outcome; `refused`, `busy`,
 `uncertain` and unacknowledged calls exit 2. `UNKNOWN` is a valid status and
 does not establish completion. A cancellation acknowledgement does not confirm
 that the job has terminated. Finished jobs appear in the exchange `outbox` on their own.

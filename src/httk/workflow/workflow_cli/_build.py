@@ -19,7 +19,7 @@ from ._common import (
     _remote_workspace_read,
     _resolve_binding,
 )
-from ._describe import _stdout_to_stderr
+from ._describe import _existing_binding, _stdout_to_stderr
 
 
 def _stamp(build: Path) -> dict[str, object]:
@@ -79,7 +79,14 @@ def _build_slot_defaults(
 def handle_build(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Build installed workflows for this platform, or list the registered builds."""
 
-    binding, root = _resolve_binding(arguments, context)
+    if arguments.list:
+        # A listing creates nothing: like workflow list, it never makes the per-user default workspace.
+        resolved = _existing_binding(arguments, context)
+        if resolved is None:
+            raise ValueError("no workspace to list builds of; create one with httk workspace init PATH")
+        binding, root = resolved
+    else:
+        binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
         flags = [flag for flag in ("--list", "--json") if getattr(arguments, flag[2:])]

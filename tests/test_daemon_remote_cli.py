@@ -1,8 +1,9 @@
-"""Typed mounted-daemon command and template boundaries."""
+"""Typed mounted-daemon commands (``run``, ``manager``, ``remote set|check|show|take-back``) and template boundaries."""
 
 import json
 import os
 import sys
+import threading
 import uuid
 from collections.abc import Mapping
 from io import StringIO
@@ -16,7 +17,7 @@ from httk.core.identity import add_identity, identity_public_key
 from httk.workflow._daemon_auth import sign_response
 from httk.workflow.adapters import PERSISTABLE_REMOTE_SETTINGS, add_remote
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
-from httk.workflow.workflow_cli import build_parser, command
+from httk.workflow.workflow_cli import command
 
 WORKSPACE_ID = "12345678-1234-4234-8234-123456789abc"
 ENROLLMENT_ID = "a" * 32
@@ -84,10 +85,6 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def _invoke(project: Path, args: list[str]) -> tuple[int, str, str]:
-    return _command(project, ["remote", "daemon", *args])
-
-
 def _command(project: Path, args: list[str]) -> tuple[int, str, str]:
     from contextlib import redirect_stderr, redirect_stdout
     from io import StringIO
@@ -119,10 +116,16 @@ def _remote_settings(project: Path) -> dict[str, object]:
     return json.loads((bundle / "remote.json").read_text(encoding="utf-8"))["settings"]
 
 
-def _configure_args(exchange: Path | str) -> list[str]:
-    """Return CLI arguments for one exchange pin."""
+def _pin(exchange: Path | str) -> list[str]:
+    """Return the command that pins one mounted exchange on the ``cluster`` remote."""
 
-    return ["configure", "cluster", "--exchange", str(exchange)]
+    return ["remote", "set", "cluster", f"exchange={exchange}"]
+
+
+#: A signed manager-status request: the typed request path every signed manager verb shares.
+_STATUS = ["manager", "status", "cluster", "--handle", "2" * 32]
+#: ``httk run`` against a workspace on the mount-daemon remote: a typed start request.
+_START = ["run", "-w", "cluster:station", "--configuration", "serial"]
 
 
 def test_template_and_shareable_daemon_settings(project: Path) -> None:
@@ -147,7 +150,7 @@ def test_configure_persists_only_successful_shareable_daemon_settings(
     from httk.workflow.workflow_cli import _transfer
 
     settings = {
-        "exchange": "/mnt/w/exchange",
+        "exchange": str(project.parent / "exchange"),
         "daemon_workspace_id": WORKSPACE_ID,
         "daemon_enrollment_id": ENROLLMENT_ID,
         "daemon_public_key": _public_key(project),
@@ -159,14 +162,14 @@ def test_configure_persists_only_successful_shareable_daemon_settings(
     assert _remote_settings(project) == settings
 
 
-def test_daemon_configure_pins_identities_from_exchange(project: Path, tmp_path: Path) -> None:
+def test_remote_set_exchange_pins_identities_from_exchange(project: Path, tmp_path: Path) -> None:
     exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
 
-    code, stdout, stderr = _invoke(project, _configure_args(exchange))
+    code, stdout, stderr = _command(project, _pin(exchange))
 
     assert code == 0
     assert json.loads(stdout)["configured"] is True
-    assert stderr == ""
+    assert "Traceback" not in stderr and "pinned the workspace only" not in stderr
     assert _remote_settings(project) == {
         "exchange": str(exchange),
         "daemon_workspace_id": WORKSPACE_ID,
@@ -185,30 +188,30 @@ def test_daemon_configure_pins_identities_from_exchange(project: Path, tmp_path:
     assert not list((exchange / "requests").iterdir())
 
 
-def test_daemon_configure_anchors_relative_exchange_to_cwd(
+def test_remote_set_exchange_anchors_relative_exchange_to_cwd(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
     monkeypatch.chdir(tmp_path)
 
-    code, _stdout, _stderr = _invoke(project, _configure_args("mounted-exchange"))
+    code, _stdout, _stderr = _command(project, _pin("mounted-exchange"))
 
     assert code == 0
     assert _remote_settings(project)["exchange"] == str(Path(os.getcwd()) / "mounted-exchange")
     assert exchange.is_dir()
 
 
-def test_daemon_configure_failure_does_not_change_settings(
+def test_remote_set_exchange_failure_does_not_change_settings(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from httk.workflow.workflow_cli import _daemon_remote as cli
+    from httk.workflow.workflow_cli import _transfer as cli
 
     metadata_path = project / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json"
     before = metadata_path.read_bytes()
     exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("no")))
 
-    code, stdout, stderr = _invoke(project, _configure_args(exchange))
+    code, stdout, stderr = _command(project, _pin(exchange))
 
     assert code == 2
     assert stdout == ""
@@ -219,10 +222,10 @@ def test_daemon_configure_failure_does_not_change_settings(
 @pytest.mark.parametrize(
     "kind", ["missing_subdirectory", "symlink", "fifo", "oversize", "duplicate", "extra", "missing_field", "format"]
 )
-def test_daemon_configure_refuses_invalid_exchange(
+def test_remote_set_exchange_refuses_invalid_exchange(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
-    from httk.workflow.workflow_cli import _daemon_remote as cli
+    from httk.workflow.workflow_cli import _transfer as cli
 
     exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
     path = exchange / "daemon.json"
@@ -253,32 +256,62 @@ def test_daemon_configure_refuses_invalid_exchange(
     before = metadata_path.read_bytes()
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
 
-    code, stdout, _stderr = _invoke(project, _configure_args(exchange))
+    code, stdout, _stderr = _command(project, _pin(exchange))
 
     assert code == 2
     assert stdout == ""
     assert metadata_path.read_bytes() == before
 
 
-def test_daemon_configure_refuses_wrong_remote_kind_without_persistence(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from httk.workflow.workflow_cli import _daemon_remote as cli
+def test_remote_add_mount_daemon_with_exchange_pins_at_creation(project: Path, tmp_path: Path) -> None:
+    exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
+
+    code, stdout, _stderr = _command(
+        project, ["remote", "add", "other", "--kind", "mount-daemon", f"exchange={exchange}"]
+    )
+
+    assert code == 0 and stdout.splitlines()[0].endswith("other")
+    bundle = project / PROJECT_DIRECTORY / "remotes" / "other"
+    assert json.loads((bundle / "remote.json").read_text(encoding="utf-8"))["settings"] == {
+        "exchange": str(exchange),
+        "daemon_workspace_id": WORKSPACE_ID,
+        "daemon_enrollment_id": ENROLLMENT_ID,
+        "daemon_public_key": _public_key(project),
+    }
+
+
+def test_daemon_settings_are_refused_on_another_kind(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow.workflow_cli import _transfer
 
     metadata_path = project / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["kind"] = "mount"
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     before = metadata_path.read_bytes()
-    exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
-    monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
+    monkeypatch.setattr(_transfer, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
 
-    code, stdout, stderr = _invoke(project, _configure_args(exchange))
-
-    assert code == 2
-    assert stdout == ""
-    assert "not a mount-daemon remote" in stderr
+    for pair in ("exchange=/mnt/elsewhere/exchange", f"daemon_workspace_id={WORKSPACE_ID}"):
+        code, stdout, stderr = _command(project, ["remote", "set", "cluster", pair])
+        assert (code, stdout) == (2, "") and "apply only to a mount-daemon remote" in stderr and "'mount'" in stderr
     assert metadata_path.read_bytes() == before
+
+
+def test_remote_set_exchange_repins_changed_identities(project: Path, tmp_path: Path) -> None:
+    seed = tmp_path / "other.seed"
+    seed.write_text("AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=\n", encoding="ascii")
+    other_key = identity_public_key(seed)
+    assert other_key is not None and other_key != _public_key(project)
+    exchange = _write_exchange(tmp_path / "re-enrolled", other_key, enrollment_id="c" * 32)
+
+    code, _stdout, _stderr = _command(project, _pin(exchange))
+
+    assert code == 0
+    assert _remote_settings(project) == {
+        "exchange": str(exchange),
+        "daemon_workspace_id": WORKSPACE_ID,
+        "daemon_enrollment_id": "c" * 32,
+        "daemon_public_key": other_key,
+    }
 
 
 def test_identity_change_after_configure_is_refused_before_signing(
@@ -287,11 +320,11 @@ def test_identity_change_after_configure_is_refused_before_signing(
     from httk.workflow.workflow_cli import _daemon_remote as cli
 
     exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
-    assert _invoke(project, _configure_args(exchange))[0] == 0
+    assert _command(project, _pin(exchange))[0] == 0
     _write_exchange(exchange, _public_key(project), enrollment_id="c" * 32)
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
 
-    code, stdout, stderr = _invoke(project, ["health", "cluster"])
+    code, stdout, stderr = _command(project, _STATUS)
 
     assert code == 2
     assert stdout == ""
@@ -311,9 +344,7 @@ def test_start_uses_live_configuration_digest(project: Path, monkeypatch: pytest
         raise TimeoutError("stop after request construction")
 
     monkeypatch.setattr(cli, "run_adapter", run_adapter)
-    code, _stdout, _stderr = _invoke(
-        project, ["start", "cluster", "--configuration", "serial", "--request-id", "e" * 32]
-    )
+    code, _stdout, _stderr = _command(project, [*_START, "--request-id", "e" * 32])
 
     assert code == 2
     assert _observed_daemon_request(observed)["configuration_digest"] == reloaded
@@ -326,11 +357,11 @@ def test_start_after_reload_cannot_replay_cached_request_under_new_digest(
 
     exchange = project.parent / "exchange"
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("stop")))
-    args = ["start", "cluster", "--configuration", "serial", "--request-id", "e" * 32]
-    assert _invoke(project, args)[0] == 2
+    args = [*_START, "--request-id", "e" * 32]
+    assert _command(project, args)[0] == 2
     _write_exchange(exchange, _public_key(project), configurations={"serial": {"digest": "d" * 64, "settings": {}}})
 
-    code, _stdout, stderr = _invoke(project, args)
+    code, _stdout, stderr = _command(project, args)
 
     assert code == 2
     assert "intent conflicts" in stderr
@@ -348,17 +379,17 @@ def test_start_time_limit_is_normalized_signed_and_part_of_the_intent(
         raise TimeoutError("stop after request construction")
 
     monkeypatch.setattr(cli, "run_adapter", run_adapter)
-    args = ["start", "cluster", "--configuration", "serial", "--request-id", "e" * 32]
-    assert _invoke(project, [*args, "--time-limit", "90"])[0] == 2
+    args = [*_START, "--request-id", "e" * 32]
+    assert _command(project, [*args, "--time-limit", "90"])[0] == 2
     assert _observed_daemon_request(observed)["time_limit"] == "01:30:00"
     observed.clear()
     # A retry under the same request ID with another limit is another intent, never the cached request.
-    assert _invoke(project, [*args, "--time-limit", "2:00:00"])[0] == 2 and not observed
-    parser = build_parser("httk workflow", CLIContext("httk", project))
+    assert _command(project, [*args, "--time-limit", "2:00:00"])[0] == 2 and not observed
     for value in ("0", "2", "soon"):
-        with pytest.raises(SystemExit):
-            parser.parse_args(["remote", "daemon", *args, "--time-limit", value])
-    assert parser.parse_args(["remote", "daemon", *args, "--time-limit", "2:01"]).time_limit == "00:02:01"
+        code, _stdout, stderr = _command(project, [*_START, "--request-id", "f" * 32, "--time-limit", value])
+        assert code == 2 and "--time-limit" in stderr and not observed
+    assert _command(project, [*_START, "--request-id", "f" * 32, "--time-limit", "2:01"])[0] == 2
+    assert _observed_daemon_request(observed)["time_limit"] == "00:02:01"
 
 
 def test_credentials_are_merged_for_endpoint_validation(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -369,7 +400,7 @@ def test_credentials_are_merged_for_endpoint_validation(project: Path, monkeypat
     store_credentials(bundle, {"daemon_workspace_id": "87654321-4321-4876-8876-cba987654321"})
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
 
-    code, _stdout, stderr = _invoke(project, ["health", "cluster"])
+    code, _stdout, stderr = _command(project, _STATUS)
 
     assert code == 2
     assert "workspace_id" in stderr
@@ -390,7 +421,7 @@ def test_cli_leaves_mounted_endpoint_check_to_adapter(project: Path, monkeypatch
         raise TimeoutError("adapter timeout")
 
     monkeypatch.setattr(cli, "run_adapter", run_adapter)
-    code, stdout, stderr = _invoke(project, ["health", "cluster"])
+    code, stdout, stderr = _command(project, _STATUS)
     assert code == 2
     assert stdout == ""
     assert called == [True]
@@ -404,42 +435,43 @@ def test_unknown_credential_settings_fail_before_dispatch(project: Path, monkeyp
     bundle = project / PROJECT_DIRECTORY / "remotes" / "cluster"
     store_credentials(bundle, {"exec_command": ""})
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
-    code, stdout, stderr = _invoke(project, ["health", "cluster"])
+    code, stdout, stderr = _command(project, _STATUS)
     assert code == 2
     assert stdout == ""
     assert "settings" in stderr
     assert "daemon request ID:" not in stderr
 
 
-def test_parser_exposes_only_typed_daemon_controls(project: Path) -> None:
-    parser = build_parser("httk workflow", CLIContext("httk", project))
-    parsed = parser.parse_args(
-        ["remote", "daemon", "start", "cluster", "--configuration", "serial", "--request-id", "a" * 32]
-    )
-    assert parsed.daemon_verb == "start"
-    assert parsed.request_id == "a" * 32
-    assert parser.parse_args(["remote", "daemon", "start", "cluster", "--configuration", "serial"]).request_id is None
-    with pytest.raises(SystemExit):
-        parser.parse_args(["remote", "daemon", "start", "cluster"])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["remote", "daemon", "start", "cluster", "--profile", "serial", "--request-id", "a" * 32])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["remote", "daemon", "health", "cluster", "--", "true"])
+def test_daemon_options_are_refused_off_a_mount_daemon_remote(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow.workflow_cli import _daemon_remote, _manager
+
+    monkeypatch.setattr(_daemon_remote, "run_adapter", lambda *_a, **_k: pytest.fail("no daemon request"))
+    monkeypatch.setattr(_manager, "launch_workspace_managers", lambda *_a: pytest.fail("no manager"))
+    monkeypatch.setattr(_manager, "remote_workspace_output", lambda *_a, **_k: pytest.fail("no remote manager"))
+    add_remote("station", template="local", project=project)
+    workspace = project.parent / "local-workspace"
+    for target in (["-w", "station:runs"], ["--by-path", "-w", str(workspace)]):
+        for option in (["--configuration", "serial"], ["--request-id", "a" * 32], ["--wait-seconds", "5"]):
+            code, stdout, stderr = _command(project, ["run", *target, *option])
+            assert (code, stdout) == (2, "") and "apply only to a workspace on a mount-daemon remote" in stderr
+    # On a mount-daemon remote run starts an approved configuration and nothing else.
+    code, _stdout, stderr = _command(project, ["run", "-w", "cluster:station"])
+    assert code == 2 and "--configuration NAME" in stderr
+    code, _stdout, stderr = _command(project, [*_START, "--workers", "2"])
+    assert code == 2 and "takes only --configuration" in stderr
 
 
 @pytest.mark.parametrize(
     ("verb_args", "outcome", "status"),
     [
-        (["health"], "ready", 0),
-        (["health"], "refused", 2),
-        (["health"], "busy", 2),
-        (["start", "--configuration", "serial", "--request-id", "1" * 32], "submitted", 0),
-        (["start", "--configuration", "serial", "--request-id", "1" * 32], "uncertain", 2),
-        (["start", "--configuration", "serial", "--request-id", "1" * 32], "refused", 2),
-        (["status", "--handle", "2" * 32], "status", 0),
-        (["status", "--handle", "2" * 32], "busy", 2),
-        (["cancel", "--handle", "2" * 32, "--request-id", "1" * 32], "cancel_requested", 0),
-        (["cancel", "--handle", "2" * 32, "--request-id", "1" * 32], "refused", 2),
+        ([*_START, "--request-id", "1" * 32], "submitted", 0),
+        ([*_START, "--request-id", "1" * 32], "uncertain", 2),
+        ([*_START, "--request-id", "1" * 32], "refused", 2),
+        ([*_STATUS], "status", 0),
+        ([*_STATUS], "busy", 2),
+        ([*_STATUS], "refused", 2),
+        (["manager", "cancel", "cluster", "--handle", "2" * 32, "--request-id", "1" * 32], "cancel_requested", 0),
+        (["manager", "cancel", "cluster", "--handle", "2" * 32, "--request-id", "1" * 32], "refused", 2),
     ],
 )
 def test_cli_sends_exact_request_and_renders_confirmed_outcomes(
@@ -480,7 +512,7 @@ def test_cli_sends_exact_request_and_renders_confirmed_outcomes(
         }
 
     monkeypatch.setattr(cli, "run_adapter", run_adapter)
-    code, stdout, stderr = _invoke(project, [*verb_args, "cluster"])
+    code, stdout, stderr = _command(project, verb_args)
     assert code == status
     assert json.loads(stdout)["outcome"] == outcome
     stderr_before_call = observed["stderr_before_call"]
@@ -495,10 +527,10 @@ def test_cli_sends_exact_request_and_renders_confirmed_outcomes(
     assert isinstance(timeout, (int, float))
     assert isinstance(wait_seconds, (int, float))
     assert timeout == wait_seconds + 5
-    if verb_args[0] in {"start", "cancel"}:
+    if "--request-id" in verb_args:
         expected_id = verb_args[verb_args.index("--request-id") + 1]
         assert expected_id in stderr_before_call
-    if verb_args[0] == "start":
+    if verb_args[0] == "run":
         daemon_request = payload_observed["daemon_request"]
         assert isinstance(daemon_request, Mapping)
         assert daemon_request["configuration"] == "serial"
@@ -518,7 +550,9 @@ def test_wrong_kind_refuses_before_request_id_output_or_adapter_call(
     metadata["kind"] = "mount"
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
-    code, stdout, stderr = _invoke(project, ["health", "cluster", "--request-id", "1" * 32])
+    code, stdout, stderr = _command(
+        project, ["manager", "cancel", "cluster", "--handle", "2" * 32, "--request-id", "1" * 32]
+    )
     assert code == 2
     assert stdout == ""
     assert "not a mount-daemon remote" in stderr
@@ -531,9 +565,8 @@ def test_unknown_configuration_refuses_before_signing_or_adapter_call(
     from httk.workflow.workflow_cli import _daemon_remote as cli
 
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
-    code, stdout, stderr = _invoke(
-        project,
-        ["start", "cluster", "--configuration", "unknown", "--request-id", "f" * 32],
+    code, stdout, stderr = _command(
+        project, ["run", "-w", "cluster:station", "--configuration", "unknown", "--request-id", "f" * 32]
     )
 
     assert code == 2
@@ -550,7 +583,7 @@ def test_invalid_wait_is_rejected_before_adapter_call(
     from httk.workflow.workflow_cli import _daemon_remote as cli
 
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: pytest.fail("adapter must not run"))
-    code, stdout, stderr = _invoke(project, ["health", "cluster", "--wait-seconds", wait])
+    code, stdout, stderr = _command(project, [*_STATUS, "--wait-seconds", wait])
     assert code == 2
     assert stdout == ""
     assert "finite and between 0.05 and 120" in stderr
@@ -561,20 +594,17 @@ def test_adapter_failure_preserves_request_id_retry_guidance(project: Path, monk
 
     monkeypatch.setattr(cli, "run_adapter", lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("late")))
     request_id = "f" * 32
-    code, stdout, stderr = _invoke(
-        project,
-        ["start", "cluster", "--configuration", "serial", "--request-id", request_id],
-    )
+    code, stdout, stderr = _command(project, [*_START, "--request-id", request_id])
     assert code == 2
     assert stdout == ""
     assert f"--request-id {request_id}" in stderr
-    assert "may still be queued" in stderr and "remote daemon status cluster" in stderr
+    assert "may still be queued" in stderr and "httk manager status cluster" in stderr
     assert "may start another manager" in stderr
 
 
 @pytest.mark.parametrize(
     "verb_args",
-    [["start", "cluster", "--configuration", "serial"], ["cancel", "cluster", "--handle", "2" * 32]],
+    [_START, ["manager", "cancel", "cluster", "--handle", "2" * 32]],
 )
 def test_omitted_request_id_is_generated_and_announced_for_retry(
     project: Path, monkeypatch: pytest.MonkeyPatch, verb_args: list[str]
@@ -588,12 +618,12 @@ def test_omitted_request_id_is_generated_and_announced_for_retry(
         raise TimeoutError("late")
 
     monkeypatch.setattr(cli, "run_adapter", failed)
-    code, stdout, stderr = _invoke(project, verb_args)
+    code, stdout, stderr = _command(project, verb_args)
     assert code == 2 and stdout == ""
     assert len(seen) == 1 and uuid.UUID(hex=seen[0]).hex == seen[0]
     assert f"daemon request ID: {seen[0]}" in stderr
     assert f"--request-id {seen[0]}" in stderr
-    assert ("may start another manager" in stderr) == (verb_args[0] == "start")
+    assert ("may start another manager" in stderr) == (verb_args[0] == "run")
 
 
 def test_random_read_request_id_is_canonical(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -606,7 +636,7 @@ def test_random_read_request_id_is_canonical(project: Path, monkeypatch: pytest.
         raise TimeoutError("offline")
 
     monkeypatch.setattr(cli, "run_adapter", failed)
-    code, _stdout, _stderr = _invoke(project, ["health", "cluster"])
+    code, _stdout, _stderr = _command(project, _STATUS)
     assert code == 2
     assert len(seen) == 1 and uuid.UUID(hex=seen[0]).hex == seen[0]
 
@@ -623,14 +653,16 @@ def test_cli_rejects_mismatched_response_identity(project: Path, monkeypatch: py
                 request.workspace_id,
                 request.enrollment_id,
                 protocol.request_digest(request),
-                "ready",
+                "status",
+                handle="2" * 32,
+                scheduler_state="PENDING",
             ),
             seed_path=project / "response.seed",
         )
         return {"returncode": 0, "stdout": protocol.encode_response(response).decode("ascii"), "stderr": ""}
 
     monkeypatch.setattr(cli, "run_adapter", run_adapter)
-    code, stdout, stderr = _invoke(project, ["health", "cluster"])
+    code, stdout, stderr = _command(project, _STATUS)
     assert code == 2
     assert stdout == ""
     assert "has no acknowledged result" in stderr
@@ -657,41 +689,119 @@ def test_status_without_handle_prints_the_passive_files(project: Path, monkeypat
 
     monkeypatch.setattr(cli, "run_adapter", lambda *_a, **_k: pytest.fail("no request may be sent"))
     status, _outbox = _passive(project)
-    code, stdout, _stderr = _invoke(project, ["status", "cluster"])
+    code, stdout, _stderr = _command(project, ["manager", "status", "cluster"])
     assert code == 0
     assert json.loads(stdout) == {"status": status, "managers": None}
 
 
-def test_show_prints_the_published_menu_and_needs_the_daemon_pins(
-    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_remote_show_prints_the_stored_pins_without_touching_the_mount(
+    project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from httk.workflow.workflow_cli import _daemon_remote as cli
+    from httk.workflow import _daemon_client
+    from httk.workflow.workflow_cli import _transfer
 
-    with monkeypatch.context() as patched:
-        patched.setattr(cli, "run_adapter", lambda *_a, **_k: pytest.fail("no request may be sent"))
-        code, stdout, _stderr = _invoke(project, ["show", "cluster"])
-    assert code == 0
-    document = json.loads(stdout)
-    assert document["format_version"] == 3 and document["enrollment_id"] == ENROLLMENT_ID
-    assert document["configurations"] == {
+    monkeypatch.setattr(_daemon_client, "MailboxDirectory", lambda *_a, **_k: pytest.fail("no mount I/O"))
+    monkeypatch.setattr(_transfer, "run_adapter", lambda *_a, **_k: pytest.fail("no adapter call"))
+    code, stdout, _stderr = _command(project, ["remote", "show", "cluster", "--json"])
+    (description,) = json.loads(stdout)
+    assert code == 0 and "daemon" not in description and "daemon_problem" not in description
+    assert description["settings"]["daemon_enrollment_id"] == ENROLLMENT_ID
+    code, text, _stderr = _command(project, ["remote", "show", "cluster"])
+    assert code == 0 and f"daemon_enrollment_id={ENROLLMENT_ID}" in text.splitlines()
+
+
+def _respond_once(project: Path, outcome: str, observed: list[str]) -> threading.Thread:
+    """Start a test broker that answers the first request in the exchange with *outcome*."""
+
+    import time
+
+    from httk.workflow import _daemon_protocol as protocol
+    from httk.workflow._daemon_mailbox import MailboxDirectory
+
+    exchange = Path(str(_remote_settings(project)["exchange"]))
+
+    def broker() -> None:
+        deadline = time.monotonic() + 15
+        with MailboxDirectory(exchange / "requests") as requests:
+            while time.monotonic() < deadline:
+                names = requests.names()
+                if names:
+                    request = protocol.decode_request(requests.read(names[0]))
+                    observed.append(request.operation)
+                    response = sign_response(
+                        protocol.Response(
+                            request.request_id,
+                            request.workspace_id,
+                            request.enrollment_id,
+                            protocol.request_digest(request),
+                            outcome,
+                            reason=None if outcome == "ready" else "policy",
+                        ),
+                        seed_path=project / "response.seed",
+                    )
+                    with MailboxDirectory(exchange / "responses") as responses:
+                        responses.replace(names[0], protocol.encode_response(response))
+                    requests.remove(names[0])
+                    return
+                time.sleep(0.005)
+
+    thread = threading.Thread(target=broker)
+    thread.start()
+    return thread
+
+
+@pytest.mark.parametrize(("outcome", "status", "returncode"), [("ready", 0, 0), ("refused", 1, 2)])
+def test_remote_check_sends_a_typed_health_request_and_reports_the_daemon(
+    project: Path, outcome: str, status: int, returncode: int
+) -> None:
+    observed: list[str] = []
+    thread = _respond_once(project, outcome, observed)
+    try:
+        code, stdout, _stderr = _command(project, ["remote", "check", "cluster"])
+    finally:
+        thread.join(timeout=15)
+    assert observed == ["health"]
+    (result,) = json.loads(stdout)
+    assert code == status and result["returncode"] == returncode
+    assert json.loads(result["stdout"])["outcome"] == outcome
+    assert result["daemon"]["enrollment_id"] == ENROLLMENT_ID
+    assert result["daemon"]["configurations"] == {
         "serial": {"digest": CONFIGURATION_DIGEST, "settings": {"slurm.ntasks": "4", "slurm.time_limit": "01:00:00"}}
     }
+
+
+def test_remote_check_reports_a_busy_daemon_and_an_unpinned_one(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow.workflow_cli import _transfer
+
+    busy = {"ok": True, "operation": "install", "returncode": 2, "stdout": '{"outcome":"busy"}', "stderr": ""}
+    with monkeypatch.context() as patched:
+        patched.setattr(_transfer, "run_adapter", lambda *_a, **_k: dict(busy))
+        code, stdout, _stderr = _command(project, ["remote", "check", "cluster"])
+    (result,) = json.loads(stdout)
+    assert code == 1 and json.loads(result["stdout"])["outcome"] == "busy" and "daemon" in result
 
     public_key = _public_key(project)
     exchange = _write_exchange(tmp_path / "mounted-exchange", public_key)
     (exchange / "daemon.json").unlink()
-    assert _invoke(project, _configure_args(exchange))[0] == 0
+    assert _command(project, _pin(exchange))[0] == 0
     _write_exchange(exchange, public_key)
-    code, stdout, stderr = _invoke(project, ["show", "cluster"])
-    assert (code, stdout) == (2, "") and "httk remote daemon configure" in stderr and "Traceback" not in stderr
+    code, stdout, _stderr = _command(project, ["remote", "check", "cluster"])
+    (result,) = json.loads(stdout)
+    # Without daemon pins the check covers the exchange only and says how to pin the daemon.
+    assert code == 0 and "daemon" not in result
+    assert "httk remote set REMOTE exchange=PATH" in result["daemon_problem"]
 
 
 def test_status_without_handle_refuses_bad_files_and_request_id_is_original_job_command(project: Path) -> None:
     _status, outbox = _passive(project)
     (outbox / "status.json").write_text("{}", encoding="utf-8")
-    code, stdout, stderr = _invoke(project, ["status", "cluster"])
+    code, stdout, stderr = _command(project, ["manager", "status", "cluster"])
     assert (code, stdout) == (2, "") and "status.json" in stderr
-    code, stdout, stderr = _invoke(project, ["status", "cluster", "--handle", "1" * 32, "--request-id", "2" * 32])
+    code, stdout, stderr = _command(
+        project, ["manager", "status", "cluster", "--handle", "1" * 32, "--request-id", "2" * 32]
+    )
     assert (code, stdout) == (2, "") and "not allowed with argument" in stderr
 
 
@@ -722,7 +832,7 @@ def test_status_request_id_sends_fresh_signed_observation_of_job_command(
         return request, response
 
     monkeypatch.setattr(cli, "job_request_status", status)
-    code, stdout, stderr = _invoke(project, ["status", "cluster", "--request-id", command_id])
+    code, stdout, stderr = _command(project, ["manager", "status", "cluster", "--request-id", command_id])
 
     assert code == 0
     assert json.loads(stdout)["command_id"] == command_id
@@ -738,12 +848,12 @@ def test_log_prints_the_published_bytes_and_refuses_errors(
     (exchange / "launchers" / f"{'2' * 32}.log").write_bytes(b"out\n\xff")
     bundle = project / PROJECT_DIRECTORY / "remotes" / "cluster"
     assert bundle.is_dir()
-    code = command(["remote", "daemon", "log", "cluster", "--handle", "2" * 32], CLIContext("httk", project))
+    code = command(["manager", "log", "cluster", "--handle", "2" * 32], CLIContext("httk", project))
     assert code == 0 and capsysbinary.readouterr().out == b"out\n\xff"
-    code = command(["remote", "daemon", "log", "cluster", "--handle", "3" * 32], CLIContext("httk", project))
+    code = command(["manager", "log", "cluster", "--handle", "3" * 32], CLIContext("httk", project))
     captured = capsysbinary.readouterr()
     assert code == 2 and captured.out == b"" and b"no launcher log is published" in captured.err
-    code = command(["remote", "daemon", "log", "cluster", "--handle", "zz"], CLIContext("httk", project))
+    code = command(["manager", "log", "cluster", "--handle", "zz"], CLIContext("httk", project))
     assert code == 2
 
 
@@ -771,15 +881,15 @@ def test_status_without_handle_passes_managers_v4_through(project: Path) -> None
         ],
     }
     (outbox / "managers.json").write_text(json.dumps(managers), encoding="utf-8")
-    code, stdout, _stderr = _invoke(project, ["status", "cluster"])
+    code, stdout, _stderr = _command(project, ["manager", "status", "cluster"])
     assert code == 0 and json.loads(stdout)["managers"] == managers
 
 
-def test_daemon_configure_without_daemon_json_pins_the_workspace_only(project: Path, tmp_path: Path) -> None:
+def test_remote_set_exchange_without_daemon_json_pins_the_workspace_only(project: Path, tmp_path: Path) -> None:
     exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
     (exchange / "daemon.json").unlink()
 
-    code, _stdout, stderr = _invoke(project, _configure_args(exchange))
+    code, _stdout, stderr = _command(project, _pin(exchange))
 
     assert code == 0 and "pinned the workspace only" in stderr
     assert _remote_settings(project)["daemon_workspace_id"] == WORKSPACE_ID
@@ -788,12 +898,12 @@ def test_daemon_configure_without_daemon_json_pins_the_workspace_only(project: P
 def test_signed_verbs_without_daemon_pins_say_how_to_pin(project: Path, tmp_path: Path) -> None:
     exchange = _write_exchange(tmp_path / "mounted-exchange", _public_key(project))
     (exchange / "daemon.json").unlink()
-    assert _invoke(project, _configure_args(exchange))[0] == 0
+    assert _command(project, _pin(exchange))[0] == 0
     assert "daemon_enrollment_id" not in _remote_settings(project)
 
-    code, stdout, stderr = _invoke(project, ["health", "cluster"])
+    code, stdout, stderr = _command(project, _STATUS)
 
-    assert (code, stdout) == (2, "") and "httk remote daemon configure" in stderr
+    assert (code, stdout) == (2, "") and "httk remote set REMOTE exchange=PATH" in stderr
 
 
 def test_take_back_verb_copies_the_inbox_entry_out(project: Path, tmp_path: Path) -> None:
@@ -802,10 +912,26 @@ def test_take_back_verb_copies_the_inbox_entry_out(project: Path, tmp_path: Path
     (exchange / "inbox" / "job-1" / "f").write_text("x")
     destination = tmp_path / "back"
 
-    code, stdout, _stderr = _invoke(project, ["take-back", "cluster", "job-1", str(destination)])
+    code, stdout, _stderr = _command(project, ["remote", "take-back", "cluster", "job-1", str(destination)])
 
     assert code == 0 and stdout.strip() == str(destination)
     assert (destination / "f").read_text() == "x"
     assert not list((exchange / "inbox").iterdir())
-    code, _stdout, stderr = _invoke(project, ["take-back", "cluster", "job-1", str(tmp_path / "again")])
+    code, _stdout, stderr = _command(project, ["remote", "take-back", "cluster", "job-1", str(tmp_path / "again")])
     assert code == 2 and "manager has taken it" in stderr
+
+
+@pytest.mark.parametrize(
+    "removed",
+    [
+        ["remote", "daemon", "status", "cluster"],
+        ["remote", "daemon", "configure", "cluster", "--exchange", "/x"],
+        ["remote", "daemon", "start", "cluster", "--configuration", "serial"],
+        ["remote", "configure", "cluster", "--exchange", "/x"],
+        ["manager", "health", "cluster"],
+        ["manager", "start", "cluster"],
+    ],
+)
+def test_the_old_daemon_client_spellings_are_gone(project: Path, removed: list[str]) -> None:
+    code, stdout, stderr = _command(project, removed)
+    assert (code, stdout) == (2, "") and "invalid choice" in stderr

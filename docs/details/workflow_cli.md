@@ -26,7 +26,7 @@ overrides a safety check instead.
 ## The command tree
 
 ```text
-httk workspace          show | set | unset | init | register | list | default | move | forget | delete | status | owners (managers) | attest-dead | check | repair | gc | seal | unseal | verify | exchange enable | daemon init|configure|show|check|run
+httk workspace          show | set | unset | init | register | list | default | move | forget | delete | status | owners (managers) | attest-dead | check | repair | gc | seal | unseal | verify
 httk job                new | submit | cancel | pause | resume | restart | set | delete | seal | unseal | detach | unlock | eject | adopt | list | show | log | why | precheck | debug | verify | move
 httk push               [SRC] DST [--job JOB] [--state STATE] [--step STEP] [--placement P] [--no-keep] [--no-workflows] [--json]
 httk pull               SRC [DST] [--job JOB] [--state STATE] [--step STEP] [--placement P] [--no-workflows] [--json]
@@ -38,12 +38,14 @@ httk workflow uninstall SELECTOR… [--workspace WORKSPACE] [--check] [--json]
 httk workflow build     [--workspace WORKSPACE] [--list] WORKFLOW…
 httk workflow fetch     URI… [--json]
 httk workflow forget    SELECTOR… [--json]
-httk run                [--workspace WORKSPACE] [manager options]
+httk run                [--workspace WORKSPACE] [manager options]   (a mount-daemon workspace: --configuration NAME [--time-limit D] [--request-id ID] [--wait-seconds S])
+httk manager            status | log | cancel   (the managers a mount-daemon remote's daemon started)
+httk daemon             init | set | unset | show | check | run | reload   (the confined workspace daemon, on its host)
 httk launcher           list | add | set | unset | show | check | remove
 httk monitor            [--workspace WORKSPACE …] [--refresh SECONDS]
 httk postprocess        SCRIPT [JOB…] [--workspace WORKSPACE]
 httk v1                 collect
-httk remote             list | add | set | unset | check | import-v1 | show | remove | daemon
+httk remote             list | add | set | unset | check | import-v1 | show | remove | take-back
 httk config             show | set | unset | import-v1
 httk campaign           init | show | set | unset | remove | submit | collect | start-managers
 httk setup | identity    (core-owned: per-user configuration and named operator identities)
@@ -66,9 +68,10 @@ these change individual members, whereas `unset` removes the whole override.
 One `set` applies its pairs, then `--add`, then `--remove`, and saves only when
 every change is valid. A workspace's `show`, `set` and `unset` take the
 workspace with `-w/--workspace` and address one key namespace: application
-settings, `policy.*` members and `prelude.WORKFLOW_ID` preludes. Daemon
-configuration still uses `configure` with repeatable `--set KEY=VALUE` and
-`--unset KEY`, applying flags in argument order.
+settings, `policy.*` members and `prelude.WORKFLOW_ID` preludes. The daemon
+configuration follows the same grammar with the daemon's workspace path as its
+object: `daemon set WORKSPACE KEY=VALUE... [--add K=V] [--remove K=V]` and
+`daemon unset WORKSPACE KEY...`.
 
 | Configuration | Inspect | Modify | Remove the definition |
 | --- | --- | --- | --- |
@@ -80,7 +83,7 @@ configuration still uses `configure` with repeatable `--set KEY=VALUE` and
 | Remote | `remote show NAME` | `remote set NAME KEY=VALUE...`, `remote unset NAME KEY...`, including private credentials | `remote remove NAME` |
 | User configuration | `config show` | `config set KEY=VALUE...`, `config unset KEY...`; `set --add` / `--remove` for `machine_names` | Unset its configurable keys |
 | Campaign | `campaign show` | `campaign set partitions.NAME=WORKSPACE`, `campaign unset partitions.NAME`; set or unset `assignment` | `campaign remove` clears the map, keeping jobs and workspaces |
-| Workspace daemon | `workspace daemon show PATH` | `workspace daemon configure PATH --set KEY=VALUE --unset KEY`; `--add` / `--remove` for launchers and authorized keys | Enrollment removal is not provided |
+| Workspace daemon | `daemon show PATH` | `daemon set PATH KEY=VALUE...`, `daemon unset PATH KEY...`; `set --add` / `--remove` for launchers and authorized keys | Enrollment removal is not provided |
 
 A workspace `set` or `unset` validates every change and stores them in one
 write of the workspace's `format.json`, so either all of them apply or none
@@ -117,13 +120,6 @@ Remote-capable commands (workspace status, settings, `gc`, `check`, `repair`,
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `workspace init PATH [KEY=VALUE...]` | create a workspace in a new or empty directory of its own (`REMOTE:PATH` on a remote), or adopt an existing one, registering its name (basename or `--name`) and recording it in the project's `members.json`; the pairs seed application settings | `--name`, `--no-durable` |
-| `workspace exchange enable [WORKSPACE]` | enable the `exchange/` extension of a workspace (idempotent) | |
-| `workspace daemon init WORKSPACE` | approve global `slurm` launchers, enable the exchange when needed and enroll the workspace, then check the sandbox | `--set KEY=VALUE`, `--add KEY=VALUE` |
-| `workspace daemon configure WORKSPACE` | change the daemon configuration, activated by `reload` or when the daemon next starts | `--set`, `--add`, `--unset`, `--remove` |
-| `workspace daemon show WORKSPACE` | describe the enrollment and its daemon configuration | `--json` |
-| `workspace daemon check WORKSPACE` | activate the configuration and check the real sandbox and scheduler clients | |
-| `workspace daemon run WORKSPACE` | activate the configuration and run the confined Slurm broker | `--once` |
-| `workspace daemon reload WORKSPACE` | activate the changed configuration and launcher bundles; a running daemon restarts on it | |
 | `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
 | `workspace register [PATH...]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only), `--json` |
@@ -647,7 +643,7 @@ workspaces.
 For `pause --wait`, the client sends the pause command once and then polls
 with fresh signed observations until the daemon reports `paused`, refusal,
 terminal supersession or timeout. Passive `status.json` is not evidence that
-a command completed. Run `httk remote daemon status REMOTE --request-id ID` to
+a command completed. Run `httk manager status REMOTE --request-id ID` to
 inspect a previously sent daemon job command; each inspection uses a fresh
 signed observation request. Without `--handle` or `--request-id`, status
 remains passive and informational.
@@ -1437,9 +1433,19 @@ otherwise it stays the managers' own deadline; see {doc}`launchers`.
 are explained in {doc}`taskmanager` under resources, time requirements and
 allocations; the startup banner, idle summary and logs under running managers.
 
+On a workspace of a `mount-daemon` remote (`-w REMOTE:WS`), `run` asks the
+remote's daemon to start one approved manager configuration with a typed,
+signed request: `--configuration NAME` (required there) names it, `--time-limit`
+sets the job's Slurm `--time` (above 120 s and up to the configuration's
+`slurm.time_limit_max`), `--request-id` fixes the request ID for a retry and
+`--wait-seconds` (0.05 to 120, default 10) bounds the mailbox wait. No other
+manager option applies there, and `--configuration`, `--request-id` and
+`--wait-seconds` are refused for every other workspace. `httk manager status`,
+`log` and `cancel` follow the started managers; see {doc}`workspace_daemon`.
+
 Every confined manager without placement prefixes that takes the `default` pool
-or an `exchange-` pool serves the workspace's `exchange/` extension once it is
-enabled with `httk workspace exchange enable`; there is no `--exchange` option.
+or an `exchange-` pool serves the workspace's `exchange/` extension once
+`httk daemon init` has enabled it.
 Without `--keep-running`, such a manager does not exit as idle within `--idle-grace`
 seconds of starting (default 120), nor while it can still adopt an inbox entry
 or return a finished exchange tree of its pools. The grace also holds any
@@ -1583,18 +1589,35 @@ remote meaning "this machine", so `remote add local` is refused.
 | `remote add NAME [KEY=VALUE...]` | create a remote from a packaged adapter; pairs then run exactly what `remote set` runs on the new bundle, and if that fails the remote stays created | `--kind`, `--global`, `--non-interactive`, `--adapter-timeout` |
 | `remote set NAME KEY=VALUE...` | run the adapter's `configure` operation with new settings and store them when it succeeds | `--adapter-timeout` |
 | `remote unset NAME KEY...` | remove stored settings or credentials, running `configure` with the remaining settings | `--adapter-timeout` |
-| `remote check NAME...` | check that `httk` answers on remotes, with their stored settings | `--adapter-timeout` |
+| `remote check NAME...` | check that `httk` answers on remotes, with their stored settings; a `mount-daemon` remote sends its pinned daemon a typed health request and reports its `daemon.json` (identities, approved configurations, digests and published resource settings) under `daemon` | `--adapter-timeout` |
 | `remote import-v1 SOURCE...` | map legacy *httk* v1 computer bundles | `--name` (one source only), `--global` |
-| `remote show NAME...` | describe remotes and their settings | `--json` |
+| `remote show NAME...` | describe remotes and their stored settings, locally (a `mount-daemon` remote's pins included; the mount is never read) | `--json` |
 | `remote remove NAME...` | remove remote bundles; refused while a registered workspace holds a transfer bound for the remote | `--yes` skips only the confirmation |
-| `remote daemon configure REMOTE` | pin the identities in the mounted `exchange.json` and `daemon.json` | required `--exchange` |
-| `remote daemon show REMOTE` | print the pinned daemon's `daemon.json`: approved configurations, digests and published resource settings | |
-| `remote daemon health REMOTE` | check the confined daemon | `--request-id`, `--wait-seconds` |
-| `remote daemon start REMOTE` | start one approved manager configuration | required `--configuration`; `--time-limit` (the job's Slurm `--time`, above 120 s and up to the configuration's `slurm.time_limit_max`), `--request-id`, `--wait-seconds` |
-| `remote daemon status REMOTE` | print passive status, inspect a manager with `--handle`, or inspect an original job command with `--request-id` | mutually exclusive `--handle` / `--request-id`; `--wait-seconds` |
-| `remote daemon cancel REMOTE` | request manager cancellation | required `--handle`; `--request-id`, `--wait-seconds` |
-| `remote daemon log REMOTE` | print a manager's published log | required `--handle` |
-| `remote daemon take-back REMOTE NAME [DESTINATION]` | take your bundle back from `inbox` before a manager takes it | `DESTINATION` defaults to `./NAME` |
+| `remote take-back REMOTE NAME [DESTINATION]` | take your bundle back from a `mount-daemon` remote's `inbox` before a manager takes it | `DESTINATION` defaults to `./NAME` |
+
+For a `mount-daemon` remote, `remote set REMOTE exchange=PATH` (or `remote add
+NAME --kind mount-daemon exchange=PATH`) pins the workspace published in the
+mounted `EXCHANGE/exchange.json` and, when present, the daemon identities in
+`EXCHANGE/daemon.json`.
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `manager status REMOTE` | print passive status, inspect a manager with `--handle`, or inspect an original job command with `--request-id` | mutually exclusive `--handle` / `--request-id`; `--wait-seconds` |
+| `manager cancel REMOTE` | request manager cancellation | required `--handle`; `--request-id`, `--wait-seconds` |
+| `manager log REMOTE` | print a manager's published log | required `--handle` |
+
+The daemon itself is set up on its host with `httk daemon` (see
+{doc}`workspace_daemon`):
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `daemon init WORKSPACE [KEY=VALUE...]` | approve global `slurm` launchers, create and enable the exchange when it is not enabled and enroll the workspace, then check the sandbox | `--add KEY=VALUE` |
+| `daemon set WORKSPACE KEY=VALUE...` | change the daemon configuration (values, then `--add`, then `--remove`), activated by `reload` or when the daemon next starts | `--add KEY=VALUE`, `--remove KEY=VALUE` |
+| `daemon unset WORKSPACE KEY...` | clear `sacct` or `slurm_conf`, or reset `max_submissions` or `force` to its default | |
+| `daemon show WORKSPACE` | describe the enrollment and its daemon configuration | `--json` |
+| `daemon check WORKSPACE` | activate the configuration and check the real sandbox and scheduler clients | |
+| `daemon run WORKSPACE` | activate the configuration and run the confined Slurm broker | `--once` |
+| `daemon reload WORKSPACE` | activate the changed configuration and launcher bundles; a running daemon restarts on it | |
 
 `remote show NAME` reports which file each setting came from, but never a
 credential value.
@@ -1887,6 +1910,15 @@ some commands and options. These spellings no longer parse:
 | `httk workspace adopt [PATH...]` | `httk workspace register [PATH...]` |
 | `httk workspace fsck [NAME...]` | `httk workspace check [NAME...]` |
 | `httk workspace fsck --repair [--yes] NAME...` | `httk workspace repair [--yes] NAME...` |
+| `httk workspace daemon init\|show\|check\|run\|reload WS` | `httk daemon init\|show\|check\|run\|reload WS` |
+| `workspace daemon init WS --set KEY=VALUE` | `daemon init WS KEY=VALUE...` |
+| `workspace daemon configure WS --set/--add/--unset/--remove` | `daemon set WS KEY=VALUE... [--add KEY=VALUE] [--remove KEY=VALUE]`, `daemon unset WS KEY...` |
+| `httk workspace exchange enable [WS]` | `httk daemon init WS` (creates and enables the exchange) |
+| `httk remote daemon configure REMOTE --exchange PATH` | `httk remote set REMOTE exchange=PATH` (or `remote add NAME --kind mount-daemon exchange=PATH`) |
+| `httk remote daemon health REMOTE`, `remote daemon show REMOTE` | `httk remote check REMOTE` (the health response and `daemon.json`) |
+| `httk remote daemon start REMOTE --configuration NAME` | `httk run -w REMOTE:WS --configuration NAME` |
+| `httk remote daemon status\|log\|cancel REMOTE` | `httk manager status\|log\|cancel REMOTE` |
+| `httk remote daemon take-back REMOTE NAME` | `httk remote take-back REMOTE NAME` |
 
 Workspaces and bundles of the earlier layout are refused with a message that
 there is no migration: re-create the workspace with `httk workspace init` and

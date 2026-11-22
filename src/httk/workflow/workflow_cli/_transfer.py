@@ -90,6 +90,9 @@ from ._describe import _stdout_to_stderr
 # remote
 # ---------------------------------------------------------------------------
 
+#: The settings only a mount-daemon remote takes: the mounted exchange and the identities it pins.
+_DAEMON_SETTINGS = frozenset({"exchange", "daemon_workspace_id", "daemon_enrollment_id", "daemon_public_key"})
+
 
 def _remote_batch(
     arguments: argparse.Namespace,
@@ -173,13 +176,24 @@ def handle_remote_check(arguments: argparse.Namespace, context: CLIContext) -> i
 
     It runs the adapter operation that keeps its historical protocol spelling
     ``install``: it verifies the target has a working httk and never installs
-    anything.
+    anything. A mount-daemon remote checks its exchange and, once the daemon is
+    pinned, sends it a typed health request whose signed response it reports,
+    together with the daemon's ``daemon.json`` (identities and approved
+    configurations) under ``daemon``, or why it is unavailable under ``daemon_problem``.
     """
 
     if isinstance(arguments.remote, list):
         return _remote_batch(arguments, context, handle_remote_check, "remote", json_output=True)
     target = resolve_remote(arguments.remote, project=context.cwd)
     result = run_adapter(target.bundle, "install", {"settings": {}}, timeout=arguments.adapter_timeout)
+    if read_metadata(target.bundle).get("kind") == "mount-daemon":
+        from ._daemon_remote import daemon_description
+
+        # The adapter answered through the mount, so reading daemon.json here does not hang on a dead one.
+        try:
+            result["daemon"] = daemon_description(target.bundle)
+        except (OSError, ValueError) as exc:
+            result["daemon_problem"] = str(exc)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 1 if result.get("returncode") not in (None, 0) else 0
 
@@ -203,8 +217,19 @@ def _configure_remote(target: RemoteTarget, settings: dict[str, str], unset: lis
 
     if any(not key or "=" in key for key in unset):
         raise ValueError("unset requires a nonempty KEY without '='")
-    persistable, credentials = split_settings(settings)
     metadata = read_metadata(target.bundle)
+    daemon_keys = sorted(set(settings) & _DAEMON_SETTINGS)
+    if daemon_keys and metadata.get("kind") != "mount-daemon":
+        raise ValueError(
+            f"{', '.join(daemon_keys)} apply only to a mount-daemon remote; {target.name} is a {metadata.get('kind')!r} remote"
+        )
+    if "exchange" in settings:
+        from ._daemon_remote import exchange_pins
+
+        # A mounted exchange pins the workspace it publishes and, with daemon.json, the daemon identities.
+        pins, unpinned = exchange_pins(settings["exchange"])
+        settings, unset = {**settings, **pins}, [*unset, *unpinned]
+    persistable, credentials = split_settings(settings)
     configured = metadata.setdefault("settings", {})
     if not isinstance(configured, dict):
         raise ValueError("adapter settings are not mutable JSON")
@@ -385,8 +410,9 @@ def build_remote_parser(
             "-- see environment.prelude; the tar push/pull stream is exempt), or "
             "interactive_auth=yes (lets ssh prompt in the terminal for a password or "
             "second factor), or connection_reuse=yes|no (keep ssh connections alive "
-            "for 10 minutes; default: httk config connection_reuse, else no); a secret "
-            "one is stored in credentials.json"
+            "for 10 minutes; default: httk config connection_reuse, else no), or, for a "
+            "mount-daemon remote, exchange=PATH (the mounted WORKSPACE/exchange: pins the "
+            "workspace and daemon identities it publishes); a secret one is stored in credentials.json"
         ),
     )
     _add_adapter_timeout(store)
@@ -412,7 +438,10 @@ def build_remote_parser(
         group,
         "check",
         summary="check that httk answers on the remote",
-        description="Check that httk answers on each remote, with its stored settings",
+        description=(
+            "Check that httk answers on each remote, with its stored settings; a mount-daemon remote sends its "
+            "daemon a typed health request and reports its daemon.json (approved configurations and digests)"
+        ),
         handler=handle_remote_check,
     )
     check.add_argument(
@@ -463,9 +492,9 @@ def build_remote_parser(
         help="skip the confirmation",
     )
 
-    from ._daemon_remote import build_daemon_remote_parser
+    from ._daemon_remote import add_take_back_parser
 
-    build_daemon_remote_parser(group)
+    add_take_back_parser(group)
 
 
 # ---------------------------------------------------------------------------

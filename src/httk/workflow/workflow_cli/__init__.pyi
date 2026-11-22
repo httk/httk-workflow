@@ -162,6 +162,7 @@ __all__ = [
     "collect_command",
     "command",
     "config_command",
+    "daemon_command",
     "dispatch",
     "ensure_identity_key",
     "handle_build",
@@ -228,6 +229,7 @@ __all__ = [
     "job_command",
     "launch_workspace_managers",
     "launcher_command",
+    "manager_command",
     "monitor_command",
     "postprocess_command",
     "publish_job_requests",
@@ -274,6 +276,9 @@ def workflow_command(argv: Sequence[str], context: CLIContext) -> int:
 def workspace_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``workspace`` command."""
 
+def daemon_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``daemon`` command with its own parser, not the workflow tree."""
+
 def job_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``job`` command."""
 
@@ -282,6 +287,9 @@ def collect_command(argv: Sequence[str], context: CLIContext) -> int:
 
 def run_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``run`` command."""
+
+def manager_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``manager`` command."""
 
 def monitor_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``monitor`` command."""

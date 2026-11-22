@@ -15,6 +15,18 @@ register_cli_command(
 )
 
 register_cli_command(
+    "manager",
+    "httk.workflow.workflow_cli:manager_command",
+    "inspect, read the log of, and cancel daemon-started managers",
+)
+
+register_cli_command(
+    "daemon",
+    "httk.workflow.workflow_cli:daemon_command",
+    "set up and run the confined workspace daemon",
+)
+
+register_cli_command(
     "monitor",
     "httk.workflow.workflow_cli:monitor_command",
     "inspect and control workspace jobs interactively",

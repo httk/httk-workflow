@@ -20,18 +20,7 @@ def test_unset_optional_and_default_settings(tmp_path: Path) -> None:
     _initialize(layout, changes=[("set", "max_submissions=7"), ("set", "force=true")])
     assert (
         _daemon_cli.command(
-            [
-                "configure",
-                str(layout.workspace.root),
-                "--unset",
-                "max_submissions",
-                "--unset",
-                "force",
-                "--unset",
-                "sacct",
-                "--unset",
-                "slurm_conf",
-            ],
+            ["unset", str(layout.workspace.root), "max_submissions", "force", "sacct", "slurm_conf"],
             program="httk daemon",
         )
         == 0

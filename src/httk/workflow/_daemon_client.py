@@ -41,7 +41,7 @@ _SUBDIRECTORIES = ("requests", "responses", "inbox", "outbox", "launchers")
 #: The content file of a request cache entry, the record directory ``daemon-requests/<enrollment>/<request id>/``.
 #: The content file of a cache entry: the file :func:`httk.workflow._fs.publish_record` writes.
 _CACHE_RECORD = "record"
-_CONFIGURE = "httk remote daemon configure REMOTE --exchange PATH"
+_CONFIGURE = "httk remote set REMOTE exchange=PATH"
 _PIN_HINT = f"pin the daemon with '{_CONFIGURE}' (it reads EXCHANGE/daemon.json)"
 _POLL_INTERVAL = 0.05
 _OUTCOMES = {

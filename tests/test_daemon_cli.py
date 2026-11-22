@@ -54,17 +54,17 @@ def test_daemon_dispatch_does_not_build_ordinary_parser(monkeypatch: pytest.Monk
     monkeypatch.setattr(workflow_cli, "command", forbidden)
     monkeypatch.setattr(_daemon_cli, "command", daemon)
     context = CLIContext(program="httk", cwd=tmp_path)
-    assert workflow_cli.workspace_command(["daemon", "run", "/data", "--once"], context) == 0
-    assert observed == [["run", "/data", "--once"], "httk workspace daemon"]
+    assert workflow_cli.daemon_command(["run", "/data", "--once"], context) == 0
+    assert observed == [["run", "/data", "--once"], "httk daemon"]
 
 
-def test_the_workflow_tree_exposes_the_same_daemon_subcommands(
+def test_daemon_is_top_level_and_its_old_spellings_are_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     context = CLIContext(program="httk", cwd=tmp_path)
-    assert workflow_cli.command(["workspace", "daemon"], context) == 0
+    assert workflow_cli.daemon_command([], context) == 0
     output = capsys.readouterr().out
-    assert all(mode in output for mode in ("init", "configure", "show", "check", "run", "reload"))
+    assert all(mode in output for mode in ("init", "set", "unset", "show", "check", "run", "reload"))
     observed: list[argparse.Namespace] = []
 
     def launch(arguments: argparse.Namespace) -> int:
@@ -72,10 +72,50 @@ def test_the_workflow_tree_exposes_the_same_daemon_subcommands(
         return 0
 
     monkeypatch.setattr(_daemon_cli, "launch", launch)
-    arguments = ["workspace", "daemon", "configure", "/data", "--add", "launchers=a", "--set", "force=true"]
-    assert workflow_cli.command(arguments, context) == 0
-    assert observed[0].daemon_mode == "configure"
-    assert observed[0].changes == [("add", "launchers=a"), ("set", "force=true")]
+    arguments = ["set", "/data", "force=true", "--remove", "launchers=b", "--add", "launchers=a", "sacct="]
+    assert workflow_cli.daemon_command(arguments, context) == 0
+    assert observed[0].daemon_mode == "set"
+    # Sets apply first, then --add, then --remove, whatever their order on the command line.
+    assert _daemon_cli._changes(observed[0]) == [
+        ("set", "force=true"),
+        ("set", "sacct="),
+        ("add", "launchers=a"),
+        ("remove", "launchers=b"),
+    ]
+    assert workflow_cli.daemon_command(["unset", "/data", "force", "sacct"], context) == 0
+    assert _daemon_cli._changes(observed[1]) == [("unset", "force"), ("unset", "sacct")]
+    capsys.readouterr()
+    for removed in (["workspace", "daemon", "run", "/data"], ["workspace", "exchange", "enable", "/data"]):
+        assert workflow_cli.workspace_command(removed[1:], context) == 2
+        assert "invalid choice" in capsys.readouterr().err
+    assert workflow_cli.daemon_command(["configure", "/data", "--set", "force=true"], context) == 2
+    assert "invalid choice" in capsys.readouterr().err
+    assert len(observed) == 2
+
+
+def test_init_collects_pairs_an_option_stranded_on_python_3_12(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observed: list[argparse.Namespace] = []
+
+    def launch(arguments: argparse.Namespace) -> int:
+        observed.append(arguments)
+        return 0
+
+    monkeypatch.setattr(_daemon_cli, "launch", launch)
+    arguments = ["init", "/data", "--add", "launchers=small", "cluster=c1", "max_submissions=7"]
+    assert _daemon_cli.command(arguments, program="httk daemon") == 0
+    assert _daemon_cli._changes(observed[0]) == [
+        ("set", "cluster=c1"),
+        ("set", "max_submissions=7"),
+        ("add", "launchers=small"),
+    ]
+    # A stranded word must still be a pair, and a stranded unknown option is refused.
+    assert _daemon_cli.command(["init", "/data", "--add", "launchers=small", "cluster"], program="httk daemon") == 2
+    assert "expected KEY=VALUE" in capsys.readouterr().err
+    assert _daemon_cli.command(["init", "/data", "--add", "a=b", "c=d", "--bogus"], program="httk daemon") == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+    assert len(observed) == 1
 
 
 @pytest.mark.parametrize(
@@ -96,6 +136,12 @@ def test_the_workflow_tree_exposes_the_same_daemon_subcommands(
         ["show", "/data", "--add", "launchers=a"],
         ["init", "/data", "--remove", "launchers=a"],
         ["init", "/data", "--exchange", "/x"],
+        ["init", "/data", "--set", "force=true"],
+        ["set", "/data"],
+        ["set", "/data", "--unset", "force"],
+        ["unset", "/data", "--add", "launchers=a"],
+        ["unset", "/data"],
+        ["configure", "/data", "--set", "force=true"],
     ],
 )
 def test_daemon_refuses_ambiguous_paths_and_unknown_options(
@@ -104,7 +150,7 @@ def test_daemon_refuses_ambiguous_paths_and_unknown_options(
     for name in ("initialize", "configure", "describe", "activate"):
         monkeypatch.setattr(_daemon_setup, name, lambda *_args, **_kwargs: pytest.fail("must refuse before setup"))
     monkeypatch.setattr(_daemon_cli.os, "execve", lambda *_args: pytest.fail("must refuse before any handoff"))
-    assert _daemon_cli.command(arguments, program="httk workspace daemon") == 2
+    assert _daemon_cli.command(arguments, program="httk daemon") == 2
 
 
 def test_relative_paths_anchor_to_the_physical_cwd_without_resolving(
@@ -158,7 +204,7 @@ fd = os.open({str(outside)!r}, os.O_RDONLY)
 os.set_inheritable(fd, True)
 os.environ.update(PYTHONPATH={str(untrusted)!r}, BASH_ENV='untrusted', SBATCH_ACCOUNT='other', NSC_RESOURCE_NAME='x')
 os.chdir({str(untrusted)!r})
-raise SystemExit(_daemon_cli.command(['run',{str(workspace)!r},'--once'], program='httk workspace daemon'))
+raise SystemExit(_daemon_cli.command(['run',{str(workspace)!r},'--once'], program='httk daemon'))
 """
     result = subprocess.run(
         [sys.executable, "-c", script], cwd="/", capture_output=True, text=True, check=True, timeout=20
@@ -199,7 +245,7 @@ _RENDERED = (
 )
 
 
-def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
+def test_init_and_set_pass_changes_in_order_and_print_without_exec(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     calls: list[tuple[str, Path, dict[str, object]]] = []
@@ -218,10 +264,9 @@ def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
     monkeypatch.setattr(_daemon_cli.os, "execve", lambda *_args: pytest.fail("local setup must not exec"))
     monkeypatch.setattr(_daemon_cli, "_bootstrap_argv", lambda *_a, **_k: ["check"])
     monkeypatch.setattr(_daemon_cli.subprocess, "run", lambda *_a, **_k: subprocess.CompletedProcess([], 0))
-    changes = ["--set", "bwrap=tools/bwrap", "--add", "launchers=small", "--set", "cluster=c1"]
-    changes += ["--add", f"authorized_keys={AUTHORIZED_KEY}"]
-    assert _daemon_cli.command(["init", "/workspace", *changes], program="httk") == 0
-    arguments = ["configure", "/workspace", "--remove", "launchers=large", "--set", "force=true"]
+    changes = ["bwrap=tools/bwrap", "--add", "launchers=small", "--add", f"authorized_keys={AUTHORIZED_KEY}"]
+    assert _daemon_cli.command(["init", "/workspace", *changes, "cluster=c1"], program="httk") == 0
+    arguments = ["set", "/workspace", "--remove", "launchers=large", "force=true"]
     assert _daemon_cli.command(arguments, program="httk") == 0
     assert calls == [
         (
@@ -230,8 +275,8 @@ def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
             {
                 "changes": [
                     ("set", "bwrap=tools/bwrap"),
-                    ("add", "launchers=small"),
                     ("set", "cluster=c1"),
+                    ("add", "launchers=small"),
                     ("add", f"authorized_keys={AUTHORIZED_KEY}"),
                 ],
                 "report": print,
@@ -241,14 +286,14 @@ def test_init_and_configure_pass_changes_in_order_and_print_without_exec(
             "configure",
             Path("/workspace"),
             {
-                "changes": [("remove", "launchers=large"), ("set", "force=true")],
+                "changes": [("set", "force=true"), ("remove", "launchers=large")],
             },
         ),
     ]
     output = capsys.readouterr().out
     assert output.startswith(f"{_RENDERED}sandbox check passed\n{_RENDERED}")
     hint = output.removeprefix(f"{_RENDERED}sandbox check passed\n{_RENDERED}")
-    assert "httk workspace daemon reload /workspace" in hint and "httk workspace daemon run /workspace" in hint
+    assert "httk daemon reload /workspace" in hint and "httk daemon run /workspace" in hint
 
 
 def test_show_renders_or_prints_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -290,7 +335,7 @@ def test_incompatible_ledger_is_a_clean_local_refusal(
         raise LedgerError("preserve this state and initialize a new enrollment")
 
     monkeypatch.setattr(_daemon_setup, "configure", incompatible)
-    assert _daemon_cli.command(["configure", "/workspace", "--set", "force=true"], program="httk") == 2
+    assert _daemon_cli.command(["set", "/workspace", "force=true"], program="httk") == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "preserve this state" in captured.err
@@ -348,7 +393,7 @@ def test_failed_check_keeps_the_enrollment_and_exits_2(
     captured = capsys.readouterr()
     assert "sandbox check passed" not in captured.out
     assert "the enrollment was saved, but the sandbox check failed" in captured.err
-    assert "httk workspace daemon configure" in captured.err and "httk workspace daemon check" in captured.err
+    assert "httk daemon set" in captured.err and "httk daemon check" in captured.err
 
 
 @pytest.mark.parametrize(("mode", "flag"), [(["check"], "--check"), (["run", "--once"], "--once")])
@@ -457,7 +502,7 @@ from pathlib import Path
 from httk.workflow import _daemon_cli, _daemon_setup
 _daemon_setup.activate = lambda workspace: (Path('/active.json'), None)
 _daemon_cli._bootstrap_argv = lambda *_a: [sys.executable, '-c', {child!r}]
-raise SystemExit(_daemon_cli.command(['run', {str(tmp_path)!r}], program='httk workspace daemon'))
+raise SystemExit(_daemon_cli.command(['run', {str(tmp_path)!r}], program='httk daemon'))
 """
     reader, writer = os.pipe()
     process = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True, pass_fds=(writer,))

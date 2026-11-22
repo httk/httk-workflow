@@ -142,6 +142,18 @@ def test_list_and_show_never_create_the_per_user_default(tmp_path: Path, capsys)
     assert capsys.readouterr().out.startswith("demo:\ndescribed from: workspace default\n")
 
 
+def test_build_list_never_creates_the_per_user_default(tmp_path: Path, capsys) -> None:
+    fresh = _context(tmp_path)
+    assert command(["build", "--list"], fresh) == 2
+    assert "no workspace to list builds of" in capsys.readouterr().err
+    assert not (data_home() / "workspace").exists() and not workspaces_path().exists()
+    install(workspace(tmp_path / "scratch"), tmp_path / "package")
+    assert command(["install", str(tmp_path / "package")], fresh) == 0  # creates the per-user default
+    capsys.readouterr()
+    assert command(["build", "--list", "--json"], fresh) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
 def test_install_without_a_resolvable_workspace_names_fetch_and_init(tmp_path: Path, capsys) -> None:
     assert command(["install", "pkg"], _context(_unresolvable_project(tmp_path))) == 2
     error = capsys.readouterr().err

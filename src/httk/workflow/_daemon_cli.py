@@ -1,4 +1,4 @@
-"""Enter the workspace daemon before ordinary workflow parser discovery."""
+"""Enter the workspace daemon (``httk daemon``) before ordinary workflow parser discovery."""
 
 import argparse
 import errno
@@ -7,80 +7,94 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 from ._daemon_bootstrap import _operator_environment
 
 _MODES = {
-    "init": "approve global slurm launchers and initialize a new enrollment",
-    "configure": "change the daemon configuration, activated by reload or when the daemon next starts",
+    "init": "approve global slurm launchers, enable the workspace's exchange and initialize a new enrollment",
+    "set": "change the daemon configuration, activated by reload or when the daemon next starts",
+    "unset": "clear or reset daemon configuration values, activated by reload or when the daemon next starts",
     "show": "describe the enrollment and its daemon configuration",
     "check": "activate the configuration and check the real sandbox and scheduler requirements",
     "run": "activate the configuration and serve the exchange",
     "reload": "activate the changed configuration and launcher bundles; a running daemon restarts on it",
 }
 _KEYS_HELP = (
-    "keys: launchers and authorized_keys (lists; --set takes a comma-separated value), bwrap, python, sbatch, "
+    "keys: launchers and authorized_keys (lists, comma-separated), bwrap, python, sbatch, "
     "squeue, scancel (executables), sacct and slurm_conf (optional paths; an empty value unsets), "
     "max_submissions, force (true or false: approve CPU, memory and time above the sanity limits)"
 )
 
 
-def _change(operation: str) -> Callable[[str], tuple[str, str]]:
-    return lambda item: (operation, item)
+def _pair(value: str) -> str:
+    """Refuse a ``KEY=VALUE`` argument without ``=`` or without a key."""
+
+    key, separator, _ = value.partition("=")
+    if not separator or not key:
+        raise argparse.ArgumentTypeError(f"expected KEY=VALUE, not {value!r}")
+    return value
 
 
-def add_subcommands(modes: "argparse._SubParsersAction[argparse.ArgumentParser]", **defaults: object) -> None:
-    """Declare the daemon subcommands ``init``, ``configure``, ``show``, ``check``, ``run`` and ``reload``.
-
-    :param modes: The subcommand action of the daemon command parser.
-    :param **defaults: Extra parser defaults set on every subcommand, such as a handler.
-    """
+def _add_subcommands(modes: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    """Declare the daemon subcommands ``init``, ``set``, ``unset``, ``show``, ``check``, ``run`` and ``reload``."""
 
     for mode, summary in _MODES.items():
         parser = modes.add_parser(mode, help=summary, description=summary[0].upper() + summary[1:])
-        parser.set_defaults(daemon_mode=mode, **defaults)
+        parser.set_defaults(daemon_mode=mode)
         parser.add_argument("workspace", metavar="WORKSPACE", type=Path, help="local workspace data directory")
-        if mode in ("init", "configure"):
+        if mode in ("init", "set"):
             extra = "; init also takes cluster and scontrol" if mode == "init" else ""
             parser.add_argument(
-                "--set",
-                dest="changes",
-                action="append",
-                type=_change("set"),
+                "pairs",
                 metavar="KEY=VALUE",
-                help=f"set one configuration value (repeatable); {_KEYS_HELP}{extra}",
+                nargs="*",
+                default=[],
+                type=_pair,
+                help=f"configuration values to set; {_KEYS_HELP}{extra}",
             )
             parser.add_argument(
                 "--add",
-                dest="changes",
                 action="append",
-                type=_change("add"),
+                default=[],
+                type=_pair,
                 metavar="KEY=VALUE",
-                help="add one launcher name or authorized Ed25519 key (repeatable)",
+                help="add one launcher name or authorized Ed25519 key after the values are set (repeatable)",
             )
-        if mode == "configure":
-            parser.add_argument(
-                "--unset",
-                dest="changes",
-                action="append",
-                type=_change("unset"),
-                metavar="KEY",
-                help="clear sacct or slurm_conf, or reset max_submissions or force to its default (repeatable)",
-            )
+            parser.set_defaults(pairs_parser=parser)
+        if mode == "set":
             parser.add_argument(
                 "--remove",
-                dest="changes",
                 action="append",
-                type=_change("remove"),
+                default=[],
+                type=_pair,
                 metavar="KEY=VALUE",
-                help="remove one launcher name or authorized key (repeatable)",
+                help="remove one launcher name or authorized key, last (repeatable)",
+            )
+        if mode == "unset":
+            parser.add_argument(
+                "keys",
+                metavar="KEY",
+                nargs="+",
+                help="clear sacct or slurm_conf, or reset max_submissions or force to its default",
             )
         if mode == "show":
             parser.add_argument("--json", action="store_true", help="print the description as one JSON document")
         if mode == "run":
             parser.add_argument("--once", action="store_true", help="process one bounded request scan and exit")
+
+
+def _changes(arguments: argparse.Namespace) -> list[tuple[str, str]]:
+    """Return the ordered configuration changes of ``init``, ``set`` or ``unset``: sets, then adds, then removes."""
+
+    if arguments.daemon_mode == "unset":
+        return [("unset", key) for key in arguments.keys]
+    return [
+        *(("set", pair) for pair in arguments.pairs),
+        *(("add", pair) for pair in arguments.add),
+        *(("remove", pair) for pair in getattr(arguments, "remove", ())),
+    ]
 
 
 def _anchored(path: Path, name: str) -> Path:
@@ -148,15 +162,14 @@ def _check_after_setup(workspace: Path, policy: Path) -> int:
             argv, stdin=subprocess.DEVNULL, cwd="/", env=_launch_environment(), close_fds=True, check=False
         ).returncode
     except (OSError, RuntimeError, ValueError) as exc:
-        print(f"httk workspace daemon: {exc}", file=sys.stderr)
+        print(f"httk daemon: {exc}", file=sys.stderr)
         code = 1
     if code == 0:
         print("sandbox check passed")
         return 0
     print(
-        "httk workspace daemon: the enrollment was saved, but the sandbox check failed (see above); fix the "
-        "launchers or the daemon configuration ('httk workspace daemon configure') and run "
-        "'httk workspace daemon check'",
+        "httk daemon: the enrollment was saved, but the sandbox check failed (see above); fix the "
+        "launchers or the daemon configuration ('httk daemon set') and run 'httk daemon check'",
         file=sys.stderr,
     )
     return 2
@@ -184,18 +197,17 @@ def _local(arguments: argparse.Namespace, workspace: Path) -> list[str] | int:
 
     mode = arguments.daemon_mode
     if mode == "init":
-        snapshot = _daemon_setup.initialize(
-            workspace,
-            changes=arguments.changes or (),
-            report=print,
-        )
+        snapshot = _daemon_setup.initialize(workspace, changes=_changes(arguments), report=print)
         print(_render(_daemon_setup.describe(workspace)))
         return _check_after_setup(workspace, snapshot)
-    if mode == "configure":
-        print(_render(_daemon_setup.configure(workspace, arguments.changes or ())))
+    if mode in ("set", "unset"):
+        changes = _changes(arguments)
+        if not changes:
+            raise ValueError("daemon set requires at least one KEY=VALUE, --add or --remove")
+        print(_render(_daemon_setup.configure(workspace, changes)))
         print(
-            f"the configuration takes effect with httk workspace daemon reload {workspace} (a running daemon "
-            f"restarts on it) or when the daemon next starts: httk workspace daemon run {workspace}"
+            f"the configuration takes effect with httk daemon reload {workspace} (a running daemon "
+            f"restarts on it) or when the daemon next starts: httk daemon run {workspace}"
         )
         return 0
     if mode == "show":
@@ -309,7 +321,7 @@ def launch(arguments: argparse.Namespace) -> int:
             return _supervise(arguments, workspace)
         result = _local(arguments, workspace)
     except (OSError, RuntimeError, ValueError) as exc:  # LedgerError is a RuntimeError
-        print(f"httk workspace daemon: {exc}", file=sys.stderr)
+        print(f"httk daemon: {exc}", file=sys.stderr)
         return 2
     if isinstance(result, int):
         return result
@@ -317,7 +329,7 @@ def launch(arguments: argparse.Namespace) -> int:
         _detach()
         os.execve(sys.executable, result, _launch_environment())
     except OSError:
-        print("httk workspace daemon: isolated bootstrap could not start", file=sys.stderr)
+        print("httk daemon: isolated bootstrap could not start", file=sys.stderr)
         return 2
 
 
@@ -330,9 +342,20 @@ def command(argv: Sequence[str], *, program: str) -> int:
     """
 
     parser = argparse.ArgumentParser(prog=program, description="Set up and run the confined workspace command daemon")
-    add_subcommands(parser.add_subparsers(metavar="COMMAND"))
+    _add_subcommands(parser.add_subparsers(metavar="COMMAND"))
     try:
-        arguments = parser.parse_args(argv)
+        arguments, extras = parser.parse_known_args(list(argv))
+        if extras:
+            # Before Python 3.13 the pairs after WORKSPACE take only the words before the first option
+            # (``init WS --add k=v a=b`` strands ``a=b``); collect them as the workflow ``dispatch`` does.
+            leaf = getattr(arguments, "pairs_parser", None)
+            if leaf is None or any(word.startswith("-") for word in extras):
+                parser.error(f"unrecognized arguments: {' '.join(extras)}")
+            for word in extras:
+                try:
+                    arguments.pairs = [*arguments.pairs, _pair(word)]  # never extend the shared default
+                except argparse.ArgumentTypeError as exc:
+                    leaf.error(f"argument KEY=VALUE: {exc}")
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 2
     if getattr(arguments, "daemon_mode", None) is None:

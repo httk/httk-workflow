@@ -69,6 +69,7 @@ __all__ = [
     "collect_command",
     "command",
     "config_command",
+    "daemon_command",
     "dispatch",
     "ensure_identity_key",
     "handle_build",
@@ -135,6 +136,7 @@ __all__ = [
     "job_command",
     "launch_workspace_managers",
     "launcher_command",
+    "manager_command",
     "monitor_command",
     "postprocess_command",
     "publish_job_requests",
@@ -271,6 +273,7 @@ _GROUPS = (
     (("launcher",), "._launcher", "build_launcher_parser", False, True),
     (("campaign",), "._campaign", "build_campaign_parser", False, True),
     (("monitor",), "._monitor", "build_monitor_parser", False, True),
+    (("manager",), "._daemon_remote", "build_manager_parser", False, True),
     (("session",), "._session", "build_session_parser", False, False),
     (("transfer-session",), "._transfer_session", "build_transfer_session_parser", False, False),
 )
@@ -396,11 +399,15 @@ def workflow_command(argv: Sequence[str], context: CLIContext) -> int:
 def workspace_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``workspace`` command."""
 
-    if argv and argv[0] == "daemon":
-        from .._daemon_cli import command as daemon_command
-
-        return daemon_command(argv[1:], program=f"{context.program} workspace daemon")
     return command(["workspace", *argv], context, prog=f"{context.program} workspace")
+
+
+def daemon_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``daemon`` command with its own parser, not the workflow tree."""
+
+    from .._daemon_cli import command as run_daemon
+
+    return run_daemon(argv, program=f"{context.program} daemon")
 
 
 def job_command(argv: Sequence[str], context: CLIContext) -> int:
@@ -419,6 +426,12 @@ def run_command(argv: Sequence[str], context: CLIContext) -> int:
     """Handle the registered top-level ``run`` command."""
 
     return command(["run", *argv], context, prog=f"{context.program} run")
+
+
+def manager_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``manager`` command."""
+
+    return command(["manager", *argv], context, prog=f"{context.program} manager")
 
 
 def monitor_command(argv: Sequence[str], context: CLIContext) -> int:

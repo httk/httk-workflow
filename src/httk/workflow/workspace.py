@@ -543,8 +543,8 @@ class Workspace:
     def refresh_format(self) -> dict[str, object]:
         """Re-read ``format.json`` and refresh the enabled :attr:`extensions` from it.
 
-        Extensions can be enabled while processes are attached (``httk
-        workspace exchange enable``), so a long-running reader re-reads them
+        Extensions can be enabled while processes are attached (``httk daemon
+        init`` enables the exchange), so a long-running reader re-reads them
         rather than trusting what it saw at attach. The format, profile and
         workspace identity must still be the attached ones; the policy keeps the
         value read at attach.

@@ -1,6 +1,7 @@
 """Enrollment, configuration, approval of slurm launchers, and activation for the workspace daemon."""
 
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -489,7 +490,7 @@ def _pass_sandbox_check(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _broker_arguments(layout: Layout) -> list[str]:
-    return [argument for operation, item in layout.options for argument in (f"--{operation}", item)]
+    return [item for _operation, item in layout.options]
 
 
 def test_relative_cli_paths_initialize_from_inside_the_workspace_and_print_the_configuration(
@@ -502,7 +503,7 @@ def test_relative_cli_paths_initialize_from_inside_the_workspace_and_print_the_c
     arguments += ["--add", f"authorized_keys={AUTHORIZED_KEY}"]
     broker = _broker_arguments(layout)
     broker[broker.index(f"sbatch={layout.broker / 'sbatch'}")] = "sbatch=../../broker/sbatch"
-    assert _daemon_cli.command([*arguments, *broker, "--set", "max_submissions=7"], program="httk") == 0
+    assert _daemon_cli.command([*arguments, *broker, "max_submissions=7"], program="httk") == 0
     output = capsys.readouterr().out.splitlines()
     assert output[-1] == "sandbox check passed"
     assert {
@@ -525,6 +526,8 @@ def test_old_daemon_flags_are_gone(tmp_path: Path, capsys: pytest.CaptureFixture
         ["run", workspace, "--set", "cluster=c"],
         ["check", workspace, "--force"],
         ["configure", workspace, "--launcher", "small"],
+        ["set", workspace, "--launcher", "small"],
+        ["init", workspace, "--set", "cluster=c"],
     ):
         assert _daemon_cli.command(arguments, program="httk") == 2
         assert "error:" in capsys.readouterr().err
@@ -548,6 +551,26 @@ def test_initialize_enables_the_exchange_without_a_dedicated_parent_or_staging(t
     assert sorted(os.listdir(tmp_path / "site")) == ["workspace"]
     # Already enabled: nothing is reported again, and a second enrollment elsewhere keeps the exchange.
     assert load_policy(snapshot).exchange == layout.exchange
+
+
+def test_daemon_init_enables_the_exchange_once_and_accepts_an_enabled_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from httk.workflow._exchange import enable_exchange
+
+    _pass_sandbox_check(monkeypatch)
+    layout = _layout(tmp_path)
+    setup = [*_broker_arguments(layout), "--add", "launchers=small", "--add", f"authorized_keys={AUTHORIZED_KEY}"]
+    assert _daemon_cli.command(["init", str(layout.workspace.root), *setup], program="httk daemon") == 0
+    enabled = f"enabled the exchange extension of {layout.workspace.root}: {layout.exchange}"
+    assert enabled in capsys.readouterr().out.splitlines()
+    assert "exchange" in Workspace(layout.workspace.root).extensions and (layout.exchange / "daemon.json").is_file()
+    # A workspace whose exchange is enabled already enrolls without enabling it again.
+    other = Workspace.initialize(tmp_path / "other")
+    assert enable_exchange(other)
+    assert _daemon_cli.command(["init", str(other.root), *setup], program="httk daemon") == 0
+    output = capsys.readouterr().out
+    assert "enabled the exchange extension" not in output and (other.root / "exchange" / "daemon.json").is_file()
 
 
 @pytest.mark.parametrize(
@@ -608,7 +631,7 @@ def test_force_is_persisted_and_honoured_at_activation(
         assert _daemon_cli.command([mode, workspace], program="httk") == 2
         assert "slurm.mem" in capsys.readouterr().err
     assert _active(layout) == old
-    assert _daemon_cli.command(["configure", workspace, "--set", "force=true"], program="httk") == 0
+    assert _daemon_cli.command(["set", workspace, "force=true"], program="httk") == 0
     assert "force=true" in capsys.readouterr().out.splitlines()
     assert _stored_configuration(layout)["force"] is True
     active = load_policy(_activate(layout))
@@ -673,9 +696,52 @@ def test_a_failed_initialize_leaves_an_enabled_exchange_without_a_daemon_documen
     monkeypatch.setattr(_daemon_setup, "_write_daemon_document", fail)
     with pytest.raises(OSError, match="daemon document write failed"):
         _initialize(layout)
-    # The extension is a valid state on its own (`httk workspace exchange enable`); no daemon is advertised.
+    # The extension is a valid state on its own; no daemon is advertised.
     assert "exchange" in Workspace(layout.workspace.root).extensions and (layout.exchange / "inbox").is_dir()
     assert not os.path.lexists(layout.exchange / "daemon.json")
+
+
+def test_a_failed_exchange_enable_leaves_no_enrollment_and_init_runs_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow import _exchange
+
+    layout = _layout(tmp_path)
+    rename = os.rename
+
+    def cross_device(src: object, dst: object, **arguments: object) -> None:
+        # The rename probe between .httk-workspace/tmp and exchange/ crosses filesystems.
+        if ".probe." in str(src) and str(dst).startswith(str(layout.exchange)):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        rename(src, dst, **arguments)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "rename", cross_device)
+        with pytest.raises(_exchange.ExchangeUnavailableError, match="different filesystems"):
+            _initialize(layout)
+    assert not os.path.lexists(_state(layout))
+    assert "exchange" not in Workspace(layout.workspace.root).extensions
+    # Once the cause is gone, init runs again on the same workspace.
+    policy = load_policy(_initialize(layout))
+    assert policy.daemon == _state(layout) and (layout.exchange / "daemon.json").is_file()
+    assert "exchange" in Workspace(layout.workspace.root).extensions
+
+
+@pytest.mark.parametrize("step", ["_publish", "Ledger"])
+def test_a_failure_before_the_enable_leaves_the_exchange_extension_off(
+    step: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path)
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(_daemon_setup, step, fail)
+    with pytest.raises(OSError, match="No space left"):
+        _initialize(layout)
+    # The extension is irreversible and makes every unconfined manager refuse: it is enabled only last.
+    assert "exchange" not in Workspace(layout.workspace.root).extensions
+    assert not layout.exchange.exists()
 
 
 def test_activation_reinstalls_the_daemon_document_and_never_follows_a_client_symlink(tmp_path: Path) -> None:
@@ -940,20 +1006,20 @@ def test_show_prints_the_enrollment_and_the_configuration(tmp_path: Path, capsys
     assert "state" not in document and "snapshots" not in document
 
 
-def test_configure_through_the_cli_prints_the_configuration_and_when_it_applies(
+def test_set_through_the_cli_prints_the_configuration_and_when_it_applies(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     layout = _layout(tmp_path)
     _initialize(layout)
     workspace = str(layout.workspace.root)
-    arguments = ["configure", workspace, "--remove", "launchers=large", "--set", "slurm_conf="]
+    arguments = ["set", workspace, "--remove", "launchers=large", "slurm_conf="]
     arguments += ["--add", f"authorized_keys={OTHER_KEY}"]
     assert _daemon_cli.command(arguments, program="httk") == 0
     lines = capsys.readouterr().out.splitlines()
     assert "launchers=small" in lines and f"authorized_keys={AUTHORIZED_KEY},{OTHER_KEY}" in lines
-    assert f"httk workspace daemon reload {workspace}" in lines[-1]
-    assert f"httk workspace daemon run {workspace}" in lines[-1]
-    assert _daemon_cli.command(["configure", workspace, "--set", "cluster=x"], program="httk") == 2
+    assert f"httk daemon reload {workspace}" in lines[-1]
+    assert f"httk daemon run {workspace}" in lines[-1]
+    assert _daemon_cli.command(["set", workspace, "cluster=x"], program="httk") == 2
     assert "cluster is fixed by the enrollment" in capsys.readouterr().err
 
 
@@ -973,7 +1039,7 @@ def test_reload_activates_a_changed_bundle_without_a_running_daemon(
     assert dict(load_policy(_active(layout)).launcher("small").settings)["slurm.cpus_per_task"] == "16"
     _rewrite_launcher("small", **{"manager.confine": None})
     assert _daemon_cli.command(["reload", workspace], program="httk") == 2
-    assert "httk workspace daemon: " in capsys.readouterr().err
+    assert "httk daemon: " in capsys.readouterr().err
 
 
 def test_a_restart_selects_again_when_a_reload_moves_the_pointer_during_selection(

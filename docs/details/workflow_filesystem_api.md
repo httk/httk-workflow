@@ -2315,7 +2315,7 @@ WORKSPACE/exchange/
 └── daemon.json, managers.json, launchers/<handle>.log    the workspace daemon's documents
 ```
 
-`httk workspace exchange enable` creates the directories by descriptor, writes
+`httk daemon init` (through `enable_exchange`) creates the directories by descriptor, writes
 `exchange.json`, proves with a rename probe that bundles move between
 `exchange/` and `.httk-workspace/tmp/`, and only then adds `"exchange"` to
 `extensions`; there is no disable. Every trusted access to `exchange/` is

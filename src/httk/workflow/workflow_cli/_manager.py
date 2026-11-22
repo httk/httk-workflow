@@ -423,6 +423,13 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(**manager_option_defaults())
 
 
+#: The ``run`` options only a mount-daemon remote takes, with their destinations.
+_DAEMON_OPTIONS = (
+    ("--configuration", "configuration"),
+    ("--request-id", "request_id"),
+    ("--wait-seconds", "wait_seconds"),
+)
+
 _LOG_FILE_REFUSAL = (
     "--log-file names one fixed file and is accepted only for a single in-process manager; "
     "managers started with --count > 1, --detach, a launcher or a remote binding always log to "
@@ -856,14 +863,28 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
     """Run one task manager with the workspace manager log.
 
     A local binding runs the manager in this process. A remote binding submits
-    managers through the remote's scheduler over its adapter. ``--keep-running`` keeps
-    a local manager serving after the workspace becomes idle; otherwise the
-    command exits when it becomes idle.
+    managers through the remote's scheduler over its adapter; on a mount-daemon
+    remote, a typed start request asks its daemon for an approved configuration.
+    ``--keep-running`` keeps a local manager serving after the workspace becomes
+    idle; otherwise the command exits when it becomes idle.
     """
 
     binding, root = _resolve_binding(arguments, context)
+    daemon = False
+    if root is None:
+        from ._job import _daemon_binding
+
+        assert binding is not None
+        daemon = _daemon_binding(binding, context)
+    given = [option for option, name in _DAEMON_OPTIONS if getattr(arguments, name, None) is not None]
+    if given and not daemon:
+        raise ValueError(f"{', '.join(given)} apply only to a workspace on a mount-daemon remote")
     if root is None:
         assert binding is not None
+        if daemon:
+            from ._daemon_remote import start_manager
+
+            return start_manager(binding, arguments, context)
         return _submit_remote_manager(binding, arguments, context)
     try:
         _mode, result = launch_workspace_managers(root, arguments, context)
@@ -881,12 +902,31 @@ def build_run_parser(
 ) -> None:
     """Declare the top-level manager runner leaf."""
 
-    add_run_arguments(
-        _leaf(
-            subparsers,
-            "run",
-            summary="run a task manager until the workspace is idle",
-            description="Run one task manager against one execution workspace",
-            handler=handle_manager_run,
-        )
+    parser = _leaf(
+        subparsers,
+        "run",
+        summary="run a task manager until the workspace is idle",
+        description=(
+            "Run one task manager against one execution workspace; on a mount-daemon remote, ask its daemon to "
+            "start an approved manager configuration"
+        ),
+        handler=handle_manager_run,
+    )
+    add_run_arguments(parser)
+    parser.add_argument(
+        "--configuration",
+        metavar="NAME",
+        help="mount-daemon remote only: the approved manager configuration its daemon starts",
+    )
+    parser.add_argument(
+        "--request-id",
+        metavar="ID",
+        help="mount-daemon remote only: 32 lowercase hexadecimal request ID (default: generated); "
+        "reuse one to keep waiting for a request",
+    )
+    parser.add_argument(
+        "--wait-seconds",
+        type=float,
+        metavar="SECONDS",
+        help="mount-daemon remote only: bound the mailbox wait (0.05 to 120 seconds; default: 10)",
     )

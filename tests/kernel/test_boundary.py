@@ -193,7 +193,6 @@ UTIL_JSON_CALLERS = frozenset(
         "registry.py",
         "adapters.py",
         "launchers.py",
-        "workflow_cli/_daemon_remote.py",
         "workflow_cli/_transfer.py",
         # Hygiene reads the metadata of holds and copies for its report only.
         "hygiene.py",

@@ -1133,7 +1133,7 @@ def _run(arguments: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         raise ValueError(
             f"daemon response seed is missing or invalid; reconcile outstanding manager jobs with squeue and scancel, "
-            f"then remove (or move aside) {policy.daemon} and run 'httk workspace daemon init'"
+            f"then remove (or move aside) {policy.daemon} and run 'httk daemon init'"
         ) from exc
 
     stop = threading.Event()

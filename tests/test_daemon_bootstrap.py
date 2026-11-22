@@ -516,7 +516,7 @@ def test_a_missing_exchange_is_refused_with_the_way_to_create_it(tmp_path: Path)
     (Path(policy["workspace"]) / "exchange").rmdir()
     result = _run(tmp_path, policy_path, ["--workspace", str(policy["workspace"]), "--once"])
     assert result.returncode == 2
-    assert "httk workspace exchange enable" in result.stderr
+    assert "httk daemon init" in result.stderr
     assert not record.exists()
 
 

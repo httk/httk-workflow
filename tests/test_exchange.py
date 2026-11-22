@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from httk.core.cli import CLIContext
 
-from conftest import configure_identity, register_ws
+from conftest import configure_identity
 from httk.workflow import TaskManager, Workspace, _bundles, _confine, _exchange, _fs, _kernel, _moving, removal
 from httk.workflow._bundles import BundleManifest, exchange_pool
 from httk.workflow._daemon_client import Endpoint, read_passive_status
@@ -209,14 +209,13 @@ def test_enable_refuses_a_sealed_workspace(tmp_path: Path) -> None:
     assert not os.path.lexists(workspace.root / "exchange")
 
 
-def test_the_enable_command_reports_and_is_idempotent(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_exchange_has_no_command_of_its_own(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # `httk daemon init` enables the exchange; there is no separate `workspace exchange enable` any more.
     workspace = Workspace.initialize(tmp_path / "workspace")
     context = CLIContext("httk", tmp_path)
-    name = register_ws(context, workspace.root)
-    assert command(["workspace", "exchange", "enable", name], context) == 0
-    assert f"{workspace.root}\texchange enabled\t{workspace.root / 'exchange'}" in capsys.readouterr().out
-    assert command(["workspace", "exchange", "enable", "--by-path", str(workspace.root)], context) == 0
-    assert "exchange already enabled" in capsys.readouterr().out
+    assert command(["workspace", "exchange", "enable", "--by-path", str(workspace.root)], context) == 2
+    assert "invalid choice" in capsys.readouterr().err
+    assert _extensions(workspace) == []
 
 
 def test_an_unconfined_manager_refuses_a_workspace_with_the_extension(tmp_path: Path) -> None:

@@ -240,7 +240,7 @@ def _legacy_message(path: Path) -> str:
     return (
         f"{path} is a SQLite daemon ledger from an earlier httk-workflow; there is no migration. Reconcile the "
         "enrollment's outstanding manager jobs with squeue and scancel, then remove (or move aside) "
-        "the workspace's .httk-workspace/daemon directory and run 'httk workspace daemon init'"
+        "the workspace's .httk-workspace/daemon directory and run 'httk daemon init'"
     )
 
 
@@ -443,7 +443,7 @@ class Ledger:
         if information is None:
             raise LedgerError(
                 f"daemon ledger {self._root} is missing; remove (or move aside) the workspace's "
-                ".httk-workspace/daemon directory and run 'httk workspace daemon init'"
+                ".httk-workspace/daemon directory and run 'httk daemon init'"
             )
         if not stat.S_ISDIR(information.st_mode):
             raise LedgerError(f"daemon ledger {self._root} is not a directory")
@@ -457,7 +457,7 @@ class Ledger:
             raise LedgerError(
                 "unsupported daemon ledger format; this ledger is not migrated. Reconcile outstanding manager "
                 "jobs with squeue and scancel, then remove (or move aside) the workspace's "
-                ".httk-workspace/daemon directory and run 'httk workspace daemon init' to re-enroll"
+                ".httk-workspace/daemon directory and run 'httk daemon init' to re-enroll"
             )
         for name in _SUBDIRECTORIES:
             child = _fs.lstat(_fs.loc(self._root / name))

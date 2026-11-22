@@ -217,7 +217,7 @@ def test_unpinned_endpoint_checks_exchange_only_and_refuses_signing(tmp_path: Pa
     unpinned.check()
     (unpinned.exchange / "daemon.json").unlink()
     unpinned.check()
-    with pytest.raises(ValueError, match="httk remote daemon configure REMOTE --exchange PATH"):
+    with pytest.raises(ValueError, match="httk remote set REMOTE exchange=PATH"):
         client_module.prepare_request(
             unpinned, Request(REQUEST_ID, WORKSPACE_ID, "health", enrollment_id=ENROLLMENT_ID)
         )
@@ -812,7 +812,7 @@ def test_passive_status_fails_closed_when_the_exchange_or_enrollment_changed(tmp
     # An unpinned enrollment cannot be compared, so the document is accepted as informational.
     assert client_module.read_passive_status(Endpoint(endpoint.exchange, WORKSPACE_ID))["managers"] is not None
     (endpoint.exchange / "exchange.json").unlink()
-    with pytest.raises(ValueError, match="httk remote daemon configure"):
+    with pytest.raises(ValueError, match="httk remote set REMOTE exchange=PATH"):
         client_module.read_passive_status(endpoint)
 
 
@@ -872,12 +872,12 @@ def test_take_back_copies_through_the_inbox_descriptor(tmp_path: Path, monkeypat
 def test_check_refuses_a_v2_shaped_exchange_with_the_teaching_message(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path)
     (endpoint.exchange / "launchers").rmdir()
-    with pytest.raises(ValueError, match="httk remote daemon configure"):
+    with pytest.raises(ValueError, match="httk remote set REMOTE exchange=PATH"):
         endpoint.check()
     (endpoint.exchange / "launchers").mkdir()
     (endpoint.exchange / "exchange.json").unlink()
     (endpoint.exchange / "launchers").rmdir()
-    with pytest.raises(ValueError, match="httk remote daemon configure"):
+    with pytest.raises(ValueError, match="httk remote set REMOTE exchange=PATH"):
         endpoint.check()
 
 

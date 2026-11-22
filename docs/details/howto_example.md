@@ -140,36 +140,36 @@ The following configuration is carefully created for Sigma and will need to be a
 ```bash
 CLIENT_PUBLIC_KEY='ed25519:<THE PUBLIC KEY FOR YOUR IDENTITY FROM STEP 1>'
 
-httk workspace daemon init main \
+httk daemon init "$HOME/sandbox/main" \
+  "authorized_keys=$CLIENT_PUBLIC_KEY" \
+  bwrap=/usr/bin/bwrap \
+  "python=$HOME/sandbox/setup/venv/bin/python3" \
+  sbatch=/usr/bin/sbatch \
+  squeue=/software/tools/bin/squeue \
+  scancel=/usr/bin/scancel \
+  sacct=/usr/bin/sacct \
+  slurm_conf=/etc/slurm/slurm.conf \
+  max_submissions=128 \
   --add launchers=small \
-  --add launchers=large \
-  --set "authorized_keys=$CLIENT_PUBLIC_KEY" \
-  --set bwrap=/usr/bin/bwrap \
-  --set "python=$HOME/sandbox/setup/venv/bin/python3" \
-  --set sbatch=/usr/bin/sbatch \
-  --set squeue=/software/tools/bin/squeue \
-  --set scancel=/usr/bin/scancel \
-  --set sacct=/usr/bin/sacct \
-  --set slurm_conf=/etc/slurm/slurm.conf \
-  --set max_submissions=128
+  --add launchers=large
 
-httk workspace daemon check main
-httk workspace daemon run main
+httk daemon check "$HOME/sandbox/main"
+httk daemon run "$HOME/sandbox/main"
 ```
 Where the last command starts the deamon. As you are starting things up/debugging, it may be nice to run it this way in the foreground.
 However, as you get more used to the setup, it is recommended to start it in the background in a screen process like this:
 ```bash
-screen -dm httk workspace daemon run main
+screen -dm httk daemon run "$HOME/sandbox/main"
 ```
 The deamon process must remain available to answer requests and submit managers. The Slurm managers execute and return jobs independently of the daemon.
 
 To modify a deamon configuration, do e.g.,:
 ```bash
-httk workspace daemon configure main --add launchers=large
-httk workspace daemon configure main --add "authorized_keys=<ANOTHER KEY>"
-httk workspace daemon reload main
+httk daemon set "$HOME/sandbox/main" --add launchers=large
+httk daemon set "$HOME/sandbox/main" --add "authorized_keys=<ANOTHER KEY>"
+httk daemon reload "$HOME/sandbox/main"
 ```
-`reload` activates the changed configuration (also after `httk launcher set`); a running `httk workspace daemon run` restarts on it by itself, and queued and running managers keep running. As a saftey feature, a deamon has a default quota of running 128 "managers".
+`reload` activates the changed configuration (also after `httk launcher set`); a running `httk daemon run` restarts on it by itself, and queued and running managers keep running. As a saftey feature, a deamon has a default quota of running 128 "managers".
 
 ## 6 Mount the exchange on the client
 
@@ -190,10 +190,8 @@ Be careful to *only* mount the exchange directory as shown above, not the whole 
 **Client.** With the exchange mounted and the sigma daemon running:
 
 ```bash
-httk remote add --kind mount-daemon sigma
-httk remote daemon configure sigma --exchange "<EXCHANGE_MOUNT_DIR>"
+httk remote add --kind mount-daemon sigma "exchange=<EXCHANGE_MOUNT_DIR>"
 httk remote check sigma
-httk remote daemon health sigma
 ```
 
 ## 8 Send jobs and choose an allocation
@@ -204,18 +202,18 @@ httk job eject JOB "$EXCHANGE_MOUNT/inbox"
 ```
 Launch a manager running in a small allocation:
 ```bash
-httk remote daemon start sigma --configuration small
+httk run -w sigma:main --configuration small
 ```
 Or launch a manager running in a large allocation:
 ```bash
-httk remote daemon start sigma --configuration large
+httk run -w sigma:main --configuration large
 ```
 Job and step resource requirements determine how many ranks a calculation receives inside the allocation. Starting `large` does not automatically give every job 192 ranks.
 
 Monitor the managers:
 ```bash
-httk remote daemon status sigma
-httk remote daemon log sigma --handle MANAGER_HANDLE
+httk manager status sigma
+httk manager log sigma --handle MANAGER_HANDLE
 ```
 
 A manager adopts the inbox bundle and returns the finished job tree to `outbox`. From the local workspace where you want the result, adopt it using the actual path visible in the exchange:
@@ -235,7 +233,7 @@ httk launcher set large slurm.time_limit=02:00:00
 A single start can instead ask for a shorter allocation, or a longer one up to the launcher's `slurm.time_limit_max`:
 
 ```bash
-httk remote daemon start sigma --configuration large --time-limit 00:30:00
+httk run -w sigma:main --configuration large --time-limit 00:30:00
 ```
 
 ## Reference

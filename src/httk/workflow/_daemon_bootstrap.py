@@ -365,7 +365,7 @@ def _prepare_sandbox(
         except OSError as exc:
             raise ValueError(
                 f"cannot open {policy.exchange} as a real directory ({exc.strerror}); "
-                "the daemon serves the workspace's exchange, which 'httk workspace exchange enable' creates"
+                "the daemon serves the workspace's exchange, which 'httk daemon init' creates"
             ) from exc
         bind_workspace_directory("jobs")
         # Keep the private daemon tree read-only, then overlay only its broker ledger directory writable below.
