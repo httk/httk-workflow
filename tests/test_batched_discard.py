@@ -240,7 +240,8 @@ def test_a_mixed_chunk_runs_the_drop_phases_before_the_trash(
     assert len(replaced) == 4 and all(c1 < at < c2 for at in replaced)
     moves = [at for at, (op, path) in enumerate(journal) if op == "rename" and path.startswith(owned)]
     released = [at for at in moves if "/ready/" in journal[at][1].split(" -> ")[1]]
-    trash = [at for at in moves if "/tmp/" in journal[at][1].split(" -> ")[1]]
+    scratch = f"{workspace.control / 'tmp'}/"
+    trash = [at for at in moves if journal[at][1].split(" -> ")[1].startswith(scratch)]
     assert len(released) == 4 and all(d1 < at < d2 for at in released)
     assert len(trash) == 5 and all(d2 < at < d1_prime for at in trash)
     # C1 wrote every job's run-log lines, but a state temporary only for the Drop jobs.
