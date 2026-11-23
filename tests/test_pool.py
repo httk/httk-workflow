@@ -100,20 +100,22 @@ def test_workers_1_is_the_plain_loop_in_the_calling_thread() -> None:
 
 
 def test_the_first_failure_in_input_order_is_raised_after_the_completed_prefix_is_emitted() -> None:
-    later_failed = threading.Event()
+    later_failed, two_running = threading.Event(), threading.Event()
     finished: set[int] = set()
     done = threading.Condition()
 
     def work(item: int) -> int:
         if item == 2:
+            two_running.set()
             # Fails only after item 3 failed: the earlier one in input order is still the one raised.
             assert later_failed.wait(PATIENCE)
             raise Boom("two")
         if item == 3:
-            # Fails only once items 0 and 1 finished: no item starts after a failure, so a worker that took
-            # one of them late would otherwise find the pool already stopped.
+            # Fails only once items 0 and 1 finished and item 2 runs: no item starts after a failure, so a worker
+            # that took one of them late would otherwise find the pool already stopped.
             with done:
                 assert done.wait_for(lambda: {0, 1} <= finished, PATIENCE)
+            assert two_running.wait(PATIENCE)
             later_failed.set()
             raise Boom("three")
         with done:
