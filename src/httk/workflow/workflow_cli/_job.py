@@ -2975,11 +2975,13 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
         nargs="?",
         metavar="SOURCE",
         help="the workflow: a runner file, workflow document, package directory, git+https://HOST/PATH[@REF][#SUBDIR]"
-        " URI, installed id, short name or NAME@REF, or a registered or packaged workflow name%(workflow_labels)s",
+        " URI, installed id, short name or NAME@REF, or a registered or packaged workflow name",
     )
     # argparse expands ``%(workflow_labels)s`` from the action's attributes only when this help is printed, so
-    # every other job verb skips discovering the installed workflows.
+    # every other job verb skips discovering the installed workflows. It is appended after add_argument, whose
+    # help-string check (Python 3.14) cannot see the attribute yet.
     vars(source)["workflow_labels"] = _WorkflowLabels()
+    source.help = f"{source.help}%(workflow_labels)s"
     new.add_argument(
         "--command",
         dest="command_template",
