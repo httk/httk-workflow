@@ -42,6 +42,8 @@ import copy
 import difflib
 import hashlib
 import importlib
+import importlib.machinery
+import importlib.util
 import json
 import logging
 import math
@@ -3018,6 +3020,19 @@ def _language_request(resolved: ResolvedWorkflow) -> LanguageRequest:
     )
 
 
+def _module_for(module_name: str, source: Path) -> ModuleType:
+    """Return an empty module for running *source*'s verified bytes, with a file spec and source loader.
+
+    The caller executes the bytes it verified; the spec only lets tracebacks and :mod:`linecache` find the source
+    (Python 3.15 deprecates looking it up for module globals without ``__spec__.loader``).
+    """
+
+    loader = importlib.machinery.SourceFileLoader(module_name, str(source))
+    spec = importlib.util.spec_from_file_location(module_name, source, loader=loader)
+    assert spec is not None  # an explicit loader always gives a spec
+    return importlib.util.module_from_spec(spec)
+
+
 def _runner_instantiate(source: Path) -> Callable[[InstantiateContext], object]:
     """Import an SDK runner file once and return the instantiate hook of its one :class:`~httk.workflow.Runner`.
 
@@ -3033,8 +3048,7 @@ def _runner_instantiate(source: Path) -> Callable[[InstantiateContext], object]:
     module_name = f"httk_workflow_runner_{hashlib.sha256(source_bytes).hexdigest()}"
     module = sys.modules.get(module_name)
     if module is None:
-        module = ModuleType(module_name)
-        module.__file__ = str(source)
+        module = _module_for(module_name, source)
         sys.modules[module_name] = module
         try:
             exec(compile(source_bytes, str(source), "exec"), module.__dict__)  # noqa: S102

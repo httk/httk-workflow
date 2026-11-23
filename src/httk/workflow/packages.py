@@ -44,6 +44,7 @@ from .scaffold import (
     RecognizeSpec,
     WorkflowProvider,
     _declared_settings,
+    _module_for,
     payload_relative,
     register_workflow,
 )
@@ -1365,8 +1366,7 @@ def _evict_modules(root: Path) -> None:
 
 
 def _exec_hook(module_name: str, source: Path) -> ModuleType:
-    module = ModuleType(module_name)
-    module.__file__ = str(source)
+    module = _module_for(module_name, source)
     sys.modules[module_name] = module
     try:
         exec(compile(source.read_bytes(), str(source), "exec"), module.__dict__)  # noqa: S102
