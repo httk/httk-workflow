@@ -786,14 +786,25 @@ def test_run_batch_reports_results_held_back_behind_a_serial_item_when_one_fails
 ) -> None:
     ws = v3_workspace(tmp_path / "a")
     emitted: list[int] = []
+    serial = {2, 6}
+    earlier = {item for item in range(failing) if item not in serial}
+    finished: set[int] = set()
+    done = threading.Condition()
 
     def work(item: int) -> int:
         if item == failing:
+            # Fail only once the earlier pooled items finished: the pool starts no item after a failure, so
+            # without this wait a worker could take one of them only to find the pool already stopped.
+            with done:
+                assert done.wait_for(lambda: earlier <= finished, timeout=30)
             raise Boom
+        with done:
+            finished.add(item)
+            done.notify_all()
         return item
 
     with cli_owner(ws) as owner, pytest.raises(Boom):
-        run_batch(owner, work, list(range(8)), 4, serial={2, 6}, emit=lambda index, _result: emitted.append(index))
+        run_batch(owner, work, list(range(8)), 4, serial=serial, emit=lambda index, _result: emitted.append(index))
     # A pooled failure (4): 3 finished but waited behind the serial 2, which never ran. A serial failure (6): the
     # pooled 7 finished long before.
     assert emitted == expected
