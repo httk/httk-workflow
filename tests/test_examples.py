@@ -146,6 +146,22 @@ def _run(command: list[str], *, cwd: Path, environment: dict[str, str]) -> subpr
     return completed
 
 
+def _output(directory: Path, name: str) -> Path:
+    """The VASP output *name* in *directory*: as written, or Zstandard-compressed by the run's finalization."""
+
+    compressed = directory / f"{name}.zst"
+    return compressed if compressed.is_file() else directory / name
+
+
+def _output_text(directory: Path, name: str) -> str:
+    """The text of the VASP output *name* in *directory*, decompressed when the run compressed it."""
+
+    from httk.core.datastream.compression import open_compressed
+
+    with _output(directory, name).open("rb") as raw, open_compressed(raw) as stream:
+        return stream.read().decode("utf-8")
+
+
 def _finished(workspace_root: Path) -> tuple[str, Path, Path]:
     """Return the terminal state, payload, and postprocess SVG path of the one job."""
 
@@ -195,9 +211,9 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     # The result lives once in the persistent workdir, with no data copy.
     assert not (payload / "data").exists()
     result = payload / "run"
-    assert (result / "OUTCAR").read_text(encoding="utf-8").startswith(" fake vasp")
-    assert (result / "CONTCAR").read_text(encoding="utf-8").splitlines()[0] == "relaxed by the mock vasp"
-    assert (result / "INCAR").is_file() and (result / "KPOINTS").is_file()
+    assert _output_text(result, "OUTCAR").startswith(" fake vasp")
+    assert _output_text(result, "CONTCAR").splitlines()[0] == "relaxed by the mock vasp"
+    assert _output(result, "INCAR").is_file() and _output(result, "KPOINTS").is_file()
     assert (payload / "files" / "POSCAR").read_text(encoding="utf-8").splitlines()[0] == "silicon"
 
     # And the last documented command printed one collected record and the sweep summary.
@@ -239,7 +255,7 @@ def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) ->
     kind, payload, postprocess_svg = _finished(work / "workspace")
     assert kind == "succeeded"
     assert not (payload / "data").exists()
-    assert (payload / "run" / "OUTCAR").is_file()
+    assert _output(payload / "run", "OUTCAR").is_file()
     assert (work / "results.sqlite").is_file()
     assert postprocess_svg.is_file()
     assert not postprocess_svg.is_relative_to(payload)
@@ -264,13 +280,13 @@ def test_the_python_api_tour_runs(work: Path, tmp_path: Path) -> None:
     kind, payload, _svg = _finished(work / "example-workflow-workspace")
     assert kind == "succeeded"
     assert not (payload / "data").exists()
-    assert (payload / "run" / "CONTCAR").is_file()
+    assert _output(payload / "run", "CONTCAR").is_file()
     lines = completed.stdout.splitlines()
     assert lines[0].startswith("workspace ")
     succeeded = [line for line in lines if line.startswith("succeeded silicon--")]
     assert len(succeeded) == 1
     _assert_pinned_relax(succeeded[0].rsplit("(", 1)[1].rstrip(")"), prefix)
-    assert "  workdir OUTCAR" in lines
+    assert "  workdir OUTCAR" in lines or "  workdir OUTCAR.zst" in lines
 
 
 @pytest.mark.parametrize("runner", ["defect_campaign.py", "defect_campaign.sh"])
