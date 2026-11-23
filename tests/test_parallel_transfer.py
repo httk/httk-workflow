@@ -855,8 +855,9 @@ class Parked:
         self.release.wait(PATIENCE)
 
 
-def interrupt_twice(parked: Parked) -> threading.Thread:
-    """Send two SIGINTs to the main thread once the expected pool threads are parked, then let them go."""
+def interrupt_twice(parked: Parked, pools: list[_pool._Pool[Any, Any]]) -> threading.Thread:
+    """Send two SIGINTs to the main thread once the expected pool threads are parked, the second once a pool of
+    *pools* (those created meanwhile) is draining, then let them go."""
 
     main = threading.main_thread().ident
     assert main is not None
@@ -866,9 +867,11 @@ def interrupt_twice(parked: Parked) -> threading.Thread:
         while parked.count < parked.expected and time.monotonic() < deadline:
             time.sleep(0.01)
         signal.pthread_kill(main, signal.SIGINT)
-        time.sleep(0.2)
+        # Until the parked pool is draining and said what it waits for: released earlier, it would start more.
+        while not any(pool.noted for pool in pools) and time.monotonic() < deadline:
+            time.sleep(0.01)
         signal.pthread_kill(main, signal.SIGINT)
-        time.sleep(0.2)
+        time.sleep(0.2)  # the second interrupt is absorbed by the drain, before or after the release
         parked.release.set()
 
     helper = threading.Thread(target=run)
@@ -886,15 +889,24 @@ def default_sigint() -> Iterator[None]:
 
 
 def interrupted(root: Path, parked: Parked, *argv: str) -> None:
+    pools: list[_pool._Pool[Any, Any]] = []
+    install = _pool._Pool.install
+
+    def recording(pool: _pool._Pool[Any, Any]) -> object:
+        pools.append(pool)
+        return install(pool)
+
     _fs.set_fault_injector(parked)
-    helper = interrupt_twice(parked)
-    try:
-        with pytest.raises(KeyboardInterrupt):
-            transfer(root, *argv)
-    finally:
-        parked.release.set()
-        helper.join()
-        _fs.set_fault_injector(None)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(_pool._Pool, "install", recording)
+        helper = interrupt_twice(parked, pools)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                transfer(root, *argv)
+        finally:
+            parked.release.set()
+            helper.join()
+            _fs.set_fault_injector(None)
     assert parked.count == parked.expected
 
 

@@ -24,6 +24,29 @@ class Boom(Exception):
     pass
 
 
+@pytest.fixture
+def pools(monkeypatch: pytest.MonkeyPatch) -> list[_pool._Pool[Any, Any]]:
+    """Every pool created in the test, recorded as it installs its handler (before any item runs)."""
+
+    created: list[_pool._Pool[Any, Any]] = []
+    install = _pool._Pool.install
+
+    def recording(pool: _pool._Pool[Any, Any]) -> object:
+        created.append(pool)
+        return install(pool)
+
+    monkeypatch.setattr(_pool._Pool, "install", recording)
+    return created
+
+
+def _poll(condition: Callable[[], object]) -> None:
+    """Wait, off the main thread, until *condition* holds (or PATIENCE ran out): for a flag nothing notifies."""
+
+    deadline = time.monotonic() + PATIENCE
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+
 def test_results_come_back_in_input_order_whatever_order_items_finish() -> None:
     def slow_first(item: int) -> int:
         time.sleep(0.02 * (8 - item))
@@ -79,6 +102,7 @@ def test_workers_1_is_the_plain_loop_in_the_calling_thread() -> None:
 def test_the_first_failure_in_input_order_is_raised_after_the_completed_prefix_is_emitted() -> None:
     later_failed = threading.Event()
     finished: set[int] = set()
+    done = threading.Condition()
 
     def work(item: int) -> int:
         if item == 2:
@@ -86,9 +110,15 @@ def test_the_first_failure_in_input_order_is_raised_after_the_completed_prefix_i
             assert later_failed.wait(PATIENCE)
             raise Boom("two")
         if item == 3:
+            # Fails only once items 0 and 1 finished: no item starts after a failure, so a worker that took
+            # one of them late would otherwise find the pool already stopped.
+            with done:
+                assert done.wait_for(lambda: {0, 1} <= finished, PATIENCE)
             later_failed.set()
             raise Boom("three")
-        finished.add(item)
+        with done:
+            finished.add(item)
+            done.notify_all()
         return item
 
     emitted: list[int] = []
@@ -98,21 +128,22 @@ def test_the_first_failure_in_input_order_is_raised_after_the_completed_prefix_i
     assert finished == {0, 1}
 
 
-def test_no_item_starts_after_the_stop_flag() -> None:
+def test_no_item_starts_after_the_stop_flag(pools: list[_pool._Pool[Any, Any]]) -> None:
     started: list[int] = []
-    second, failing = threading.Event(), threading.Event()
+    second = threading.Event()
 
     def work(item: int) -> int:
         started.append(item)
         if item == 0:
             assert second.wait(PATIENCE)
-            failing.set()
             raise Boom
         if item == 1:
             second.set()
-            # Long enough for the failure of item 0 to be recorded before this worker takes another item.
-            assert failing.wait(PATIENCE)
-            time.sleep(0.2)
+            # Until the failure of item 0 set the stop flag (its worker notifies under the condition), so that
+            # this worker takes no other item before.
+            pool = pools[0]
+            with pool.condition:
+                assert pool.condition.wait_for(lambda: pool.stop, PATIENCE)
         return item
 
     with pytest.raises(Boom):
@@ -122,16 +153,19 @@ def test_no_item_starts_after_the_stop_flag() -> None:
 
 def test_an_emit_failure_stops_the_batch_and_is_raised_after_the_drain() -> None:
     finished: Counter[int] = Counter()
-    release = threading.Event()
+    started, release = threading.Event(), threading.Event()
 
     def work(item: int) -> int:
         if item == 1:
+            started.set()
             assert release.wait(PATIENCE)
         finished[item] += 1
         return item
 
     def emit(index: int, _value: int) -> None:
         if index == 0:
+            # Item 1 must be running before the failure: no item starts after the stop flag.
+            assert started.wait(PATIENCE)
             release.set()
             raise Boom("emit")
 
@@ -208,7 +242,7 @@ def default_sigint() -> Iterator[None]:
 
 
 def test_two_real_interrupts_wait_for_every_started_item(
-    default_sigint: None, capsys: pytest.CaptureFixture[str]
+    default_sigint: None, pools: list[_pool._Pool[Any, Any]], capsys: pytest.CaptureFixture[str]
 ) -> None:
     items = list(range(12))
     started = {item: threading.Event() for item in items}
@@ -229,9 +263,10 @@ def test_two_real_interrupts_wait_for_every_started_item(
         for item in range(4):
             started[item].wait(PATIENCE)
         signal.pthread_kill(main, signal.SIGINT)
-        time.sleep(0.2)  # the caller is now draining: workers are still parked
+        # Until the caller is draining and said what it waits for: workers are still parked, none took item 4.
+        _poll(lambda: pools[0].noted)
         signal.pthread_kill(main, signal.SIGINT)
-        time.sleep(0.2)
+        time.sleep(0.2)  # the second interrupt is absorbed by the drain, before or after the release
         release.set()
 
     helper = threading.Thread(target=interrupt)
@@ -328,7 +363,7 @@ def test_bursts_of_real_interrupts_never_leave_an_item_running(default_sigint: N
 
 
 def test_a_failing_stderr_during_two_interrupts_still_ends_in_keyboard_interrupt(
-    default_sigint: None, monkeypatch: pytest.MonkeyPatch
+    default_sigint: None, monkeypatch: pytest.MonkeyPatch, pools: list[_pool._Pool[Any, Any]]
 ) -> None:
     class Broken:
         def write(self, _text: str) -> int:
@@ -356,7 +391,7 @@ def test_a_failing_stderr_during_two_interrupts_still_ends_in_keyboard_interrupt
         while len(started) < 4 and time.monotonic() < deadline:
             time.sleep(0.001)
         signal.pthread_kill(main, signal.SIGINT)
-        time.sleep(0.25)  # the drain has tried to say what it waits for
+        _poll(lambda: pools[0].noted)  # the drain has tried to say what it waits for (noted before printing)
         signal.pthread_kill(main, signal.SIGINT)
         time.sleep(0.1)
         release.set()
@@ -373,7 +408,9 @@ def test_a_failing_stderr_during_two_interrupts_still_ends_in_keyboard_interrupt
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
 
 
-def test_a_previous_custom_handler_is_called_once_and_the_rest_runs_here() -> None:
+def test_a_previous_custom_handler_is_called_once_and_the_rest_runs_here(
+    pools: list[_pool._Pool[Any, Any]],
+) -> None:
     if threading.current_thread() is not threading.main_thread():
         pytest.skip("signals reach only the main thread")
     calls: list[int] = []
@@ -400,7 +437,8 @@ def test_a_previous_custom_handler_is_called_once_and_the_rest_runs_here() -> No
             while len(where) < 3 and time.monotonic() < deadline:
                 time.sleep(0.001)
             _fire(main, 3)
-            time.sleep(0.2)
+            # Until the pool recorded the interrupt: released earlier, a worker would take item 3.
+            _poll(lambda: pools[0].stop)
             release.set()
 
         helper = threading.Thread(target=interrupt)
@@ -584,11 +622,12 @@ def test_on_quiet_waits_for_every_running_item() -> None:
     started: set[int] = set()
     finished: set[int] = set()
     seen: list[bool] = []
-    release = threading.Event()
+    release, another = threading.Event(), threading.Event()
 
     def work(item: int) -> int:
         started.add(item)
         if item:
+            another.set()
             release.wait(PATIENCE)
             time.sleep(0.02)
         finished.add(item)
@@ -596,6 +635,8 @@ def test_on_quiet_waits_for_every_running_item() -> None:
 
     def emit(index: int, _value: int) -> None:
         if index == 0:
+            # Another item must be running before the failure: no item starts after the stop flag.
+            assert another.wait(PATIENCE)
             threading.Timer(0.2, release.set).start()
             raise ValueError("emit")
 
@@ -772,6 +813,7 @@ def test_a_worker_starting_late_takes_nothing_once_the_feed_resumed_inline(monke
     assert main is not None
     caller = threading.get_ident()
     late, release = threading.Event(), threading.Event()
+    parked = [threading.Event(), threading.Event()]
     real_work = _pool.Feed.work
     entered = Counter[str]()
 
@@ -784,6 +826,7 @@ def test_a_worker_starting_late_takes_nothing_once_the_feed_resumed_inline(monke
     class Parked(Ledger):
         def body(self, task: Task) -> None:
             if task.number < 2:
+                parked[task.number].set()
                 release.wait(PATIENCE)
             elif threading.get_ident() == caller:
                 time.sleep(0.02)  # the inline tasks give a late worker every chance to take one
@@ -799,12 +842,11 @@ def test_a_worker_starting_late_takes_nothing_once_the_feed_resumed_inline(monke
         late.set()
 
     def interrupt() -> None:
-        deadline = time.monotonic() + PATIENCE
-        while len(ledger.runs) < 2 and feed.pending < 6 and time.monotonic() < deadline:
-            time.sleep(0.001)
-        time.sleep(0.05)
+        for event in parked:  # both workers run their parked task
+            event.wait(PATIENCE)
         signal.pthread_kill(main, signal.SIGINT)
-        time.sleep(0.2)
+        # Until the feed recorded the interrupt: released earlier, a worker would take task 2.
+        _poll(lambda: feed.stop)
         release.set()
 
     previous = signal.signal(signal.SIGINT, custom)
