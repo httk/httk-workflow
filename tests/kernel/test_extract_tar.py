@@ -538,6 +538,18 @@ def oracle_relinks_over_existing_names() -> bool:
     return True
 
 
+@functools.cache
+def oracle_refuses_a_symlink_named_dot() -> bool:
+    """Whether this Python's ``data`` filter refuses a symlink named ``.`` (3.15 does; earlier ones skip it)."""
+
+    with tempfile.TemporaryDirectory() as scratch:
+        try:
+            old_extract(io.BytesIO(archive([S(".", "x")])), Path(scratch))
+        except tarfile.OutsideDestinationError:
+            return True
+    return False
+
+
 @WORKERS
 @pytest.mark.parametrize(
     ("case", "fmt"),
@@ -555,6 +567,8 @@ def test_differential_against_the_stdlib_filters(tmp_path: Path, case: Case, fmt
     verdict = case.verdict
     if verdict == RELAX_HARDLINK and oracle_relinks_over_existing_names():
         verdict = COPY  # a newer oracle accepts too, aliasing where the new extractor copies
+    if case.name == "symlink named dot" and oracle_refuses_a_symlink_named_dot():
+        verdict = REFUSE  # a newer oracle refuses it too
     check_verdict(verdict, old_data, new_data, tmp_path, case.setup, case.error, workers)
 
 

@@ -17,7 +17,7 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-_SUPPORTED_PYTHON_VERSIONS = ("3.12", "3.13", "3.14")
+_SUPPORTED_PYTHON_VERSIONS = ("3.12", "3.13", "3.14", "3.15")
 
 
 def _normal_test_command(version: str) -> list[str]:
@@ -249,7 +249,7 @@ def main() -> int:
         "repository": str(repo),
         "status": "failed",
         "checker_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "scope": "Declared CI/release targets, normal tests on Python 3.12-3.14, locked docs, "
+        "scope": "Declared CI/release targets, normal tests on Python 3.12-3.15, locked docs, "
         "and configured bare-wheel imports; "
         "does not add browser or live-database gates, or reproduce the GitHub OS image.",
     }

@@ -31,7 +31,7 @@ The following gates run in the isolated snapshot and stop on failure:
    dependency inputs, then install JavaScript dependencies with `npm ci` if
    applicable and run `make ci`.
 3. Run each repository's normal `make test` target in uv-isolated Python 3.12,
-   3.13, and 3.14 environments with its `dev` and `ci` extras. Extended profiles and
+   3.13, 3.14, and 3.15 environments with its `dev` and `ci` extras. Extended profiles and
    benchmark targets are not part of this compatibility matrix.
 4. Add `.[dev,ci,docs,release]`, validate dependencies and the release preflight,
    then run `HTTK_DOCS_VERSION=<VERSION> make release-check`. CI runs again
