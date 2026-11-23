@@ -123,7 +123,8 @@ def _header(kind: bytes, request_id: int, length: int) -> bytes:
         (_header(b"R", 1, 4) + "{}".encode("utf-16-le"), "undecodable"),  # JSON, but not UTF-8
         (_header(b"R", 1, 2) + b"[]", "JSON object"),
         pytest.param(
-            _header(b"R", 1, 200_006) + b'{"a":' + b"[" * 100_000 + b"]" * 100_000 + b"}",
+            # Deep enough to exhaust the C stack on Python 3.14 too, whose json parses 100 000 levels.
+            _header(b"R", 1, 20_000_006) + b'{"a":' + b"[" * 10_000_000 + b"]" * 10_000_000 + b"}",
             "RecursionError",
             id="nested",
         ),

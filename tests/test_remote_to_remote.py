@@ -390,8 +390,12 @@ def test_dst_dying_in_a_segment_keeps_it_and_the_later_ones_held_and_releases_th
     transfers, errors = statuses(capsys)
     assert [outcome["status"] for outcome in transfers] == ["adopted"] * 2 + ["failed"] * 4
     assert all("whether the jobs arrived is unknown" in outcome["message"] for outcome in transfers[2:4])
-    assert all("not delivered" in outcome["message"] for outcome in transfers[4:])
-    assert len(headers(requests, "stage")) == 2 and any("--resume" in error for error in errors)
+    # Not sent, or (a positive deadline) staged before the dying adoption answered and given up.
+    later = ("not delivered", "not adopted, since the transfer stopped") if DEADLINE else ("not delivered",)
+    assert all(any(said in outcome["message"] for said in later) for outcome in transfers[4:])
+    segments = (2, 3) if DEADLINE else (2,)
+    assert len(headers(requests, "stage")) in segments and len(headers(requests, "adopt_staged")) == 2
+    assert any("--resume" in error for error in errors)
     assert sorted(outgoing(ends.near)) == sorted(outcome["transfer_id"] for outcome in transfers[2:])
     monkeypatch.delenv("HTTK_TEST_EXIT_AFTER_ADOPT")
     assert run(ends.project, "--json", "-q", "--resume", ends.src, ends.dst) == 0
@@ -412,7 +416,10 @@ def test_another_workspace_answering_a_later_segment_stops_the_pair(
     transfers, _ = statuses(capsys)
     assert [outcome["status"] for outcome in transfers] == ["adopted"] * 2 + ["failed"] * 4
     assert "not the expected workspace" in transfers[2]["message"]
-    assert len(headers(requests, "stage")) == 2 and len(headers(requests, "send")) == 2
+    # A positive deadline may stage (and give up) the third segment before the second's adoption answered.
+    segments = (2, 3) if DEADLINE else (2,)
+    assert len(headers(requests, "stage")) in segments and len(headers(requests, "send")) in segments
+    assert len(headers(requests, "adopt_staged")) == 2
     assert len(outgoing(ends.near)) == 4
 
 
@@ -766,11 +773,20 @@ def test_the_pinned_workspace_id_lasts_across_pages(
     plan = jobs(ends.near, 3)
     assert run(ends.project, "--json", "-q", *selected(plan), ends.src, ends.dst) == 1
     transfers, errors = statuses(capsys)
-    assert [outcome["status"] for outcome in transfers] == ["adopted", "failed"]
+    assert [outcome["status"] for outcome in transfers[:2]] == ["adopted", "failed"]
     assert "not the expected workspace" in transfers[1]["message"]
-    # Nothing more is held after the stop: the third job stays in SRC, unattempted.
-    assert ops(requests, SRC_OPS).count("hold_page") == 2 and find(ends.near, plan[2][0]["id"]) is not None
-    assert any("1 selected job(s) were not attempted" in error for error in errors)
+    if DEADLINE and len(transfers) == 3:
+        # A positive deadline may hold and stage the third page before the second's adoption answered; the stop
+        # gives it up (it stays held on SRC) and holds nothing more.
+        assert (
+            transfers[2]["status"] == "failed" and "not adopted, since the transfer stopped" in transfers[2]["message"]
+        )
+        assert ops(requests, SRC_OPS).count("hold_page") == 3
+    else:
+        # Nothing more is held after the stop: the third job stays in SRC, unattempted.
+        assert len(transfers) == 2
+        assert ops(requests, SRC_OPS).count("hold_page") == 2 and find(ends.near, plan[2][0]["id"]) is not None
+        assert any("1 selected job(s) were not attempted" in error for error in errors)
 
 
 def test_the_relay_goes_where_tmpdir_says(
