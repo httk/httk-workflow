@@ -229,7 +229,7 @@ def test_package_without_references_stores_none(tmp_path: Path, capsys: pytest.C
     assert resolve_schema(ReferenceRecord).table_name not in tables
 
 
-def test_an_output_without_the_link_is_stored_uncited_and_reported(
+def test_a_third_party_entry_record_is_cited_through_the_standard_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     from httk.core.register import entries, register_entry_record
@@ -254,8 +254,8 @@ def test_an_output_without_the_link_is_stored_uncited_and_reported(
         (report,) = store_collected([item], str(store_path), id_base="httk.probe")
 
     stored = cast(dict[str, Any], report["stored"])
-    assert stored["references_uncited"] == ["extra"]
-    assert "'extra' (XRecord)" in caplog.text and "declares no 'references' weak link" in caplog.text
+    assert "references_uncited" not in stored
+    assert "declares no 'references' weak link" not in caplog.text
     (reference_id,) = stored["references"]
     with Backend.sqlite(store_path) as database:
         store = SqlStore(database)

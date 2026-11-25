@@ -20,7 +20,7 @@ from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
-from httk.core import DataRecord, FileRecord, ReferenceRecord, Run, RunEdge
+from httk.core import DataRecord, FileRecord, ReferenceRecord, Run, RunEdge, standard_links
 from httk.core.storage import content_id, project_storage_record, resolve_storage_record
 from httk.core.storage.identity import CANONICAL_SOURCE_ATTRIBUTE
 
@@ -1437,7 +1437,7 @@ def _link_references(
     uncited: dict[str, str] = {}
     for role, stored in outputs:
         record = resolve_storage_record(stored)
-        links = getattr(getattr(record, "__httk_storage__", None), "links", ())
+        links = (*getattr(getattr(record, "__httk_storage__", None), "links", ()), *standard_links(record))
         if any(link.name == "references" for link in links):
             citing.append(stored)
         else:
