@@ -298,18 +298,20 @@ class SlurmGateway:
 
         if cluster != self.policy.cluster:
             raise SchedulerError("recorded cluster is outside the current policy")
-        output = _checked(
-            [
-                str(self.policy.squeue),
-                "--noheader",
-                f"--clusters={cluster}",
-                f"--jobs={job_id}",
-                f"--name=httk-{handle}",
-                f"--user={self._uid}",
-                "--format=%i|%j|%U|%T",
-            ],
-            self.policy,
-        )
+        argv = [
+            str(self.policy.squeue),
+            "--noheader",
+            f"--clusters={cluster}",
+            f"--jobs={job_id}",
+            f"--name=httk-{handle}",
+            f"--user={self._uid}",
+            "--format=%i|%j|%U|%T",
+        ]
+        code, output, stderr = _run(argv, self.policy)
+        if code != 0:
+            if code == 1 and stderr.strip() == b"slurm_load_jobs error: Invalid job id specified":
+                return "UNKNOWN"
+            raise _failure(argv, f"exited {code}", stderr)        
         try:
             lines = [line.strip() for line in output.decode("ascii").splitlines() if line.strip()]
         except UnicodeDecodeError as exc:
