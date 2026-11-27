@@ -325,6 +325,50 @@ def test_status_matches_identity_and_absence_is_unknown(policy: Policy) -> None:
     assert gateway.status("123", "cluster", _HANDLE) == "UNKNOWN"
 
 
+@pytest.mark.parametrize(
+    "stderr,code,unknown",
+    [
+        ("slurm_load_jobs error: Invalid job id specified", 1, True),
+        ("squeue: banner\nslurm_load_jobs error: Invalid job id specified\n", 1, True),
+        ("slurm_load_jobs error: Invalid job id specified", 2, False),
+        ("slurm_load_jobs error: Unable to contact slurm controller", 1, False),
+        ("slurm_load_jobs error: Job/step already completing or completed", 1, False),
+    ],
+)
+def test_status_of_a_purged_job_is_unknown_and_other_failures_raise(
+    policy: Policy, stderr: str, code: int, unknown: bool
+) -> None:
+    _client(policy.squeue, f"sys.stderr.write({stderr!r})\nsys.exit({code})\n")
+    gateway = SlurmGateway(policy)
+    if unknown:
+        assert gateway.status("123", "cluster", _HANDLE) == "UNKNOWN"
+    else:
+        with pytest.raises(SchedulerError, match=f"^squeue exited {code}: "):
+            gateway.status("123", "cluster", _HANDLE)
+
+
+@pytest.mark.parametrize(
+    "stderr,code,gone",
+    [
+        ("scancel: error: Kill job error on job id 123: Invalid job id specified\n", 1, True),
+        ("scancel: error: Kill job error on job id 123: Invalid job id specified\n", 2, False),
+        ("scancel: error: Kill job error on job id 123: Job/step already completing or completed\n", 1, True),
+        ("scancel: error: Kill job error on job id 123: Job/step already completing or completed\n", 2, False),
+        ("scancel: error: Unable to contact slurm controller\n", 1, False),
+    ],
+)
+def test_cancel_of_a_purged_job_succeeds_and_other_failures_raise(
+    policy: Policy, stderr: str, code: int, gone: bool
+) -> None:
+    _client(policy.scancel, f"sys.stderr.write({stderr!r})\nsys.exit({code})\n")
+    gateway = SlurmGateway(policy)
+    if gone:
+        gateway.cancel("123", "cluster", _HANDLE)
+    else:
+        with pytest.raises(SchedulerError, match=f"^scancel exited {code}: "):
+            gateway.cancel("123", "cluster", _HANDLE)
+
+
 def test_cancel_sends_identity_filters_to_controller_without_lookup(policy: Policy, tmp_path: Path) -> None:
     record = tmp_path / "cancel.json"
     _client(policy.scancel, f"open({str(record)!r},'w').write(json.dumps(sys.argv))\n")

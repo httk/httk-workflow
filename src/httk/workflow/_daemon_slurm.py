@@ -170,6 +170,13 @@ def _checked(argv: list[str], policy: Policy, *, data: bytes = b"") -> bytes:
     return stdout
 
 
+def _purged(code: int, stderr: bytes) -> bool:
+    """Tell whether a client refused a job the controller has already purged."""
+
+    # The message may carry a prefix or banner; the C locale of _run keeps it in English.
+    return code == 1 and b"Invalid job id specified" in stderr
+
+
 def manager_argv(policy: Policy, operator_key: str) -> list[str]:
     """Return the manager command of every daemon submission, before the launcher's own additions.
 
@@ -309,9 +316,9 @@ class SlurmGateway:
         ]
         code, output, stderr = _run(argv, self.policy)
         if code != 0:
-            if code == 1 and stderr.strip() == b"slurm_load_jobs error: Invalid job id specified":
+            if _purged(code, stderr):
                 return "UNKNOWN"
-            raise _failure(argv, f"exited {code}", stderr)        
+            raise _failure(argv, f"exited {code}", stderr)
         try:
             lines = [line.strip() for line in output.decode("ascii").splitlines() if line.strip()]
         except UnicodeDecodeError as exc:
@@ -385,19 +392,21 @@ class SlurmGateway:
         :param job_id: Protected numeric job identifier.
         :param cluster: Protected scheduler cluster.
         :param handle: Protected correlation handle.
-        :raises SchedulerError: If the cancellation request fails.
+        :raises SchedulerError: If the cancellation request fails; a job Slurm has already purged is not a failure.
         """
 
         if cluster != self.policy.cluster:
             raise SchedulerError("recorded cluster is outside the current policy")
-        _checked(
-            [
-                str(self.policy.scancel),
-                "--ctld",
-                f"--clusters={cluster}",
-                f"--name=httk-{handle}",
-                f"--user={self._uid}",
-                job_id,
-            ],
-            self.policy,
-        )
+        argv = [
+            str(self.policy.scancel),
+            "--ctld",
+            f"--clusters={cluster}",
+            f"--name=httk-{handle}",
+            f"--user={self._uid}",
+            job_id,
+        ]
+        code, _, stderr = _run(argv, self.policy)
+        # A job that ended within MinJobAge is refused as already done; it needs no cancellation either.
+        done = code == 1 and b"Job/step already completing or completed" in stderr
+        if code != 0 and not (done or _purged(code, stderr)):
+            raise _failure(argv, f"exited {code}", stderr)
