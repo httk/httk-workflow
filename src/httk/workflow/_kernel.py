@@ -705,7 +705,14 @@ def attest_dead(
     path = _owner_dir(workspace, owner_id)
     # An operator may attest an owner whose directory is gone but whose owned/<id>/ remains.
     _fs.make_dirs(path, durable=workspace.durable)
-    _fs.write_file(_fs.loc(path / "dead.json"), _encode(tombstone), durable=workspace.durable)
+    try:
+        _fs.write_file(_fs.loc(path / "dead.json"), _encode(tombstone), durable=workspace.durable)
+    except FileNotFoundError:
+        # Recovery, which needs dead.json, removes the write temporaries beside it: a concurrent attester's that
+        # wrote it first and recovered the owner took this one's. Dead stays dead, so the tombstone is there; its
+        # details (by, evidence, an operator's reason) are the rival's, and this attester's are not written.
+        if not _fs.exists(_fs.loc(path / "dead.json")):
+            raise
 
 
 def _names_process(record_path: Path, here: _death.ProcessIdentity) -> bool:

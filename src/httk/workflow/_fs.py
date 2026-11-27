@@ -408,7 +408,12 @@ def make_dirs(path: Path, *, durable: bool, mode: int = 0o777, commit: "Commit |
     """Create *path* and its missing ancestors as real directories.
 
     A concurrent creation of the same directory is success. An ancestor removed
-    concurrently (by a pruner) makes the walk start again. Only the components
+    concurrently (by a pruner) makes the walk start again. A round lost to a
+    removal seen to have happened (the parent just observed or created is gone)
+    does not count against the bounded rounds: it is work another actor
+    completed. Empty directories are removed only by pruners, once per claim or
+    scan that emptied them, and once per quarantine move recovery loses
+    (``_return_jobs``), so the walk wins once they pause. Only the components
     this call creates and the deepest existing ancestor are checked: a symlink
     further up is followed, so *path* must lie below directories only trusted
     parties write (anchor with :func:`open_dir_under` otherwise).
@@ -420,10 +425,11 @@ def make_dirs(path: Path, *, durable: bool, mode: int = 0o777, commit: "Commit |
         (*durable* is then not used).
     :raises UnsafePath: When the deepest existing ancestor, or a component created concurrently, is a symlink or
         not a directory.
-    :raises MoveFailed: When concurrent removals defeat every attempt.
+    :raises MoveFailed: When ``mkdir`` keeps failing with ``ENOENT`` while its parent is there.
     """
 
-    for _ in range(_ATTEMPTS):
+    rounds = 0
+    while rounds < _ATTEMPTS:
         # Walk up to the deepest existing ancestor; each component examined must be a real directory.
         missing: list[Path] = []
         current = path
@@ -432,6 +438,7 @@ def make_dirs(path: Path, *, durable: bool, mode: int = 0o777, commit: "Commit |
             current = current.parent
         if not stat.S_ISDIR(info.st_mode):
             raise UnsafePath(f"{current} is a symlink or not a directory", "not_directory")
+        directory = current  # rebound to each directory created below; its parent is the one it needs
         try:
             for directory in reversed(missing):
                 try:
@@ -448,15 +455,35 @@ def make_dirs(path: Path, *, durable: bool, mode: int = 0o777, commit: "Commit |
                     _fsync_parent(Loc(directory))
         except FileNotFoundError:
             # A pruner removed an ancestor between our mkdirs: walk again.
+            rounds += not _removed(directory.parent)
             continue
         return
     raise MoveFailed(f"could not create {path} in {_ATTEMPTS} rounds", errno.ENOENT)
+
+
+def _removed(parent: Path) -> bool:
+    # After an ENOENT below *parent*, which this call just observed or created: is it gone now? Then another actor
+    # completed a removal, and the retry it causes is not a failed attempt.
+    return not exists(Loc(parent))
 
 
 def _ensure_parent(dst: Loc, *, durable: bool, commit: "Commit | None" = None) -> None:
     # An anchored destination's parent is its descriptor, which exists.
     if dst.at is None:
         make_dirs(dst.path.parent, durable=durable, commit=commit)
+
+
+def _pruned(error: OSError | None, dst: Loc, create_parents: bool) -> bool:
+    # A rename that left the source in place because the parent make_dirs just observed or created is gone: a
+    # removal another actor completed, which (as in make_dirs) never uses up an attempt. An anchored parent is a
+    # descriptor make_dirs never checked, so its ENOENT counts.
+    return (
+        create_parents
+        and dst.at is None
+        and error is not None
+        and error.errno == errno.ENOENT
+        and _removed(dst.path.parent)
+    )
 
 
 def _parent_of(target: Loc) -> Path | int:
@@ -511,7 +538,8 @@ def move_once(
     if lstat(dst) is not None:
         raise ValueError(f"{dst.path} is not a fresh name: it already exists")
     error: OSError | None = None
-    for _ in range(_ATTEMPTS):
+    attempts = 0
+    while attempts < _ATTEMPTS:
         if create_parents:
             _ensure_parent(dst, durable=durable, commit=commit)
         error = _rename(src, dst)
@@ -525,6 +553,7 @@ def move_once(
             return Moved.WON
         if exists(src):
             # src still here: the rename did not happen (e.g. a pruner removed dst's parent); retry.
+            attempts += not _pruned(error, dst, create_parents)
             continue
         # Both absent: another actor moved src first, or our dst is not yet visible here (NFS
         # attribute caching); the caller's self-healing finds a misjudged win.
@@ -554,7 +583,8 @@ def move_owned(
     """
 
     error: OSError | None = None
-    for _ in range(_ATTEMPTS):
+    attempts = 0
+    while attempts < _ATTEMPTS:
         if create_parents:
             _ensure_parent(dst, durable=durable, commit=commit)
         error = _rename(src, dst)
@@ -566,6 +596,7 @@ def move_owned(
                 _fsync_parents(src, dst)
             return
         # src still here: the rename did not happen; retry (the parent may have been pruned).
+        attempts += not _pruned(error, dst, create_parents)
     raise MoveFailed(
         f"{src.path} stayed in place after {_ATTEMPTS} attempts", error.errno if error else None
     ) from error

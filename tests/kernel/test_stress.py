@@ -587,3 +587,27 @@ def test_recovery_leaves_only_the_tombstone(tmp_path: Path) -> None:
     recover(ws, recoverer, dead.owner_id)
     # Dead stays dead, and nothing else of the owner stays.
     assert os.listdir(dead.path) == ["dead.json"]
+
+
+def test_an_attester_whose_temporary_a_recoverer_removed_still_sees_the_owner_dead(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    ws = StressWorkspace(root, root / ".httk-workspace", root / "jobs", False, VISIBILITY)
+    dead = register_owner(ws, kind="manager", label=None, allocation=None, advertised={})
+    recoverer = register_owner(ws, kind="manager", label=None, allocation=None, advertised={})
+    rivals: list[str] = []
+
+    def rival_attests_and_recovers(op: str, phase: str, src: Loc | None, dst: Loc | None) -> None:
+        # Between this attester's staging and its replace, a rival attests and recovers the owner, and the
+        # recovery removes every write temporary beside dead.json: this one's too.
+        del src
+        if (op, phase) == ("write", "before_replace") and dst is not None and dst.name() == "dead.json" and not rivals:
+            rivals.append("rival")
+            attest_dead(ws, dead.owner_id, by="probe", evidence=[])
+            recover(ws, recoverer, dead.owner_id)
+
+    _fs.set_fault_injector(rival_attests_and_recovers)
+    try:
+        attest_dead(ws, dead.owner_id, by="probe", evidence=[])
+    finally:
+        _fs.set_fault_injector(None)
+    assert rivals == ["rival"] and os.listdir(dead.path) == ["dead.json"]

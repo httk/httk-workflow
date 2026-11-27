@@ -226,6 +226,65 @@ def test_move_once_retries_when_dst_parent_is_pruned(tmp_path: Path, monkeypatch
     assert (dst / "payload").exists()
 
 
+#: More removals than the eight attempts a failing rename gets: a pruner's removals must never use them up.
+PRUNES = 20
+
+
+def test_make_dirs_outlasts_a_pruner_between_its_mkdirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The kernel stress failure: a release into ready/beta/gamma lost eight rounds in a row to pruners removing
+    # the freshly made, still empty ready/beta before the mkdir of gamma, and raised MoveFailed.
+    (tmp_path / "ready").mkdir()
+    target = tmp_path / "ready" / "beta" / "gamma"
+    real_mkdir, prunes = os.mkdir, [0]
+
+    def mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        real_mkdir(path, *args, **kwargs)  # type: ignore[arg-type]
+        if Path(path) == target.parent and prunes[0] < PRUNES:
+            prunes[0] += 1
+            os.rmdir(path)  # a pruner removes the empty directory before the walk goes deeper
+
+    monkeypatch.setattr(os, "mkdir", mkdir)
+    _fs.make_dirs(target, durable=False)
+    assert prunes == [PRUNES] and target.is_dir()
+
+
+@pytest.mark.parametrize("contested", [False, True])
+def test_a_move_outlasts_a_pruner_between_make_dirs_and_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contested: bool
+) -> None:
+    src = _tree(tmp_path / "src")
+    dst = tmp_path / "ready" / "beta" / "gamma" / "dst"
+    prunes: list[int] = []
+
+    def rename(source: object, destination: object, **kwargs: object) -> None:
+        if len(prunes) < PRUNES:
+            prunes.append(1)
+            os.rmdir(dst.parent)  # the placement directories _ensure_parent just made, still empty
+            os.rmdir(dst.parent.parent)
+        REAL_RENAME(source, destination, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "rename", rename)
+    if contested:
+        assert move_once(loc(src), loc(dst), durable=False) is Moved.WON
+    else:
+        move_owned(loc(src), loc(dst), durable=False)
+    assert len(prunes) == PRUNES and (dst / "payload").exists()
+
+
+def test_an_anchored_missing_parent_still_fails_after_eight_attempts(tmp_path: Path) -> None:
+    # A removed anchor directory never comes back: its ENOENT is not a pruner's and uses up the attempts.
+    src = _tree(tmp_path / "src")
+    (tmp_path / "gone").mkdir()
+    descriptor = open_dir(tmp_path / "gone")
+    try:
+        os.rmdir(tmp_path / "gone")
+        with pytest.raises(MoveFailed) as raised:
+            move_owned(loc(src), anchored(descriptor, "dst"), durable=False)
+    finally:
+        os.close(descriptor)
+    assert raised.value.errno == errno.ENOENT and src.exists()
+
+
 def test_move_once_fails_after_eight_attempts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     src = _tree(tmp_path / "src")
     rename, calls = _fail(errno.EIO)
