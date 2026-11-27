@@ -604,6 +604,8 @@ class TaskManager:
         self._reported: dict[str, str] = {}
         # The claim pass resumes its window of ready jobs after this cursor.
         self._cursor: str | None = None
+        # What the claim pass read of each ready job of its last window, reused while the files are unchanged.
+        self._ready_memo: _manager_scheduling.ReadyMemo = {}
         # Installed workflows and their closure problems, by workflow id, for one tick.
         self._workflows: dict[str, tuple[_store.Installed | None, str | None]] = {}
         self._scheduler = _death.SchedulerQueries()

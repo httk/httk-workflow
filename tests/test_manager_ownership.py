@@ -38,7 +38,8 @@ def test_a_job_without_this_users_provenance_is_never_claimed_or_served(
             # Planted by another user: the provenance check (not an authentication) refuses it.
             fields = list(result[:10])
             fields[4] = result.st_uid + 1
-            return os.stat_result(fields)
+            times = ("st_atime", "st_mtime", "st_ctime", "st_atime_ns", "st_mtime_ns", "st_ctime_ns")
+            return os.stat_result(fields, {name: getattr(result, name) for name in times})
         return result
 
     monkeypatch.setattr(os, "lstat", lstat)

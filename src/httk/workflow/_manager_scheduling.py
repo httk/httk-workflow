@@ -2,9 +2,11 @@
 
 import functools
 import logging
+import os
 import time
 from collections import Counter
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from httk.core.requirements import parse_requirements, unmet_requirements
@@ -23,6 +25,10 @@ _LOGGER = logging.getLogger("httk.workflow.manager")
 
 #: Why a job is not this manager's work: ``(kind, name)``, the :class:`~httk.workflow.manager.WorkCensus` keys.
 type Blocker = tuple[str, str]
+#: Files changed this recently (ns) are not memoized: an edit within one timestamp tick would keep their identity.
+_RACY_NS = 1_000_000_000
+#: What the claim pass read of a ready job, by job directory: the identity of the files read, then the reading.
+type ReadyMemo = dict[Path, tuple[tuple[tuple[int, ...] | None, ...], JobDefinition, StateDoc | None]]
 
 
 @functools.cache
@@ -303,6 +309,38 @@ def read_ready(manager: "TaskManager", ref: _kernel.JobRef) -> tuple[JobDefiniti
     return job, doc
 
 
+def _read_ready_memoized(
+    manager: "TaskManager", ref: _kernel.JobRef, memo: ReadyMemo
+) -> tuple[JobDefinition, StateDoc | None] | None:
+    # read_ready, reusing the previous pass's reading while the job directory, job.json and state.json are the same
+    # files (inode, size, mtime, ctime). A job is rewritten only once claimed, which renames it (names are never
+    # reused). An edit in place shows in the timestamps only across a timestamp tick (1 ms locally, 1 s on coarse
+    # NFS), so a reading whose files changed within _RACY_NS of now is not kept (git's racy-index rule; it assumes
+    # the file server's clock agrees with ours). The identity is taken before reading, so a file replaced meanwhile
+    # differs next pass. Only the reading is reused: assess() and fits_now() run on every pass.
+    identity: list[tuple[int, ...] | None] = []
+    newest = 0
+    directory = os.fspath(ref.path)
+    for path in (directory, f"{directory}/job.json", f"{directory}/state.json"):
+        try:
+            info = os.lstat(path)
+        except OSError:
+            identity.append(None)
+        else:
+            identity.append((info.st_uid, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+            newest = max(newest, info.st_mtime_ns, info.st_ctime_ns)
+    key = tuple(identity)
+    previous = manager._ready_memo.get(ref.path)
+    # The owner check of read_ready passed for that identity (the uids are part of it).
+    if previous is not None and previous[0] == key and None not in key[:2]:
+        loaded: tuple[JobDefinition, StateDoc | None] | None = previous[1:]
+    else:
+        loaded = read_ready(manager, ref)
+    if loaded is not None and time.time_ns() - newest >= _RACY_NS:
+        memo[ref.path] = (key, *loaded)
+    return loaded
+
+
 def claim_pass(manager: "TaskManager") -> bool:
     """Claim and launch eligible ready jobs within the manager's workers and capacity (plan §7.7 step 8).
 
@@ -327,10 +365,12 @@ def claim_pass(manager: "TaskManager") -> bool:
     )
     # A short window reached the end: the next pass starts over.
     manager._cursor = refs[-1].cursor if len(refs) == manager.discovery_budget else None
-    # ponytail: every job of the window is read before claiming; cap the window if wide queues make ticks slow.
+    # ponytail: the memo keeps only this window, so a ready queue wider than discovery_budget re-reads every job;
+    # keep a whole rotation's entries if such queues make ticks slow.
+    memo: ReadyMemo = {}
     candidates: list[_kernel.JobRef] = []
     for ref in refs:
-        loaded = read_ready(manager, ref)
+        loaded = _read_ready_memoized(manager, ref, memo)
         if loaded is None:
             continue
         job, doc = loaded
@@ -341,6 +381,7 @@ def claim_pass(manager: "TaskManager") -> bool:
         assert requirement is not None
         if fits_now(manager, requirement):
             candidates.append(ref)
+    manager._ready_memo = memo
     changed = False
     for ref in sorted(candidates, key=lambda item: (item.priority, item.cursor)):
         if not _has_room(manager):

@@ -10,14 +10,17 @@ reaching a starved subtree, and that a placement-prefixed manager schedules only
 its subtree.
 """
 
+import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import v3_helpers as v3
-from httk.workflow import TaskManager, _kernel
+from httk.workflow import TaskManager, _kernel, _manager_scheduling
+from httk.workflow._job import JobDefinition
 from httk.workflow._state import TERMINAL_STATES
 
 
@@ -115,3 +118,39 @@ def test_a_placement_prefixed_manager_schedules_only_within_its_prefix(tmp_path:
     assert {ref.job_id for ref in _kernel.list_jobs(ws, "ready")} == b_ids
     v3.run(ws, placement_prefixes=("b",))
     assert {ref.job_id for ref in _kernel.list_jobs(ws, "succeeded")} == a_ids | b_ids
+
+
+def test_an_unchanged_ready_job_is_read_once_and_again_when_its_files_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = v3.workspace(tmp_path / "workspace")
+    installed = v3.install(ws, tmp_path / "package")
+    ref = v3.submit(ws, installed, {"start": "succeed"}, resources={"procs": 2})
+    real_from_path = JobDefinition.from_path
+    reads: list[Path] = []
+
+    def from_path(path: Path) -> JobDefinition:
+        reads.append(path)
+        return real_from_path(path)
+
+    monkeypatch.setattr(JobDefinition, "from_path", from_path)
+    with TaskManager(ws, resources={"procs": 1}, heartbeat_interval=600.0) as manager:
+        # Files changed within the racy margin are read on every pass: an edit in the same timestamp tick would
+        # leave their identity unchanged. (The margin covers ctime, which os.utime cannot set back: wait it out.)
+        for _ in range(2):
+            assert not _manager_scheduling.claim_pass(manager)
+        assert len(reads) == 2 and manager._ready_memo == {}
+        files = [path.stat() for path in (ref.path, ref.path / "job.json", ref.path / "state.json") if path.exists()]
+        newest = max(max(item.st_mtime_ns, item.st_ctime_ns) for item in files)
+        time.sleep(max(0.0, (newest + _manager_scheduling._RACY_NS - time.time_ns()) / 1e9 + 0.05))
+        reads.clear()
+        for _ in range(3):
+            assert not _manager_scheduling.claim_pass(manager)
+        # Blocked on every pass, but job.json was read (and parsed) only on the first once it was old enough.
+        assert reads == [ref.path / "job.json"] and list(manager._ready_memo) == [ref.path]
+        # An edit in place (a new file under the same name) is read again, and the job now fits.
+        mapping = json.loads((ref.path / "job.json").read_text(encoding="utf-8"))
+        (ref.path / "job.json.new").write_text(json.dumps(mapping | {"resources": {"procs": 1}}), encoding="utf-8")
+        os.replace(ref.path / "job.json.new", ref.path / "job.json")
+        assert _manager_scheduling.claim_pass(manager)
+        assert reads[1] == ref.path / "job.json"
