@@ -13,7 +13,8 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import _fs
@@ -923,6 +924,105 @@ def activate(workspace: Path) -> tuple[Path, tuple[str, ...] | None]:
     return snapshot, tuple(sorted({launcher.name for launcher in set(old.launchers) ^ set(new.launchers)}))
 
 
+def _moved_active(workspace: Path) -> tuple[Path, Policy]:
+    """Return the active snapshot of *workspace*'s enrollment, found by name in its own daemon directory.
+
+    The pointer records the snapshot below the path the workspace had when it was activated, so after a move
+    of the whole workspace the same snapshot is looked up by name here and verified against the pointer's digest.
+    """
+
+    daemon = workspace / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY
+    _validate_private_directory(daemon)
+    try:
+        recorded, digest = read_active_snapshot(daemon)
+    except FileNotFoundError:
+        raise ValueError(
+            f"the daemon directory {daemon} has no active.json: its enrollment is incomplete; remove that directory "
+            "(and run 'httk daemon init' again if the workspace should have a daemon)"
+        ) from None
+    if recorded.parent.name != "snapshots":
+        raise ValueError(f"the active daemon snapshot is not in a snapshots directory: {recorded}")
+    snapshot = daemon / "snapshots" / recorded.name
+    policy = load_policy(snapshot)
+    if activation_document(snapshot, policy)["digest"] != digest:
+        raise ValueError("the daemon snapshot does not match its active pointer")
+    if policy.workspace_id != _workspace_id(workspace):
+        raise ValueError("the daemon enrollment belongs to a different workspace")
+    return snapshot, policy
+
+
+def unfinished_managers(workspace: Path) -> tuple[list[str], list[str]]:
+    """List the manager starts of a stopped daemon whose Slurm jobs may still be queued or running.
+
+    A start counts once its job is known and its last stored scheduler observation is not final; a job that
+    ended while no daemon observed it counts until a daemon run observes it. A start answered ``uncertain``
+    without a job ID (sbatch may have accepted it) is listed apart: nothing ever reconciles it. The enrollment
+    may have been activated at another path of the workspace (a move in progress).
+
+    :param workspace: Workspace data root.
+    :return: One ``"<handle> (Slurm job <id>)"`` line per unfinished start, and one ``"<handle> (<UTC time>)"``
+        line per uncertain start; both empty without an enrollment.
+    :raises ValueError: If the enrollment is invalid.
+    :raises httk.workflow._daemon_state.LedgerError: If the ledger is missing or corrupt.
+    """
+
+    from ._daemon_service import _parse_observation
+
+    workspace = workspace.resolve(strict=True)
+    daemon = workspace / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY
+    if not os.path.lexists(daemon):
+        return [], []
+    _snapshot, policy = _moved_active(workspace)
+    found: list[str] = []
+    uncertain: list[str] = []
+    with Ledger(
+        daemon / "broker",
+        policy.workspace_id,
+        policy.enrollment_id,
+        max_records=policy.max_records,
+        max_submissions=policy.max_submissions,
+    ) as ledger:
+        for row in ledger.managers():
+            handle, job_id = str(row["handle"]), row["job_id"]
+            if job_id is None:
+                entry = ledger.lookup_manager(handle) if row["state"] == "uncertain" else None
+                if entry is not None:
+                    created = datetime.fromtimestamp(entry.request.created_at, UTC).isoformat(timespec="seconds")
+                    uncertain.append(f"{handle} ({created})")
+                continue
+            observation = _parse_observation(ledger.observation(handle))
+            if observation is None or not observation["final"] or observation["job_id"] != job_id:
+                found.append(f"{handle} (Slurm job {job_id})")
+    return found, uncertain
+
+
+def relocate(workspace: Path) -> Path | None:
+    """Republish the enrollment of a workspace that was moved as a whole to its current path.
+
+    The active snapshot is published again with only its ``workspace`` changed to this path, through the
+    ordinary publication (an immutable snapshot, then the active pointer), and ``exchange/daemon.json`` is
+    reinstalled; the enrollment, its identities, launchers and keys stay as they were. The configuration
+    digests clients sign change with the path, as after a reload. Every step is repeatable, so a relocation an
+    interruption cut short completes when it runs again, and an enrollment already at this path only gets its
+    ``daemon.json`` reinstalled.
+
+    :param workspace: Workspace data root, at its new path.
+    :return: The active runtime snapshot, or ``None`` when the workspace has no daemon enrollment.
+    :raises ValueError: If the enrollment is invalid or belongs to another workspace.
+    """
+
+    workspace = workspace.resolve(strict=True)
+    if not os.path.lexists(workspace / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY):
+        return None
+    snapshot, policy = _moved_active(workspace)
+    if policy.workspace != workspace or read_active_snapshot(policy.daemon)[0] != snapshot:
+        policy = replace(policy, workspace=workspace)
+        _validate_private_directory(policy.snapshots)
+        snapshot = _publish(policy)
+    _write_daemon_document(policy)
+    return snapshot
+
+
 __all__ = [
     "CONFIGURATION_KEYS",
     "INITIALIZE_KEYS",
@@ -931,4 +1031,6 @@ __all__ = [
     "describe",
     "initialize",
     "published_settings",
+    "relocate",
+    "unfinished_managers",
 ]

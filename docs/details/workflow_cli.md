@@ -125,7 +125,7 @@ Remote-capable commands (workspace status, settings, `gc`, `check`, `repair`,
 | `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
 | `workspace register [PATH...]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only), `--json` |
-| `workspace move NAME DEST_DIR` | move a local workspace and update its registry path | `--no-durable` |
+| `workspace move NAME NEW_PATH` | move a workspace on its filesystem and update every local record of its path (registry, project members, a configured daemon's enrollment); refused while its daemon runs, an owner is not proven dead or daemon manager jobs may still run | `--record-only` (the directory is already at NEW_PATH), `--no-durable` |
 | `workspace forget NAME...` | deregister names, leaving workspaces on disk | |
 | `workspace delete NAME...` | destroy workspaces and deregister them, after confirmation | `--yes` skips the confirmation |
 | `workspace status [NAME...]` | job counts by state, the seal, the owners with their liveness, and the held transfers (transfer id, root job, members, destination, age; `transfers` in `--json`; a hold whose manifest cannot be read is named, `transfers_unreadable` in `--json`, without changing the exit status) (remote: over the adapter) | `--json` |
@@ -158,12 +158,44 @@ httk workspace init --name my-workspace runs/my-workspace
 A workspace on a cluster is addressed as `REMOTE:NAME`. Its owning machine
 chooses the path given to `workspace init REMOTE:PATH`.
 
-`workspace move NAME DEST_DIR` is an atomic same-filesystem rename and refuses
-cross-filesystem moves. `workspace move` and `workspace delete` refuse while
-any owner of the workspace is not proven dead: stop its managers first.
-`workspace forget` only removes the name. To move across filesystems, stop
-managers, copy the tree, forget the old name, and re-register it with
-`workspace init --name NAME <newpath>`.
+`workspace move NAME NEW_PATH` renames the workspace directory to `NEW_PATH`,
+which must not exist, in one atomic same-filesystem rename, then updates every
+record of its path on this machine: the registry entry (same name), the
+`members.json` of the project it leaves and of the project it joins, and a
+configured daemon's enrollment (the active runtime snapshot is published again
+naming the new path, and `exchange/daemon.json` is reinstalled; identities,
+launchers and keys are unchanged). It refuses while the workspace daemon runs
+(stop its `httk daemon run` process first), while any other owner of the
+workspace is not proven dead (it lists the owners and the jobs they hold:
+stop its managers first), while daemon manager jobs may still be queued or
+running on the old path (let them end and a daemon observe them), while the
+enclosing project is sealed, and when `NEW_PATH` is registered under another
+name. A daemon manager start answered `uncertain` (sbatch failed after it may
+have accepted the job) never blocks, since nothing reconciles it; the move
+warns of it instead: if Slurm accepted that job, it fails on the old path, so
+look for it with `squeue --name=httk-<handle>` and cancel it with `scancel`. A
+destination project that cannot record the workspace (it is sealed, or the
+name is taken there) leaves the move done and is reported as `not recorded in
+<members.json>`. It prints what it updated and what names the old
+path elsewhere and must be updated by hand: scripts and service units, manager
+jobs a launcher queued in a scheduler before the move (they fail when they
+start; start them again), and a mounted exchange path set on a `mount-daemon`
+remote, which `httk remote set REMOTE exchange=PATH` re-pins. Remotes on other
+machines address the workspace by name and need no change. Requests a client
+signed for the previous daemon configuration are refused as
+`stale_configuration`, as after a `daemon reload`; clients read the new
+configuration digests from `daemon.json`. Records already collected into a store keep
+the path the job had when it was collected.
+
+Across filesystems the rename is refused: copy the directory with a copy that
+keeps modes and ownership (`cp -a`, `rsync -a`; a daemon's private directory must
+stay mode 0700 and owned by its user), remove the original, then run
+`workspace move --record-only NAME NEW_PATH`, which only updates the records;
+the old path must no longer be a workspace. `--record-only` cannot check that
+`NEW_PATH` is the same workspace, since the registry records no workspace id;
+name the right directory. Every step is
+repeatable, so `--record-only` also completes a move that was interrupted after
+the rename. `workspace forget` only removes the name.
 
 ### Sealing a workspace
 

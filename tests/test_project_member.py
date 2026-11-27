@@ -109,11 +109,11 @@ def test_move_updates_the_member_path(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="member")
     Workspace.initialize(project / "old")
-    move_project_member(project / "old", project / "new")
+    move_project_member(project / "old", project / "new", "w")
     assert [member.path for member in project_members(project)] == ["new"]
 
     # A move out of the project unregisters the member.
-    move_project_member(project / "new", tmp_path / "outside")
+    move_project_member(project / "new", tmp_path / "outside", "w")
     assert project_members(project) == ()
 
 

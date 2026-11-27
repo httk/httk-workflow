@@ -521,6 +521,24 @@ enrollment, ledger, response key and old snapshots. Installed binaries and
 site configuration file contents remain operator-maintained external
 dependencies.
 
+### Moving the workspace
+
+Stop the daemon, then move the workspace with `httk workspace move NAME
+NEW_PATH` (`--record-only` after copying it across filesystems). The move is
+refused while the daemon runs or while a manager start in the ledger may still
+be queued or running, since its job names the old path; a start answered
+`uncertain` only draws a warning, as nothing reconciles it (find it with
+`squeue --name=httk-<handle>` and cancel it if Slurm accepted it). Across
+filesystems, copy with `cp -a` or `rsync -a`, so the daemon's private directory
+keeps mode 0700 and its owner. It publishes the
+active runtime snapshot again with the new workspace path and reinstalls
+`daemon.json`; the enrollment, ledger, response key and approved launchers are
+kept. The configuration digests change with the path, as after a reload, so a
+request signed for the old digest is refused as `stale_configuration`; clients
+read the new digests from `daemon.json`. Afterwards run the daemon on the new path, and update a service unit or
+script that started `httk daemon run` with the old one, and the `exchange`
+setting of a `mount-daemon` remote whose mount path changed.
+
 ### Upgrading
 
 After updating *httk-workflow* on the remote host, restart the daemon. An

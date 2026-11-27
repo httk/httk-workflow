@@ -514,28 +514,39 @@ def _unregister_project_member(path: Path, *, allow_sealed: bool = False) -> Non
             raise
 
 
-def move_project_member(old_path: Path, new_path: Path) -> None:
-    """Follow a moved workspace in its project's member registry.
+def move_project_member(old_path: Path, new_path: Path, name: str) -> str | None:
+    """Follow a moved workspace in the member registries of its old and new projects, repeatably.
 
-    A move that stays inside the same project updates the recorded relpath; one
-    that leaves the project unregisters it; a workspace outside any project is a
-    no-op. A sealed project refuses either change.
+    The member recorded at the old path (if any) leaves the old project, and the workspace joins the project
+    enclosing its new path under its recorded name, or under *name* when the old project recorded none; a
+    workspace outside any project records nothing there. Each step is idempotent, so an interrupted move
+    completes when it runs again.
+
+    :param old_path: The workspace's previous path, which may no longer exist.
+    :param new_path: The workspace's current path.
+    :param name: The workspace's registered name.
+    :return: Why the new project did not record the workspace (sealed, or the name taken there), or ``None``.
+    :raises httk.core.project.sealing.SealedError: If the old project is sealed.
     """
 
-    old = old_path.expanduser().resolve()
-    new = new_path.expanduser().resolve()
-    project = discover_project(old)
-    if project is None:
-        return
-    from httk.core.project.members import unregister_project_member, update_project_member_path
+    from httk.core.project.members import members_path, project_members, register_project_member
+    from httk.core.project.sealing import SealedError
 
-    if new.is_relative_to(project):
-        update_project_member_path(project, old, new)
-    else:
-        try:
-            unregister_project_member(project, old)
-        except ValueError:
-            pass
+    old = old_path.expanduser().resolve()
+    project = discover_project(old)
+    if project is not None:
+        recorded = next((m.name for m in project_members(project) if (project / m.path).resolve() == old), None)
+        name = recorded or name
+        _unregister_project_member(old)
+    new = new_path.expanduser().resolve()
+    project = discover_project(new)
+    if project is None:
+        return None
+    try:
+        register_project_member(project, new, "workspace", name=name)
+    except (ValueError, SealedError) as exc:
+        return f"not recorded in {members_path(project)}: {exc}"
+    return None
 
 
 def create_workspace(

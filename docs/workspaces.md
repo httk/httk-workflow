@@ -407,6 +407,19 @@ The full guide, {doc}`details/remotes`, covers the mount variants, moving job
 trees, and the Python adapter API; {doc}`details/adapter_authoring` specifies
 the adapter bundle, and {doc}`details/workspace_daemon` the confined broker.
 
+## Moving a workspace
+
+```console
+httk workspace move my-workspace /scratch/campaign/my-workspace
+```
+
+renames the workspace on its filesystem and updates every record of its path
+on this machine, including a configured daemon's enrollment; stop the
+workspace's daemon and managers first. Across filesystems, copy the directory
+yourself with `cp -a` or `rsync -a`, remove the original, and run `httk workspace move --record-only NAME NEW_PATH`; the same
+command completes an interrupted move. {doc}`details/workflow_cli` lists what
+the command updates and what it asks you to update by hand.
+
 ## Moving a project between machines
 
 A project directory is self-describing. Copy the whole tree, including its

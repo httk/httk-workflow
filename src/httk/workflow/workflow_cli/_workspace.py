@@ -32,6 +32,8 @@ from ..adapters import (
     REMOTE_WORKSPACE_SET_COMMAND,
     REMOTE_WORKSPACE_SHOW_COMMAND,
     REMOTE_WORKSPACE_UNSET_COMMAND,
+    list_remotes,
+    remote_settings,
     resolve_remote,
     run_adapter,
     seed_application_settings,
@@ -39,9 +41,10 @@ from ..adapters import (
 from ..configuration import machine_names
 from ..fsck import check_workspace
 from ..gc import GC_CATEGORIES, collect_garbage, iter_report_rows
-from ..introspection import JOB_STATES, count_jobs, probe_liveness
-from ..manifests import require_quiescent_workspace
+from ..introspection import JOB_STATES, count_jobs, iter_jobs, probe_liveness
 from ..models import (
+    DAEMON_DIRECTORY,
+    EXCHANGE_DIRECTORY,
     POLICY_KEYS,
     RETENTION_KEYS,
     WORKSPACE_DIRECTORY,
@@ -64,6 +67,7 @@ from ..registry import (
 )
 from ..seals import (
     default_workspace_keys,
+    is_project_sealed,
     is_workspace_sealed,
     read_seal,
     require_cli_modifiable,
@@ -713,48 +717,188 @@ def handle_workspace_default(arguments: argparse.Namespace, context: CLIContext)
     return 0
 
 
-def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Move a local workspace within its filesystem and update its registry path.
+def _is_workspace(path: Path) -> bool:
+    return (path / WORKSPACE_DIRECTORY / "format.json").is_file()
 
-    Refused unless every owner of the workspace is proven dead: a running
-    manager or CLI owner keeps the workspace in use. A remote binding moves over
-    its adapter.
+
+def _move_blockers(root: Path) -> tuple[list[str], list[str]]:
+    """Say why the workspace at *root* cannot move now, and warn of what cannot block it.
+
+    Owners not proven dead, the jobs they hold and daemon manager jobs that may still run block; uncertain
+    daemon manager starts only warn, since nothing ever reconciles them.
+    """
+
+    workspace = Workspace(root)
+    scheduler, here = _death.SchedulerQueries(), _death.process_identity()
+    busy: dict[str, str] = {}
+    for owner in _kernel.list_owners(workspace):
+        verdict = _death.probe(owner.path, visibility_deadline=0.0, scheduler=scheduler, here=here)[0]
+        if verdict is not _death.Liveness.DEAD:
+            busy[owner.owner_id] = str((owner.record or {}).get("kind") or "unknown")
+    reasons: list[str] = []
+    daemons = [owner_id for owner_id, kind in busy.items() if kind == "daemon"]
+    if daemons:
+        reasons.append(
+            f"the workspace daemon is running (owner {', '.join(daemons)}); stop its `httk daemon run` process "
+            "(or the service that runs it) first"
+        )
+    others = [f"{owner_id} ({kind})" for owner_id, kind in busy.items() if kind != "daemon"]
+    if others:
+        reasons.append(f"owners not proven dead: {', '.join(others)}")
+    held = sorted(ref.job_key for ref in iter_jobs(workspace, ("owned",)) if ref.owner_id in busy)
+    if held:
+        reasons.append(f"jobs they hold: {', '.join(held)}")
+    from .._daemon_setup import unfinished_managers
+
+    managers, uncertain = unfinished_managers(root)
+    warnings = [
+        f"a daemon manager start {start} is uncertain; if Slurm accepted it, it will fail on the old path: "
+        f"find it with `squeue --name=httk-{start.split()[0]}` and cancel it with scancel"
+        for start in uncertain
+    ]
+    if managers:
+        reasons.append(
+            f"daemon manager jobs may still be queued or running on {root}: {', '.join(managers)}; let them end "
+            f"(or cancel them), then let the daemon observe them (`httk daemon run --once {root}`)"
+        )
+    return reasons, warnings
+
+
+def _external_references(old: Path, new: Path, context: CLIContext) -> list[str]:
+    """List what names the old path outside this machine's records, for the operator to update by hand.
+
+    *old* equals *new* when a rerun completes a move whose registry entry was already updated; the old path is
+    then unknown and only the general note is given.
+    """
+
+    notes = [
+        (
+            f"remotes reach this workspace by name and need no change; anything else that names "
+            f"{'its previous path' if old == new else old} (scripts, service units, manager jobs a launcher queued "
+            "in a scheduler, a client's mounted exchange path) must be updated by hand"
+        )
+    ]
+    if old == new:
+        return notes
+    for row in list_remotes(context.cwd):
+        try:
+            exchange = remote_settings(str(row["path"])).get("exchange")
+        except (OSError, ValueError):
+            continue
+        if isinstance(exchange, str) and Path(exchange).is_relative_to(old):
+            moved = new / Path(exchange).relative_to(old)
+            notes.append(
+                f"remote {row['name']} mounts the old exchange: httk remote set {row['name']} exchange={moved}"
+            )
+    if (new / WORKSPACE_DIRECTORY / DAEMON_DIRECTORY).is_dir():
+        from .._daemon_setup import describe
+
+        try:
+            configuration = describe(new)["configuration"]
+        except (OSError, ValueError):
+            configuration = {}  # an enrollment relocate could republish but not describe (no saved configuration)
+        assert isinstance(configuration, dict)
+        for key, value in configuration.items():
+            if isinstance(value, str) and Path(value).is_relative_to(old):
+                notes.append(f"daemon {key}={value} lies in the old path: httk daemon set {new} {key}=NEW_VALUE")
+    return notes
+
+
+def _record_move(name: str, old: Path, new: Path, *, durable: bool) -> tuple[list[str], str | None]:
+    """Update every local record of a workspace already at *new*; each step is repeatable.
+
+    Return what was updated, and why the new project did not record the workspace, if it did not.
+    """
+
+    from .._daemon_setup import relocate
+
+    updated: list[str] = []
+    snapshot = relocate(new)
+    if snapshot is not None:
+        updated.append(f"daemon enrollment (active snapshot {snapshot.name}) and {EXCHANGE_DIRECTORY}/daemon.json")
+    problem = move_project_member(old, new, name)
+    joined = discover_project(new)
+    for project in dict.fromkeys(filter(None, (discover_project(old), joined))):
+        if project != joined or problem is None:
+            updated.append(f"project members of {project}")
+    _update_workspace_path(name, new, durable=durable)
+    updated.append(f"registry entry {name}")
+    return updated, problem
+
+
+def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Move a local workspace within its filesystem and update every local record of its path.
+
+    Refused while the workspace daemon runs, while any owner of the workspace is not proven dead (listing the
+    jobs it holds) and while daemon manager jobs may still start or run on the old path. ``--record-only``
+    updates the records of a workspace already moved by other means, and completes an interrupted move. A
+    remote binding moves over its adapter.
     """
     binding = resolve_workspace(arguments.workspace, project=context.cwd)
     if binding.remote != LOCAL_REMOTE:
         target = resolve_remote(binding.remote, project=context.cwd)
         name = binding.name.split(":", 1)[1]
+        flags = ["--record-only"] if arguments.record_only else []
+        flags += [] if _durable(arguments) else ["--no-durable"]
         result = run_adapter(
-            target.bundle, "invoke", {"argv": [*REMOTE_WORKSPACE_MOVE_COMMAND, name, arguments.destination]}
+            target.bundle, "invoke", {"argv": [*REMOTE_WORKSPACE_MOVE_COMMAND, *flags, name, arguments.destination]}
         )
         if result.get("returncode") != 0:
             raise RuntimeError(f"remote workspace move failed: {result.get('stderr', '')}")
         sys.stdout.write(str(result.get("stdout", "")))
         return 0
     assert binding.path is not None
+    old = Path(binding.path)
     destination = (Path(context.cwd) / arguments.destination).resolve()
-    if os.path.lexists(destination):
-        raise ValueError(f"workspace move destination already exists: {destination}")
-    try:
-        require_quiescent_workspace(Workspace(binding.path))
-    except ValueError as exc:
-        raise ValueError(f"cannot move the workspace while it is in use: {exc}") from exc
-    try:
-        # ponytail: check-then-rename; an empty directory created at the destination in between is replaced
-        # (rename(2) replaces only an empty one), anything else that appeared refuses the move below.
-        os.rename(binding.path, destination)
-    except OSError as exc:
-        if exc.errno in (errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR, errno.EISDIR):
-            raise ValueError(f"workspace move destination appeared during the move: {destination}") from exc
-        if exc.errno != errno.EXDEV:
-            raise
-        raise ValueError(
-            "workspace move must stay within one filesystem; stop managers, copy the workspace manually, "
-            "then forget the old name and run `workspace init --name NAME <newpath>`"
-        ) from exc
-    updated = _update_workspace_path(binding.name, destination, durable=_durable(arguments))
-    move_project_member(Path(binding.path), destination)
-    print(updated.path)
+    project = discover_project(old)
+    if project is not None and is_project_sealed(project):
+        raise ValueError(f"cannot move the workspace: its project {project} is sealed, so its members cannot change")
+    other = [row.name for row in list_workspaces() if row.name != binding.name and Path(row.path or "") == destination]
+    if other:
+        raise ValueError(f"cannot move the workspace: {destination} is registered as {other[0]!r}")
+    if arguments.record_only:
+        if not _is_workspace(destination):
+            raise ValueError(f"--record-only: {destination} is not an httk execution workspace")
+        if old != destination and _is_workspace(old):
+            raise ValueError(f"--record-only: {old} is still the workspace; move it first, or drop --record-only")
+        source = destination
+    else:
+        if os.path.lexists(destination):
+            hint = ""
+            if _is_workspace(destination) and not _is_workspace(old):
+                hint = (
+                    f"; if it is this workspace, already moved there, `httk workspace move --record-only "
+                    f"{binding.name} {destination}` updates its records"
+                )
+            raise ValueError(f"workspace move destination already exists: {destination}{hint}")
+        source = old
+    blockers, warnings = _move_blockers(source)
+    if blockers:
+        raise ValueError("cannot move the workspace while it is in use: " + "; ".join(blockers))
+    if not arguments.record_only:
+        try:
+            # ponytail: check-then-rename; an empty directory created at the destination in between is replaced
+            # (rename(2) replaces only an empty one), anything else that appeared refuses the move below.
+            os.rename(old, destination)
+        except OSError as exc:
+            if exc.errno in (errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR, errno.EISDIR):
+                raise ValueError(f"workspace move destination appeared during the move: {destination}") from exc
+            if exc.errno != errno.EXDEV:
+                raise
+            raise ValueError(
+                f"workspace move must stay within one filesystem; copy or move {old} to {destination} by other "
+                f"means, then run `httk workspace move --record-only {binding.name} {destination}`"
+            ) from exc
+        print(f"moved {binding.name}: {old} -> {destination}")
+    updated, problem = _record_move(binding.name, old, destination, durable=_durable(arguments))
+    for item in updated:
+        print(f"updated: {item}")
+    if problem is not None:
+        print(f"warning: {problem}")
+    for warning in warnings:
+        print(f"warning: {warning}")
+    for note in _external_references(old, destination, context):
+        print(f"note: {note}")
     return 0
 
 
@@ -1133,12 +1277,30 @@ def build_workspace_parser(
     move = _leaf(
         group,
         "move",
-        summary="move a workspace and update its registry path",
-        description="Move one local workspace to a new path",
+        summary="move a workspace and update every record of its path",
+        description=(
+            "Move one workspace to a new path on the same filesystem (an atomic rename) and update the records "
+            "of its path: the registry entry, the project members and a configured daemon's enrollment. Refused "
+            "while its daemon runs, while an owner is not proven dead and while daemon manager jobs may still run "
+            "on the old path. Across filesystems, copy or move the directory by other means and run it with "
+            "--record-only; that also completes an interrupted move"
+        ),
         handler=handle_workspace_move,
     )
-    move.add_argument("workspace", metavar="NAME", help="the local workspace name")
-    move.add_argument("destination", metavar="DEST_DIR", help="the new workspace path")
+    move.add_argument("workspace", metavar="NAME", help="the workspace name")
+    move.add_argument(
+        "destination",
+        metavar="NEW_PATH",
+        help="the new workspace path, which must not exist (with --record-only: where the workspace already is)",
+    )
+    move.add_argument(
+        "--record-only",
+        action="store_true",
+        help=(
+            "the workspace is already at NEW_PATH (moved by other means, or a move was interrupted): "
+            "only update the records of its path"
+        ),
+    )
     add_durability_arguments(move)
 
     workspace_help = (
