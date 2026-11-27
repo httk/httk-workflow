@@ -153,7 +153,8 @@ def _version(repository: str, commit: str) -> Mapping[str, WorkflowProvider]:
     key = (repository, commit)
     if key in _VERSIONS:
         return _VERSIONS[key]
-    from .packages import load_workflow_package, source_tree_digest
+    from . import _store
+    from .packages import load_workflow_package
 
     packages: dict[str, WorkflowProvider] = {}
     try:
@@ -170,7 +171,7 @@ def _version(repository: str, commit: str) -> Mapping[str, WorkflowProvider]:
         try:
             if manifest.is_symlink():
                 raise ValueError(f"{_MANIFEST} is a symlink")
-            source_tree_digest(directory)  # refuse what the git route refuses (e.g. a symlink), as git_workflows does
+            _store.source_digest(directory)  # refuse what the git route refuses (e.g. a symlink), as git_workflows does
             packages[directory.name] = load_workflow_package(directory, register=False, _uri=uri)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             _LOGGER.warning("Skipping pip-installed workflow %s: %s", uri, exc)

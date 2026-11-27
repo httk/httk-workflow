@@ -55,10 +55,11 @@ def _load(uri: str, package: Path) -> WorkflowProvider:
 def _claims(package: Path) -> tuple[str, ...]:
     """Validate a fetched package before it is installed and return its short names."""
 
-    from .packages import load_workflow_package, source_tree_digest
+    from . import _store
+    from .packages import load_workflow_package
 
     provider = load_workflow_package(package, register=False)
-    source_tree_digest(package)  # refuse a tree that could never be published (e.g. a symlink)
+    _store.source_digest(package)  # refuse a tree that could never be published (e.g. a symlink)
     return tuple(name for name in (provider.workflow_id, provider.alias) if name is not None)
 
 

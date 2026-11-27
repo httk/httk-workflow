@@ -508,6 +508,13 @@ def test_collect_degrades_a_tampered_pinned_tree_loudly(tmp_path: Path) -> None:
     assert item.outputs == {}
     assert item.missing_collector is not None
     assert "pinned runner tree was modified" in item.missing_collector
+    # An installation (and pin) an older httk digested differently is refused the same way, naming the remedy.
+    assert "made by an older httk whose tree digest differed: reinstall it with `httk workflow install" in (
+        item.missing_collector
+    )
+    assert item.missing_collector.endswith(
+        "must then be restarted ('httk job restart JOB') or deleted ('httk job delete JOB') and created again"
+    )
 
 
 def test_collect_degrades_a_pinned_tree_with_the_wrong_manifest_id(tmp_path: Path) -> None:
@@ -544,8 +551,8 @@ def test_collect_degrades_a_reinstalled_workflow(tmp_path: Path) -> None:
     assert f"digest {str(reinstalled.record['tree_sha256'])[:12]}" in reason
     assert f"pinned {str(original.record['tree_sha256'])[:12]}" in reason
     assert reason.endswith(
-        "reinstall the tree it ran with, or delete the job ('httk job delete JOB') and create it again so it runs "
-        "on the installed tree"
+        "reinstall the tree it ran with (impossible when an older httk made the pin), or delete the job "
+        "('httk job delete JOB') and create it again so it runs on the installed tree"
     )
     assert "unlock" not in reason
     assert "pinned runner tree was modified" not in reason

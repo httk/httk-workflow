@@ -70,13 +70,20 @@ __all__ = [
     "load_workflow_package",
     "parse_workflow_manifest",
     "read_build_spec",
-    "source_tree_digest",
     "workflow_declaration_from_manifest",
 ]
 
 
 class _PinnedTreeError(ValueError):
     """The pinned tree changed before a hook member could be executed."""
+
+
+#: Appended to a refusal of an installed tree whose digest is not the recorded one: ``tree_digest`` framing changed
+#: in httk-core (file entries became ``F\0<path>\0<content sha256>``), so an older httk's digests no longer match.
+_OLDER_HTTK_DIGEST = (
+    "; the installation may have been made by an older httk whose tree digest differed: reinstall it with "
+    "`httk workflow install SOURCE` (or `httk workflow uninstall ID` and install it again)"
+)
 
 
 def _error(directory: Path, message: str) -> ValueError:
@@ -225,18 +232,6 @@ def read_build_spec(root: Path) -> BuildSpec | None:
         table_name="workflow",
         protected_names=("run", MANIFEST_NAME),
     )
-
-
-def source_tree_digest(root: Path) -> str:
-    """Return the digest of package sources, excluding declared build artifacts.
-
-    :param root: Locate the workflow package directory.
-    :return: The source-only tree digest.
-    :raises ValueError: If the package build section is malformed.
-    """
-
-    spec = read_build_spec(root)
-    return tree_digest(root, exclude=artifact_excluder(spec)) if spec is not None else tree_digest(root)
 
 
 def _validate_name(name: object, path: str, directory: Path) -> str:
@@ -1401,6 +1396,7 @@ def _tree_hook(
         if actual != pinned_sha256:
             raise _PinnedTreeError(
                 f"published workflow tree {store_tree} changed: digest {actual} does not match pinned {pinned_sha256}"
+                + ("" if embedded else _OLDER_HTTK_DIGEST)
             )
         module = sys.modules.get(module_name)
         if module is None:

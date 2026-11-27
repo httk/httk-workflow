@@ -32,7 +32,7 @@ from ..adapters import resolve_remote, run_adapter
 from ..errors import FormatError, ResolutionMiss, WorkflowError
 from ..models import BUDGET_LIMITS, WORKSPACE_DIRECTORY, validate_step
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, list_workspaces, resolve_workspace
-from ..scaffold import STRUCTURE_PATTERNS, JobItem, _sanitize_tag, structure_tag
+from ..scaffold import STRUCTURE_PATTERNS, JobItem, _poscar_named, _sanitize_tag, structure_tag
 from ..seals import require_cli_modifiable
 from ..workspace import Workspace
 
@@ -280,9 +280,7 @@ def _load_input_file(path: Path) -> object:
     :raises ValueError: If the file cannot be read; the message names the file.
     """
 
-    force_poscar = not httk.core.has_reader_for(path.name) and any(
-        fnmatch.fnmatch(path.name, pattern) for pattern in STRUCTURE_PATTERNS
-    )
+    force_poscar = not httk.core.has_reader_for(path.name) and _poscar_named(path.name)
     try:
         if force_poscar:
             return httk.core.load_source(str(path), "POSCAR")

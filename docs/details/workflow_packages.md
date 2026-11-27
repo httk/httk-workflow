@@ -390,6 +390,18 @@ is refused without running package code, and hooks need not null-check
 required inputs. It does not apply to `format` workflows, which satisfy their
 own inputs.
 
+A file given for an input with a `destination` is copied there byte for byte,
+except for a `structures` input when the registered readers know both its
+format and the destination's (a `POSCAR*`, `CONTCAR*`, `*.vasp` or `*.poscar`
+name is a POSCAR) and they differ. A different compression only
+(`POSCAR.gz` into `POSCAR`) is decompressed and recompressed, keeping the bytes
+exactly. A different format is converted: `job new --input structure=Si.cif`
+into `destination = "POSCAR"` loads the structure and writes the POSCAR, as
+`--input-from` does. A structure the destination format cannot hold (a CIF
+holding several structures, charges, partial occupancy, site moments outside
+mCIF, a trajectory) is refused rather than copied. `staged_files` records the
+written file, not the given one.
+
 ```toml
 [workflow.inputs.structure]
 destination = "POSCAR"
@@ -1068,7 +1080,21 @@ is deleted with `httk job delete` and created again).
 `job new DIR --install` reinstalls when the sources
 of `DIR` have changed since the installation (compared by the installed
 digest's rules, ignoring `.git` and declared build artifacts), so an
-edited package directory is picked up by the next job. To iterate on a runner
+edited package directory is picked up by the next job.
+
+An installation made by an older httk, whose tree digest framed files
+differently, no longer matches its recorded digest: running its hooks or
+collecting its jobs is refused with that reason, and `httk workflow install
+SOURCE` reinstalls it. Jobs launched before the upgrade pinned the old digest,
+so after the reinstall they cannot be collected: restart them (`httk job
+restart JOB`) or delete them and create them again; the same holds for the
+runner copy of an unlocked job. An installation copied from another workspace
+whose record an older httk wrote is refused until that workspace reinstalls it
+and sends it again. The ad hoc id of a document directory embeds its tree
+digest (without `.git`), so reinstalling one creates a second installation
+beside the old id; remove the old one with `httk workflow uninstall ID`.
+
+To iterate on a runner
 for one job only, without reinstalling, unlock the job: it gets its own copy of
 the installed `package/` at `workflow/` in the job directory to edit and rerun (see
 {doc}`/restarting_jobs`). `httk workflow list --workspace WS` and

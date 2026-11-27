@@ -11,7 +11,7 @@ import pytest
 
 from httk.workflow import _fs, _kernel, _store, git_workflows, scaffold
 from httk.workflow._kernel import Owner, register_owner
-from httk.workflow.packages import parse_workflow_manifest, source_tree_digest
+from httk.workflow.packages import parse_workflow_manifest
 from httk.workflow.scaffold import WorkflowProvider
 
 GIT_ID = "git+https://example.test/workflows.git@" + "a" * 40 + "#sub"
@@ -79,7 +79,7 @@ def test_install_from_directory(ws: FakeWorkspace, owner: Owner, tmp_path: Path)
     assert record["runner"] == {"command": None, "entry": "run", "builtin": None}
     assert record["steps"] == ["start"] and record["initial_step"] == "start"
     assert record["calls"] == {} and record["requires"] == [] and record["build"] is False
-    assert record["tree_sha256"] == source_tree_digest(installed.package)
+    assert record["tree_sha256"] == _store.source_digest(installed.package)
     provider = installed.provider()
     assert provider.workflow_id == installed.id and provider.name == "Relax.Demo+1"
     assert installed.provider() is provider

@@ -10,7 +10,6 @@ import pytest
 import v3_helpers as v3
 from httk.workflow import Workspace, _kernel, _moving, _requests, _store, removal
 from httk.workflow._job import JobDefinition
-from httk.workflow.packages import source_tree_digest
 from test_runner_builds import _compiled_package
 
 COPY = _store.RUNNER_COPY
@@ -184,7 +183,7 @@ def test_an_unlocked_job_launches_from_its_runner_copy(tmp_path: Path) -> None:
     assert root.endswith(f"/{COPY}") and done.job_key in root
     pin = v3.state_of(done).workflow_pin
     assert pin is not None and pin["id"] == installed.id
-    assert pin["tree_sha256"] == source_tree_digest(done.path / COPY) != installed.record["tree_sha256"]
+    assert pin["tree_sha256"] == _store.source_digest(done.path / COPY) != installed.record["tree_sha256"]
     assert pin["source"] == "copy" and (done.path / COPY / "run").is_file()  # left in place: unaffected
 
 

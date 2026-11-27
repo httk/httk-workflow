@@ -60,7 +60,7 @@ from contextlib import AbstractContextManager, ExitStack, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType, ModuleType
-from typing import TYPE_CHECKING, Literal, TypedDict, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast, overload
 
 from httk.core.building import BuildSpec
 from httk.core.digests import sha256_file, tree_digest
@@ -1394,6 +1394,8 @@ def structure_tag(path: str | os.PathLike[str]) -> str | None:
     """
 
     name = Path(path).name
+    if not _poscar_named(name):
+        return None
     for prefix in ("POSCAR", "CONTCAR"):
         if name.startswith(prefix):
             name = name[len(prefix) :].lstrip("._-")
@@ -4135,8 +4137,11 @@ def _run_executable_instantiate(
     tree, pinned_sha256, member = hook
     actual = (embedded_digest if embedded else tree_digest)(tree)
     if actual != pinned_sha256:
+        from .packages import _OLDER_HTTK_DIGEST
+
         raise ValueError(
             f"published workflow tree {tree} changed: digest {actual} does not match pinned {pinned_sha256}"
+            + ("" if embedded else _OLDER_HTTK_DIGEST)
         )
     source = tree.joinpath(*PurePosixPath(member).parts)
     if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(tree.resolve()):
@@ -4238,7 +4243,13 @@ def _stage_inputs(
     instantiate: bool = False,
     durable: bool = False,
 ) -> None:
-    """Realize declared inputs into the payload declared by the workflow (*durable*: copies fsynced as written)."""
+    """Realize declared inputs into the payload declared by the workflow (*durable*: copies fsynced as written).
+
+    A path is copied byte for byte, except a file given for a ``structures`` input when :func:`_structure_format`
+    knows both its format and its destination's and they differ: a different compression only is decompressed and
+    recompressed byte for byte, and a different format is loaded and written in the destination's format; a
+    structure that cannot be converted is refused, never copied.
+    """
 
     declared = workflow.inputs
     for name, value in inputs.items():
@@ -4260,8 +4271,19 @@ def _stage_inputs(
                 raise ValueError(f"workflow input {name!r} requires an instantiate hook")
             continue
         destination = payload_relative(destination_name)
+        path = payload.joinpath(*destination.parts)
         if isinstance(value, (str, os.PathLike)):
-            _stage_files(payload, {destination.as_posix(): value}, durable=durable)
+            source = Path(value).expanduser()
+            structure = workflow._input_metadata.get(name, {}).get("entry_type") == "structures"
+            given = _structure_format(source.name) if structure and source.is_file() else (None, None)
+            wanted = _structure_format(destination.name)
+            if given[0] is None or wanted[0] is None or given == wanted:
+                _stage_files(payload, {destination.as_posix(): value}, durable=durable)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _convert_structure_file(
+                    name, source, destination_name, path, given[0], wanted[0], wanted[1], durable=durable
+                )
             continue
         import httk.core
 
@@ -4270,11 +4292,131 @@ def _stage_inputs(
                 f"no writer is registered for {destination.name!r}; a writer must be registered "
                 "(installing httk-atomistic provides the POSCAR/CIF writers)"
             )
-        path = payload.joinpath(*destination.parts)
         path.parent.mkdir(parents=True, exist_ok=True)
         httk.core.save(value, path)
         if durable:
             _fsync_saved(path)
+
+
+def _poscar_named(name: str) -> bool:
+    """Report whether a file name is a VASP structure name: ``POSCAR*``, ``CONTCAR*``, ``*.vasp`` or ``*.poscar``.
+
+    A recognized compression suffix is ignored, and an archive (``.tar``, ``.tgz``, ``.zip``) is never one.
+    """
+
+    from httk.core.datastream.compression import split_compression_suffix
+
+    inner = split_compression_suffix(PurePosixPath(name).name)[0]
+    lowered = inner.lower()
+    if lowered.endswith((".tar", ".tgz", ".zip")):
+        return False
+    return inner.startswith(("POSCAR", "CONTCAR")) or lowered.endswith((".vasp", ".poscar"))
+
+
+def _structure_format(name: str) -> tuple[str | None, str | None]:
+    """Return the reader format tag of a structure file name and its compression codec's name.
+
+    A :func:`_poscar_named` name without a reader of its own is a ``POSCAR``; the tag is ``None`` for a name no
+    reader claims.
+    """
+
+    import httk.core
+    from httk.core.datastream.compression import split_compression_suffix
+
+    inner, codec = split_compression_suffix(PurePosixPath(name).name)
+    tag = httk.core.reader_format_for(inner)
+    if tag is None and _poscar_named(inner):
+        tag = httk.core.reader_format_for("POSCAR")
+    return tag, None if codec is None else codec.name
+
+
+def _convert_structure_file(
+    name: str,
+    source: Path,
+    destination_name: str,
+    path: Path,
+    given: str,
+    wanted: str,
+    codec: str | None,
+    *,
+    durable: bool,
+) -> None:
+    """Write the structure file *source* (of reader format *given*) to *path* in the *wanted* format and *codec*.
+
+    The same format is decompressed and recompressed byte for byte, never loaded; another one is loaded and saved.
+    """
+
+    import httk.core
+
+    from ._util import decode_errors
+
+    def refused(reason: object) -> ValueError:
+        return ValueError(
+            f"workflow input {name!r}: {source} is not in the format of its destination {destination_name!r} "
+            f"and cannot be converted: {reason}"
+        )
+
+    if given == wanted:
+        undecodable: tuple[type[Exception], ...] = (ValueError, *decode_errors())
+        try:
+            _recompress(source, path, codec, durable=durable)
+        except undecodable as exc:
+            raise refused(exc) from exc
+        return
+    try:
+        if httk.core.has_reader_for(source.name):
+            structure = httk.core.load(str(source))
+        else:
+            structure = httk.core.load_source(str(source), "POSCAR")
+    except Exception as exc:
+        raise refused(exc) from exc
+    # ponytail: site moments are the one content checked that a writer drops silently, and only mcif holds them;
+    # check another kind here when a writer is found dropping it.
+    if getattr(structure, "site_moments", None) is not None and wanted != "mcif":
+        raise refused("it carries site moments, which that format cannot hold")
+    try:
+        httk.core.save(structure, path, format=wanted)
+    except (ValueError, TypeError) as exc:
+        raise refused(exc) from exc
+    if durable:
+        _fsync_saved(path)
+
+
+def _recompress(source: Path, path: Path, codec: str | None, *, durable: bool) -> None:
+    """Write the uncompressed bytes of *source* to *path*, compressed by the core codec named *codec*, if any."""
+
+    import bz2
+    import gzip
+    import lzma
+    import shutil
+
+    from httk.core.datastream.compression import open_compressed
+
+    from .runtime_utils import _zstd
+
+    def compressor(raw: Any) -> Any:
+        if codec is None:
+            return contextlib.nullcontext(raw)
+        if codec == "gzip":
+            return gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0)
+        if codec == "bzip2":
+            return bz2.BZ2File(raw, "wb")
+        if codec in ("xz", "lzma"):
+            return lzma.LZMAFile(raw, "wb", format=lzma.FORMAT_XZ if codec == "xz" else lzma.FORMAT_ALONE)
+        if codec == "zstd":
+            return _zstd().ZstdFile(raw, "w")
+        raise ValueError(f"cannot write {codec} compression")
+
+    with (
+        source.open("rb") as raw,
+        open_compressed(raw, compression="extension", name=source.name) as stream,
+        path.open("wb") as output,
+    ):
+        with compressor(output) as sink:
+            shutil.copyfileobj(stream, sink)
+        if durable:
+            output.flush()
+            os.fsync(output.fileno())
 
 
 def _write_document(path: Path, data: bytes, *, durable: bool) -> None:

@@ -17,7 +17,6 @@ from httk.workflow.packages import (
     load_workflow_package,
     parse_workflow_manifest,
     read_build_spec,
-    source_tree_digest,
     workflow_declaration_from_manifest,
 )
 from httk.workflow.scaffold import BuildSpec, resolve_workflow, workflow_provider
@@ -268,11 +267,11 @@ def test_source_digest_and_installation_ignore_build_artifacts(tmp_path: Path) -
         tmp_path / "package",
         _MANIFEST + '\n[workflow.build]\ncommand = "python build.py"\nartifacts = ["build"]\n',
     )
-    digest = source_tree_digest(package)
+    digest = _store.source_digest(package)
     build = package / "build"
     build.mkdir()
     (build / "runner.o").write_bytes(b"artifact")
-    assert source_tree_digest(package) == digest
+    assert _store.source_digest(package) == digest
 
     installed = _install(Workspace.initialize(tmp_path / "workspace"), package)
     assert not (installed.package / "build").exists()
@@ -1054,6 +1053,20 @@ def test_directory_workflow_scaffolds_from_the_installed_tree_and_pins_declarati
     )
     with pytest.raises(ValueError, match="changed: digest"):
         new_job(workspace, package, inputs={"structure": structure})
+
+
+def test_an_installation_with_an_older_httk_digest_is_refused_with_the_reinstall_remedy(tmp_path: Path) -> None:
+    package = _package(tmp_path / "package")
+    structure = tmp_path / "POSCAR"
+    structure.write_text("structure", encoding="utf-8")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    installed = _install(workspace, package)
+    # An older httk's tree_digest framed files differently, so its recorded digest is not today's.
+    record = json.loads((installed.directory / "install.json").read_text(encoding="utf-8"))
+    record["tree_sha256"] = "0" * 64
+    (installed.directory / "install.json").write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(ValueError, match="made by an older httk whose tree digest differed: reinstall"):
+        new_job(workspace, installed.id, inputs={"structure": structure})
 
 
 def test_manifest_id_key_is_retired_and_git_names_are_refused(tmp_path: Path) -> None:

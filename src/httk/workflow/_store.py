@@ -66,7 +66,6 @@ from httk.workflow.packages import (
     artifact_excluder,
     parse_workflow_manifest,
     read_build_spec,
-    source_tree_digest,
 )
 from httk.workflow.scaffold import WorkflowProvider
 
@@ -766,7 +765,7 @@ def _document_package(source: Path, language: str | None, destination: Path) -> 
     if source.is_dir():
         shutil.copytree(source, destination, symlinks=True)
         _writable(destination)
-        document, digest = "", source_tree_digest(destination)
+        document, digest = "", source_digest(destination)
     else:
         destination.mkdir()
         shutil.copyfile(source, destination / source.name)
@@ -1203,9 +1202,13 @@ def install_copy(workspace: KernelWorkspace, owner: Owner, entry: Path, *, sourc
             durable = barrier is not None and barrier.fsync_inline
             _copy_package(source, tree / "package", read_build_spec(source), durable=durable)
             # Everything recorded is derived from the copy itself, never from the copied record or the source tree.
-            tree_sha256 = source_tree_digest(tree / "package")
+            tree_sha256 = source_digest(tree / "package")
             if tree_sha256 != claimed:
-                raise ValueError(f"{entry}: tree digest mismatch: the package has {tree_sha256}, the record {claimed}")
+                raise ValueError(
+                    f"{entry}: tree digest mismatch: the package has {tree_sha256}, the record {claimed}; the "
+                    "sending workspace's installation may have been made by an older httk whose tree digest "
+                    "differed: reinstall it there (`httk workflow install SOURCE` in that workspace) and send it again"
+                )
             provider = parse_workflow_manifest(tree / "package", _uri=workflow_id)
             name = provider.name or provider.workflow_id
             if (workflow_id.startswith("local:") and workflow_id != f"local:{name}") or (

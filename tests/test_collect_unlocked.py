@@ -65,8 +65,11 @@ def test_a_copy_edited_after_the_run_is_never_collected_from(tmp_path: Path) -> 
     _edit_total(ref.path / _store.RUNNER_COPY / "collect.py", "3.5")
     actual = _store.source_digest(ref.path / _store.RUNNER_COPY, declared_by=tmp_path / "package")
     (forced,) = collect(workspace, allow_job_collector=True, force=True)
+    # A copy an older httk pinned (another digest framing) mismatches the same way, so the reason names that too.
     assert forced.missing_collector == (
-        f"runner copy modified since the job ran: digest {actual} does not match pinned {pin['tree_sha256']}"
+        f"runner copy modified since the job ran: digest {actual} does not match pinned {pin['tree_sha256']}; or "
+        "an older httk whose tree digest differed pinned it: run the job from its copy again ('httk job restart "
+        "JOB'; a succeeded job is deleted with 'httk job delete JOB' and created again)"
     )
     assert forced.unfulfilled == ("relaxed_structure",)
 

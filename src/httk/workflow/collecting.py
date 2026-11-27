@@ -1683,7 +1683,7 @@ def _run_executable_collector(
 
 
 def _snapshot(
-    tree: Path, digest: Callable[[Path], str], pinned: str, modified: str, snapshots: list[Path]
+    tree: Path, digest: Callable[[Path], str], pinned: str, modified: str, snapshots: list[Path], older: str = ""
 ) -> tuple[Path | None, str | None]:
     """Copy a job-writable workflow tree into a fresh private directory and verify the copy against *pinned*.
 
@@ -1695,6 +1695,7 @@ def _snapshot(
     :param pinned: The pinned digest.
     :param modified: The reason prefix of a refused tree.
     :param snapshots: The caller's snapshot list.
+    :param older: Appended to a digest mismatch: what to do when an older httk made the pin.
     :return: The verified snapshot, or ``None`` and the reason (prefixed by *modified*).
     """
 
@@ -1708,7 +1709,7 @@ def _snapshot(
     except Exception as exc:
         return None, f"{modified}: {tree} could not be verified: {exc}"
     if actual != pinned:
-        return None, f"{modified}: digest {actual} does not match pinned {pinned}"
+        return None, f"{modified}: digest {actual} does not match pinned {pinned}{older}"
     return snapshot, None
 
 
@@ -1736,6 +1737,8 @@ def _job_collector(
     its tree only when its last attempt launched from it with the digest pinned then. An unlocked job of an installed
     workflow without a copy collects, unverified, from the installed tree (operator-controlled, never job-writable).
     """
+
+    from .packages import _OLDER_HTTK_DIGEST
 
     unlocked = record.job.get("unlocked") is not None
     pin = record.runner_provenance or {}
@@ -1793,26 +1796,29 @@ def _job_collector(
                 pinned,
                 "runner copy modified since the job ran",
                 snapshots,
+                "; or an older httk whose tree digest differed pinned it: run the job from its copy again "
+                "('httk job restart JOB'; a succeeded job is deleted with 'httk job delete JOB' and created again)",
             )
             if snapshot is None:
                 return None, None, reason
             installed = replace(copy, package_override=snapshot)
     elif (current := installed.record.get("tree_sha256")) != pinned:
         assert isinstance(pinned, str)  # a locked job without a pin returned above
+        reinstall = "reinstall the tree it ran with (impossible when an older httk made the pin)"
         remedy = (
-            "reinstall the tree it ran with, or delete the job ('httk job delete JOB') and create it again so it "
-            "runs on the installed tree"
+            f"{reinstall}, or delete the job ('httk job delete JOB') and create it again so it runs on the "
+            "installed tree"
             if record.state == "succeeded"
             else "rerun the job on the installed tree ('httk job restart JOB', or 'httk job resume --tree JOB' when "
-            "it failed waiting on failed children), or reinstall the tree it ran with"
+            f"it failed waiting on failed children), or {reinstall}"
         )
         return (
             None,
             None,
             (
                 f"workflow {workflow_id!r} is installed here with digest {str(current)[:12]}, but the job's last "
-                f"launch pinned {pinned[:12]}: it was reinstalled since the job ran, or the job ran where another "
-                f"tree was installed under the same id; {remedy}"
+                f"launch pinned {pinned[:12]}: it was reinstalled since the job ran, the job ran where another tree "
+                f"was installed under the same id, or an older httk whose tree digest differed made the pin; {remedy}"
             ),
         )
     else:
@@ -1824,7 +1830,11 @@ def _job_collector(
             return (
                 None,
                 None,
-                f"pinned runner tree was modified: {installed.package} digest {actual} does not match pinned {pinned}",
+                (
+                    f"pinned runner tree was modified: {installed.package} digest {actual} does not match pinned "
+                    f"{pinned}{_OLDER_HTTK_DIGEST}; the job, launched before that, must then be restarted "
+                    "('httk job restart JOB') or deleted ('httk job delete JOB') and created again"
+                ),
             )
     try:
         provider = installed.provider()

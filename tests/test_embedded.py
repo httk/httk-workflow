@@ -31,10 +31,10 @@ def _tree(root: Path, files: dict[str, bytes]) -> Path:
     return root
 
 
-def test_framing_separates_trees_the_core_digest_confuses(tmp_path: Path) -> None:
+def test_framing_separates_trees_an_unframed_digest_would_confuse(tmp_path: Path) -> None:
     one = _tree(tmp_path / "one", {"a": b"x" + b"F\0b\0" + b"y"})
     two = _tree(tmp_path / "two", {"a": b"x", "b": b"y"})
-    assert tree_digest(one) == tree_digest(two)  # the core digest does not length-frame contents
+    assert tree_digest(one) != tree_digest(two)  # the core digest frames each file by its content's SHA-256
     assert embedded_digest(one) != embedded_digest(two)
 
 

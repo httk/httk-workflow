@@ -8,7 +8,7 @@ from httk.core.cli import CLIContext
 
 from conftest import fake_remote, register_ws
 from httk.workflow import TaskManager, Workspace, _kernel, _store, job_records, scaffold
-from httk.workflow.packages import load_workflow_package, source_tree_digest
+from httk.workflow.packages import load_workflow_package
 from httk.workflow.projects import initialize_project
 from httk.workflow.scaffold import new_job
 from httk.workflow.workflow_cli import command
@@ -253,6 +253,121 @@ def test_job_new_batch_tag_prefix_stays_within_the_tag_syntax(tmp_path: Path, ca
         assert "--" not in tag and 0 < len(tag) <= 48
 
 
+_CIF = """data_NaCl
+_cell_length_a 5.64
+_cell_length_b 5.64
+_cell_length_c 5.64
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_symmetry_equiv_pos_as_xyz
+x,y,z
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+Na1 Na 0 0 0
+Cl1 Cl 0.5 0.5 0.5
+"""
+
+
+def test_job_new_input_converts_a_structure_to_its_destination_format(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("httk.atomistic")
+    from httk.atomistic import UnitcellStructureView
+    from httk.core import load
+
+    context = _context(tmp_path)
+    workspace = _workspace(tmp_path, context)
+    argv = ["job", "new", "--workspace", workspace, "--install", str(_cli_package(tmp_path / "package"))]
+    (tmp_path / "NaCl.cif").write_text(_CIF, encoding="utf-8")
+    (tmp_path / "Si.vasp").write_text(_POSCAR, encoding="utf-8")
+    (tmp_path / "two.cif").write_text(_CIF + _CIF.replace("data_NaCl", "data_other"), encoding="utf-8")
+    assert command([*argv, "--input", f"structure={tmp_path / 'NaCl.cif'}", "--tag", "cif"], context) == 0
+    assert command([*argv, "--input", f"structure={tmp_path / 'Si.vasp'}", "--tag", "same"], context) == 0
+    jobs = tmp_path / "workspace" / "jobs"
+    # A CIF given for the POSCAR destination is converted, never copied: it loads back to the same structure.
+    written = next(jobs.rglob("cif--*")) / "files" / "POSCAR"
+    given, staged = UnitcellStructureView(load(str(tmp_path / "NaCl.cif"))), UnitcellStructureView(load(str(written)))
+    assert (given.cell, given.sites) == (staged.cell, staged.sites)
+    assert [s.chemical_symbols for s in given.species] == [s.chemical_symbols for s in staged.species]
+    # A file already in the destination's format is copied byte for byte.
+    assert (next(jobs.rglob("same--*")) / "files" / "POSCAR").read_text(encoding="utf-8") == _POSCAR
+    # A structure that cannot be converted is refused, not copied.
+    capsys.readouterr()
+    assert command([*argv, "--input", f"structure={tmp_path / 'two.cif'}", "--tag", "two"], context) == 2
+    err = capsys.readouterr().err
+    assert "is not in the format of its destination 'POSCAR' and cannot be converted" in err and "2 structures" in err
+    assert not list(jobs.rglob("two--*"))
+
+
+_MCIF = """data_cartesian
+_cell_length_a 2
+_cell_length_b 3
+_cell_length_c 4
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+Fe1 Fe 0 0 0
+loop_
+_atom_site_moment.label
+_atom_site_moment.Cartn_x
+_atom_site_moment.Cartn_y
+_atom_site_moment.Cartn_z
+Fe1 1 2 3
+loop_
+_space_group_symop_magn_operation.xyz
+x,y,z,+1
+"""
+
+
+def test_job_new_input_recompresses_bytes_and_refuses_what_the_destination_cannot_hold(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("httk.atomistic")
+    import gzip
+
+    import httk.core
+    from httk.atomistic import Cell, Sites, Species, Trajectory, UnitcellStructure
+
+    from httk.workflow.scaffold import _structure_format
+
+    # One name rule: CONTCAR.* is a POSCAR, an archive never is.
+    assert _structure_format("CONTCAR.relaxed") == ("vasp-poscar", None)
+    assert _structure_format("POSCAR.tar.gz") == (None, "gzip")
+    context = _context(tmp_path)
+    workspace = _workspace(tmp_path, context)
+    argv = ["job", "new", "--workspace", workspace, "--install", str(_cli_package(tmp_path / "package"))]
+    jobs = tmp_path / "workspace" / "jobs"
+    # The same format, compressed: the bytes are decompressed, never loaded, so selective dynamics stays.
+    selective = _POSCAR.replace("Direct\n", "Selective dynamics\nDirect\n").replace("0000\n", "0000 T T F\n")
+    (tmp_path / "POSCAR.gz").write_bytes(gzip.compress(selective.encode()))
+    assert command([*argv, "--input", f"structure={tmp_path / 'POSCAR.gz'}", "--tag", "gz"], context) == 0
+    assert (next(jobs.rglob("gz--*")) / "files" / "POSCAR").read_text(encoding="utf-8") == selective
+
+    charged = _CIF.replace("Na1 Na ", "Na1 Na1+ ").replace("Cl1 Cl ", "Cl1 Cl1- ")
+    (tmp_path / "charged.cif").write_text(charged, encoding="utf-8")
+    (tmp_path / "moments.mcif").write_text(_MCIF, encoding="utf-8")
+    frame = UnitcellStructure(
+        Cell([[2, 0, 0], [0, 2, 0], [0, 0, 2]]), Sites([[0, 0, 0]]), [Species.from_object("Al")], ["Al"]
+    )
+    httk.core.save(Trajectory([frame, frame], {}, []), tmp_path / "traj.jsonl")
+    for given, reason in (("charged.cif", "charges"), ("moments.mcif", "site moments"), ("traj.jsonl", "Trajectory")):
+        capsys.readouterr()
+        assert command([*argv, "--input", f"structure={tmp_path / given}", "--tag", "refused"], context) == 2
+        err = capsys.readouterr().err
+        assert "is not in the format of its destination 'POSCAR' and cannot be converted" in err, err
+        assert reason in err and "Traceback" not in err, err
+    assert not list(jobs.rglob("refused--*"))
+
+
 def test_job_new_batch_reports_partial_progress_before_failing(tmp_path: Path, capsys) -> None:
     pytest.importorskip("httk.atomistic")
     context = _context(tmp_path)
@@ -481,7 +596,7 @@ def test_directory_package_runs_and_job_records_retain_the_tree_pin(tmp_path: Pa
     # The run pins the installed tree it ran, the sources-only digest of the package.
     assert record.runner_provenance == {
         "id": "local:tests.cli.package",
-        "tree_sha256": source_tree_digest(package),
+        "tree_sha256": _store.source_digest(package),
         "source": "installed",
         "workflow_present": False,
     }
@@ -584,7 +699,7 @@ def test_workflow_install_list_show_and_uninstall_a_workspace_store(tmp_path: Pa
     (row,) = json.loads(captured.out)  # the build's output went to stderr
     assert "compiler-output" in captured.err
     assert row["id"] == "local:tests.package" and row["builds"] == ["any"]
-    assert row["source"] == str(package.resolve()) and row["tree_sha256"] == source_tree_digest(package)
+    assert row["source"] == str(package.resolve()) and row["tree_sha256"] == _store.source_digest(package)
 
     assert command(["list", "--workspace", name], context) == 0
     assert capfd.readouterr().out == f"local:tests.package\ttests.package\t{package.resolve()}\n"
@@ -627,7 +742,7 @@ def test_workflow_install_over_an_id_unfinished_jobs_use_warns_and_installs(tmp_
         "attempts lose the old tree and later steps run the new one"
     ) in captured.err
     installed = _store.lookup(Workspace(tmp_path / "workspace"), "local:tests.package")
-    assert installed is not None and installed.record["tree_sha256"] == source_tree_digest(package)
+    assert installed is not None and installed.record["tree_sha256"] == _store.source_digest(package)
 
 
 def test_workflow_install_refuses_a_sealed_workspace(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch) -> None:

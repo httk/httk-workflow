@@ -634,12 +634,13 @@ def _pin_check(workspace: Workspace, state: str, doc: StateDoc | None, report: _
     if state in {"failed", "paused"} or (state == "succeeded" and doc.unlocked is not None):
         report.hint(
             "rerun it on the installed tree ('httk job restart JOB', or 'httk job resume --tree JOB' when "
-            "it failed waiting on failed children), or reinstall the tree it ran with"
+            "it failed waiting on failed children), or reinstall the tree it ran with (impossible when an older "
+            "httk made the pin)"
         )
     elif state == "succeeded":
         report.hint(
-            "reinstall the tree it ran with, or delete the job ('httk job delete JOB') and create it again so it "
-            "runs on the installed tree"
+            "reinstall the tree it ran with (impossible when an older httk made the pin), or delete the job "
+            "('httk job delete JOB') and create it again so it runs on the installed tree"
         )
     else:
         report.hint("nothing to do yet: its next launch runs and pins the installed tree")
