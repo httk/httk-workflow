@@ -889,6 +889,7 @@ def _open_store(
     id_base: str,
     id_series: str,
     upgrade: bool,
+    validate: bool = False,
 ) -> Any:
     """Open the SQLite store at *target* in *layout* on *stack*, applying an additive upgrade only when asked.
 
@@ -900,6 +901,7 @@ def _open_store(
     :param id_base: The entry-id namespace base.
     :param id_series: The entry-id campaign series.
     :param upgrade: Apply an additive layout upgrade instead of refusing it.
+    :param validate: Open the store with ``validate_records``, so every write runs its records' validators.
     :return: The open store.
     :raises ValueError: If the store's layout is refused, needs an upgrade that
         *upgrade* does not allow, or holds generic rows of now-typed definitions.
@@ -929,7 +931,9 @@ def _open_store(
 
     try:
         store = stack.enter_context(
-            SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series))
+            SqliteStore(
+                target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series), validate_records=validate
+            )
         )
     except StorageLayoutUpgradeRequiredError as exc:
         if exc.remedy != "upgrade" or not upgrade:
@@ -943,7 +947,13 @@ def _open_store(
             raise ValueError(_REBUILD_TYPED.format(target=target, ids=", ".join(ids))) from exc
         try:
             store = stack.enter_context(
-                SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series), upgrade=True)
+                SqliteStore(
+                    target,
+                    entry_records=layout,
+                    entry_ids=EntryIdScheme(id_base, id_series),
+                    upgrade=True,
+                    validate_records=validate,
+                )
             )
         except StorageLayoutUpgradeRequiredError as again:
             raise refusal(again) from again
@@ -963,6 +973,7 @@ def store_collected(
     bare_runs: bool = True,
     upgrade: bool = False,
     entry_records: Mapping[str, Sequence[str]] | None = None,
+    validate: bool = False,
 ) -> list[dict[str, object]]:
     """Save one bounded collected sweep into a file-backed SQLite store.
 
@@ -1041,6 +1052,9 @@ def store_collected(
     :param entry_records: Map entry types (``"structures"``) to the registered
         record names (``"atomistic-numeric-unitcell-structure"``) to declare and
         store them as, or ``None`` for every registered record.
+    :param validate: Run each stored record's class validators (``__httk_validate__``)
+        before storing it; a refused record fails its job with ``"storage_error"``.
+        Off by default: the store trusts its input.
     :return: One report mapping per collected job.
     :raises ValueError: If *httk-store* is unavailable, *entry_records* names an
         unknown entry type or record, a record outside its type's family, or an
@@ -1095,7 +1109,15 @@ def store_collected(
         typed = _typed_record_classes(records_family)
 
         store = _open_store(
-            stack, target, layout, typed, requested, id_base=id_base, id_series=id_series, upgrade=upgrade
+            stack,
+            target,
+            layout,
+            typed,
+            requested,
+            id_base=id_base,
+            id_series=id_series,
+            upgrade=upgrade,
+            validate=validate,
         )
         # A dataclass entry is stored only as a record of its family; anything else
         # would land in a private table no provider serves.
@@ -1496,6 +1518,7 @@ def store_postprocess(
     ledger_path: str | None = None,
     ledger_keys: Sequence[tuple[str, bytes]] = (),
     upgrade: bool = False,
+    validate: bool = False,
 ) -> list[dict[str, object]]:
     """Store each collected postprocess execution as a run of an existing SQLite store.
 
@@ -1529,6 +1552,9 @@ def store_postprocess(
     :param ledger_keys: The signing keys each appended ledger segment is signed with.
     :param upgrade: Apply an additive layout upgrade the store needs instead of
         refusing. Keep a backup of the store first.
+    :param validate: Run each stored record's class validators (``__httk_validate__``)
+        before storing it; a refused record fails its execution with ``"storage_error"``.
+        Off by default: the store trusts its input.
     :return: One report mapping per item.
     :raises ValueError: If *httk-store* is unavailable, the store does not
         exist, or its layout is refused.
@@ -1574,7 +1600,15 @@ def store_postprocess(
             return ledger
 
         store = _open_store(
-            stack, target, layout, typed, ("files", "runs"), id_base=id_base, id_series=id_series, upgrade=upgrade
+            stack,
+            target,
+            layout,
+            typed,
+            ("files", "runs"),
+            id_base=id_base,
+            id_series=id_series,
+            upgrade=upgrade,
+            validate=validate,
         )
         for item, report in zip(items, reports):
             if item.skipped is not None or item.error is not None:

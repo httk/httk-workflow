@@ -168,6 +168,10 @@ httk v1 collect --workflow-dir PKG ROOT
 httk v1 collect --workflow-dir PKG --into results.sqlite --id-base httk.v1 ROOT
 ```
 
+`--validate` runs the collected records' class checks before they are stored
+(off by default; see {doc}`/details/collecting`). A task that could not be
+stored, such as one with a refused record, makes the command exit nonzero.
+
 With a manifest, identity survives moving the tree. Without one, the UUIDv5
 identity derives from the task path and dated run path and does not survive
 relocation. The latest dated run is used; `ht.run.current` is not a finished

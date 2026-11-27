@@ -77,6 +77,22 @@ def add_records_option(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_validate_option(parser: argparse.ArgumentParser) -> None:
+    """Declare the ``--validate`` collect option.
+
+    :param parser: The collect parser the option is added to.
+    """
+
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help=(
+            "validate records with their record class's checks before storing them "
+            "(off by default: stores trust their input)"
+        ),
+    )
+
+
 def records_option(arguments: argparse.Namespace) -> dict[str, tuple[str, ...]] | None:
     """Parse and validate the ``--records`` options into an ``entry_records`` selection.
 
@@ -227,6 +243,7 @@ def _collect_postprocess(arguments: argparse.Namespace, workspace: Workspace, jo
             ledger_path=ledger_path,
             ledger_keys=ledger_keys,
             upgrade=arguments.upgrade,
+            validate=arguments.validate,
         )
     else:
         reports = [_postprocess_mapping(item) for item in items]
@@ -340,6 +357,8 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
         raise ValueError("--no-bare-runs only applies with --into")
     if arguments.into is None and arguments.upgrade:
         raise ValueError("--upgrade only applies with --into")
+    if arguments.into is None and arguments.validate:
+        raise ValueError("--validate only applies with --into")
     if arguments.job and arguments.placement:
         raise ValueError("--job cannot be combined with --placement")
     if arguments.degraded and arguments.raw:
@@ -443,6 +462,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             bare_runs=not arguments.no_bare_runs,
             upgrade=arguments.upgrade,
             entry_records=selection,
+            validate=arguments.validate,
         )
         for item, report in zip(items, reports):
             degraded += item.missing_collector is not None
@@ -608,6 +628,7 @@ def build_collect_parser(
         ),
     )
     add_records_option(parser)
+    add_validate_option(parser)
     parser.add_argument(
         "--no-id-ledger",
         action="store_true",

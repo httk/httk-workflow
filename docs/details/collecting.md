@@ -590,6 +590,14 @@ unlocked job is degraded this way unless collected with `--force` (see
 whose entries cannot be stored keeps a `"storage_error"` and fails the exit
 code.
 
+### Validating records
+
+The store trusts what it is given: record classes' own checks
+(`__httk_validate__`) do not run on `--into`. `--validate` opts in, so every
+record a job stores is checked first and a refused record fails that job with
+a `"storage_error"`. It applies with `--into`, including `--postprocess`
+collection.
+
 ### Run-only jobs and child runs
 
 A `run_only` job stores its run by default, so an orchestrating parent and
