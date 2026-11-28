@@ -476,6 +476,7 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
             "calls": calls,
             "call_parameters": call_parameters,
             "duplicate_tag": arguments.duplicate_tag,
+            "source_root": arguments.source_root,
         }
         results: Iterator[ScaffoldedJob]
         try:
@@ -3087,6 +3088,16 @@ def _build_new_parser(group: "argparse._SubParsersAction[argparse.ArgumentParser
         dest="inputs",
         metavar="NAME=VALUE",
         help="one declared input value to stage (repeatable)",
+    )
+    new.add_argument(
+        "--source-root",
+        metavar="DIR",
+        help=(
+            "record the path of each file given with --input or --input-from for a declared structures input, "
+            "relative to DIR, which must contain them all (a wide DIR such as / records most of the absolute path); "
+            "without it only the file's name, size and SHA-256 are recorded, never a path of this machine "
+            "(httk collect --into stores the file and its import record either way)"
+        ),
     )
     new.add_argument(
         "--input-move-from-job",

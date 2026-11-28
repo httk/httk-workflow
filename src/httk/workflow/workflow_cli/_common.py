@@ -32,7 +32,7 @@ from ..adapters import resolve_remote, run_adapter
 from ..errors import FormatError, ResolutionMiss, WorkflowError
 from ..models import BUDGET_LIMITS, WORKSPACE_DIRECTORY, validate_step
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, list_workspaces, resolve_workspace
-from ..scaffold import STRUCTURE_PATTERNS, JobItem, _poscar_named, _sanitize_tag, structure_tag
+from ..scaffold import STRUCTURE_PATTERNS, JobItem, _InputFile, _poscar_named, _sanitize_tag, structure_tag
 from ..seals import require_cli_modifiable
 from ..workspace import Workspace
 
@@ -318,7 +318,8 @@ def _load_inputs(
     one stderr note, and a structure-named file with no reader of its own is read
     as POSCAR. The batch — a directory or a multi-file occurrence — is returned
     as a list so ``job new``, which re-tags it and with ``--campaign`` splits it over the
-    partitions, sees one stable result.
+    partitions, sees one stable result. Each value carries its file, so a ``structures`` input with a destination
+    is staged from the file, as with ``--input``.
     """
 
     shared: dict[str, object] = {name: text for name, text in _pairs(values, "a staged workflow input")}
@@ -347,12 +348,15 @@ def _load_inputs(
                 raise ValueError("only one --input-from occurrence may contain multiple files")
             batch_present = True
             batch = [
-                {"inputs": {name: _load_input_file(path)}, "tag": structure_tag(path) or _sanitize_tag(path.stem)}
+                {
+                    "inputs": {name: _InputFile(path, _load_input_file(path))},
+                    "tag": structure_tag(path) or _sanitize_tag(path.stem),
+                }
                 for path in found
             ]
         else:
             path = found[0]
-            shared[name] = _load_input_file(path)
+            shared[name] = _InputFile(path, _load_input_file(path))
             single_files.append(path)
             single_tags.append(structure_tag(path) or _sanitize_tag(path.stem))
     tag = single_tags[0] if len(single_files) == 1 else None

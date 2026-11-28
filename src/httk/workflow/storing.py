@@ -355,6 +355,11 @@ def _storage_layout(
     from httk.core.register import known_entry_records, resolve_entry_family, resolve_entry_record
 
     required_types = {"records", "runs", *extra_types, *(selected or ())}
+    selected_records = (
+        None
+        if selected is None or "structures" not in selected
+        else tuple(resolve_entry_record(name) for name in selected["structures"])
+    )
     failures: dict[int, str] = {}
     for index, item in enumerate(items):
         if item.references:
@@ -365,6 +370,8 @@ def _storage_layout(
                 failures[index] = "cannot store an output without a string entry type"
                 continue
             required_types.add(entry_type)
+            if isinstance(value, StructureInput) and _embeddable(value, selected_records):
+                required_types.add("imports")
         for edge in (*item.run.inputs, *item.run.artifacts, *item.run.outputs):
             required_types.add(edge.entry_type)
         for value in item.outputs.values():
@@ -551,6 +558,47 @@ def _selected(value: object, selection: Mapping[str, Sequence[str]], typed: Mapp
     except Exception as exc:
         # The projection is foreign user code: any failure fails this job, never the sweep.
         raise ValueError(f"cannot convert to {names[0]}: {exc}") from exc
+
+
+def _import(imported: Any, alternative: Any) -> Any:
+    """Return *imported* importing the stored *alternative* without its file, or ``None`` when it cannot embed it."""
+
+    try:
+        return replace(imported, structure=replace(alternative, source_file=None))
+    except (TypeError, ValueError):
+        return None
+
+
+def _embeddable(value: StructureInput, selected: Sequence[type] | None) -> bool:
+    """Report whether the import of a staged structure input is stored, so the store needs the ``imports`` family.
+
+    A *selected* record selection of ``structures`` keeps the input's alternative only when its record is selected
+    (:func:`_selected`); otherwise the alternative is rebuilt as a selected record, which the import cannot embed.
+    """
+
+    if value.imported is None or (selected is not None and type(value.alternative) not in selected):
+        return False
+    return _import(value.imported, value.alternative) is not None
+
+
+def _save_import(store: Any, item: CollectedJob, role: str, imported: Any, alternative: Any) -> list[str]:
+    """Store the import record of a staged structure input's original file and return its entry id, if stored.
+
+    The structure is the stored *alternative* without its file, which is the input's main entry when it was stored
+    as that record; an alternative of a record selection the import record cannot embed records no import.
+    """
+
+    record = _import(imported, alternative)
+    if record is None:
+        _LOGGER.warning(
+            "%s: the import of input %r is not recorded: the stored %s cannot be embedded in it",
+            item.record.job_key,
+            role,
+            type(alternative).__name__,
+            extra={"context": "workflow"},
+        )
+        return []
+    return [str(store.fetch(type(record), store.save(record)).id)]
 
 
 def _persisted_record_order(path: Path) -> dict[str, tuple[str, ...]] | None:
@@ -1292,6 +1340,8 @@ def store_collected(
                             store.save(form.alternative, alternative_of=main_id, alternative_kind=value.kind)
                             pending_remap[content_id(value.alternative)] = f"{main_id}~{value.kind}"
                             entry_ids.append(f"{main_id}~{value.kind}")
+                            if value.imported is not None:
+                                entry_ids.extend(_save_import(store, item, role, value.imported, form.alternative))
                             continue
                         revised |= _save_output(
                             item,

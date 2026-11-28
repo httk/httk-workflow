@@ -1528,6 +1528,7 @@ def new_job(
     calls: Mapping[str, str] | None = None,
     call_parameters: Mapping[str, Mapping[str, object]] | None = None,
     embed_workflow: bool = False,
+    source_root: str | os.PathLike[str] | None = None,
     duplicate_tag: Literal["refuse", "allow"] = "refuse",
 ) -> ScaffoldedJob: ...
 
@@ -1553,6 +1554,7 @@ def new_job(
     calls: Mapping[str, str] | None = None,
     call_parameters: Mapping[str, Mapping[str, object]] | None = None,
     embed_workflow: bool = False,
+    source_root: str | os.PathLike[str] | None = None,
     duplicate_tag: Literal["refuse", "skip", "allow"],
 ) -> ScaffoldedJob | None: ...
 
@@ -1577,6 +1579,7 @@ def new_job(
     calls: Mapping[str, str] | None = None,
     call_parameters: Mapping[str, Mapping[str, object]] | None = None,
     embed_workflow: bool = False,
+    source_root: str | os.PathLike[str] | None = None,
     duplicate_tag: Literal["refuse", "skip", "allow"] = "refuse",
 ) -> ScaffoldedJob | None:
     """Scaffold, submit, and describe one job of an installed *workflow*.
@@ -1641,6 +1644,10 @@ def new_job(
         directory, a git URI fetched into the fetch cache, a runner file) and its package copied into the job,
         pinned in ``job.json`` (workflow id ``embedded:<name>@<sha12>``). Refused for workflow format realizations,
         ``[workflow.build]``, fixed ``[workflow.calls]`` not installed in the workspace, and with *install*.
+    :param source_root: Record the path of each file given for a declared ``structures`` input relative to this
+        directory, which every such file must lie under (compared resolved). The original file of such an input is
+        always recorded in ``job.json`` by its name, size and SHA-256 (``staged_files[].original``), so collection
+        can record its import; a path is recorded only relative to this root, never absolute.
     :param duplicate_tag: What to do when a job of the same exact placement, in any state (owned included), already
         carries the job's final tag (explicit or derived from an input or the instantiate hook): ``"refuse"`` raises
         :class:`~httk.workflow.errors.DuplicateTagError`, ``"skip"`` logs a warning and submits nothing,
@@ -1649,9 +1656,9 @@ def new_job(
     :return: The submitted job description, or ``None`` when it was skipped.
     :raises httk.workflow.errors.DuplicateTagError: If the tag is taken and *duplicate_tag* is ``"refuse"``.
     :raises ValueError: If the workflow is not installed (and *install* and *embed_workflow* are false), or workflow,
-        inputs, placement, or job settings are invalid, or a file to move is not a regular file
-        inside a succeeded job of *workspace* on its filesystem, or a call slot is unbound, bound to a
-        workflow that does not fit it, or given parameters of the wrong type.
+        inputs, placement, or job settings are invalid, a structure input file is outside *source_root*, or a file
+        to move is not a regular file inside a succeeded job of *workspace* on its filesystem, or a call slot is
+        unbound, bound to a workflow that does not fit it, or given parameters of the wrong type.
     """
 
     jobs = list(
@@ -1674,6 +1681,7 @@ def new_job(
             calls=calls,
             call_parameters=call_parameters,
             embed_workflow=embed_workflow,
+            source_root=source_root,
             duplicate_tag=duplicate_tag,
         )
     )
@@ -1700,6 +1708,7 @@ def new_jobs(
     calls: Mapping[str, str] | None = None,
     call_parameters: Mapping[str, Mapping[str, object]] | None = None,
     embed_workflow: bool = False,
+    source_root: str | os.PathLike[str] | None = None,
     duplicate_tag: Literal["refuse", "skip", "allow"] = "refuse",
     batch: int = 1,
 ) -> Generator[ScaffoldedJob, None, None]:
@@ -1772,6 +1781,7 @@ def new_jobs(
     :param embed_workflow: Embed the workflow in each job's own ``workflow/``, nothing installed; see
         :func:`new_job`.
         The package is resolved and snapshotted once; every job gets its own copy.
+    :param source_root: Record structure input paths relative to this directory; see :func:`new_job`.
     :param duplicate_tag: What to do with a job whose tag is taken in its placement; see :func:`new_job`. The jobs
         this call submits count too, and each placement is listed once per call.
     :param batch: Stage up to this many jobs before syncing and publishing them together (see above); 1, the
@@ -1785,7 +1795,8 @@ def new_jobs(
         batch early, if any); or when a batched publication's commit and its reseal failed after its renames (its
         notes name every job by what happened to it).
     :raises ValueError: If the workflow is not installed (and *install* is false), or workflow,
-        inputs, placement, job settings, call slot bindings, *duplicate_tag* or *batch* are invalid.
+        inputs, placement, job settings, call slot bindings, *duplicate_tag* or *batch* are invalid, or a structure
+        input file is outside *source_root*.
 
     .. code-block:: python
 
@@ -1855,6 +1866,7 @@ def new_jobs(
                 move_inputs=item.get("move_inputs"),
                 moves=moves,
                 calls=bindings,
+                source_root=source_root,
                 durable=barrier is not None and barrier.fsync_inline,
             )
             return _Staged(job, scratch, moves, created=not moving)
@@ -3692,6 +3704,7 @@ def _build_payload(
     moves: list[_InputMove] | None = None,
     calls: Mapping[str, Mapping[str, object]] | None = None,
     persist_outputs: Mapping[str, str] | None = None,
+    source_root: str | os.PathLike[str] | None = None,
     durable: bool = False,
 ) -> JobDefinition:
     """Stage one job payload into *destination* and write its ``job.json``.
@@ -3705,12 +3718,16 @@ def _build_payload(
     roll them back when the job is not submitted. *calls* is the job's call slot bindings
     (:func:`_bind_slots`); without them, a workflow's slots are bound to their installed defaults.
     *persist_outputs* is the ``persist_outputs`` member of a job called through a call slot.
+    *source_root* is the root structure input paths are recorded relative to (:func:`_input_originals`).
     With *durable* (:func:`new_jobs` under a sync barrier of strategy ``fsync``), every file this copies or
     writes itself is fsynced on its writing descriptor; the barrier's walk covers the rest (hook outputs,
     serialized inputs, directories).
     """
 
     workflow = prepared.workflow
+    inputs = {name: _given(workflow, name, value) for name, value in (inputs or {}).items()}
+    # Before anything is staged: a structure input outside the source root refuses the job.
+    originals = _input_originals(workflow, inputs, source_root)
     if calls is None:
         calls = _bind_slots(workspace, prepared.installed, None, None, owner=None, install=False)
     caller_tag = tag
@@ -3743,14 +3760,15 @@ def _build_payload(
         document_path.parent.mkdir(parents=True, exist_ok=True)
         _write_document(document_path, text if isinstance(text, bytes) else text.encode("utf-8"), durable=durable)
     _stage_files(destination, prepared.files, durable=durable)
-    supplied_inputs = dict(inputs or {})
-    _stage_inputs(
+    supplied_inputs = dict(inputs)
+    verbatim = _stage_inputs(
         destination,
         workflow,
         supplied_inputs,
         instantiate=prepared.instantiate is not None or prepared.instantiate_exec is not None,
         durable=durable,
     )
+    _check_originals(destination, originals, verbatim)
     # The job id is chosen now, so a release record can name the receiving job before its file moves.
     job_id = str(uuid.uuid4()) if move_inputs else None
     keys = _release_keys(workspace) if move_inputs else ()
@@ -3911,6 +3929,7 @@ def _build_payload(
             destination,
             [*user_files, *(member for member in workflow.inputs.values() if member is not None)],
             known=[move.entry for move in moves or ()],
+            originals={member: original for member, (_, original) in originals.items()},
         ),
         job_id=job_id,
         calls=calls,
@@ -4214,12 +4233,17 @@ def _stage_files(payload: Path, files: Mapping[str, str | os.PathLike[str]], *, 
 
 
 def _staged_entries(
-    payload: Path, members: Iterable[str], *, known: Iterable[dict[str, object]] = ()
+    payload: Path,
+    members: Iterable[str],
+    *,
+    known: Iterable[dict[str, object]] = (),
+    originals: Mapping[str, Mapping[str, object]] | None = None,
 ) -> tuple[dict[str, object], ...]:
     """Describe every staged file present in the payload by its path, size and SHA-256.
 
     This runs in ``job new``, before the job does, so the just-written files are trusted.
     A *known* entry (a moved file, described by its origin's seal) is taken as it is, never re-hashed.
+    A path of *originals* (:func:`_input_originals`) gets its value as the entry's ``original``.
     """
 
     entries: dict[str, dict[str, object]] = {str(entry["path"]): entry for entry in known}
@@ -4232,7 +4256,105 @@ def _staged_entries(
                 "size": path.stat().st_size,
                 "sha256": sha256_file(path),
             }
+            original = (originals or {}).get(relative.as_posix())
+            if original is not None:
+                entries[relative.as_posix()]["original"] = dict(original)
     return tuple(entries.values())
+
+
+@dataclass(frozen=True)
+class _InputFile:
+    """A declared input value loaded from a file (``job new --input-from``), carried with the file it was read from.
+
+    A ``structures`` input with a destination is staged from *path*, exactly as a path given with ``--input``; any
+    other input receives *value* (see :func:`_given`).
+
+    :param path: The file the value was read from.
+    :param value: The loaded value.
+    """
+
+    path: Path
+    value: object
+
+
+def _given(workflow: ResolvedWorkflow, name: str, value: object) -> object:
+    """Return what input *name* is staged from: an :class:`_InputFile`'s path or value, or *value* itself."""
+
+    if not isinstance(value, _InputFile):
+        return value
+    staged = workflow.inputs.get(name) is not None
+    return (
+        value.path
+        if staged and workflow._input_metadata.get(name, {}).get("entry_type") == "structures"
+        else value.value
+    )
+
+
+def _input_originals(
+    workflow: ResolvedWorkflow, inputs: Mapping[str, object], source_root: str | os.PathLike[str] | None
+) -> dict[str, tuple[Path, dict[str, object]]]:
+    """Describe the file given for each declared ``structures`` input with a destination, by that destination.
+
+    Each is the file and ``{name, size, sha256}`` of it: the base name and bytes (compressed or not) of the file a
+    symbolic link resolves to; with *source_root* also ``path``, that file's path relative to the resolved root, in
+    POSIX form. No absolute path is ever recorded.
+
+    :param workflow: The resolved workflow declaring the inputs.
+    :param inputs: The supplied inputs; values other than paths of existing files are skipped.
+    :param source_root: The directory every such file must lie under, or ``None`` to record no path.
+    :return: The files and their descriptions keyed by payload-relative destination path.
+    :raises ValueError: If a file lies outside *source_root*.
+    """
+
+    root = None if source_root is None else Path(source_root).expanduser().resolve()
+    originals: dict[str, tuple[Path, dict[str, object]]] = {}
+    for name, value in inputs.items():
+        destination = workflow.inputs.get(name)
+        if (
+            destination is None
+            or not isinstance(value, (str, os.PathLike))
+            or workflow._input_metadata.get(name, {}).get("entry_type") != "structures"
+        ):
+            continue
+        source = Path(value).expanduser()
+        if not source.is_file():
+            continue
+        resolved = source.resolve()
+        original: dict[str, object] = {
+            "name": resolved.name,
+            "size": resolved.stat().st_size,
+            "sha256": sha256_file(resolved),
+        }
+        if root is not None:
+            if not resolved.is_relative_to(root):
+                raise ValueError(f"workflow input {name!r}: {source} is not under the source root {root}")
+            original["path"] = resolved.relative_to(root).as_posix()
+        originals[payload_relative(destination).as_posix()] = (resolved, original)
+    return originals
+
+
+def _check_originals(
+    payload: Path, originals: Mapping[str, tuple[Path, Mapping[str, object]]], verbatim: Iterable[str]
+) -> None:
+    """Refuse a job whose structure input file changed while it was staged, or whose copy is not that file.
+
+    :param payload: The payload being built.
+    :param originals: The files and descriptions of :func:`_input_originals`, by destination.
+    :param verbatim: The destinations copied byte for byte.
+    :raises ValueError: If a file's size or SHA-256 differs from its description, or a byte-for-byte copy's
+        SHA-256 from its file's.
+    """
+
+    copies = set(verbatim)
+    for member, (source, original) in originals.items():
+        staged = payload.joinpath(*PurePosixPath(member).parts)
+        try:
+            now = (source.stat().st_size, sha256_file(source))
+            copied = sha256_file(staged) if member in copies else original["sha256"]
+        except OSError:
+            now, copied = None, None
+        if now != (original["size"], original["sha256"]) or copied != original["sha256"]:
+            raise ValueError(f"{source} changed while it was staged as {member}; create the job again")
 
 
 def _stage_inputs(
@@ -4242,16 +4364,17 @@ def _stage_inputs(
     *,
     instantiate: bool = False,
     durable: bool = False,
-) -> None:
+) -> set[str]:
     """Realize declared inputs into the payload declared by the workflow (*durable*: copies fsynced as written).
 
     A path is copied byte for byte, except a file given for a ``structures`` input when :func:`_structure_format`
     knows both its format and its destination's and they differ: a different compression only is decompressed and
     recompressed byte for byte, and a different format is loaded and written in the destination's format; a
-    structure that cannot be converted is refused, never copied.
+    structure that cannot be converted is refused, never copied. Return the destinations copied byte for byte.
     """
 
     declared = workflow.inputs
+    verbatim: set[str] = set()
     for name, value in inputs.items():
         if name not in declared:
             names = ", ".join(declared) or "none"
@@ -4279,6 +4402,7 @@ def _stage_inputs(
             wanted = _structure_format(destination.name)
             if given[0] is None or wanted[0] is None or given == wanted:
                 _stage_files(payload, {destination.as_posix(): value}, durable=durable)
+                verbatim.add(destination.as_posix())
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 _convert_structure_file(
@@ -4296,6 +4420,7 @@ def _stage_inputs(
         httk.core.save(value, path)
         if durable:
             _fsync_saved(path)
+    return verbatim
 
 
 def _poscar_named(name: str) -> bool:

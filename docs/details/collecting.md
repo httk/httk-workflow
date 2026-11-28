@@ -187,6 +187,15 @@ can read:
   name it, leaving the earlier entries in place; rebuild such stores (collect
   into a new file) instead. The run's input edge, and any product link drawn
   from that role, names the alternative as `<main id>~file_<hex>`.
+  When `job.json` records the file the input was given as (`original`, see
+  {doc}`workflow_packages`), the store also gets that file as a `files` entry
+  without a URL (for a verbatim copy, the staged file's own entry, since files
+  are identified by content) and a `UnitcellStructureImportRecord` (`imports`)
+  whose `structure` is the main entry, `source_file` that file, and
+  `source_uri` its path relative to the job's source root, or its name. A
+  record selection whose structure record the import cannot embed stores no
+  import, and collecting again after upgrading *httk-workflow* adds a new
+  import record, whose identity includes the importer version.
 - A `structures` input that is compressed, larger than 64 MiB or not loadable
   as a structure is recorded as its `files` entry only, with a warning naming
   the reason.

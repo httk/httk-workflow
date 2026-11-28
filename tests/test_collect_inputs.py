@@ -1059,7 +1059,15 @@ def test_job_new_records_the_digest_of_every_staged_file_and_declared_input(tmp_
     copied = JobDefinition.from_path(next((ws.root / "jobs").rglob("copied--*")) / "job.json")
     assert copied.as_mapping()["staged_files"] == [
         _entry("files/INCAR", b"ENCUT = 520\n"),
-        _entry("files/POSCAR", _POSCAR.encode()),
+        # The structure input's destination also records the file it was given as, by name, size and digest.
+        {
+            **_entry("files/POSCAR", _POSCAR.encode()),
+            "original": {
+                "name": "Si.vasp",
+                "size": len(_POSCAR),
+                "sha256": hashlib.sha256(_POSCAR.encode()).hexdigest(),
+            },
+        },
     ]
     saved = next((ws.root / "jobs").rglob("saved--*"))
     written = (saved / "files" / "POSCAR").read_bytes()

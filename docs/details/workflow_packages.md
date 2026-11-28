@@ -402,6 +402,31 @@ holding several structures, charges, partial occupancy, site moments outside
 mCIF, a trajectory) is refused rather than copied. `staged_files` records the
 written file, not the given one.
 
+The given file itself (with `--input` or `--input-from`), converted or
+copied, is recorded in that file's `staged_files` entry as `original`: its
+base name, size and SHA-256 as read (the compressed bytes of a compressed
+file; for a symbolic link, the file it points to). Its path is recorded only
+when the job is created with `job new --source-root DIR` (`source_root=` of
+`httk.workflow.new_job`/`new_jobs`), relative to DIR, and every structure
+file given must then lie under DIR, or the job is refused; *httk* never
+records an absolute path of the machine that creates the job, but a wide
+root such as `/` records most of it. A file that changes while it is staged
+refuses the job.
+
+`collect --into` stores the original as a `files` entry without a URL (its
+bytes are not held) and an import record (`UnitcellStructureImportRecord`,
+entry type `imports`) linking it to the main structure entry read from the
+input, with `source_uri` the recorded relative path, or the file name
+without one, and `importer` `httk-workflow <version>`. Files are identified
+by content, so a verbatim copy is the staged file's own entry, and the given
+name survives only in `source_uri`. No import is stored for an input that is
+recorded as its file only (compressed, larger than 64 MiB, not loadable, or
+mutated or deleted during the job), nor under a record selection
+(`collect --records`) whose structure record the import cannot embed. The
+importer version is part of the import's identity, so collecting a job again
+after upgrading *httk-workflow* adds a new import record. A store created
+before it held an import needs `--upgrade` once to add the `imports` family.
+
 ```toml
 [workflow.inputs.structure]
 destination = "POSCAR"

@@ -228,11 +228,15 @@ class StructureInput:
         with the staged file as ``source_file``.
     :param kind: The alternative kind, ``file_`` and the first 16 hex digits of
         the staged file record's content id.
+    :param imported: The ``UnitcellStructureImportRecord`` of the original file the
+        job was given for this input (``staged_files[].original`` of its ``job.json``),
+        or ``None`` when the job records none.
     """
 
     main: object
     alternative: Any
     kind: str
+    imported: Any = None
 
     @property
     def type(self) -> str:
@@ -2157,9 +2161,12 @@ def _staged_inputs(record: JobRecord, run: httk.core.Run, taken: Mapping[str, ob
             # The hook (or the run) names the role's entry; the staged file is still recorded, by its path.
             wanted[path] = (relative, None, False)
     digests: dict[str, tuple[int, str] | None] = {}
+    originals: dict[str, Mapping[str, object]] = {}
     for item in staged if isinstance(staged, list) else ():
         staged_path = item.get("path") if isinstance(item, Mapping) else None
         if isinstance(staged_path, str):
+            if isinstance(original := item.get("original"), Mapping):
+                originals[staged_path] = original
             size, sha256 = item.get("size"), item.get("sha256")
             digests[staged_path] = (size, sha256) if isinstance(size, int) and isinstance(sha256, str) else None
             if staged_path not in destinations and staged_path not in skip:
@@ -2177,9 +2184,48 @@ def _staged_inputs(record: JobRecord, run: httk.core.Run, taken: Mapping[str, ob
         value = _staged_input(
             record, label, relative, entry_type, required, staging[label], sealed, released.get(relative.as_posix())
         )
+        original = originals.get(relative.as_posix())
+        if isinstance(value, StructureInput) and original is not None:
+            try:
+                value = replace(value, imported=_import_record(original, value.alternative))
+            except (TypeError, ValueError) as exc:
+                _LOGGER.warning("input %r of %s: its import is not recorded: %s", label, record.job_key, exc)
         if value is not None:
             loaded[label] = value
     return loaded
+
+
+def _import_record(original: Mapping[str, object], alternative: Any) -> Any:
+    """Record the import of a structure input from the original file ``job.json`` describes.
+
+    The file is recorded by its content only (``url=None``: its bytes are not held), with the reader format of
+    its name, as collect records any file; ``source_uri`` is its path relative to the job's source root, or its
+    name when none was named. The imported structure is the input's reading, *alternative* without its file.
+    """
+
+    from httk.atomistic import UnitcellStructureImportRecord  # pyright: ignore[reportMissingImports]
+    from httk.core import FileRecord, reader_format_for
+
+    name = str(original["name"])
+    source_file = FileRecord(
+        None, name, sha256=str(original["sha256"]), size=cast(int, original["size"]), format=reader_format_for(name)
+    )
+    return UnitcellStructureImportRecord(
+        str(original.get("path", name)),
+        _importer(),
+        "imported",
+        source_file=source_file,
+        structure=replace(alternative, source_file=None),
+    )
+
+
+@functools.cache
+def _importer() -> str:
+    """Name *httk-workflow*, with its version, as the importer of a job's structure input files."""
+
+    from importlib.metadata import version
+
+    return f"httk-workflow {version('httk-workflow')}"
 
 
 def _usable_seal(record: JobRecord, consequence: str) -> Seal | None:

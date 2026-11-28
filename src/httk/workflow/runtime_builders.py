@@ -166,7 +166,8 @@ class JobSpec:
     :param declared: Supply the declared parameter and input metadata sections.
     :param seal_succeeded: Seal the job when it succeeds; ``None`` leaves it to the workspace setting.
     :param staged_files: Describe the files staged into the payload, each ``{path, size, sha256}`` with the
-        payload-relative path, or only ``{path}`` when the digest is unknown.
+        payload-relative path, or only ``{path}`` when the digest is unknown; a declared ``structures`` input's
+        destination may add ``original``: ``{name, size, sha256}``, and optionally ``path``, of the file given.
     :param calls: Bind the workflow's call slots, alias to ``{"workflow": <installed id>, "parameters": {...}}``.
     :param persist_outputs: Name the call slot outputs the job records for its caller, name to output role.
     :param embedded: Freeze the trusted settings of the workflow the job embeds in its ``workflow/`` (the

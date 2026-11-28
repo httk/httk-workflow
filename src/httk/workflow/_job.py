@@ -92,7 +92,8 @@ _EMBEDDED_MEMBERS = frozenset(
 _RETRY_MEMBERS = frozenset(
     {"maximum_attempts_per_activation", "maximum_total_attempts", "maximum_activations", "retry_on"}
 )
-_STAGED_MEMBERS = frozenset({"path", "size", "sha256"})
+_STAGED_MEMBERS = frozenset({"path", "size", "sha256", "original"})
+_ORIGINAL_MEMBERS = frozenset({"name", "size", "sha256", "path"})
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _PARENT_MEMBERS = frozenset({"workspace_id", "job_id", "job_key", "placement", "activation_id", "spawn_id"})
 
@@ -125,17 +126,14 @@ def _staged_files(value: object) -> tuple[Mapping[str, Frozen], ...]:
         raise FormatError("staged_files must be a non-empty array")
     paths = []
     for entry in value:
-        staged = _exact(entry, "staged_files[]", _STAGED_MEMBERS, optional=frozenset({"size", "sha256"}))
+        staged = _exact(entry, "staged_files[]", _STAGED_MEMBERS, optional=frozenset({"size", "sha256", "original"}))
         if ("size" in staged) != ("sha256" in staged):
             raise FormatError("staged_files[] carries size and sha256 together or neither")
         text = require_string(staged["path"], "staged_files[].path")
+        if "original" in staged:
+            _original(staged["original"], text)
         parts = text.split("/")
-        if (
-            text.startswith("/")
-            or any(part in {"", ".", ".."} for part in parts)
-            or len(parts) < 2
-            or _reserved_payload_member(parts[0])
-        ):
+        if not _normalized(text) or len(parts) < 2 or _reserved_payload_member(parts[0]):
             raise FormatError(f"staged_files names a path that is not a normalized payload path: {text!r}")
         if "size" in staged:
             require_int(staged["size"], "staged_files[].size", minimum=0)
@@ -146,6 +144,29 @@ def _staged_files(value: object) -> tuple[Mapping[str, Frozen], ...]:
     if paths != sorted(set(paths)):
         raise FormatError("staged_files must be sorted by path and without duplicates")
     return tuple(_frozen(entry) for entry in value)
+
+
+def _normalized(path: str) -> bool:
+    """Report whether *path* is a normalized relative POSIX path: not absolute, no empty, ``.`` or ``..`` part."""
+
+    return not path.startswith("/") and not any(part in {"", ".", ".."} for part in path.split("/"))
+
+
+def _original(value: object, staged: str) -> None:
+    """Validate the ``original`` of the staged file *staged*: ``{name, size, sha256}`` and an optional relative path."""
+
+    original = _exact(value, "staged_files[].original", _ORIGINAL_MEMBERS, optional=frozenset({"path"}))
+    name = require_string(original["name"], "staged_files[].original.name")
+    if name in {".", ".."} or "/" in name or "\x00" in name:
+        raise FormatError(f"staged_files[].original.name of {staged!r} is not a file name: {name!r}")
+    require_int(original["size"], "staged_files[].original.size", minimum=0)
+    sha256 = original["sha256"]
+    if not isinstance(sha256, str) or not _SHA256.fullmatch(sha256):
+        raise FormatError(f"staged_files[].original.sha256 of {staged!r} is not 64 lowercase hex digits")
+    if "path" in original:
+        path = require_string(original["path"], "staged_files[].original.path")
+        if not _normalized(path) or "\x00" in path:
+            raise FormatError(f"staged_files[].original.path of {staged!r} is not a normalized relative path: {path!r}")
 
 
 def _parent(value: object) -> Mapping[str, Frozen] | None:
@@ -242,7 +263,9 @@ class JobDefinition:
     :param seal_succeeded: Whether a succeeded job is sealed; ``None`` uses the workspace setting ``seal.succeeded``.
     :param staged_files: The files staged into the payload (``--file``/``--files`` and declared-input
         destinations), sorted by path: each ``{path, size, sha256}``, or only ``{path}`` from a
-        runner-prepared payload; the member is absent when there are none.
+        runner-prepared payload; the member is absent when there are none. The destination of a declared
+        ``structures`` input given as a file also carries ``original``: ``{name, size, sha256}`` of that file as
+        given, and ``path``, relative to the ``source_root`` the job was created with, only when one was named.
     :param calls: The call slot bindings, alias to ``{workflow, parameters}``; ``None`` (the member absent) when
         the workflow has no call slots.
     :param persist_outputs: The call slot output names to the output roles this job records for its caller, or

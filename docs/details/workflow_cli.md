@@ -458,7 +458,16 @@ the job moves between states.
 
 ### Inputs, files, and batches
 
-- `--input NAME=PATH` stages one declared input.
+- `--input NAME=PATH` stages one declared input. For a `structures` input
+  with a destination (here and with `--input-from`), `job.json` records the
+  given file (name, size, SHA-256) as the `original` of its `staged_files`
+  entry, and `collect --into` stores it with an import record (see
+  {doc}`workflow_packages`).
+- `--source-root DIR` also records the path of each such structure file,
+  relative to DIR; every one must lie under DIR, or the job is refused.
+  Without it no path is recorded: *httk* never records an absolute path of the
+  machine that creates the job. The path is stored relative to DIR, so a wide
+  root such as `/` records most of it.
 - `--input-move-from-job NAME=PATH` moves (renames, never copies) PATH into
   the declared input NAME's destination. PATH must be a regular file (not a
   symlink) inside the payload of a succeeded job of the same workspace, not
