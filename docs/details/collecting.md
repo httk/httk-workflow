@@ -32,11 +32,12 @@ When an output role is a single file-valued result, its run edge points to a
 standard `files` entry (`type = "files"`). File lists remain values within
 their role record.
 
-A `files` entry is identified by its content: its media type
-(`application/octet-stream` unless known), its `format` (the *httk₂* reader
-tag, such as `vasp-poscar`, when one is set) and the SHA-256 digest of its
-bytes. The same bytes at many locations are one entry, which keeps the URL,
-name and size it was first stored with. A `FileRecord` therefore needs a
+A `files` entry is identified by its content: its `format` (the *httk₂*
+reader tag, such as `vasp-poscar`, when one is set) and the SHA-256 digest of
+its bytes. The same bytes at many locations are one entry, which keeps the
+URL, name, size and media type it was first stored with; a value stored as
+unset (unknown, as collection leaves it) is filled by a later save of the same
+content. A `FileRecord` therefore needs a
 `sha256` of 64 lowercase hex digits: a hook building one (or returning a
 `{"entry": {"type": "files", ...}}` response) must compute it, for example
 with `httk.core.digests.sha256_file`. The framework computes it, and sets
@@ -50,8 +51,8 @@ the root directory's name. A hook that builds a `FileRecord` with the bare
 workspace-relative path is prefixed the same way. Only a normalized relative
 path is prefixed; one with an empty, `.` or `..` segment, or one that already
 starts with the prefix, is left as it is with a warning naming the job and the
-role. The URL is metadata, not part of a file entry's identity (its media
-type, `format` and SHA-256), so the same workspace collected under another
+role. The URL is metadata, not part of a file entry's identity (its
+`format` and SHA-256), so the same workspace collected under another
 registered name yields the same file entries, and a store keeps the first
 non-null URL it was given. Where the files are served from is a serving-time choice instead:
 `httk serve optimade serve STORE --data-path DIR` (or `NAME=DIR`) serves the

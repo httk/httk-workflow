@@ -73,7 +73,7 @@ the CWL schema, and output ports become declared output roles.
 
 A single CWL `File` output is served and stored as a standard `files` entry
 with a workspace-relative POSIX `url`, file `name`, size and flat `sha256`.
-The media type stays `application/octet-stream` unless a collector knows it,
+The media type stays unset (unknown) unless a collector knows it,
 and `format` is the reader tag the file name selects, if any. A list of files stays a
 descriptor value inside a `DataRecord`, preserving its shape: one file is
 addressable as an entry, a list is one role value.
