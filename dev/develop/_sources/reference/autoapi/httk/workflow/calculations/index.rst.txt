@@ -1,0 +1,235 @@
+httk.workflow.calculations
+==========================
+
+.. py:module:: httk.workflow.calculations
+
+.. autoapi-nested-parse::
+
+   Collect finished calculations found anywhere in a directory tree.
+
+   A *recognized-calculation collector* is a workflow package with a
+   ``[workflow.recognize]`` table and no runner: it is collected, never run.
+   :func:`collect_tree` walks a tree and asks every collector whether a directory
+   is one of its calculations. The cheap ``requires`` markers are checked first;
+   only when every marker matches is the package's ``recognize(directory)`` hook
+   called. The winning collector's ``collect`` hook then reads the directory
+   through a stand-in :class:`~httk.workflow.collecting.JobRecord`, and the result
+   is assembled into a :class:`~httk.workflow.collecting.CollectedJob` exactly as
+   for a workspace job. :func:`claims` reports the same decisions without
+   collecting, for a dry run.
+
+   A claimed calculation is identified by ``<collector name>:<identity>``, where
+   the collector derives the identity from the calculation's content (see
+   :func:`content_digest`), so moving a directory keeps its identity. Within one
+   sweep, two directories claiming the same identity with identical marker files
+   are copies and the second is skipped; with different marker files they are an
+   :class:`IdentityCollisionError`.
+
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.workflow.calculations.AmbiguousClaimError
+   httk.workflow.calculations.IdentityCollisionError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.calculations.DirectoryClaim
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.calculations.content_digest
+   httk.workflow.calculations.claims
+   httk.workflow.calculations.collect_tree
+
+
+Module Contents
+---------------
+
+.. py:exception:: AmbiguousClaimError
+
+   Bases: :py:obj:`ValueError`
+
+
+   Several collectors claimed one directory at the same, highest priority.
+
+
+.. py:exception:: IdentityCollisionError
+
+   Bases: :py:obj:`ValueError`
+
+
+   Two directories with different content claimed the same identity in one sweep.
+
+
+.. py:class:: DirectoryClaim
+
+   One directory's recognition outcome, as reported by :func:`claims`.
+
+   :param directory: The directory, relative to the swept root (POSIX).
+   :param kind: ``"claimed"``, ``"unclaimed"`` or ``"workspace"``.
+   :param collector: The winning collector's name (``claimed``), the declining
+       collector's name (``unclaimed``), or ``None`` (``workspace``).
+   :param priority: The winning collector's priority, or ``None``.
+   :param identity: The claimed identity, or ``None``.
+   :param reason: The ``Unclaimed`` reason, or ``None``.
+   :param also_matched: Names of lower-priority collectors that also claimed the directory.
+   :param duplicate_of: For a claimed copy of an earlier directory of this sweep
+       (same collector, identity and marker content), that directory; it is not
+       collected again.
+   :param consumes: The subdirectories the claim names as part of its
+       calculation, relative to the swept root (POSIX).
+
+
+   .. py:attribute:: directory
+      :type:  str
+
+
+   .. py:attribute:: kind
+      :type:  Literal['claimed', 'unclaimed', 'workspace']
+
+
+   .. py:attribute:: collector
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: priority
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: identity
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: reason
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: also_matched
+      :type:  tuple[str, ...]
+      :value: ()
+
+
+
+   .. py:attribute:: duplicate_of
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: consumes
+      :type:  tuple[str, ...]
+      :value: ()
+
+
+
+.. py:function:: content_digest(directory, names)
+
+   Return the SHA-256 hex digest of the named files of a directory, decompressed.
+
+   Each distinct name is framed, in sorted order, as ``name NUL length NUL
+   content``, where ``length`` is the decimal byte count of the decompressed
+   content. A name absent from the directory is framed as ``name NUL - NUL``,
+   so an absent file differs from an empty one. A name is found as itself or,
+   when that is absent, as its compressed copy (``INCAR.gz`` for ``INCAR``), so
+   compressing a file does not change the digest. Collectors use this to
+   derive a claim's identity from a calculation's input files.
+
+   :param directory: The directory holding the files.
+   :param names: The uncompressed basenames to digest; order and repetition do not matter.
+   :return: The hex digest.
+
+
+.. py:function:: claims(root, *, collectors = (), prefer = (), exclude = ())
+
+   Report how :func:`collect_tree` would treat each directory, without collecting.
+
+   Ordinary directories that no collector's markers and hook recognize are not
+   reported. Parameters and errors are those of :func:`collect_tree`.
+
+   :param root: The tree to sweep.
+   :param collectors: Extra collector package directories; see :func:`collect_tree`.
+   :param prefer: Collector names that win priority ties, in order.
+   :param exclude: Root-relative POSIX glob patterns of directories to skip.
+   :yields: One outcome per claimed, declined or workspace directory, in walk order.
+
+
+.. py:function:: collect_tree(root, *, collectors = (), prefer = (), exclude = (), fail_fast = False, on_unclaimed = None, on_skipped = None)
+
+   Collect every recognized calculation below *root*.
+
+   The collector set is every registered collector
+   (``httk.core.register.codes.register_collector``) plus the package
+   directories in *collectors*. A local package named like a registered one
+   replaces it, which is how a shipped collector is overridden. A registered
+   collector whose package cannot be loaded is logged and skipped.
+
+   The walk starts at *root* itself and descends in sorted name order. It does
+   not follow symlinked directories and skips names starting with ``.``. A
+   directory holding ``.httk-workspace/format.json`` is collected as a
+   workspace (:func:`~httk.workflow.collecting.collect`) and not descended.
+   In any other directory, each collector whose ``requires`` markers all match
+   the directory's file names (case-insensitively, compression suffixes
+   stripped) has its recognize hook called; the highest-priority claim wins.
+   A hook that raises declines the directory, except that an ``ImportError``
+   (a missing dependency) propagates. Directories below a claimed one
+   are still visited.
+
+   A claimed directory is read through a stand-in job record whose workdir is
+   the directory. Its collect hook returns declared input roles, which become
+   the run's input edges and the ``inputs`` of
+   :class:`~httk.workflow.collecting.CollectedJob`, and output roles.
+   The run's ``source_id`` is ``<collector name>:<identity>``. A collect-hook
+   failure yields a degraded item.
+
+   A claim that consumes subdirectories (the ``consumes`` of
+   :class:`~httk.workflow.hookapi.Claim`) is a
+   multi-directory calculation. Its subdirectories are walked and collected by
+   their own collectors as usual, and the claiming item is held back until the
+   walk leaves its subtree. It is then yielded, after those children, with
+   one ``(relative path, child source id)`` pair per consumed directory in
+   ``child_runs``, so :func:`~httk.workflow.storing.store_collected` links its
+   run to theirs. A consumed directory that was a deduplicated copy links to the
+   earlier copy's run, which has the same source id. One that is missing, not
+   visited, a workspace, or not claimed, or whose own item degraded ("consumed
+   calculation ... failed: ..."), degrades the claiming item, which then names
+   only the children that were collected. The degraded child is still yielded.
+   Items are otherwise yielded in walk order. A directory a collector declines with
+   :class:`~httk.workflow.hookapi.Unclaimed` is logged as a warning and passed
+   to *on_unclaimed*.
+
+   :param root: The tree to sweep.
+   :param collectors: Extra collector package directories, loaded alongside the registered ones.
+   :param prefer: Collector names that win a tie at the highest priority, first named first.
+   :param exclude: Root-relative POSIX glob patterns (:func:`fnmatch.fnmatchcase`) of
+       directories that are neither visited nor descended.
+   :param fail_fast: Raise the first degraded item instead of yielding it.
+   :param on_unclaimed: Receive the outcome of every declined directory.
+   :param on_skipped: Receive the job key of every nested workspace job dropped for
+       an unreadable ``job.json``.
+   :yields: One collected job per recognized calculation and per workspace job, in walk order.
+   :raises ValueError: If *root* is not a directory, a *collectors* package is not a
+       loadable recognize package, or *fail_fast* observes a degraded item.
+   :raises AmbiguousClaimError: If collectors tie at the highest priority and none is preferred.
+   :raises IdentityCollisionError: If two directories claim one identity with different marker content.
+
+

@@ -1,0 +1,776 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="./">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Running workflows" href="running.html"><link rel="prev" title="Quickstart" href="quickstart.html">
+
+    <!-- Generated with Sphinx 9.1.1 and Furo 2025.12.19 -->
+        <title>Setting up workspaces - httk-workflow dev:develop documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="_static/sphinx_autodoc_typehints.css?v=057ac668" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:develop) — built from the GitHub develop branch; content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="index.html"><div class="brand">httk-workflow dev:develop documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:develop documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Setting up workspaces</a></li>
+<li class="toctree-l1"><a class="reference internal" href="running.html">Running workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="restarting_jobs.html">Restarting and resuming jobs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtime_helpers.html">Writing runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sdks/index.html">Runner SDKs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_packages.html">Workflow packages and URIs</a></li>
+<li class="toctree-l1"><a class="reference internal" href="vasp_runners.html">VASP workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="code_support.html">Supporting a simulation code</a></li>
+<li class="toctree-l1"><a class="reference internal" href="collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="provenance.html">Provenance, declarations, and stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_cli.html">The command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_filesystem_api.html">The filesystem protocol</a></li>
+<li class="toctree-l1"><a class="reference internal" href="httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="reference/index.html">Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="notebooks/examples.html">Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="details/taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/launchers.html">Launchers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/launcher_authoring.html">Writing a manager launcher in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/remotes.html">Remotes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workspace_daemon.html">Confined workspace daemon</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/howto_example.html">Example configuration of mount access to the NSC Sigma HPC system</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/sealing.html">Sealing jobs, workspaces, and projects</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/monitor.html">Workflow monitor</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/composing_workflows.html">Composing workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_uris.html">Workflows by URI</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/stable_ids.html">Stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_compat.html">Compatibility with other workflow systems</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="_sources/workspaces.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section class="tex2jax_ignore mathjax_ignore" id="setting-up-workspaces">
+<h1>Setting up workspaces<a class="headerlink" href="#setting-up-workspaces" title="Link to this heading">¶</a></h1>
+<p>A <strong>workspace</strong> is a directory tree that holds jobs and their state. A
+<strong>project</strong> groups workspaces together with the remotes, launchers and settings
+they share, and is what you copy when work moves to another machine.
+<strong>Managers</strong> are the processes that run the jobs in a workspace. This page
+sets all of that up; <a class="reference internal" href="running.html"><span class="doc">Running workflows</span></a> then creates and runs jobs in it.</p>
+<section id="project-and-workspace">
+<h2>Project and workspace<a class="headerlink" href="#project-and-workspace" title="Link to this heading">¶</a></h2>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk setup --name "Your Name" --email you@example.org</span>
+<span class="go">httk project init --name campaign .</span>
+<span class="go">httk workspace init --name default workspace</span>
+<span class="go">httk workspace status</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">setup</span></code> creates your per-user operator identity, used to attribute and
+sign what you publish; it is idempotent. <code class="docutils literal notranslate"><span class="pre">project</span> <span class="pre">init</span></code> writes the project
+anchor <code class="docutils literal notranslate"><span class="pre">httk_project/</span></code>. <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span></code> creates a workspace and registers it
+under a name in the per-user registry, so every later command can address it
+with <code class="docutils literal notranslate"><span class="pre">--workspace</span> <span class="pre">NAME</span></code>; a workspace’s directory path works too, registered or
+not. Without <code class="docutils literal notranslate"><span class="pre">--workspace</span></code>, commands use the enclosing workspace, then the
+project’s default, then the per-user default. A workspace
+is a directory of its own (<code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span></code> refuses a non-empty directory, so
+a project root is never a workspace); a project records its workspaces as
+members, and the first workspace initialized inside a project becomes its
+default.</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace list</span>
+<span class="go">httk workspace default default</span>
+<span class="go">httk workspace status --json default</span>
+</pre></div>
+</div>
+<p>State changes are synchronized to storage by default. <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span> <span class="pre">--no-durable</span></code> makes a throwaway workspace faster at the price of recoverability
+after a node crash.</p>
+</section>
+<section id="settings">
+<h2>Settings<a class="headerlink" href="#settings" title="Link to this heading">¶</a></h2>
+<p>A workspace carries a flat map of <em>application settings</em>, small values a
+runner resolves at run time, such as the VASP command:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace set -w default vasp.command=vasp_std</span>
+<span class="go">httk workspace show -w default</span>
+<span class="go">httk workspace show -w default vasp.command</span>
+<span class="go">httk workspace unset -w default vasp.command</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">show</span></code>, <code class="docutils literal notranslate"><span class="pre">set</span></code> and <code class="docutils literal notranslate"><span class="pre">unset</span></code> address one key namespace: application
+settings under their dotted names, the <a class="reference internal" href="details/taskmanager.html#workspace-policy"><span class="std std-ref">policy</span></a> as
+<code class="docutils literal notranslate"><span class="pre">policy.visibility_deadline_seconds</span></code> and <code class="docutils literal notranslate"><span class="pre">policy.retention.MEMBER</span></code>, and the
+<a class="reference internal" href="#environment-preludes">per-workflow preludes</a> as <code class="docutils literal notranslate"><span class="pre">prelude.WORKFLOW_ID</span></code>; an application
+setting cannot start with <code class="docutils literal notranslate"><span class="pre">policy.</span></code> or <code class="docutils literal notranslate"><span class="pre">prelude.</span></code>. A setting an older release
+stored under such a name is not reachable through these verbs: remove it by
+editing the workspace’s <code class="docutils literal notranslate"><span class="pre">.httk-workspace/format.json</span></code>, and store its value
+under a key outside those namespaces. One <code class="docutils literal notranslate"><span class="pre">set</span></code> or <code class="docutils literal notranslate"><span class="pre">unset</span></code> validates every
+change and stores them all in one write, or none; for a workspace on a remote
+each verb is one forwarded command, so one ssh connection. <code class="docutils literal notranslate"><span class="pre">show</span></code> with no key prints every key,
+one <code class="docutils literal notranslate"><span class="pre">key&lt;TAB&gt;value</span></code> line each (values as JSON, so a prelude’s newlines appear
+as <code class="docutils literal notranslate"><span class="pre">\n</span></code>, and application settings get a third column, below); one key prints
+its bare value; <code class="docutils literal notranslate"><span class="pre">--json</span></code> prints one flat object.</p>
+<p>The manager exports each scalar setting into the attempt environment under its
+<code class="docutils literal notranslate"><span class="pre">HTTK_</span></code> name, so <code class="docutils literal notranslate"><span class="pre">vasp.command</span></code> becomes <code class="docutils literal notranslate"><span class="pre">HTTK_VASP_COMMAND</span></code>. A real
+environment variable is a deployment override and wins over the workspace
+setting; a job’s own parameter of the same name wins over both.</p>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">show</span></code> marks each setting by who reads it:
+<em>recognized</em> (by <em>httk-workflow</em>, an installed code-support package, or a
+workflow installed in the workspace whose manifest declares the key; see
+<a class="reference internal" href="details/workflow_packages.html"><span class="doc">Workflow packages in detail</span></a>), <em>unrecognized</em> (in a namespace
+<em>httk-workflow</em> owns, such as <code class="docutils literal notranslate"><span class="pre">slurm.</span></code>, but read by nothing, so it has no
+effect; an unknown <code class="docutils literal notranslate"><span class="pre">confine.</span></code> key even stops managers from starting), or
+<em>undeclared</em> (nothing installed declares reading it, though a workflow may
+still read it without declaring it, or a future workflow may):</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp">$ </span>httk<span class="w"> </span>workspace<span class="w"> </span>show<span class="w"> </span>-w<span class="w"> </span>default
+<span class="go">foo.bar	1	undeclared: nothing installed declares reading it; a workflow may still read it without declaring it, or a future workflow may</span>
+<span class="go">mywf.threshold	0.5	recognized by workflow mywf</span>
+<span class="go">slurm.account	"proj"	recognized by httk-workflow</span>
+<span class="go">slurm.qos	"high"	unrecognized: httk-workflow reads no setting slurm.qos; pass it with slurm.sbatch_options=--qos=high</span>
+</pre></div>
+</div>
+<p>Setting an unrecognized key still stores it but prints a <code class="docutils literal notranslate"><span class="pre">warning:</span></code> line on
+standard error; setting an undeclared key prints a milder <code class="docutils literal notranslate"><span class="pre">notice:</span></code> line. On a terminal the markers are also colored; set <code class="docutils literal notranslate"><span class="pre">NO_COLOR</span></code> to
+turn that off. The namespaces <code class="docutils literal notranslate"><span class="pre">manager</span></code>, <code class="docutils literal notranslate"><span class="pre">slurm</span></code>, <code class="docutils literal notranslate"><span class="pre">confine</span></code>, <code class="docutils literal notranslate"><span class="pre">environment</span></code>,
+<code class="docutils literal notranslate"><span class="pre">seal</span></code>, <code class="docutils literal notranslate"><span class="pre">postprocess</span></code>, <code class="docutils literal notranslate"><span class="pre">children</span></code>, <code class="docutils literal notranslate"><span class="pre">io</span></code> and <code class="docutils literal notranslate"><span class="pre">httk_v1</span></code> belong to <em>httk-workflow</em>, so a
+workflow reads its own keys outside them, and a code package uses its code’s
+namespace, such as <code class="docutils literal notranslate"><span class="pre">vasp.</span></code>.</p>
+<p>The SDK itself reads <code class="docutils literal notranslate"><span class="pre">children.placement</span></code> (<code class="docutils literal notranslate"><span class="pre">nested</span></code>, the default, or <code class="docutils literal notranslate"><span class="pre">flat</span></code>)
+from the attempt’s settings snapshot to place spawned children; see
+<a class="reference internal" href="campaigns.html"><span class="doc">Campaigns</span></a>. Unlike other settings it is not overridden by job parameters
+or <code class="docutils literal notranslate"><span class="pre">HTTK_CHILDREN_PLACEMENT</span></code>: only the workspace setting, or a manager’s pinned
+setting override, counts.</p>
+<p><code class="docutils literal notranslate"><span class="pre">io.workers</span></code> (an integer from 1 to 32, default 8) sets how many jobs a batch
+command works on at once in this workspace: holding, adopting and releasing
+jobs in <code class="docutils literal notranslate"><span class="pre">push</span></code>, <code class="docutils literal notranslate"><span class="pre">pull</span></code>, <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">move</span></code> and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">adopt</span></code>, writing the
+small files (up to 1 MiB) of a tar stream pushed into the workspace, and
+reading the rows and per-state counts of <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">list</span></code>. Each job’s own steps
+still run in order, and the output is the same as with one worker. The
+overlap helps most where file operations are slow round trips, as on shared
+HPC filesystems; how much depends on the filesystem. On a fast local disk it
+still helps the durable writes of transfers, while writing many small pushed
+files can be somewhat slower than with <code class="docutils literal notranslate"><span class="pre">1</span></code>. <code class="docutils literal notranslate"><span class="pre">1</span></code> restores strictly
+one-at-a-time processing. A value outside 1..32 is refused when set, and the
+<code class="docutils literal notranslate"><span class="pre">HTTK_IO_WORKERS</span></code> variable that attempts see does not affect commands. Each
+end of a transfer uses its own workspace’s value:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace set -w default io.workers=16</span>
+<span class="go">httk workspace set -w cluster:default io.workers=4</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">io.sync</span></code> (<code class="docutils literal notranslate"><span class="pre">auto</span></code>, the default, <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> or <code class="docutils literal notranslate"><span class="pre">fsync</span></code>) sets how jobs that a
+transfer lands in this workspace (the far side of a push, the local side of a
+pull, and holds copied from another filesystem or kept with <code class="docutils literal notranslate"><span class="pre">--keep</span></code>) are made
+durable before they are adopted, so that a crash of the node cannot leave a
+published job with missing or partial files. <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> makes the whole landing
+durable with one call for its filesystem, on a descriptor opened (and synced
+once, which also flushes what was pending before) before the first file lands;
+it flushes other users’ pending writes on that filesystem too, and Ctrl-C
+waits for it to finish. <code class="docutils literal notranslate"><span class="pre">fsync</span></code> synchronizes every file on its own, which
+costs one round trip a file on a shared filesystem. <code class="docutils literal notranslate"><span class="pre">auto</span></code> uses <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> on
+Linux 5.8 or later for Lustre, ext4, XFS and tmpfs, on ZFS only with Linux
+5.17 or later and OpenZFS 2.4.0 or later, and <code class="docutils literal notranslate"><span class="pre">fsync</span></code> elsewhere (older kernels
+report no write errors through <code class="docutils literal notranslate"><span class="pre">syncfs</span></code>); <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> forces it on any filesystem
+type you vouch for, still falling back to <code class="docutils literal notranslate"><span class="pre">fsync</span></code> below Linux 5.8 or where the
+call is not available (found by the first call on a filesystem, made before
+anything lands). tmpfs is never persistent, whatever the setting. A value
+other than the three is refused when set, and one stored otherwise counts as
+<code class="docutils literal notranslate"><span class="pre">fsync</span></code>; the setting is read afresh at every landing, so a
+running daemon sees a change at once, and a <code class="docutils literal notranslate"><span class="pre">--no-durable</span></code> workspace
+synchronizes nothing. Job creation (<code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code>, campaigns, <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">submit</span></code>),
+workflow installation and builds, and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">adopt</span> <span class="pre">PATH</span></code> of a bundle on the
+workspace’s filesystem are made durable the same way, quietly, before the job
+or package is published. <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code>, campaigns and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">submit</span></code> create jobs in
+batches, each costing one <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> before its jobs are submitted and reported:
+a batch closes at 256 jobs, once 10 seconds have passed since its first job
+(checked between jobs, so a slow instantiate hook delays it), and at the end of
+the input, and a job that moves inputs (<code class="docutils literal notranslate"><span class="pre">--input-move-from-job</span></code>) has a batch of
+its own. Creating N jobs thus costs one <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> per batch plus one (600 jobs
+cost 4 when each batch fills within 10 seconds) for the payloads; where <code class="docutils literal notranslate"><span class="pre">syncfs</span></code>
+is trusted for the workspace’s own protocol steps (a vetted local filesystem,
+<code class="docutils literal notranslate"><span class="pre">io.sync</span></code> not <code class="docutils literal notranslate"><span class="pre">fsync</span></code>), a batch of eight jobs or more is then named complete
+and submitted with one more <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> each (plus one per command), instead of
+three fsyncs per job. Once a batch’s jobs start being named complete, each of
+them is submitted even when it is not reported (an error or interrupt names
+those by id). The library’s <code class="docutils literal notranslate"><span class="pre">new_jobs</span></code>
+publishes each job before it asks for the next item (N + 1 <code class="docutils literal notranslate"><span class="pre">syncfs</span></code>) unless
+it is given <code class="docutils literal notranslate"><span class="pre">batch=</span></code>. Bundles and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">submit</span> <span class="pre">--move</span></code> payloads that were
+written before httk ran are synced together as they are, so a write error
+there is reported only if nobody has
+seen it yet; when one is reported, nothing is taken, and the files may not be
+intact on disk: re-create them from their source before trying again, since a
+retry would not notice the loss.</p>
+<p>ZFS was first left to <code class="docutils literal notranslate"><span class="pre">fsync</span></code>: it never records a write error where <code class="docutils literal notranslate"><span class="pre">syncfs</span></code>
+looks for one (the filesystem’s error sequence). A <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> on ZFS always
+committed the dataset’s whole intent log; from OpenZFS 2.4.0 it also returns
+that commit’s error itself, which Linux passes on from 5.17 (5.8 to 5.16 take
+another, untraced path). On a suspended pool it then fails with <code class="docutils literal notranslate"><span class="pre">EIO</span></code>, where
+<code class="docutils literal notranslate"><span class="pre">fsync</span></code> waits until the pool returns (<code class="docutils literal notranslate"><span class="pre">failmode=wait</span></code>, the default). A
+command with no retry (<code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code>, <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">submit</span></code>, <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">adopt</span> <span class="pre">PATH</span></code>, workflow
+installation) then fails where it used to wait and succeed, once the removal
+of what it staged, which also waits for the pool, is done. A transfer refuses
+that landing, removes it (waiting for the pool) and delivers it once more with
+every file synchronized on its own, so it can still succeed once the pool is
+back. OpenZFS
+2.1.16, 2.2.8 and 2.3.0 return success on a suspended pool, and 2.3.4 fails
+only when the pool is suspended already when it is called (a suspension
+during its commit is waited out and reported as success), so <code class="docutils literal notranslate"><span class="pre">auto</span></code> keeps
+<code class="docutils literal notranslate"><span class="pre">fsync</span></code> below 2.4.0, and also when <code class="docutils literal notranslate"><span class="pre">/sys/module/zfs/version</span></code> cannot be read
+or parsed; do not force <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> on ZFS below that gate. The version is
+compared by its leading <code class="docutils literal notranslate"><span class="pre">major.minor.patch</span></code>, so a distribution build such as
+<code class="docutils literal notranslate"><span class="pre">2.4.1-1ubuntu5.1</span></code> counts as 2.4.1 (its own patches are not verified) and any
+later release is trusted as well. On ZFS a failed <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> is always this
+landing’s own failure, so <code class="docutils literal notranslate"><span class="pre">io.sync_errors</span> <span class="pre">ignore</span></code> (below) does not apply
+there. A ZFS <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> also misses a failed write of pages written through
+<code class="docutils literal notranslate"><span class="pre">mmap</span></code> (a quota or a full pool), which <code class="docutils literal notranslate"><span class="pre">fsync</span></code> reports, so on ZFS <code class="docutils literal notranslate"><span class="pre">auto</span></code>
+synchronizes bundles and payloads written before httk ran file by file;
+files that an instantiate hook writes through <code class="docutils literal notranslate"><span class="pre">mmap</span></code> during <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code> are
+the accepted exception. When such a synchronization fails on ZFS because
+the pool was suspended, the message’s advice to re-create the files is more
+than needed: ZFS keeps the data of a suspended pool and writes it once the
+pool is back. A
+<code class="docutils literal notranslate"><span class="pre">syncfs</span></code> covers only the filesystem it is called on: whatever is mounted inside
+a synced tree from another filesystem, a directory or a single file, is
+synchronized file by file.</p>
+<p>The command that runs <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">move</span></code>, <code class="docutils literal notranslate"><span class="pre">push</span></code> or <code class="docutils literal notranslate"><span class="pre">pull</span></code> prints the
+strategy on standard error, unless <code class="docutils literal notranslate"><span class="pre">-q</span></code>: <code class="docutils literal notranslate"><span class="pre">syncing</span> <span class="pre">120</span> <span class="pre">landed</span> <span class="pre">file(s)</span> <span class="pre">to</span> <span class="pre">disk</span> <span class="pre">(syncfs:</span> <span class="pre">lustre,</span> <span class="pre">Linux</span> <span class="pre">5.14)</span></code>, or <code class="docutils literal notranslate"><span class="pre">made</span> <span class="pre">3</span> <span class="pre">landed</span> <span class="pre">bundle(s)</span> <span class="pre">durable</span> <span class="pre">(fsync:</span> <span class="pre">zfs</span> <span class="pre">2.2.2</span> <span class="pre">is</span> <span class="pre">below</span> <span class="pre">2.4.0)</span></code> when every file was synchronized as it was
+written. For a push, that is the destination’s line, relayed with its name in
+front. When the synchronization fails, nothing of that landing is adopted.
+Where the landing was synchronized with one <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> and <code class="docutils literal notranslate"><span class="pre">io.sync_errors</span></code> is
+<code class="docutils literal notranslate"><span class="pre">fail</span></code> (see below), the transfer then tries once more by itself, since the
+error may be another user’s on the same filesystem, which <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> reports to
+everyone on it:</p>
+<ul class="simple">
+<li><p>a push from a local workspace synchronizes each segment’s landing only when
+the destination adopts it, about one visibility deadline after it landed
+(the destination answers the segment’s upload at once, its landing still
+unsynchronized, and synchronizes it first thing when it is asked to adopt
+it), so that the system’s own writeback has mostly run by then and a
+storage hiccup has had time to clear; under <code class="docutils literal notranslate"><span class="pre">io.sync</span> <span class="pre">fsync</span></code> that changes
+nothing (every file was synchronized as it was written). When that
+synchronization fails, nothing of the segment is adopted, and it is
+delivered once more at once, the same bundles to a fresh landing with every
+file synchronized as it is written (which another user’s error cannot fail),
+and adopted before any later segment (so an explicitly selected child is
+still adopted before its parent). One write error usually fails every
+segment then waiting at the destination (up to 8), each delivered once more
+in turn; every segment staged afterwards is synchronized file by file at
+once. If a segment’s second delivery is refused too, its jobs stay held at
+the source for <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">move</span> <span class="pre">--resume</span></code> (they were sent, so they are never
+taken back);</p></li>
+<li><p>a push from a remote workspace (remote to remote) synchronizes each segment
+as it lands, and a failure is delivered once more from its relayed local
+copies rather than fetched anew; this is one more request on the
+destination’s transfer session, per segment (the segment is staged once
+more, before anything of it is adopted), and every later segment is then
+synchronized file by file at once. If that delivery is refused too, its jobs
+stay held at the source (<code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">move</span> <span class="pre">--resume</span></code>);</p></li>
+<li><p>a pull synchronizes each landing here only when it adopts it, as a push
+does; when that fails, the landing is discarded and fetched once more at once
+into a fresh landing, with every file synchronized as it is written here (as
+every later fetch of the session then is), and adopted before any later
+landing. If that fails too, the pull stops there (that segment and every
+later one stay held at the source, and no later page of the selection is
+held); their jobs stay held at the source, and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">move</span> <span class="pre">--resume</span></code>
+delivers them again.</p></li>
+</ul>
+<p>A failure is not retried otherwise. A destination (or, for a pull, this
+workspace) on <code class="docutils literal notranslate"><span class="pre">io.sync</span> <span class="pre">fsync</span></code>, whose per-file errors are exact, fails at once:
+a push from a local workspace takes the jobs it held itself back into the
+source (<code class="docutils literal notranslate"><span class="pre">not_moved</span></code>; run the transfer again), and a push from a remote
+workspace keeps the jobs held at the source for <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">move</span> <span class="pre">--resume</span></code>; a pull
+stops (that segment and every later one stay held at the source), resumable
+with <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">move</span> <span class="pre">--resume</span></code>. A hold an earlier run left is never taken back, since an earlier
+delivery may have adopted it (see <a class="reference internal" href="details/workflow_cli.html"><span class="doc">Project and workflow command line in detail</span></a>). Job
+creation (<code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code>, campaigns), <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">submit</span></code> of copies and workflow
+installation have no retry either: the command fails, and for job creation
+and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">submit</span></code> none of that batch is submitted (the batches before it are,
+and the message says how many). Running it again is safe: for <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code> and
+campaigns with <code class="docutils literal notranslate"><span class="pre">--duplicate-tag</span> <span class="pre">skip</span></code>, so that the jobs already submitted are
+not created twice (a tagless job is); for <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">submit</span></code>, which has no such
+check, give it only the payloads it did not report as submitted. <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">adopt</span> <span class="pre">PATH</span></code> and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">submit</span> <span class="pre">--move</span></code> take files written before httk ran, so after a
+failed synchronization re-create them from their source first, as described
+above, rather than merely running the command again. Copies from
+another filesystem whose <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> failed are made once more with every file
+synchronized as it is written, and the chunk fails (jobs held at the source)
+only if that fails too. The retried delivery or fetch runs under the same
+<code class="docutils literal notranslate"><span class="pre">--adapter-timeout</span></code> as the first one; when it times out, its outcome is
+unknown and the jobs stay held at the source, and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">move</span> <span class="pre">--resume</span></code>
+then reports those that arrived as <code class="docutils literal notranslate"><span class="pre">already_adopted</span></code> and releases them.</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace set -w default io.sync=fsync</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">io.sync_errors</span></code> (<code class="docutils literal notranslate"><span class="pre">fail</span></code>, the default, or <code class="docutils literal notranslate"><span class="pre">ignore</span></code>) sets what a write error
+that a <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> reports does, except on ZFS, where such an error always fails. <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> cannot tell whose write failed: on a
+busy shared login node another user’s late quota error (<code class="docutils literal notranslate"><span class="pre">EDQUOT</span></code>) on the same
+filesystem fails our landing too, which <code class="docutils literal notranslate"><span class="pre">fail</span></code> handles by the retries above.
+<code class="docutils literal notranslate"><span class="pre">ignore</span></code> trusts the writes that returned successfully: the landing is still
+flushed, and after a failed <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> another full <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> is made; a warning
+says whether that one completed without reporting a further error
+(<code class="docutils literal notranslate"><span class="pre">...</span> <span class="pre">reported</span> <span class="pre">a</span> <span class="pre">writeback</span> <span class="pre">error,</span> <span class="pre">which</span> <span class="pre">io.sync_errors=ignore</span> <span class="pre">trusts</span> <span class="pre">(a</span> <span class="pre">second</span> <span class="pre">flush</span> <span class="pre">reported</span> <span class="pre">no</span> <span class="pre">further</span> <span class="pre">error)</span></code>; this does not prove that the data
+whose write failed reached the disk) or failed too (<code class="docutils literal notranslate"><span class="pre">...</span> <span class="pre">the</span> <span class="pre">flush</span> <span class="pre">may</span> <span class="pre">be</span> <span class="pre">incomplete</span></code>), and the
+jobs are published anyway, with no retry. Choose it for speed when you expect
+no quota trouble and accept removing a batch whose files turn out damaged: any
+file can then have lost data, <code class="docutils literal notranslate"><span class="pre">job.json</span></code>, <code class="docutils literal notranslate"><span class="pre">state.json</span></code> and bundle records
+included (a job may be unreadable, not only its outputs wrong), compute nodes
+see the loss without any crash, and a <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">submit</span> <span class="pre">--move</span></code> payload, the only
+copy, is consumed all the same. A write error that <code class="docutils literal notranslate"><span class="pre">write()</span></code> itself reports
+(a quota already full) still fails. <code class="docutils literal notranslate"><span class="pre">ignore</span></code> changes nothing else: under
+<code class="docutils literal notranslate"><span class="pre">io.sync</span> <span class="pre">fsync</span></code> every per-file error fails; a <code class="docutils literal notranslate"><span class="pre">syncfs</span></code> that the system does not
+support falls back to <code class="docutils literal notranslate"><span class="pre">fsync</span></code> when the first, priming call finds it so (or,
+for bundles written before httk ran, at their one synchronization), but if it
+reports so only at the final call, the landing fails under <code class="docutils literal notranslate"><span class="pre">ignore</span></code> too, without
+a retry; and workflow installation and builds always fail on an error (a
+damaged package would run for every later job). A value other than the two is
+refused when set, and one stored otherwise counts as <code class="docutils literal notranslate"><span class="pre">fail</span></code> (with a warning);
+like <code class="docutils literal notranslate"><span class="pre">io.sync</span></code>, it is read afresh at every landing.</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace set -w default io.sync_errors=ignore</span>
+</pre></div>
+</div>
+<p>Engine tunables (the visibility deadline of a shared filesystem and the
+retention limits of <code class="docutils literal notranslate"><span class="pre">gc</span></code>) are <em>workspace policy</em>, kept apart from application
+settings and addressed as the <code class="docutils literal notranslate"><span class="pre">policy.*</span></code> keys of <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">show|set|unset</span></code>;
+see <a class="reference internal" href="details/taskmanager.html"><span class="doc">Task-manager usage in detail</span></a>.</p>
+</section>
+<section id="installed-workflows">
+<h2>Installed workflows<a class="headerlink" href="#installed-workflows" title="Link to this heading">¶</a></h2>
+<p>A workspace runs only workflows installed in it, under <code class="docutils literal notranslate"><span class="pre">workflows/</span></code>. Install
+once per workspace, locally or on a remote:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow install --workspace default 'git+https://github.com/httk/workflows-vasp#vasp-relax'</span>
+<span class="go">httk workflow list -w default</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span> <span class="pre">--install</span></code> installs a missing workflow on the fly. A transfer
+(<code class="docutils literal notranslate"><span class="pre">push</span></code>, <code class="docutils literal notranslate"><span class="pre">pull</span></code>, <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">move</span></code>) installs the workflows its jobs need
+in the destination when it lacks them (see <a class="reference internal" href="details/remotes.html"><span class="doc">Remotes</span></a>).</p>
+</section>
+<section id="environment-preludes">
+<h2>Environment preludes<a class="headerlink" href="#environment-preludes" title="Link to this heading">¶</a></h2>
+<p>Shell setup an HPC job needs (<code class="docutils literal notranslate"><span class="pre">module</span> <span class="pre">load</span></code>, <code class="docutils literal notranslate"><span class="pre">source</span> <span class="pre">activate</span></code>) goes in a
+prelude, not in the command setting. There are two layers, both run under
+<code class="docutils literal notranslate"><span class="pre">set</span> <span class="pre">-e</span></code> in a login shell, so a failing line aborts the job instead of running
+it in a half-configured environment:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace set -w default environment.prelude="module load httk"</span>
+<span class="go">httk workspace set -w default prelude.vasp.relax="module load VASP/6.4.2"</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">environment.prelude</span></code> applies to every job of the workspace and runs before
+the manager starts; after it, the manager command is looked up on the resulting
+<code class="docutils literal notranslate"><span class="pre">PATH</span></code>. A workflow prelude applies only to that workflow’s jobs and runs after
+the workspace prelude. Preludes are workspace-local: a job transferred to
+another workspace runs under that workspace’s preludes.</p>
+</section>
+<section id="launchers">
+<h2>Launchers<a class="headerlink" href="#launchers" title="Link to this heading">¶</a></h2>
+<p>A launcher decides <em>where managers start</em>. The built-in <code class="docutils literal notranslate"><span class="pre">process</span></code> launcher
+starts them on the current machine. On a cluster, add the packaged Slurm
+launcher once, then select it per workspace together with the scheduler
+directives it should use:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk launcher add --kind slurm --global cluster</span>
+<span class="go">httk launcher check cluster</span>
+<span class="go">httk workspace set -w default manager.launch=cluster \</span>
+<span class="go">  slurm.partition=batch slurm.time_limit=02:00:00</span>
+<span class="go">httk run --count 4 --workspace default</span>
+</pre></div>
+</div>
+<p>Every pair is validated and all of them are stored in one write, or none is.</p>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">run</span> <span class="pre">--count</span> <span class="pre">4</span></code> now submits four managers through Slurm and
+prints their scheduler job ids. <code class="docutils literal notranslate"><span class="pre">--inline</span></code> runs one manager in the current
+process regardless of the launcher, which is the way to see manager output
+while debugging; <code class="docutils literal notranslate"><span class="pre">--launcher</span> <span class="pre">NAME</span></code> picks another launcher for one invocation.
+Launchers live at <code class="docutils literal notranslate"><span class="pre">httk_project/launchers/NAME</span></code> or
+<code class="docutils literal notranslate"><span class="pre">~/.config/httk/launchers/NAME</span></code>, project first.</p>
+<p>The full guide, <a class="reference internal" href="details/launchers.html"><span class="doc">Launchers</span></a>, lists every <code class="docutils literal notranslate"><span class="pre">slurm.*</span></code> and <code class="docutils literal notranslate"><span class="pre">manager.*</span></code>
+setting, shows how to keep separate CPU and GPU launcher profiles, and gives
+the Python API; <a class="reference internal" href="details/launcher_authoring.html"><span class="doc">Writing a manager launcher in detail</span></a> specifies the launcher bundle
+for other schedulers.</p>
+</section>
+<section id="remotes">
+<h2>Remotes<a class="headerlink" href="#remotes" title="Link to this heading">¶</a></h2>
+<p>A remote reaches another machine: it moves files and runs <code class="docutils literal notranslate"><span class="pre">httk</span></code> there. It
+does not schedule anything; the destination workspace’s launcher does that.</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk remote add kappa --kind ssh host=login.example.org username=me</span>
+<span class="go">httk remote set kappa cli_prelude='module load Python/3.13'</span>
+<span class="go">httk remote check kappa</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">ssh</span></code> runs commands in a non-interactive shell, so the remote’s <code class="docutils literal notranslate"><span class="pre">cli_prelude</span></code>
+setting is where <code class="docutils literal notranslate"><span class="pre">httk</span></code> is put on <code class="docutils literal notranslate"><span class="pre">PATH</span></code> for those commands. It runs before
+each <code class="docutils literal notranslate"><span class="pre">httk</span></code> command the CLI runs on the remote, not at job start: jobs get
+their environment from <code class="docutils literal notranslate"><span class="pre">environment.prelude</span></code> and the per-workflow prelude
+(see <a class="reference internal" href="#environment-preludes">Environment preludes</a>). A workspace on the
+remote is created and addressed by writing the remote name before it:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace init --name runs kappa:/scratch/me/httk/runs</span>
+<span class="go">httk workspace set -w kappa:runs manager.launch=cluster</span>
+<span class="go">httk workspace status kappa:runs</span>
+<span class="go">httk run --workspace kappa:runs --count 4</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">NAME:WORKSPACE</span></code> is a binding, not a path. Jobs are created locally, pushed
+with <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">push</span> <span class="pre">kappa:runs</span></code> (every job waiting to start) after
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">install</span> <span class="pre">--workspace</span> <span class="pre">kappa:runs</span> <span class="pre">…</span></code> installed their workflow
+there, and the finished ones brought back with <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">pull</span> <span class="pre">kappa:runs</span></code>
+(every succeeded job); the end left out is the workspace the command runs in,
+else the default workspace. A push leaves an <code class="docutils literal notranslate"><span class="pre">away</span></code> copy of each job in its
+source until the pull brings the job back. <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">job</span> <span class="pre">move</span> <span class="pre">SRC</span> <span class="pre">DST</span></code> is the
+general form; see <a class="reference internal" href="running.html"><span class="doc">Running workflows</span></a>. A transfer to or from a remote runs over one
+transfer session, so the remote’s <code class="docutils literal notranslate"><span class="pre">httk</span></code> must be the same version as this
+machine’s: otherwise the transfer stops before anything is held, with “the httk
+on REMOTE is too old (or too new) for this transfer: install the same httk
+version on both ends”. Besides <code class="docutils literal notranslate"><span class="pre">ssh</span></code>, the packaged
+templates are <code class="docutils literal notranslate"><span class="pre">local</span></code> (a second tree on this machine), <code class="docutils literal notranslate"><span class="pre">mount</span></code> (files over a
+shared mount, commands through a separate executor) and <code class="docutils literal notranslate"><span class="pre">mount-daemon</span></code> (files
+as the only channel, through an exchange directory: the workspace’s managers serve it, and the confined broker only starts, queries and cancels managers).</p>
+<p>The full guide, <a class="reference internal" href="details/remotes.html"><span class="doc">Remotes</span></a>, covers the mount variants, moving job
+trees, and the Python adapter API; <a class="reference internal" href="details/adapter_authoring.html"><span class="doc">Writing a remote adapter in detail</span></a> specifies
+the adapter bundle, and <a class="reference internal" href="details/workspace_daemon.html"><span class="doc">Confined workspace daemon</span></a> the confined broker.</p>
+</section>
+<section id="moving-a-workspace">
+<h2>Moving a workspace<a class="headerlink" href="#moving-a-workspace" title="Link to this heading">¶</a></h2>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workspace move my-workspace /scratch/campaign/my-workspace</span>
+</pre></div>
+</div>
+<p>renames the workspace on its filesystem and updates every record of its path
+on this machine, including a configured daemon’s enrollment; stop the
+workspace’s daemon and managers first. Across filesystems, copy the directory
+yourself with <code class="docutils literal notranslate"><span class="pre">cp</span> <span class="pre">-a</span></code> or <code class="docutils literal notranslate"><span class="pre">rsync</span> <span class="pre">-a</span></code>, remove the original, and run <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workspace</span> <span class="pre">move</span> <span class="pre">--record-only</span> <span class="pre">NAME</span> <span class="pre">NEW_PATH</span></code>; the same
+command completes an interrupted move. <a class="reference internal" href="details/workflow_cli.html"><span class="doc">Project and workflow command line in detail</span></a> lists what
+the command updates and what it asks you to update by hand.</p>
+</section>
+<section id="moving-a-project-between-machines">
+<h2>Moving a project between machines<a class="headerlink" href="#moving-a-project-between-machines" title="Link to this heading">¶</a></h2>
+<p>A project directory is self-describing. Copy the whole tree, including its
+workspaces, and run <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">project</span> <span class="pre">repair</span></code> inside it: every member workspace is
+registered under the name recorded in <code class="docutils literal notranslate"><span class="pre">httk_project/members.json</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">run</span></code>, <code class="docutils literal notranslate"><span class="pre">--workspace</span> <span class="pre">NAME</span></code> and the rest work without a new
+<code class="docutils literal notranslate"><span class="pre">init</span></code>. It is idempotent and refuses to overwrite a name that already points
+elsewhere.</p>
+</section>
+<section id="further-reading">
+<h2>Further reading<a class="headerlink" href="#further-reading" title="Link to this heading">¶</a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="details/taskmanager.html"><span class="doc">Task-manager usage in detail</span></a> covers workspace policy, durability and
+filesystem requirements, resources and scheduling, owners and recovery, and
+maintenance with <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">check</span></code>, <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">repair</span></code> and <code class="docutils literal notranslate"><span class="pre">gc</span></code>.</p></li>
+<li><p><a class="reference internal" href="details/workflow_cli.html"><span class="doc">Project and workflow command line in detail</span></a> is the complete command reference, including
+the <code class="docutils literal notranslate"><span class="pre">workspace</span></code>, <code class="docutils literal notranslate"><span class="pre">launcher</span></code>, <code class="docutils literal notranslate"><span class="pre">remote</span></code>, <code class="docutils literal notranslate"><span class="pre">config</span></code> and <code class="docutils literal notranslate"><span class="pre">project</span></code> groups.</p></li>
+<li><p><a class="reference internal" href="campaigns.html"><span class="doc">Campaigns</span></a> spreads one very large run across several workspaces.</p></li>
+</ul>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="running.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Running workflows</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="quickstart.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Quickstart</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Setting up workspaces</a><ul>
+<li><a class="reference internal" href="#project-and-workspace">Project and workspace</a></li>
+<li><a class="reference internal" href="#settings">Settings</a></li>
+<li><a class="reference internal" href="#installed-workflows">Installed workflows</a></li>
+<li><a class="reference internal" href="#environment-preludes">Environment preludes</a></li>
+<li><a class="reference internal" href="#launchers">Launchers</a></li>
+<li><a class="reference internal" href="#remotes">Remotes</a></li>
+<li><a class="reference internal" href="#moving-a-workspace">Moving a workspace</a></li>
+<li><a class="reference internal" href="#moving-a-project-between-machines">Moving a project between machines</a></li>
+<li><a class="reference internal" href="#further-reading">Further reading</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="_static/documentation_options.js?v=952df46a"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=fd10adb8"></script>
+    <script src="_static/selector.js?v=d8e9b3ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:develop","versionPathDepth":2};</script>
+    </body>
+</html>

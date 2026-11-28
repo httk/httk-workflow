@@ -1,0 +1,86 @@
+httk.workflow.manifests
+=======================
+
+.. py:module:: httk.workflow.manifests
+
+.. autoapi-nested-parse::
+
+   Deterministic signed project manifests.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.manifests.payload_file_records
+   httk.workflow.manifests.require_quiescent_workspace
+   httk.workflow.manifests.workspace_maintenance_guard
+   httk.workflow.manifests.verify_legacy_manifest
+   httk.workflow.manifests.verify_manifest
+
+
+Module Contents
+---------------
+
+.. py:function:: payload_file_records(root)
+
+   Return the deterministic records of one job payload, minus runner scratch and owner documents.
+
+   The runner-private entries (``attempts/``, ``logs/``, ``.httk-job/``), the
+   transfer envelope, the owner's ``state.json`` and a root ``seal.json`` are
+   excluded from every seal record exactly as they are from a transfer payload
+   digest, so committing an outcome, or moving the job out of its workspace
+   and back, never changes a sealed payload's records.
+
+   :param root: The job directory.
+   :return: The file records.
+
+
+.. py:function:: require_quiescent_workspace(workspace)
+
+   Refuse while any owner of the workspace is not proven dead; read-only, holds nothing.
+
+   A closed owner leaves no ``owners/<id>/``; a dead one is reclaimed by
+   ``httk workspace gc``. The check is a snapshot: an owner registering
+   afterwards is not fenced, which suits manifests and project snapshots of a
+   workspace nobody is running.
+
+   :param workspace: The workspace.
+   :raises ValueError: If an owner is alive or its death cannot be proven.
+
+
+.. py:function:: workspace_maintenance_guard(workspace)
+
+   Run :func:`require_quiescent_workspace` before the guarded work (no lock is held).
+
+   :param workspace: The workspace.
+   :return: A context manager.
+   :raises ValueError: If an owner is alive or its death cannot be proven.
+
+
+.. py:function:: verify_legacy_manifest(root, path)
+
+   Verify a legacy manifest without modifying its project tree.
+
+   :param root: Locate the tree the manifest should describe.
+   :param path: Locate the legacy manifest to verify.
+   :return: Whether the legacy tree records and signature verify.
+
+
+.. py:function:: verify_manifest(project = None, *, manifest = None, trusted_keys = None)
+
+   Auto-detect a v2 or legacy manifest and verify it against its trust anchors.
+
+   The trust anchor is the key pinned in ``project.json`` — never the key the
+   manifest being verified names in its own header — plus any key passed in
+   *trusted_keys*, as a recorded value or as the path of a ``*.pub`` file.
+
+   :param project: Locate the project to discover and verify.
+   :param manifest: Select a manifest path instead of the project default.
+   :param trusted_keys: Add explicit trust anchors to the project keys.
+   :return: The detailed verification verdict.
+   :raises ValueError: If no project or usable manifest exists.
+
+

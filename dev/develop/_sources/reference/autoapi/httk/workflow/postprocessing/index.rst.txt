@@ -1,0 +1,237 @@
+httk.workflow.postprocessing
+============================
+
+.. py:module:: httk.workflow.postprocessing
+
+.. autoapi-nested-parse::
+
+   Run one provider-owned postprocess script against one collected job.
+
+   Fields: a manifest script name, workspace/job identifiers, an output directory,
+   the process return code, and captured stdout/stderr.
+
+   Postprocess output never lands in the job payload: it is written under a
+   workspace-level ``postprocess/`` tree, so a finished job may be sealed
+   immediately and still be postprocessed later without disturbing the bytes the
+   seal covers. The output root is ``<workspace.root>/postprocess/`` by default,
+   the workspace setting ``postprocess.directory`` when set (an absolute path
+   outside the workspace), or a per-invocation override (a relative path
+   resolves against the current directory; it must also land outside the
+   workspace); the per-job directory below it mirrors payload
+   placement as ``<root>/<placement>/<job_key>/<script name>/``.
+
+   The script runs with its cwd set to that per-job output directory and receives
+   ``HTTK_WORKFLOW_WORKSPACE_DIR`` and ``HTTK_WORKFLOW_JOB_DIR`` for the workspace
+   and the immutable payload (read-only from the script's perspective),
+   ``HTTK_WORKFLOW_POSTPROCESS_DIR`` for the output directory, and
+   ``HTTK_WORKFLOW_WORKDIR`` / ``HTTK_WORKFLOW_DATA_DIR`` for the collected job's
+   result directories when those exist. Those are the only variables exported from
+   the reserved ``HTTK_WORKFLOW_`` namespace; all others in it are removed before
+   launch. Scripts resolve only from the registered provider or an explicit
+   package directory; job payloads and pinned workflow trees are never trusted as
+   script sources.
+
+   Every completed run (any exit status) leaves a receipt
+   ``<output_dir>/.httk-postprocess.json`` naming the script, the workflow, the
+   job, the run times, the exit status, and the script's declared ``outputs``
+   patterns as they were at run time. A stale receipt is removed before launch,
+   so a timeout or launch failure leaves none. :func:`collect_postprocess` reads
+   the receipts (it needs no provider) and describes each job's declared output
+   files as file records; it collects only from the workspace's own
+   ``postprocess/`` tree, never from a ``postprocess.directory`` elsewhere or a
+   per-invocation override. The output directory is reused between runs, so a
+   glob pattern also matches stale files an earlier run left that a later run did
+   not rewrite.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.postprocessing.DEFAULT_POSTPROCESS_TIMEOUT
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.postprocessing.PostprocessResult
+   httk.workflow.postprocessing.CollectedPostprocess
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.postprocessing.postprocess_root
+   httk.workflow.postprocessing.run_postprocess_script
+   httk.workflow.postprocessing.collect_postprocess
+
+
+Module Contents
+---------------
+
+.. py:data:: DEFAULT_POSTPROCESS_TIMEOUT
+   :type:  float
+   :value: 3600.0
+
+
+.. py:class:: PostprocessResult
+
+   The captured result of one postprocess invocation.
+
+
+   .. py:attribute:: script
+      :type:  str
+
+
+   .. py:attribute:: workspace_id
+      :type:  str
+
+
+   .. py:attribute:: job_id
+      :type:  str
+
+
+   .. py:attribute:: output_dir
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: returncode
+      :type:  int
+
+
+   .. py:attribute:: stdout
+      :type:  str
+
+
+   .. py:attribute:: stderr
+      :type:  str
+
+
+   .. py:attribute:: receipt
+      :type:  pathlib.Path
+
+
+.. py:class:: CollectedPostprocess
+
+   The declared output files of one job's postprocess run, read from its receipt.
+
+   At most one of *skipped* and *error* is set; when either is, *files* is empty.
+
+   :param script: Name the postprocess script.
+   :param record: Carry the job the script ran on.
+   :param files: Pair each output-relative POSIX path with its file record, sorted by path.
+   :param workflow_id: Identify the workflow the script came from, as the receipt records it.
+   :param started_at: Record when the script started.
+   :param finished_at: Record when the script exited.
+   :param skipped: Explain why there is benignly nothing to collect.
+   :param error: Explain why collecting this job's postprocess output failed.
+
+
+   .. py:attribute:: script
+      :type:  str
+
+
+   .. py:attribute:: record
+      :type:  httk.workflow.collecting.JobRecord
+
+
+   .. py:attribute:: files
+      :type:  tuple[tuple[str, httk.core.FileRecord], ...]
+      :value: ()
+
+
+
+   .. py:attribute:: workflow_id
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: started_at
+      :type:  datetime.datetime | None
+      :value: None
+
+
+
+   .. py:attribute:: finished_at
+      :type:  datetime.datetime | None
+      :value: None
+
+
+
+   .. py:attribute:: skipped
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: error
+      :type:  str | None
+      :value: None
+
+
+
+.. py:function:: postprocess_root(workspace, override = None)
+
+   Resolve the output root all this workspace's postprocess output lands in.
+
+   Precedence is the per-invocation *override*, then the ``postprocess.directory``
+   application setting, then ``<workspace.root>/postprocess``. The setting must be
+   an absolute path outside the workspace; a relative *override* resolves against
+   the current directory and must also land outside the workspace.
+
+   :param workspace: The workspace whose postprocess output root to resolve.
+   :param override: A per-invocation output root that wins over the setting.
+   :return: The resolved absolute output root.
+   :raises ValueError: If the root is inside the workspace (other than the default), or the setting is relative.
+
+
+.. py:function:: run_postprocess_script(resolved, name, record, *, output_root = None, timeout = DEFAULT_POSTPROCESS_TIMEOUT)
+
+   Run provider script *name* in the collected job's postprocess directory.
+
+   :param resolved: Resolve the script from a registered provider or package.
+   :param name: Select the manifest ``[workflow.postprocess.<name>]`` entry.
+   :param record: Supply the collected job and its result paths.
+   :param output_root: The output root; defaults to ``<workspace.root>/postprocess``.
+   :param timeout: Limit the subprocess, or wait indefinitely when ``None``.
+   :return: Captured process result, including nonzero return codes.
+   :raises ValueError: If the script cannot be resolved or run, or times out;
+       neither leaves a receipt.
+
+
+.. py:function:: collect_postprocess(workspace, script, *, states = ('succeeded', ), placement = None, jobs = None, on_skipped = None, steps = None, force = False)
+
+   Describe the declared output files of *script*'s last run on each selected job.
+
+   Jobs are selected exactly as :func:`~httk.workflow.collecting.job_records`
+   selects them. Each job's receipt decides what is collected: no receipt, a
+   failed run, a script declaring no ``outputs``, or nothing matching skip the
+   job; an unusable receipt, a missing literal (required) output, or a receipt
+   rewritten while the files were hashed make it an error. Files reached
+   through a symlink, or with a dot-prefixed component (the receipt itself
+   among them), are never collected. File URLs have the form
+   ``data/<workspace name>/<workspace-relative path>`` like job files; nothing
+   is read from the provider and nothing is created.
+
+   :param workspace: Read jobs and their postprocess output from this workspace.
+   :param script: Name the postprocess script whose output to collect.
+   :param states: Select the stopped states to report.
+   :param placement: Restrict results to this placement and its descendants.
+   :param jobs: Collect only these jobs and their descendants.
+   :param on_skipped: Receive the job key of every selected job dropped for an
+       unreadable ``job.json``, forwarded to ``job_records``.
+   :param steps: Collect only the jobs at one of these steps, as ``job_records`` selects them.
+   :param force: Collect unlocked jobs (debug mode) too; without it each is an error.
+   :return: A lazy iterator with one item per selected readable job.
+   :raises ValueError: If *script* is not a single path component, or the
+       postprocess root is not inside the workspace (a ``postprocess.directory``
+       setting elsewhere).
+
+
